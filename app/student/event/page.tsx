@@ -1,8 +1,42 @@
 "use client";
 import { useState } from "react";
 
+type EventStatus = "Upcoming" | "Payment Due" | "Pre-registration" | "Attended" | "Missed";
+
+interface EventItem {
+    event: string;
+    description: string;
+    status: EventStatus;
+    time: string;
+    details: {
+        location: string;
+        requirement: string;
+        note: string;
+    };
+}
+
+interface EventGroup {
+    date: string;
+    items: EventItem[];
+}
+
 export default function StudentEvents() {
-    const events = [
+    // Manage open/close state for all event cards
+    const [openStates, setOpenStates] = useState<Record<string, boolean>>({});
+
+    // Helper to toggle open state for a specific card
+    const toggleOpen = (groupIndex: number, itemIndex: number) => {
+        const key = `${groupIndex}-${itemIndex}`;
+        setOpenStates(prev => ({ ...prev, [key]: !prev[key] }));
+    };
+
+    // Helper to check if a card is open
+    const isOpen = (groupIndex: number, itemIndex: number) => {
+        const key = `${groupIndex}-${itemIndex}`;
+        return openStates[key] || false;
+    };
+
+    const events: EventGroup[] = [
         {
             date: "Thursday, October 23",
             items: [
@@ -89,7 +123,7 @@ export default function StudentEvents() {
         }
     ];
 
-    const statusColor = {
+    const statusColor: Record<EventStatus, string> = {
         "Upcoming": "bg-blue-100 text-blue-700",
         "Payment Due": "bg-yellow-100 text-yellow-700",
         "Pre-registration": "bg-gray-100 text-gray-700",
@@ -115,7 +149,7 @@ export default function StudentEvents() {
                         {/* EVENT CARDS */}
                         <div className="space-y-4">
                             {group.items.map((item, j) => {
-                                const [open, setOpen] = useState(false);
+                                const open = isOpen(i, j);
 
                                 return (
                                     <div
@@ -143,7 +177,7 @@ export default function StudentEvents() {
                                                 {/* DROPDOWN BUTTON */}
                                                 <button
                                                     className="p-1 rounded-full hover:bg-gray-200 transition"
-                                                    onClick={() => setOpen(!open)}
+                                                    onClick={() => toggleOpen(i, j)}
                                                 >
                                                     <span className="material-icons text-gray-600 text-lg">
                                                         {open ? "expand_less" : "expand_more"}

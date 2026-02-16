@@ -1,4 +1,6 @@
-export default function StudentLayout({ children }) {
+import { ReactNode } from "react";
+
+export default function StudentLayout({ children }: { children: ReactNode }) {
     return (
         <div className="min-h-screen flex bg-[#f2f2f2] text-gray-800">
 
@@ -8,6 +10,7 @@ export default function StudentLayout({ children }) {
                     <div className="flex flex-col items-center gap-3">
                         <img
                             src="/new campus-logo.jpg"
+                            alt="Campus Logo"
                             className="w-24 h-24 rounded-full object-cover shadow-md"
                         />
                         <h2 className="text-[#7b0000] font-black text-5xl">CAMPUS</h2>

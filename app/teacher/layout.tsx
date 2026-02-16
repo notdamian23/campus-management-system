@@ -1,4 +1,6 @@
-export default function TeacherLayout({ children }) {
+import { ReactNode } from "react";
+
+export default function TeacherLayout({ children }: { children: ReactNode }) {
     return (
         <div className="min-h-screen flex bg-[#f2f2f2] text-gray-800">
 

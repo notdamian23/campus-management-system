@@ -1,14 +1,22 @@
 "use client";
-import { useState } from "react";
+import React, { useState } from "react";
 import { FiChevronDown, FiChevronUp, FiPlus } from "react-icons/fi";
 
-export default function ECStudentLookup() {
-    const [expandedId, setExpandedId] = useState(null);
-    const [query, setQuery] = useState("");
-    const [course, setCourse] = useState("");
-    const [year, setYear] = useState("");
+interface Student {
+    id: string;
+    name: string;
+    course: string;
+    year: string;
+    status: string;
+}
 
-    const students = [
+export default function ECStudentLookup() {
+    const [expandedId, setExpandedId] = useState<string | null>(null);
+    const [query, setQuery] = useState<string>("");
+    const [course, setCourse] = useState<string>("");
+    const [year, setYear] = useState<string>("");
+
+    const students: Student[] = [
         {
             id: "23200455",
             name: "Rhodiel B. Badiongo",
@@ -18,7 +26,7 @@ export default function ECStudentLookup() {
         },
     ];
 
-    const toggleExpand = (id) => {
+    const toggleExpand = (id: string) => {
         setExpandedId(expandedId === id ? null : id);
     };
 
@@ -128,8 +136,8 @@ export default function ECStudentLookup() {
 
                     <tbody>
                     {filtered.map((student) => (
-                        <>
-                            <tr key={student.id} className="border-b hover:bg-gray-50">
+                        <React.Fragment key={student.id}>
+                            <tr className="border-b hover:bg-gray-50">
                                 <td className="p-3">{student.id}</td>
                                 <td className="p-3">{student.name}</td>
                                 <td className="p-3">
@@ -260,7 +268,7 @@ export default function ECStudentLookup() {
                                 </tr>
                             )}
 
-                        </>
+                        </React.Fragment>
                     ))}
                     </tbody>
                 </table>

@@ -3,8 +3,8 @@
 import { useState } from "react";
 
 export default function EventsPage() {
-    const [openDetails, setOpenDetails] = useState(null);
-    const [openParticipants, setOpenParticipants] = useState(null);
+    const [openDetails, setOpenDetails] = useState<number | null>(null);
+    const [openParticipants, setOpenParticipants] = useState<number | null>(null);
 
     return (
         <div className="w-full p-10 bg-gray-50 min-h-screen">

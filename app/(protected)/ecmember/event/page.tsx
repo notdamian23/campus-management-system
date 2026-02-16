@@ -488,13 +488,18 @@ export default function EventDashboard() {
     const [events, setEvents] = useState<EventDoc[]>([]);
     const [eventsLoading, setEventsLoading] = useState(true);
 
+    // Current authenticated user
+    const [currentUser, setCurrentUser] = useState<any>(null);
+
     // ✅ Role check from profiles/{uid}
     useEffect(() => {
         const unsub = onAuthStateChanged(auth, async (user) => {
             setRoleLoading(true);
+            setCurrentUser(user);
 
             if (!user) {
                 setIsECUser(false);
+                setCurrentUser(null);
                 setRoleLoading(false);
                 return;
             }
@@ -587,12 +592,8 @@ export default function EventDashboard() {
                 date,
 
                 // ✅ if you already moved Add Event time to 24h strings:
-                // timeStart: format12h(eventStart24),
-                // timeEnd: format12h(eventEnd24),
-
-                // ✅ if still using old strings:
-                timeStart,
-                timeEnd,
+                timeStart: format12h(eventStart24),
+                timeEnd: format12h(eventEnd24),
 
                 yearLevel: isPreReg ? "All Years" : yearLevel,
                 course: isPreReg ? "All Courses" : course,
@@ -605,7 +606,7 @@ export default function EventDashboard() {
                 preRegCount: isPreReg ? 0 : 0,
                 preRegRemaining: isPreReg ? slots : 0, // ✅ remaining = slots
 
-                createdBy: user ? user.uid : null,
+                createdBy: currentUser ? currentUser.uid : null,
                 createdAt: serverTimestamp(),
                 status: "upcoming",
             });

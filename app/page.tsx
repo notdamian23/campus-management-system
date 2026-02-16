@@ -3,7 +3,7 @@
 import Image from "next/image";
 import { Poppins } from "next/font/google";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useState, Suspense } from "react";
 
 import { auth, db } from "@/lib/firebase";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
@@ -24,7 +24,7 @@ function setCampusCookies(role: string, mustChangePassword: boolean) {
     document.cookie = `campus_must_change=${mustChangePassword ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
 }
 
-export default function LoginPage() {
+function LoginForm() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const nextPath = searchParams.get("next"); // optional redirect target
@@ -197,5 +197,17 @@ export default function LoginPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function LoginPage() {
+    return (
+        <Suspense fallback={
+            <div className="min-h-screen w-full bg-[#7b0000] flex items-center justify-center">
+                <div className="text-white">Loading...</div>
+            </div>
+        }>
+            <LoginForm />
+        </Suspense>
     );
 }

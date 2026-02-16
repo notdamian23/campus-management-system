@@ -2,12 +2,31 @@
 import { useState } from "react";
 import { FiCalendar } from "react-icons/fi";
 
+interface PaymentStudent {
+    id: string;
+    name: string;
+    year: number;
+    section: string;
+    course: string;
+    status: string;
+}
+
+interface Payment {
+    id: number;
+    title: string;
+    ref: string;
+    amount: string;
+    status: string;
+    date: string;
+    students: PaymentStudent[];
+}
+
 export default function PaymentDashboard() {
-    const [expandedPayment, setExpandedPayment] = useState(null);
-    const [showAddPaymentForm, setShowAddPaymentForm] = useState(false);
+    const [expandedPayment, setExpandedPayment] = useState<number | null>(null);
+    const [showAddPaymentForm, setShowAddPaymentForm] = useState<boolean>(false);
 
     // UPDATED STUDENT DATA WITH COURSE FIELD
-    const paymentData = [
+    const paymentData: Payment[] = [
         {
             id: 1,
             title: "Acquaintance Party",

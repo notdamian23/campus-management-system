@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --version:*)",
+      "Bash(wc:*)",
+      "Bash(npm install)",
+      "Bash(npm run build)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run lint)"
+    ]
+  }
+}

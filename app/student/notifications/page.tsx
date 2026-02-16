@@ -68,9 +68,9 @@ export default function NotificationsPage() {
         },
     ]
         // sort latest → oldest
-        .sort((a, b) => new Date(b.date) - new Date(a.date));
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
-    const getCardClasses = (type) => {
+    const getCardClasses = (type: string) => {
         if (type === "upcoming") {
             return "bg-green-50 border-l-4 border-green-400";
         }
