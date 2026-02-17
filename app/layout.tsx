@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
+import { HeroUIProvider } from "@heroui/system";
+import { ToastProvider } from "@heroui/toast";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -33,7 +35,10 @@ export default function RootLayout({
         </head>
 
         <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        {children}
+        <HeroUIProvider>
+            <ToastProvider placement="top-right" toastOffset={60} />
+            {children}
+        </HeroUIProvider>
         </body>
         </html>
     );

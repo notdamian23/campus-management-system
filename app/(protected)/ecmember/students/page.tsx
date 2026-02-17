@@ -1,6 +1,9 @@
 "use client";
 import React, { useState } from "react";
 import { FiChevronDown, FiChevronUp, FiPlus } from "react-icons/fi";
+import { Card, CardBody } from "@heroui/card";
+import { CampusInput, CampusBadge } from "@/components/heroui";
+import { Select, SelectItem } from "@heroui/select";
 
 interface Student {
     id: string;
@@ -44,14 +47,14 @@ export default function ECStudentLookup() {
     return (
         <div className="p-6 space-y-6">
 
-            {/* 🔥 UPDATED HEADER – Matches your screenshot exactly */}
-            <div className="bg-white shadow-md rounded-xl px-6 py-4 flex justify-between items-center">
-                <h1 className="text-xl font-bold text-[#7b0000]">
-                    Engineering Student Management System
-                </h1>
-
-            </div>
-            {/* END HEADER */}
+            {/* HEADER */}
+            <Card shadow="sm">
+                <CardBody className="flex flex-row justify-between items-center px-6 py-4">
+                    <h1 className="text-xl font-bold text-primary-900">
+                        Engineering Student Management System
+                    </h1>
+                </CardBody>
+            </Card>
 
             {/* TOP SUMMARY CARDS */}
             <div className="grid grid-cols-6 gap-4">
@@ -68,7 +71,7 @@ export default function ECStudentLookup() {
                         className="bg-white rounded-lg shadow p-4 text-center border"
                     >
                         <div className="text-2xl font-bold">{item.count}</div>
-                        <p className="text-sm text-gray-500">{item.label}</p>
+                        <p className="text-sm text-campus-text-secondary">{item.label}</p>
                     </div>
                 ))}
             </div>
@@ -113,7 +116,7 @@ export default function ECStudentLookup() {
                 </select>
 
                 {/* ⭐ MOVED ADD STUDENT BUTTON HERE ⭐ */}
-                <button className="flex items-center gap-2 bg-[#7b0000] text-white px-4 py-2 rounded-lg shadow hover:bg-red-800 transition">
+                <button className="flex items-center gap-2 bg-primary-500 text-white px-4 py-2 rounded-lg shadow hover:bg-red-800 transition">
                     <FiPlus />
                     Add Student
                 </button>
@@ -124,7 +127,7 @@ export default function ECStudentLookup() {
             <div className="bg-white rounded-lg shadow border">
                 <table className="w-full text-left">
                     <thead>
-                    <tr className="border-b bg-gray-50 text-sm text-gray-600">
+                    <tr className="border-b bg-gray-50 text-sm text-campus-text-secondary">
                         <th className="p-3">Student ID</th>
                         <th className="p-3">Name</th>
                         <th className="p-3">Course</th>
@@ -152,7 +155,11 @@ export default function ECStudentLookup() {
                                         </span>
                                 </td>
                                 <td className="p-3 text-right">
-                                    <button onClick={() => toggleExpand(student.id)}>
+                                    <button
+                                        onClick={() => toggleExpand(student.id)}
+                                        className="p-2 bg-transparent hover:bg-gray-100 text-gray-600 hover:text-gray-900 rounded-lg transition-colors"
+                                        aria-label={expandedId === student.id ? "Collapse details" : "Expand details"}
+                                    >
                                         {expandedId === student.id ? (
                                             <FiChevronUp size={20} />
                                         ) : (
@@ -168,7 +175,7 @@ export default function ECStudentLookup() {
                                         <div className="space-y-6">
 
                                             <h3 className="text-lg font-semibold flex items-center gap-2">
-                                                    <span className="w-7 h-7 flex items-center justify-center rounded-full bg-[#7b0000] text-white font-bold">
+                                                    <span className="w-7 h-7 flex items-center justify-center rounded-full bg-primary-500 text-white font-bold">
                                                         SR
                                                     </span>
                                                 Student Record Overview
@@ -187,7 +194,7 @@ export default function ECStudentLookup() {
                                                             Edit
                                                         </button>
                                                         <p className="font-medium">Graduation Orientation</p>
-                                                        <p className="text-sm text-gray-500">
+                                                        <p className="text-sm text-campus-text-secondary">
                                                             March 15, 2024 | 9:00 AM – 5:00 PM <br /> Fab Lab
                                                         </p>
                                                     </div>
@@ -197,7 +204,7 @@ export default function ECStudentLookup() {
                                                             Edit
                                                         </button>
                                                         <p className="font-medium">Programming Tutorial</p>
-                                                        <p className="text-sm text-gray-500">
+                                                        <p className="text-sm text-campus-text-secondary">
                                                             Feb 28, 2024 | 1:00 PM – 6:00 PM <br /> CBE 901
                                                         </p>
                                                     </div>

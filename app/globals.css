@@ -1,15 +1,55 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
+  /* Primary Brand Red - Modern SaaS palette */
+  --color-primary-50: #FEF2F2;
+  --color-primary-100: #FEE2E2;
+  --color-primary-200: #FECACA;
+  --color-primary-300: #FCA5A5;
+  --color-primary-400: #F87171;
+  --color-primary-500: #DC2626;
+  --color-primary-600: #B91C1C;
+  --color-primary-700: #991B1B;
+  --color-primary-800: #7F1D1D;
+  --color-primary-900: #7b0000;
+  --color-primary-950: #450A0A;
+  --color-primary: #DC2626;
+
+  /* Background Colors */
+  --color-bg-main: #FFFFFF;
+  --color-bg-subtle: #FAFAFA;
+  --color-bg-muted: #F3F4F6;
+
+  /* Text Colors */
+  --color-text-primary: #111827;
+  --color-text-secondary: #374151;
+  --color-text-muted: #6B7280;
+  --color-text-disabled: #9CA3AF;
+  --color-text-on-primary: #FFFFFF;
+
+  /* Border Colors */
+  --color-border: #E5E7EB;
+  --color-border-input: #D1D5DB;
+  --color-border-input-focus: #DC2626;
+
+  /* Alert Colors */
+  --color-alert-error-bg: #FEE2E2;
+  --color-alert-error-text: #991B1B;
+  --color-alert-success-bg: #DCFCE7;
+  --color-alert-success-text: #166534;
+  --color-alert-warning-bg: #FEF3C7;
+  --color-alert-warning-text: #92400E;
+
+  /* Fonts */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  --background: #FFFFFF;
+  --foreground: #111827;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -20,7 +60,9 @@
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--color-bg-main);
+  color: var(--color-text-primary);
   font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
