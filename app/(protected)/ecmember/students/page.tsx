@@ -71,7 +71,7 @@ export default function ECStudentLookup() {
                         className="bg-white rounded-lg shadow p-4 text-center border"
                     >
                         <div className="text-2xl font-bold">{item.count}</div>
-                        <p className="text-sm text-gray-500">{item.label}</p>
+                        <p className="text-sm text-campus-text-secondary">{item.label}</p>
                     </div>
                 ))}
             </div>
@@ -127,7 +127,7 @@ export default function ECStudentLookup() {
             <div className="bg-white rounded-lg shadow border">
                 <table className="w-full text-left">
                     <thead>
-                    <tr className="border-b bg-gray-50 text-sm text-gray-600">
+                    <tr className="border-b bg-gray-50 text-sm text-campus-text-secondary">
                         <th className="p-3">Student ID</th>
                         <th className="p-3">Name</th>
                         <th className="p-3">Course</th>
@@ -190,7 +190,7 @@ export default function ECStudentLookup() {
                                                             Edit
                                                         </button>
                                                         <p className="font-medium">Graduation Orientation</p>
-                                                        <p className="text-sm text-gray-500">
+                                                        <p className="text-sm text-campus-text-secondary">
                                                             March 15, 2024 | 9:00 AM – 5:00 PM <br /> Fab Lab
                                                         </p>
                                                     </div>
@@ -200,7 +200,7 @@ export default function ECStudentLookup() {
                                                             Edit
                                                         </button>
                                                         <p className="font-medium">Programming Tutorial</p>
-                                                        <p className="text-sm text-gray-500">
+                                                        <p className="text-sm text-campus-text-secondary">
                                                             Feb 28, 2024 | 1:00 PM – 6:00 PM <br /> CBE 901
                                                         </p>
                                                     </div>

@@ -430,7 +430,7 @@ function StatMini({ label, value }: { label: string; value: number }) {
     return (
         <div className="rounded-lg border bg-white px-2 py-2 text-center">
             <div className="text-base font-bold leading-none">{value}</div>
-            <div className="text-[11px] text-gray-500 mt-1 leading-none">{label}</div>
+            <div className="text-[11px] text-campus-text-secondary mt-1 leading-none">{label}</div>
         </div>
     );
 }
@@ -640,7 +640,7 @@ export default function EventDashboard() {
             {/* HEADER */}
             <div className="bg-white sm:bg-transparent border sm:border-0 rounded-xl sm:rounded-none shadow-sm sm:shadow-none p-4 sm:p-0">
                 <h1 className="text-lg sm:text-2xl font-bold text-[#7b0000] leading-tight">Campus Event Management System</h1>
-                <p className="text-gray-600 text-xs sm:text-sm mt-1">
+                <p className="text-campus-text-secondary text-xs sm:text-sm mt-1">
                     Organize, manage, and track all campus events in one centralized dashboard.
                 </p>
             </div>
@@ -773,7 +773,7 @@ export default function EventDashboard() {
                             value={yearLevel}
                             onChange={(e) => setYearLevel(e.target.value)}
                             disabled={isPreReg}
-                            className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${isPreReg ? "bg-gray-100 text-gray-500 cursor-not-allowed" : ""}`}
+                            className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""}`}
                         >
                             <option>All Years</option>
                             <option>1st Year</option>
@@ -789,7 +789,7 @@ export default function EventDashboard() {
                             value={course}
                             onChange={(e) => setCourse(e.target.value)}
                             disabled={isPreReg}
-                            className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${isPreReg ? "bg-gray-100 text-gray-500 cursor-not-allowed" : ""}`}
+                            className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""}`}
                         >
                             <option>All Courses</option>
                             <option>Computer Engineering</option>
@@ -799,7 +799,7 @@ export default function EventDashboard() {
                             <option>Industrial Engineering</option>
                         </select>
 
-                        {isPreReg && <p className="text-xs text-gray-500 mt-1">Pre-Registration events are open to all year levels and courses.</p>}
+                        {isPreReg && <p className="text-xs text-campus-text-secondary mt-1">Pre-Registration events are open to all year levels and courses.</p>}
                     </div>
 
                     <div>
@@ -818,7 +818,7 @@ export default function EventDashboard() {
                                 className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
                                 placeholder="e.g. 100"
                             />
-                            <p className="text-xs text-gray-500 mt-1">This is the maximum number of students allowed to pre-register.</p>
+                            <p className="text-xs text-campus-text-secondary mt-1">This is the maximum number of students allowed to pre-register.</p>
                         </div>
                     )}
 
@@ -834,7 +834,7 @@ export default function EventDashboard() {
                     </button>
 
                     {!roleLoading && !isECUser && (
-                        <p className="text-xs text-gray-500">
+                        <p className="text-xs text-campus-text-secondary">
                             Your Firestore role is not <b>ec</b> in <code>profiles/{`{uid}`}</code>.
                         </p>
                     )}
@@ -928,9 +928,9 @@ export default function EventDashboard() {
                 <h3 className="text-lg font-semibold mb-4">Event List</h3>
 
                 {eventsLoading ? (
-                    <p className="text-sm text-gray-500">Loading events...</p>
+                    <p className="text-sm text-campus-text-secondary">Loading events...</p>
                 ) : filteredEvents.length === 0 ? (
-                    <p className="text-sm text-gray-500">No events match your filter/search.</p>
+                    <p className="text-sm text-campus-text-secondary">No events match your filter/search.</p>
                 ) : (
                     <div className="space-y-3">
                         {filteredEvents.map((ev) => {
@@ -949,7 +949,7 @@ export default function EventDashboard() {
                                 >
                                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                                         <div className="flex items-center gap-3">
-                                            <h4 className="font-semibold text-gray-800">{ev.title}</h4>
+                                            <h4 className="font-semibold text-campus-text-primary">{ev.title}</h4>
                                             <span className={`px-3 py-1 text-xs rounded-full ${statusChip(liveStatus)}`}>{liveStatus}</span>
 
                                             {hasSlots && (
@@ -960,7 +960,7 @@ export default function EventDashboard() {
                                         </div>
 
                                         <div className="flex items-center gap-2">
-                                            <button type="button" className="px-4 py-1 bg-gray-200 text-gray-800 text-xs rounded-lg" onClick={(e) => e.stopPropagation()}>
+                                            <button type="button" className="px-4 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg" onClick={(e) => e.stopPropagation()}>
                                                 Info ▼
                                             </button>
                                             <button type="button" className="px-4 py-1 bg-blue-500 text-white text-xs rounded-lg" onClick={(e) => e.stopPropagation()}>
@@ -969,9 +969,9 @@ export default function EventDashboard() {
                                         </div>
                                     </div>
 
-                                    {ev.details && <p className="text-sm text-gray-500 mt-1">{ev.details}</p>}
+                                    {ev.details && <p className="text-sm text-campus-text-secondary mt-1">{ev.details}</p>}
 
-                                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 mt-3 text-sm text-gray-600">
+                                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 mt-3 text-sm text-campus-text-secondary">
                                         <span>📅 {ev.date}</span>
                                         <span>
                       ⏰ {ev.timeStart ?? "—"} – {ev.timeEnd ?? "—"}
@@ -981,18 +981,18 @@ export default function EventDashboard() {
 
                                     {expandedEventId === ev.id && (
                                         <div className="mt-4 p-4 border rounded-lg bg-gray-50 space-y-2">
-                                            <p className="text-sm text-gray-700">
+                                            <p className="text-sm text-campus-text-primary">
                                                 <b>Course:</b> {ev.course ?? "—"}
                                             </p>
-                                            <p className="text-sm text-gray-700">
+                                            <p className="text-sm text-campus-text-primary">
                                                 <b>Year Level:</b> {ev.yearLevel ?? "—"}
                                             </p>
-                                            <p className="text-sm text-gray-700">
+                                            <p className="text-sm text-campus-text-primary">
                                                 <b>Pre-Reg:</b> {ev.isPreReg ? "Yes" : "No"} | <b>With Payment:</b> {ev.withPayment ? "Yes" : "No"}
                                             </p>
 
                                             {ev.isPreReg && typeof ev.preRegSlots === "number" && (
-                                                <p className="text-sm text-gray-700">
+                                                <p className="text-sm text-campus-text-primary">
                                                     <b>Slots:</b> {ev.preRegCount ?? 0} / {ev.preRegSlots} (left: {Math.max(0, ev.preRegSlots - (ev.preRegCount ?? 0))})
                                                 </p>
                                             )}

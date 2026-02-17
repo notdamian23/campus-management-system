@@ -7,7 +7,7 @@ import { Poppins } from "next/font/google";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, Suspense } from "react";
 
-import { CampusInput, CampusButton } from "@/components/heroui";
+// Campus components not needed - using native elements for better control
 
 import { auth, db } from "@/lib/firebase";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
@@ -176,101 +176,123 @@ function LoginForm() {
     };
 
     return (
-        <div className="min-h-screen w-full bg-[#7b0000] flex items-center justify-center p-4">
-            <div className="bg-white w-full max-w-md rounded-xl shadow-xl px-10 py-8 flex flex-col items-center">
+        <div className="min-h-screen w-full bg-primary-500 flex items-center justify-center p-4 sm:p-6 lg:p-8">
+            <div className="bg-bg-main w-full max-w-[520px] rounded-2xl shadow-2xl px-8 py-12 sm:px-12 sm:py-14 flex flex-col items-center border border-border/20">
                 {/* Logo */}
-                <div className="w-40 h-40 rounded-full overflow-hidden flex items-center justify-center mb-4 border-4 border-[#7b0000]">
+                <div className="w-36 h-36 sm:w-44 sm:h-44 rounded-full overflow-hidden flex items-center justify-center mb-8 border-4 border-white shadow-xl">
                     <Image
                         src="/new campus-logo.jpg"
                         alt="Campus Logo"
                         width={200}
                         height={200}
                         className="object-cover"
+                        priority
                     />
                 </div>
 
                 {/* Title */}
                 <h1
-                    className={`text-4xl font-extrabold text-center text-[#7b0000] tracking-tight ${poppins.className}`}
+                    className={`text-5xl sm:text-6xl font-extrabold text-center text-primary-500 tracking-tight mb-3 ${poppins.className}`}
                 >
                     CAMPUS
                 </h1>
 
-                <p className="text-gray-500 text-center mb-6">
+                <p className="text-text-secondary text-center text-base mb-10">
                     Welcome back! Sign in to your account
                 </p>
 
                 {/* School ID */}
-                <div className="w-full mb-4">
-                    <CampusInput
-                        type="text"
-                        label="School ID"
-                        placeholder="e.g. 23209455"
-                        value={schoolId}
-                        onValueChange={setSchoolId}
-                        startContent={<span className="material-icons text-gray-400">person</span>}
-                        inputMode="numeric"
-                        onKeyDown={(e) => {
-                            if (e.key === "Enter") handleLogin();
-                        }}
-                    />
+                <div className="w-full mb-7">
+                    <label className="block text-sm font-semibold text-text-primary mb-2">
+                        School ID
+                    </label>
+                    <div className="relative">
+                        <span className="absolute left-4 top-1/2 -translate-y-1/2 material-icons text-text-muted text-xl z-10">
+                            person
+                        </span>
+                        <input
+                            type="text"
+                            placeholder="e.g. 23209455"
+                            value={schoolId}
+                            onChange={(e) => setSchoolId(e.target.value)}
+                            inputMode="numeric"
+                            className="w-full pl-14 pr-4 py-4 text-base text-text-primary placeholder:text-text-muted bg-bg-main border-2 border-border-input rounded-xl hover:border-primary-600 focus:border-primary-500 focus:ring-4 focus:ring-primary-500/20 outline-none transition-all"
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") handleLogin();
+                            }}
+                        />
+                    </div>
                 </div>
 
                 {/* Password */}
-                <div className="w-full mb-4">
-                    <CampusInput
-                        label="Password"
-                        placeholder="Enter password"
-                        type={isVisible ? "text" : "password"}
-                        value={password}
-                        onValueChange={setPassword}
-                        startContent={<span className="material-icons text-gray-400">lock</span>}
-                        endContent={
-                            <button
-                                aria-label="toggle password visibility"
-                                className="focus:outline-none"
-                                type="button"
-                                onClick={toggleVisibility}
-                            >
-                                {isVisible ? (
-                                    <EyeSlashFilledIcon className="text-2xl text-default-400 pointer-events-none" />
-                                ) : (
-                                    <EyeFilledIcon className="text-2xl text-default-400 pointer-events-none" />
-                                )}
-                            </button>
-                        }
-                        onKeyDown={(e) => {
-                            if (e.key === "Enter") handleLogin();
-                        }}
-                    />
+                <div className="w-full mb-7">
+                    <label className="block text-sm font-semibold text-text-primary mb-2">
+                        Password
+                    </label>
+                    <div className="relative">
+                        <span className="absolute left-4 top-1/2 -translate-y-1/2 material-icons text-text-muted text-xl z-10">
+                            lock
+                        </span>
+                        <input
+                            type={isVisible ? "text" : "password"}
+                            placeholder="Enter password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            className="w-full pl-14 pr-14 py-4 text-base text-text-primary placeholder:text-text-muted bg-bg-main border-2 border-border-input rounded-xl hover:border-primary-600 focus:border-primary-500 focus:ring-4 focus:ring-primary-500/20 outline-none transition-all"
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") handleLogin();
+                            }}
+                        />
+                        <button
+                            aria-label="toggle password visibility"
+                            className="absolute right-4 top-1/2 -translate-y-1/2 focus:outline-none text-text-muted hover:text-text-primary transition-colors z-10"
+                            type="button"
+                            onClick={toggleVisibility}
+                        >
+                            {isVisible ? (
+                                <EyeSlashFilledIcon className="text-2xl pointer-events-none" />
+                            ) : (
+                                <EyeFilledIcon className="text-2xl pointer-events-none" />
+                            )}
+                        </button>
+                    </div>
                 </div>
 
-                {/* Remember + Forgot (optional UI only) */}
-                <div className="flex justify-between items-center w-full text-sm mb-6">
-                    <label className="flex items-center gap-2 text-gray-700">
-                        <input type="checkbox" />
-                        Remember me
+                {/* Remember + Forgot */}
+                <div className="flex justify-between items-center w-full text-sm mb-10">
+                    <label className="flex items-center gap-2.5 text-text-primary cursor-pointer group">
+                        <input
+                            type="checkbox"
+                            className="w-5 h-5 rounded border-2 border-border-input text-primary-500 focus:ring-2 focus:ring-primary-500/40 cursor-pointer transition-colors"
+                        />
+                        <span className="select-none font-medium group-hover:text-primary-600 transition-colors">Remember me</span>
                     </label>
-                    <button type="button" className="text-blue-600 hover:underline">
-                        Forgot your password?
+                    <button type="button" className="text-primary-600 font-semibold hover:text-primary-700 hover:underline transition-colors">
+                        Forgot password?
                     </button>
                 </div>
 
                 {/* Sign In */}
-                <CampusButton
-                    variant="secondary"
+                <button
                     onClick={handleLogin}
-                    isLoading={loading}
-                    className="w-full"
-                    size="lg"
+                    disabled={loading}
+                    className="w-full py-4 bg-primary-500 hover:bg-primary-600 active:bg-primary-700 text-white font-bold text-base rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:transform-none"
                 >
-                    Sign In
-                </CampusButton>
+                    {loading ? (
+                        <span className="flex items-center justify-center gap-2">
+                            <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Signing In...
+                        </span>
+                    ) : "Sign In"}
+                </button>
 
                 {/* Footer */}
-                <div className="mt-6 text-sm text-gray-600">
-                    Don’t have an account?
-                    <a className="text-blue-600 font-medium hover:underline ml-1">
+                <div className="mt-10 text-sm text-text-secondary text-center">
+                    Don&apos;t have an account?{" "}
+                    <a className="text-primary-600 font-bold hover:underline hover:text-primary-700 cursor-pointer transition-colors">
                         Contact Administration
                     </a>
                 </div>

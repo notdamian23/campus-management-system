@@ -32,8 +32,8 @@ export default function StudentsPage() {
                 ].map(([value, label], idx) => (
                     <Card key={idx} shadow="sm">
                         <CardBody className="flex flex-col text-center">
-                            <span className="text-4xl font-bold text-gray-800">{value}</span>
-                            <span className="text-sm text-gray-500 mt-1">{label}</span>
+                            <span className="text-4xl font-bold text-campus-text-primary">{value}</span>
+                            <span className="text-sm text-campus-text-secondary mt-1">{label}</span>
                         </CardBody>
                     </Card>
                 ))}
@@ -128,7 +128,7 @@ export default function StudentsPage() {
                                             <div className="w-10 h-10 bg-[#7b0000] rounded-full flex items-center justify-center text-white font-bold">
                                                 SR
                                             </div>
-                                            <h2 className="text-xl font-bold text-gray-800">
+                                            <h2 className="text-xl font-bold text-campus-text-primary">
                                                 Student Record Overview
                                             </h2>
                                         </div>
@@ -141,7 +141,7 @@ export default function StudentsPage() {
 
                                         <div className="grid grid-cols-2 gap-4 mb-6">
                                             <div className="border rounded-xl p-4 shadow-sm">
-                                                <h4 className="font-bold text-gray-800 mb-1">
+                                                <h4 className="font-bold text-campus-text-primary mb-1">
                                                     Graduation Orientation
                                                 </h4>
                                                 <div className="text-sm text-gray-600">
@@ -151,7 +151,7 @@ export default function StudentsPage() {
                                             </div>
 
                                             <div className="border rounded-xl p-4 shadow-sm">
-                                                <h4 className="font-bold text-gray-800 mb-1">
+                                                <h4 className="font-bold text-campus-text-primary mb-1">
                                                     Programming Tutorial
                                                 </h4>
                                                 <div className="text-sm text-gray-600">
@@ -168,7 +168,7 @@ export default function StudentsPage() {
                                         </h3>
 
                                         <div className="border rounded-xl p-4 shadow-sm bg-red-50 mb-6">
-                                            <h4 className="font-bold text-gray-800 mb-1">
+                                            <h4 className="font-bold text-campus-text-primary mb-1">
                                                 General Assembly
                                             </h4>
                                             <div className="text-sm text-gray-600">

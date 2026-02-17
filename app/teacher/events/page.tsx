@@ -18,7 +18,7 @@ export default function EventsPage() {
                     <h1 className="text-3xl font-extrabold text-[#7b0000]">
                         Campus Event Management System
                     </h1>
-                    <p className="text-gray-600 mt-1">
+                    <p className="text-campus-text-secondary mt-1">
                         Organize, manage, and track all campus events in one centralized dashboard.
                     </p>
                 </CardBody>
@@ -35,8 +35,8 @@ export default function EventsPage() {
                 ].map(([value, label], idx) => (
                     <Card key={idx} shadow="sm">
                         <CardBody className="flex flex-col text-center">
-                            <span className="text-3xl font-bold text-gray-800">{value}</span>
-                            <span className="text-sm text-gray-500 mt-1">{label}</span>
+                            <span className="text-3xl font-bold text-campus-text-primary">{value}</span>
+                            <span className="text-sm text-campus-text-secondary mt-1">{label}</span>
                         </CardBody>
                     </Card>
                 ))}
@@ -63,7 +63,7 @@ export default function EventsPage() {
             {/* EVENT LIST PANEL */}
             <Card shadow="lg" className="mb-6">
                 <CardBody className="p-6">
-                <h2 className="text-lg font-semibold text-gray-800 mb-4">Event List</h2>
+                <h2 className="text-lg font-semibold text-campus-text-primary mb-4">Event List</h2>
 
                 {/* EVENT ITEM */}
                 <div className="border rounded-xl p-4 shadow-sm bg-white relative">
@@ -71,31 +71,31 @@ export default function EventsPage() {
                     {/* EVENT HEADER */}
                     <div className="flex justify-between items-center">
                         <div>
-                            <h3 className="font-bold text-lg text-gray-800">
+                            <h3 className="font-bold text-lg text-campus-text-primary">
                                 Engineering Orientation
                             </h3>
-                            <p className="text-sm text-gray-600">First year orientation</p>
+                            <p className="text-sm text-campus-text-secondary">First year orientation</p>
 
                             <div className="flex items-center gap-6 mt-3 text-sm text-gray-700">
 
                                 <div className="flex items-center gap-2">
-                                    <span className="material-icons text-gray-500 text-base">calendar_today</span>
+                                    <span className="material-icons text-campus-text-secondary text-base">calendar_today</span>
                                     1/22/2026
                                 </div>
 
                                 <div className="flex items-center gap-2">
-                                    <span className="material-icons text-gray-500 text-base">schedule</span>
+                                    <span className="material-icons text-campus-text-secondary text-base">schedule</span>
                                     07:00 - 12:00
                                 </div>
 
                                 <div className="flex items-center gap-2">
-                                    <span className="material-icons text-gray-500 text-base">location_on</span>
+                                    <span className="material-icons text-campus-text-secondary text-base">location_on</span>
                                     Maritime AVR
                                 </div>
 
                             </div>
 
-                            <p className="mt-3 text-sm text-gray-600">
+                            <p className="mt-3 text-sm text-campus-text-secondary">
                                 Organized by: President Kian Lacubtan
                             </p>
                         </div>
@@ -139,21 +139,21 @@ export default function EventsPage() {
                 {/* DETAILS EXPANDED */}
                 {openDetails === 2 && (
                     <div className="bg-white rounded-2xl shadow-md border p-6 mt-6">
-                        <h2 className="text-xl font-bold text-gray-800 mb-4">Event Details</h2>
+                        <h2 className="text-xl font-bold text-campus-text-primary mb-4">Event Details</h2>
 
                         <div className="grid grid-cols-2 gap-6">
 
                             <div className="border rounded-xl p-4 shadow-sm">
-                                <h3 className="font-bold text-gray-800">Description</h3>
-                                <p className="text-sm text-gray-600 mt-2">
+                                <h3 className="font-bold text-campus-text-primary">Description</h3>
+                                <p className="text-sm text-campus-text-secondary mt-2">
                                     This orientation welcomes first-year Computer Engineering students,
                                     introduces program expectations, and outlines campus activities.
                                 </p>
                             </div>
 
                             <div className="border rounded-xl p-4 shadow-sm">
-                                <h3 className="font-bold text-gray-800">Organizer</h3>
-                                <p className="text-sm text-gray-600 mt-2">
+                                <h3 className="font-bold text-campus-text-primary">Organizer</h3>
+                                <p className="text-sm text-campus-text-secondary mt-2">
                                     President Kian Lacubtan
                                 </p>
                             </div>
@@ -168,7 +168,7 @@ export default function EventsPage() {
                         <div className="bg-white rounded-2xl shadow-md border p-6 mt-6">
 
                             <div className="flex justify-between items-center mb-4">
-                                <h2 className="text-xl font-bold text-gray-800">Participants</h2>
+                                <h2 className="text-xl font-bold text-campus-text-primary">Participants</h2>
 
                                 <div className="flex items-center gap-3">
 
@@ -250,7 +250,7 @@ export default function EventsPage() {
 
                         {/* ⭐ DOCUMENTATION SECTION ⭐ */}
                         <div className="bg-white rounded-2xl shadow-md border p-6 mt-8">
-                            <h2 className="text-xl font-bold text-gray-800 mb-4">Documentation</h2>
+                            <h2 className="text-xl font-bold text-campus-text-primary mb-4">Documentation</h2>
 
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
 

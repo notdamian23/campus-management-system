@@ -109,7 +109,7 @@ export default function PaymentDashboard() {
                 <h1 className="text-2xl font-bold text-[#7b0000]">
                     Campus Payment Management
                 </h1>
-                <p className="text-gray-600 text-sm mt-1">
+                <p className="text-campus-text-secondary text-sm mt-1">
                     Track, verify, and manage student payments.
                 </p>
             </div>
@@ -234,10 +234,10 @@ export default function PaymentDashboard() {
 
                             {/* LEFT */}
                             <div>
-                                <h4 className="font-semibold text-gray-800">{p.title}</h4>
-                                <p className="text-sm text-gray-500">Reference: {p.ref}</p>
+                                <h4 className="font-semibold text-campus-text-primary">{p.title}</h4>
+                                <p className="text-sm text-campus-text-secondary">Reference: {p.ref}</p>
 
-                                <div className="flex gap-4 items-center mt-2 text-sm text-gray-600">
+                                <div className="flex gap-4 items-center mt-2 text-sm text-campus-text-secondary">
                                     <span>📅 {p.date}</span>
                                     <span>💰 {p.amount}</span>
                                 </div>
@@ -245,7 +245,7 @@ export default function PaymentDashboard() {
 
                             {/* RIGHT */}
                             <div className="flex flex-col items-end gap-2">
-                                <span className="px-3 py-1 rounded-full text-xs bg-gray-100 text-gray-700">
+                                <span className="px-3 py-1 rounded-full text-xs bg-gray-100 text-campus-text-primary">
                                     {p.status}
                                 </span>
 
@@ -253,7 +253,7 @@ export default function PaymentDashboard() {
                                     onClick={() =>
                                         setExpandedPayment(expandedPayment === p.id ? null : p.id)
                                     }
-                                    className="px-4 py-1 bg-gray-200 text-gray-800 text-xs rounded-lg hover:bg-gray-300 transition"
+                                    className="px-4 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg hover:bg-gray-300 transition"
                                 >
                                     Info ▼
                                 </button>
@@ -286,11 +286,11 @@ export default function PaymentDashboard() {
                                     </span>
                                 </div>
 
-                                <h4 className="font-semibold text-gray-700 mb-2">Students</h4>
+                                <h4 className="font-semibold text-campus-text-primary mb-2">Students</h4>
 
                                 <div className="overflow-x-auto">
                                     <table className="w-full text-sm">
-                                        <thead className="bg-gray-100 text-gray-600">
+                                        <thead className="bg-gray-100 text-campus-text-secondary">
                                         <tr>
                                             <th className="p-2 text-left">Student ID</th>
                                             <th className="p-2 text-left">Name</th>

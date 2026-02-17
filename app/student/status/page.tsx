@@ -53,8 +53,8 @@ export default function StudentStatus() {
                     ST
                 </div>
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-800">Student Status</h1>
-                    <p className="text-sm text-gray-500">Overview of your attendance and payments</p>
+                    <h1 className="text-2xl font-bold text-campus-text-primary">Student Status</h1>
+                    <p className="text-sm text-campus-text-secondary">Overview of your attendance and payments</p>
                 </div>
             </div>
 
@@ -83,7 +83,7 @@ export default function StudentStatus() {
             {/* EVENTS ATTENDED */}
             {(filter === "all" || filter === "attended") && (
                 <div>
-                    <h2 className="font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                    <h2 className="font-semibold text-campus-text-primary mb-3 flex items-center gap-2">
                         <span className="text-green-600">✔</span> Events Attended
                     </h2>
 
@@ -91,9 +91,9 @@ export default function StudentStatus() {
                         {attendedEvents.map((event, index) => (
                             <Card key={index} shadow="sm" isPressable>
                                 <CardBody>
-                                    <h3 className="font-semibold text-gray-800">{event.title}</h3>
-                                    <p className="text-sm text-gray-600">{event.date}</p>
-                                    <p className="text-xs text-gray-500">{event.location}</p>
+                                    <h3 className="font-semibold text-campus-text-primary">{event.title}</h3>
+                                    <p className="text-sm text-campus-text-secondary">{event.date}</p>
+                                    <p className="text-xs text-campus-text-secondary">{event.location}</p>
                                 </CardBody>
                             </Card>
                         ))}
@@ -104,7 +104,7 @@ export default function StudentStatus() {
             {/* EVENTS MISSED */}
             {(filter === "all" || filter === "missed") && (
                 <div>
-                    <h2 className="font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                    <h2 className="font-semibold text-campus-text-primary mb-3 flex items-center gap-2">
                         <span className="text-red-600">✖</span> Events Missed
                     </h2>
 
@@ -112,9 +112,9 @@ export default function StudentStatus() {
                         {missedEvents.map((event, index) => (
                             <Card key={index} shadow="sm" className="bg-red-50 border-red-100">
                                 <CardBody>
-                                    <h3 className="font-semibold text-gray-800">{event.title}</h3>
-                                    <p className="text-sm text-gray-600">{event.date}</p>
-                                    <p className="text-xs text-gray-500">{event.location}</p>
+                                    <h3 className="font-semibold text-campus-text-primary">{event.title}</h3>
+                                    <p className="text-sm text-campus-text-secondary">{event.date}</p>
+                                    <p className="text-xs text-campus-text-secondary">{event.location}</p>
                                 </CardBody>
                             </Card>
                         ))}
@@ -126,7 +126,7 @@ export default function StudentStatus() {
             {(filter === "all" || filter === "payments") && (
                 <div>
                     <div className="flex items-center justify-between mb-3">
-                        <h2 className="font-semibold text-gray-800 text-lg flex items-center gap-2">
+                        <h2 className="font-semibold text-campus-text-primary text-lg flex items-center gap-2">
                             💰 Payments
                         </h2>
 
@@ -153,7 +153,7 @@ export default function StudentStatus() {
                                 className={p.status === "PAID" ? "bg-green-50 border-green-100" : "bg-red-50 border-red-100"}
                             >
                                 <CardBody className="flex flex-row justify-between items-center">
-                                    <span className="font-medium text-gray-800">{p.name}</span>
+                                    <span className="font-medium text-campus-text-primary">{p.name}</span>
                                     <CampusBadge status={p.status === "PAID" ? "paid" : "unpaid"}>
                                         {p.status}
                                     </CampusBadge>

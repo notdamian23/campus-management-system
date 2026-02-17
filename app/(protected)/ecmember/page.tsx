@@ -12,21 +12,21 @@ export default function ECMemberDashboard() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <Card shadow="sm">
                     <CardBody>
-                        <p className="text-gray-500 text-sm">Total Students</p>
+                        <p className="text-campus-text-secondary text-sm">Total Students</p>
                         <h2 className="text-3xl font-bold text-blue-600 mt-2">0</h2>
                     </CardBody>
                 </Card>
 
                 <Card shadow="sm">
                     <CardBody>
-                        <p className="text-gray-500 text-sm">Upcoming Events</p>
+                        <p className="text-campus-text-secondary text-sm">Upcoming Events</p>
                         <h2 className="text-3xl font-bold text-green-600 mt-2">0</h2>
                     </CardBody>
                 </Card>
 
                 <Card shadow="sm">
                     <CardBody>
-                        <p className="text-gray-500 text-sm">Pending Payments</p>
+                        <p className="text-campus-text-secondary text-sm">Pending Payments</p>
                         <h2 className="text-3xl font-bold text-orange-600 mt-2">0</h2>
                     </CardBody>
                 </Card>

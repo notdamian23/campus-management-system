@@ -102,19 +102,19 @@ export default function NotificationsPage() {
                     >
                         <CardBody className="flex flex-row gap-3 p-4">
                             <div className="mt-1">
-                                <span className="material-icons text-gray-500 text-lg">
+                                <span className="material-icons text-campus-text-tertiary text-lg">
                                     event_note
                                 </span>
                             </div>
 
                             <div className="flex-1">
-                                <h2 className="font-semibold text-sm md:text-base text-gray-800">
+                                <h2 className="font-semibold text-sm md:text-base text-campus-text-primary">
                                     {item.title}
                                 </h2>
-                                <p className="text-xs md:text-sm text-gray-600">
+                                <p className="text-xs md:text-sm text-campus-text-secondary">
                                     {item.description}
                                 </p>
-                                <p className="text-[11px] md:text-xs text-gray-500 mt-1">
+                                <p className="text-[11px] md:text-xs text-campus-text-tertiary mt-1">
                                     {item.displayDate}
                                 </p>
                             </div>

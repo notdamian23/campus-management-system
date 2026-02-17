@@ -11,7 +11,7 @@ export default function TeacherDashboard() {
                     <h1 className="text-5xl font-extrabold text-[#7b0000] drop-shadow-sm">
                         Welcome back!
                     </h1>
-                    <p className="text-gray-600 text-lg mt-1">
+                    <p className="text-campus-text-secondary text-lg mt-1">
                         Here's what's happening today.
                     </p>
                 </div>
@@ -21,7 +21,7 @@ export default function TeacherDashboard() {
                     <div className="w-14 h-14 bg-[#7b0000] hover:bg-red-900 transition text-white rounded-full flex items-center justify-center shadow-lg cursor-pointer">
                         <span className="material-icons text-3xl">person</span>
                     </div>
-                    <p className="text-xs mt-1 text-gray-600 font-medium">Teacher</p>
+                    <p className="text-xs mt-1 text-campus-text-secondary font-medium">Teacher</p>
                 </div>
             </div>
 
@@ -33,7 +33,7 @@ export default function TeacherDashboard() {
                             <h2 className="text-3xl font-bold text-[#7b0000]">
                                 Events Overview
                             </h2>
-                            <p className="text-sm text-gray-500 mt-1">
+                            <p className="text-sm text-campus-text-secondary mt-1">
                                 Quick glance at your upcoming and recent activities.
                             </p>
                         </div>
@@ -96,11 +96,11 @@ export default function TeacherDashboard() {
                                                     <h3 className="font-semibold text-lg">
                                                         {event.title}
                                                     </h3>
-                                                    <span className="px-2 py-0.5 text-[10px] rounded-full bg-gray-100 text-gray-600 uppercase tracking-wide">
+                                                    <span className="px-2 py-0.5 text-[10px] rounded-full bg-gray-100 text-campus-text-secondary uppercase tracking-wide">
                                                         {event.type}
                                                     </span>
                                                 </div>
-                                                <p className="text-sm text-gray-500 mt-1">
+                                                <p className="text-sm text-campus-text-secondary mt-1">
                                                     {event.datetime}
                                                 </p>
                                                 <p className="text-xs text-gray-400 mt-0.5">
