@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import LogoutButton from "@/component/LogoutButton";
+import { app } from "@/lib/firebase"; // you must export `app` from your firebase.ts
 
 import { auth, db } from "@/lib/firebase";
 import {
@@ -82,7 +83,7 @@ function badge(role: Role) {
 
 export default function AdminDashboardPage() {
   const router = useRouter();
-  const functions = useMemo(() => getFunctions(), []);
+  const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
 
   // Tabs
   const [tab, setTab] = useState<"overview" | "users" | "logs" | "exports">("overview");
@@ -119,6 +120,11 @@ export default function AdminDashboardPage() {
   const [notice, setNotice] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
   const showOk = (msg: string) => setNotice({ type: "ok", msg });
   const showErr = (msg: string) => setNotice({ type: "err", msg });
+
+  //Error fedback
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
   // ---------------------------
   // Admin guard: must be admin
@@ -279,11 +285,17 @@ export default function AdminDashboardPage() {
       setNewEmail("");
       setNewRole("student");
       setTab("users");
-    } catch (e: any) {
-      showErr(e?.message || "Failed to create account.");
-    } finally {
-      setCreating(false);
-    }
+    }} catch (e: any) {
+  console.error("adminCreateUser error:", e);
+
+  const msg =
+    e?.code ? `${e.code}: ${e.message}` :
+    e?.message || "Failed to create account.";
+
+  showErr(msg);
+} finally {
+  setCreating(false);
+}
   }
 
   async function removeAccount(uid: string) {
@@ -537,6 +549,8 @@ export default function AdminDashboardPage() {
             >
               {creating ? "Creating…" : "Create Account"}
             </button>
+
+
           </div>
 
           {/* Users table */}
@@ -602,9 +616,7 @@ export default function AdminDashboardPage() {
             </table>
           </div>
 
-          <p className="text-xs text-gray-500">
-            Tip: If your users list grows large, add pagination and/or query by role (teacher/student/ec/admin).
-          </p>
+          
         </section>
       )}
 

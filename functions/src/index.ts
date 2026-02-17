@@ -1,32 +1,188 @@
+import * as admin from "firebase-admin";
+import {CallableRequest, HttpsError, onCall} from "firebase-functions/v2/https";
+
+admin.initializeApp();
+
+type Role = "admin" | "ec" | "teacher" | "student";
+
+const REGION = "asia-southeast1";
+const ALLOWED_ROLES: Role[] = ["admin", "ec", "teacher", "student"];
+
 /**
- * Import function triggers from their respective submodules:
- *
- * import {onCall} from "firebase-functions/v2/https";
- * import {onDocumentWritten} from "firebase-functions/v2/firestore";
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
+ * Maps internal/admin SDK errors to safe callable HTTPS errors.
+ * @param {unknown} error The original thrown error.
+ * @param {string} fallbackMessage The fallback message to expose.
+ * @return {HttpsError} A sanitized callable error.
  */
+function toHttpsError(
+  error: unknown,
+  fallbackMessage: string
+): HttpsError {
+  if (error instanceof HttpsError) {
+    return error;
+  }
 
-import {setGlobalOptions} from "firebase-functions";
-import {onRequest} from "firebase-functions/https";
-import * as logger from "firebase-functions/logger";
+  const code = typeof (error as {code?: unknown})?.code === "string" ?
+    String((error as {code?: string}).code) :
+    "";
+  const message = typeof (error as {message?: unknown})?.message === "string" ?
+    String((error as {message?: string}).message) :
+    fallbackMessage;
 
-// Start writing functions
-// https://firebase.google.com/docs/functions/typescript
+  if (
+    code === "auth/email-already-exists" ||
+    code === "auth/uid-already-exists"
+  ) {
+    return new HttpsError("already-exists", message);
+  }
+  if (
+    code === "auth/invalid-email" ||
+    code === "auth/invalid-password" ||
+    code === "auth/invalid-uid"
+  ) {
+    return new HttpsError("invalid-argument", message);
+  }
+  if (code === "auth/user-not-found") {
+    return new HttpsError("not-found", message);
+  }
+  return new HttpsError("internal", message);
+}
 
-// For cost control, you can set the maximum number of containers that can be
-// running at the same time. This helps mitigate the impact of unexpected
-// traffic spikes by instead downgrading performance. This limit is a
-// per-function limit. You can override the limit for each function using the
-// `maxInstances` option in the function's options, e.g.
-// `onRequest({ maxInstances: 5 }, (req, res) => { ... })`.
-// NOTE: setGlobalOptions does not apply to functions using the v1 API. V1
-// functions should each use functions.runWith({ maxInstances: 10 }) instead.
-// In the v1 API, each function can only serve one request per container, so
-// this will be the maximum concurrent request count.
-setGlobalOptions({ maxInstances: 10 });
+/**
+ * Ensures the caller is authenticated and has admin role.
+ * @param {CallableRequest} request Callable request context.
+ * @return {Promise<Object>} The admin profile data used in logs.
+ */
+async function assertAdmin(
+  request: CallableRequest<unknown>
+): Promise<{schoolId?: string}> {
+  if (!request.auth) {
+    throw new HttpsError(
+      "unauthenticated",
+      "You must be signed in."
+    );
+  }
 
-// export const helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
+  const snap = await admin
+    .firestore()
+    .doc(`profiles/${request.auth.uid}`)
+    .get();
+  const data = snap.data() ?? {};
+  const role = data.role;
+
+  if (role !== "admin") {
+    throw new HttpsError("permission-denied", "Admin only.");
+  }
+
+  return {schoolId: data.schoolId};
+}
+
+type CreateUserData = {
+  schoolId?: string;
+  role?: string;
+  email?: string | null;
+};
+
+type DeleteUserData = {
+  uid?: string;
+};
+
+export const adminCreateUser = onCall<CreateUserData>(
+  {region: REGION},
+  async (request) => {
+    const adminProfile = await assertAdmin(request);
+    const data = request.data;
+
+    const schoolId = String(data?.schoolId ?? "").trim();
+    const role = String(data?.role ?? "").trim() as Role;
+    const emailInput = String(data?.email ?? "").trim();
+    const email = emailInput || `${schoolId}@campus.local`;
+
+    if (!schoolId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "schoolId is required"
+      );
+    }
+
+    if (schoolId.length < 6) {
+      throw new HttpsError(
+        "invalid-argument",
+        "schoolId must be at least 6 characters."
+      );
+    }
+
+    if (!ALLOWED_ROLES.includes(role)) {
+      throw new HttpsError("invalid-argument", "Invalid role.");
+    }
+
+    try {
+      const user = await admin.auth().createUser({
+        email,
+        password: schoolId,
+      });
+
+      await admin.firestore().doc(`profiles/${user.uid}`).set({
+        schoolId,
+        role,
+        email,
+        mustChangePassword: true,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      await admin.firestore().collection("logs").add({
+        action: "CREATE_USER",
+        actorUid: request.auth?.uid ?? null,
+        actorSchoolId: adminProfile.schoolId ?? null,
+        targetUid: user.uid,
+        targetSchoolId: schoolId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      return {uid: user.uid};
+    } catch (error) {
+      throw toHttpsError(error, "Failed to create account.");
+    }
+  }
+);
+
+export const adminDeleteUser = onCall<DeleteUserData>(
+  {region: REGION},
+  async (request) => {
+    const adminProfile = await assertAdmin(request);
+    const data = request.data;
+
+    const uid = String(data?.uid ?? "").trim();
+
+    if (!uid) {
+      throw new HttpsError("invalid-argument", "uid required.");
+    }
+    if (uid === request.auth?.uid) {
+      throw new HttpsError(
+        "failed-precondition",
+        "You cannot delete yourself."
+      );
+    }
+
+    try {
+      const profileSnap = await admin.firestore().doc(`profiles/${uid}`).get();
+      const schoolId = profileSnap.data()?.schoolId ?? null;
+
+      await admin.auth().deleteUser(uid);
+      await admin.firestore().doc(`profiles/${uid}`).delete().catch(() => null);
+
+      await admin.firestore().collection("logs").add({
+        action: "DELETE_USER",
+        actorUid: request.auth?.uid ?? null,
+        actorSchoolId: adminProfile.schoolId ?? null,
+        targetUid: uid,
+        targetSchoolId: schoolId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      return {success: true};
+    } catch (error) {
+      throw toHttpsError(error, "Failed to remove account.");
+    }
+  }
+);
