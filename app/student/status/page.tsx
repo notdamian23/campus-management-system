@@ -49,7 +49,7 @@ export default function StudentStatus() {
 
             {/* HEADER */}
             <div className="flex items-center gap-3">
-                <div className="w-12 h-12 flex items-center justify-center rounded-full bg-[#7b0000] text-white font-bold">
+                <div className="w-12 h-12 flex items-center justify-center rounded-full bg-primary-500 text-white font-bold">
                     ST
                 </div>
                 <div>
@@ -71,7 +71,7 @@ export default function StudentStatus() {
                         onClick={() => setFilter(btn.value)}
                         className={`px-4 py-2 rounded-lg text-sm font-medium transition
                             ${filter === btn.value
-                            ? "bg-[#7b0000] text-white"
+                            ? "bg-primary-500 text-white"
                             : "bg-gray-100 text-gray-700 hover:bg-gray-200"}
                         `}
                     >

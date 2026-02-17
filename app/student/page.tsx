@@ -9,7 +9,7 @@ export default function StudentDashboard() {
 
             {/* WELCOME HEADER */}
             <div>
-                <h1 className="text-3xl font-bold text-[#7b0000]">Welcome back!</h1>
+                <h1 className="text-3xl font-bold text-primary-900">Welcome back!</h1>
                 <p className="text-campus-text-secondary text-sm">Here's what's happening today 🎓</p>
             </div>
 
@@ -19,7 +19,7 @@ export default function StudentDashboard() {
                 <Card shadow="sm" isPressable>
                     <CardBody>
                         <p className="text-campus-text-secondary text-sm">Upcoming Events</p>
-                        <h2 className="text-3xl font-bold text-campus-red-700 mt-2">3</h2>
+                        <h2 className="text-3xl font-bold text-primary-700 mt-2">3</h2>
                     </CardBody>
                 </Card>
 
@@ -46,7 +46,7 @@ export default function StudentDashboard() {
             <Card shadow="sm">
                 <CardHeader className="flex justify-between items-center">
                     <h2 className="text-lg font-semibold text-campus-text-primary">Events Overview</h2>
-                    <button className="text-sm text-campus-red-700 hover:underline flex items-center gap-1">
+                    <button className="text-sm text-primary-700 hover:underline flex items-center gap-1">
                         View All <FiChevronRight size={16} />
                     </button>
                 </CardHeader>

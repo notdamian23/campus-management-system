@@ -1,13 +1,21 @@
 @import "tailwindcss";
 
-:root {
-  /* Brand Colors */
+@theme inline {
+  /* Primary Brand Red - Modern SaaS palette */
+  --color-primary-50: #FEF2F2;
+  --color-primary-100: #FEE2E2;
+  --color-primary-200: #FECACA;
+  --color-primary-300: #FCA5A5;
+  --color-primary-400: #F87171;
+  --color-primary-500: #DC2626;
+  --color-primary-600: #B91C1C;
+  --color-primary-700: #991B1B;
+  --color-primary-800: #7F1D1D;
+  --color-primary-900: #7b0000;
+  --color-primary-950: #450A0A;
   --color-primary: #DC2626;
-  --color-primary-hover: #B91C1C;
-  --color-primary-active: #991B1B;
-  --color-primary-soft: #FEE2E2;
 
-  /* Backgrounds */
+  /* Background Colors */
   --color-bg-main: #FFFFFF;
   --color-bg-subtle: #FAFAFA;
   --color-bg-muted: #F3F4F6;
@@ -19,7 +27,7 @@
   --color-text-disabled: #9CA3AF;
   --color-text-on-primary: #FFFFFF;
 
-  /* Borders */
+  /* Border Colors */
   --color-border: #E5E7EB;
   --color-border-input: #D1D5DB;
   --color-border-input-focus: #DC2626;
@@ -32,16 +40,16 @@
   --color-alert-warning-bg: #FEF3C7;
   --color-alert-warning-text: #92400E;
 
-  /* Legacy variables */
-  --background: #FFFFFF;
-  --foreground: #111827;
-}
-
-@theme inline {
+  /* Fonts */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  --background: #FFFFFF;
+  --foreground: #111827;
 }
 
 @media (prefers-color-scheme: dark) {

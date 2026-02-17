@@ -50,7 +50,7 @@ export default function ECStudentLookup() {
             {/* HEADER */}
             <Card shadow="sm">
                 <CardBody className="flex flex-row justify-between items-center px-6 py-4">
-                    <h1 className="text-xl font-bold text-[#7b0000]">
+                    <h1 className="text-xl font-bold text-primary-900">
                         Engineering Student Management System
                     </h1>
                 </CardBody>
@@ -116,7 +116,7 @@ export default function ECStudentLookup() {
                 </select>
 
                 {/* ⭐ MOVED ADD STUDENT BUTTON HERE ⭐ */}
-                <button className="flex items-center gap-2 bg-[#7b0000] text-white px-4 py-2 rounded-lg shadow hover:bg-red-800 transition">
+                <button className="flex items-center gap-2 bg-primary-500 text-white px-4 py-2 rounded-lg shadow hover:bg-red-800 transition">
                     <FiPlus />
                     Add Student
                 </button>
@@ -155,7 +155,11 @@ export default function ECStudentLookup() {
                                         </span>
                                 </td>
                                 <td className="p-3 text-right">
-                                    <button onClick={() => toggleExpand(student.id)}>
+                                    <button
+                                        onClick={() => toggleExpand(student.id)}
+                                        className="p-2 bg-transparent hover:bg-gray-100 text-gray-600 hover:text-gray-900 rounded-lg transition-colors"
+                                        aria-label={expandedId === student.id ? "Collapse details" : "Expand details"}
+                                    >
                                         {expandedId === student.id ? (
                                             <FiChevronUp size={20} />
                                         ) : (
@@ -171,7 +175,7 @@ export default function ECStudentLookup() {
                                         <div className="space-y-6">
 
                                             <h3 className="text-lg font-semibold flex items-center gap-2">
-                                                    <span className="w-7 h-7 flex items-center justify-center rounded-full bg-[#7b0000] text-white font-bold">
+                                                    <span className="w-7 h-7 flex items-center justify-center rounded-full bg-primary-500 text-white font-bold">
                                                         SR
                                                     </span>
                                                 Student Record Overview

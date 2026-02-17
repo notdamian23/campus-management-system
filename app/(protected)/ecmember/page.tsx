@@ -5,7 +5,7 @@ import { Card, CardBody } from "@heroui/card";
 export default function ECMemberDashboard() {
     return (
         <div className="p-6">
-            <h1 className="text-3xl font-bold text-[#7b0000] mb-6">
+            <h1 className="text-3xl font-bold text-primary-900 mb-6">
                 EC Member Dashboard
             </h1>
 

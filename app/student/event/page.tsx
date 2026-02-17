@@ -136,7 +136,7 @@ export default function StudentEvents() {
     return (
         <div className="min-h-screen p-10 bg-[#fafafa] text-campus-text-primary">
 
-            <h1 className="text-3xl font-bold mb-8 text-[#7b0000]">
+            <h1 className="text-3xl font-bold mb-8 text-primary-900">
                 Events
             </h1>
 

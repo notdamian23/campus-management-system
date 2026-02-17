@@ -8,7 +8,7 @@ export default function DocumentsPage() {
 
             {/* HEADER */}
             <div className="bg-white p-6 rounded-xl shadow border">
-                <h1 className="text-2xl font-bold text-[#7b0000]">Manage and Access Documents</h1>
+                <h1 className="text-2xl font-bold text-primary-900">Manage and Access Documents</h1>
                 <p className="text-campus-text-secondary text-sm mt-1">
                     Upload, organize, and review documents. Everything stored securely in one place.
                 </p>
@@ -62,7 +62,7 @@ export default function DocumentsPage() {
                     className="px-3 py-2 border rounded-lg shadow-sm"
                 />
 
-                <button className="px-4 py-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 transition">
+                <button className="px-4 py-2 bg-primary-600 text-white rounded-lg shadow hover:bg-primary-700 transition">
                     Upload Document
                 </button>
             </div>

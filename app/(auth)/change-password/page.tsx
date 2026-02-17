@@ -84,9 +84,9 @@ export default function ChangePasswordPage() {
     };
 
     return (
-        <div className="min-h-[100dvh] w-full bg-[#7b0000] flex items-center justify-center px-4 py-8">
+        <div className="min-h-[100dvh] w-full bg-primary-500 flex items-center justify-center px-4 py-8">
             <div className="bg-white w-full max-w-md rounded-2xl shadow-xl px-6 sm:px-10 py-8 flex flex-col items-center">
-                <div className="w-28 h-28 sm:w-36 sm:h-36 rounded-full overflow-hidden flex items-center justify-center mb-4 border-4 border-[#7b0000]">
+                <div className="w-28 h-28 sm:w-36 sm:h-36 rounded-full overflow-hidden flex items-center justify-center mb-4 border-4 border-primary-500">
                     <Image
                         src="/new campus-logo.jpg"
                         alt="Campus Logo"
@@ -97,7 +97,7 @@ export default function ChangePasswordPage() {
                     />
                 </div>
 
-                <h1 className={`text-4xl font-extrabold text-center text-[#7b0000] tracking-tight ${poppins.className}`}>
+                <h1 className={`text-4xl font-extrabold text-center text-primary-900 tracking-tight ${poppins.className}`}>
                     CAMPUS
                 </h1>
 
@@ -151,7 +151,7 @@ export default function ChangePasswordPage() {
                 <button
                     onClick={onSave}
                     disabled={loading}
-                    className="w-full bg-yellow-400 text-black py-3 rounded-lg font-semibold hover:bg-yellow-500 transition disabled:opacity-60"
+                    className="w-full bg-primary-500 text-white py-3 rounded-lg font-semibold hover:bg-primary-600 transition disabled:opacity-60"
                 >
                     {loading ? "Saving..." : "Save password"}
                 </button>

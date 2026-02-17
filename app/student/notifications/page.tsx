@@ -89,7 +89,7 @@ export default function NotificationsPage() {
 
     return (
         <main className="min-h-screen bg-[#f7f7f7] px-8 py-6">
-            <h1 className="text-3xl font-extrabold text-[#7b0000] mb-4">
+            <h1 className="text-3xl font-extrabold text-primary-900 mb-4">
                 Notifications
             </h1>
 

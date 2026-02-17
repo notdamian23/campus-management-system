@@ -8,7 +8,7 @@ export default function TeacherDashboard() {
             {/* HEADER */}
             <div className="flex justify-between items-center">
                 <div>
-                    <h1 className="text-5xl font-extrabold text-[#7b0000] drop-shadow-sm">
+                    <h1 className="text-5xl font-extrabold text-primary-900 drop-shadow-sm">
                         Welcome back!
                     </h1>
                     <p className="text-campus-text-secondary text-lg mt-1">
@@ -18,7 +18,7 @@ export default function TeacherDashboard() {
 
                 {/* PROFILE */}
                 <div className="flex flex-col items-center">
-                    <div className="w-14 h-14 bg-[#7b0000] hover:bg-red-900 transition text-white rounded-full flex items-center justify-center shadow-lg cursor-pointer">
+                    <div className="w-14 h-14 bg-primary-500 hover:bg-red-900 transition text-white rounded-full flex items-center justify-center shadow-lg cursor-pointer">
                         <span className="material-icons text-3xl">person</span>
                     </div>
                     <p className="text-xs mt-1 text-campus-text-secondary font-medium">Teacher</p>
@@ -30,7 +30,7 @@ export default function TeacherDashboard() {
                 <Card className="w-full max-w-7xl" shadow="lg">
                     <CardHeader className="flex flex-wrap items-center justify-between gap-4 px-10 py-6">
                         <div>
-                            <h2 className="text-3xl font-bold text-[#7b0000]">
+                            <h2 className="text-3xl font-bold text-primary-900">
                                 Events Overview
                             </h2>
                             <p className="text-sm text-campus-text-secondary mt-1">
@@ -41,7 +41,7 @@ export default function TeacherDashboard() {
                         {/* FILTERS / VIEW ALL */}
                         <div className="flex items-center gap-3">
                             <div className="flex gap-2 text-xs font-semibold">
-                                <button className="px-3 py-1 rounded-full bg-[#7b0000] text-white">
+                                <button className="px-3 py-1 rounded-full bg-primary-500 text-white">
                                     All
                                 </button>
                                 <button className="px-3 py-1 rounded-full bg-blue-50 text-blue-600">
@@ -51,7 +51,7 @@ export default function TeacherDashboard() {
                                     Completed
                                 </button>
                             </div>
-                            <button className="text-xs font-semibold text-[#7b0000] hover:underline ml-2">
+                            <button className="text-xs font-semibold text-primary-900 hover:underline ml-2">
                                 View All
                             </button>
                         </div>

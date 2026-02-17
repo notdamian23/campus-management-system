@@ -15,7 +15,7 @@ export default function EventsPage() {
             {/* HEADER */}
             <Card shadow="lg" className="mb-10">
                 <CardBody className="p-8">
-                    <h1 className="text-3xl font-extrabold text-[#7b0000]">
+                    <h1 className="text-3xl font-extrabold text-primary-900">
                         Campus Event Management System
                     </h1>
                     <p className="text-campus-text-secondary mt-1">
@@ -173,7 +173,7 @@ export default function EventsPage() {
                                 <div className="flex items-center gap-3">
 
                                     {/* Export Report Button */}
-                                    <button className="px-4 py-2 bg-yellow-400 hover:bg-yellow-500 text-black rounded-lg text-sm font-semibold shadow-sm">
+                                    <button className="px-4 py-2 bg-primary-100 hover:bg-primary-200 text-primary-700 rounded-lg text-sm font-semibold shadow-sm">
                                         Export Report
                                     </button>
 

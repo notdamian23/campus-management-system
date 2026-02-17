@@ -14,7 +14,7 @@ export default function StudentsPage() {
             {/* HEADER CARD */}
             <Card shadow="lg" className="mb-10">
                 <CardBody className="p-8">
-                    <h1 className="text-4xl font-extrabold text-[#7b0000]">
+                    <h1 className="text-4xl font-extrabold text-primary-900">
                         Engineering Student Management System
                     </h1>
                 </CardBody>
@@ -125,7 +125,7 @@ export default function StudentsPage() {
 
                                         {/* HEADER */}
                                         <div className="flex items-center gap-3 mb-4">
-                                            <div className="w-10 h-10 bg-[#7b0000] rounded-full flex items-center justify-center text-white font-bold">
+                                            <div className="w-10 h-10 bg-primary-500 rounded-full flex items-center justify-center text-white font-bold">
                                                 SR
                                             </div>
                                             <h2 className="text-xl font-bold text-campus-text-primary">

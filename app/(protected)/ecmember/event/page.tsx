@@ -639,7 +639,7 @@ export default function EventDashboard() {
         <div className="px-3 py-4 sm:p-6 space-y-4 sm:space-y-6">
             {/* HEADER */}
             <div className="bg-white sm:bg-transparent border sm:border-0 rounded-xl sm:rounded-none shadow-sm sm:shadow-none p-4 sm:p-0">
-                <h1 className="text-lg sm:text-2xl font-bold text-[#7b0000] leading-tight">Campus Event Management System</h1>
+                <h1 className="text-lg sm:text-2xl font-bold text-primary-900 leading-tight">Campus Event Management System</h1>
                 <p className="text-campus-text-secondary text-xs sm:text-sm mt-1">
                     Organize, manage, and track all campus events in one centralized dashboard.
                 </p>
@@ -685,11 +685,11 @@ export default function EventDashboard() {
                     </div>
 
                     <div className="grid grid-cols-2 gap-2">
-                        <button onClick={() => setShowNotificationForm((v) => !v)} className="py-2 rounded-lg bg-blue-500 text-white text-sm font-semibold">
+                        <button onClick={() => setShowNotificationForm((v) => !v)} className="py-2 rounded-lg bg-primary-500 text-white text-sm font-semibold">
                             Notify
                         </button>
 
-                        <button onClick={() => setShowAddEventForm((v) => !v)} className="py-2 rounded-lg bg-[#7b0000] text-white text-sm font-semibold">
+                        <button onClick={() => setShowAddEventForm((v) => !v)} className="py-2 rounded-lg bg-primary-500 text-white text-sm font-semibold">
                             Add
                         </button>
                     </div>
@@ -700,7 +700,7 @@ export default function EventDashboard() {
             {showAddEventForm && (
                 <div className="bg-white p-6 border rounded-xl shadow space-y-4 animate-slideDown">
                     <div className="flex items-start justify-between">
-                        <h2 className="text-xl font-semibold text-[#7b0000]">Add New Event</h2>
+                        <h2 className="text-xl font-semibold text-primary-900">Add New Event</h2>
 
                         <div className="flex flex-col items-end space-y-3">
                             <label className="flex items-center gap-3 cursor-pointer select-none">
@@ -828,7 +828,7 @@ export default function EventDashboard() {
                     <button
                         onClick={handleSaveEvent}
                         disabled={saving || roleLoading || !isECUser}
-                        className="w-full px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-60"
+                        className="w-full px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
                     >
                         {roleLoading ? "Checking role..." : saving ? "Saving..." : "Save"}
                     </button>
@@ -919,7 +919,7 @@ export default function EventDashboard() {
                         <textarea value={notifMessage} onChange={(e) => setNotifMessage(e.target.value)} className="w-full h-28 mt-1 px-4 py-3 border rounded-lg shadow-sm" />
                     </div>
 
-                    <button className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">Send Notification (later)</button>
+                    <button className="px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600">Send Notification (later)</button>
                 </div>
             )}
 
@@ -963,7 +963,7 @@ export default function EventDashboard() {
                                             <button type="button" className="px-4 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg" onClick={(e) => e.stopPropagation()}>
                                                 Info ▼
                                             </button>
-                                            <button type="button" className="px-4 py-1 bg-blue-500 text-white text-xs rounded-lg" onClick={(e) => e.stopPropagation()}>
+                                            <button type="button" className="px-4 py-1 bg-primary-500 text-white text-xs rounded-lg" onClick={(e) => e.stopPropagation()}>
                                                 Edit (later)
                                             </button>
                                         </div>
