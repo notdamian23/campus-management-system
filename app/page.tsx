@@ -14,7 +14,7 @@ const poppins = Poppins({
     weight: ["400", "600", "700", "800"],
 });
 
-type Role = "teacher" | "student" | "ec";
+type Role = "teacher" | "student" | "ec" | "admin";
 
 function setCampusCookies(role: string, mustChangePassword: boolean) {
     // Basic cookies for middleware guard (7 days)
@@ -71,7 +71,7 @@ function LoginForm() {
             };
 
             // Validate role
-            if (data.role !== "teacher" && data.role !== "student" && data.role !== "ec") {
+            if (data.role !== "teacher" && data.role !== "student" && data.role !== "ec" && data.role !== "admin") {
                 await signOut(auth);
                 alert("Invalid role in database. Contact admin.");
                 return;
@@ -94,13 +94,15 @@ function LoginForm() {
 
             if (data.role === "teacher") router.push("/teacher");
             else if (data.role === "student") router.push("/student");
-            else router.push("/ecmember");
-        } catch (e: any) {
-            const code = e?.code as string | undefined;
+            else if (data.role === "ec") router.push("/ecmember");
+            else router.push("/admin");
+        } catch (e: unknown) {
+            const error = e as { code?: string; message?: string };
+            const code = error.code;
 
             if (code === "auth/invalid-credential") alert("Wrong School ID or password.");
             else if (code === "auth/user-not-found") alert("Account not found. Contact admin.");
-            else alert(e?.message ?? "Login failed");
+            else alert(error.message ?? "Login failed");
         } finally {
             setLoading(false);
         }
@@ -211,3 +213,4 @@ export default function LoginPage() {
         </Suspense>
     );
 }
+

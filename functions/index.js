@@ -1,32 +1,116 @@
-/**
- * Import function triggers from their respective submodules:
- *
- * const {onCall} = require("firebase-functions/v2/https");
- * const {onDocumentWritten} = require("firebase-functions/v2/firestore");
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
- */
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
 
-const {setGlobalOptions} = require("firebase-functions");
-const {onRequest} = require("firebase-functions/https");
-const logger = require("firebase-functions/logger");
+admin.initializeApp();
 
-// For cost control, you can set the maximum number of containers that can be
-// running at the same time. This helps mitigate the impact of unexpected
-// traffic spikes by instead downgrading performance. This limit is a
-// per-function limit. You can override the limit for each function using the
-// `maxInstances` option in the function's options, e.g.
-// `onRequest({ maxInstances: 5 }, (req, res) => { ... })`.
-// NOTE: setGlobalOptions does not apply to functions using the v1 API. V1
-// functions should each use functions.runWith({ maxInstances: 10 }) instead.
-// In the v1 API, each function can only serve one request per container, so
-// this will be the maximum concurrent request count.
-setGlobalOptions({ maxInstances: 10 });
+async function assertAdmin(context) {
+  if (!context.auth) {
+    throw new functions.https.HttpsError(
+      "unauthenticated",
+      "You must be signed in."
+    );
+  }
 
-// Create and deploy your first functions
-// https://firebase.google.com/docs/functions/get-started
+  const snap = await admin
+    .firestore()
+    .doc(`profiles/${context.auth.uid}`)
+    .get();
 
-// exports.helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
+  const role = snap.data()?.role;
+
+  if (role !== "admin") {
+    throw new functions.https.HttpsError(
+      "permission-denied",
+      "Admin only."
+    );
+  }
+}
+
+// -------------------------
+// CREATE USER
+// -------------------------
+exports.adminCreateUser = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const schoolId = String(data.schoolId || "").trim();
+  const role = String(data.role || "").trim();
+  const email = data.email
+    ? String(data.email).trim()
+    : `${schoolId}@campus.local`;
+
+  if (!schoolId)
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "schoolId is required"
+    );
+
+  if (!["admin", "ec", "teacher", "student"].includes(role))
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "Invalid role"
+    );
+
+  const user = await admin.auth().createUser({
+    email,
+    password: schoolId, // default password = school ID
+  });
+
+  await admin.firestore().doc(`profiles/${user.uid}`).set({
+    schoolId,
+    role,
+    email,
+    mustChangePassword: true,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  await admin.firestore().collection("logs").add({
+    action: "CREATE_USER",
+    actorUid: context.auth.uid,
+    targetUid: user.uid,
+    targetSchoolId: schoolId,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return { uid: user.uid };
+});
+
+// -------------------------
+// DELETE USER
+// -------------------------
+exports.adminDeleteUser = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const uid = String(data.uid || "").trim();
+
+  if (!uid)
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "uid required"
+    );
+
+  if (uid === context.auth.uid)
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "You cannot delete yourself."
+    );
+
+  const profileSnap = await admin
+    .firestore()
+    .doc(`profiles/${uid}`)
+    .get();
+
+  const schoolId = profileSnap.data()?.schoolId || null;
+
+  await admin.auth().deleteUser(uid);
+  await admin.firestore().doc(`profiles/${uid}`).delete().catch(() => {});
+
+  await admin.firestore().collection("logs").add({
+    action: "DELETE_USER",
+    actorUid: context.auth.uid,
+    targetUid: uid,
+    targetSchoolId: schoolId,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return { success: true };
+});

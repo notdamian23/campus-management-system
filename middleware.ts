@@ -4,6 +4,7 @@ const ROLE_HOME: Record<string, string> = {
     teacher: "/teacher",
     student: "/student",
     ec: "/ecmember",
+    admin: "/admin",
 };
 
 function redirectToLogin(req: NextRequest) {
@@ -33,14 +34,15 @@ export function middleware(req: NextRequest) {
 
     // Cookies set on login
     const loggedIn = req.cookies.get("campus_logged_in")?.value === "1";
-    const role = req.cookies.get("campus_role")?.value; // "student" | "teacher" | "ec"
+    const role = req.cookies.get("campus_role")?.value; // "student" | "teacher" | "ec" | "admin"
     const mustChangePassword = req.cookies.get("campus_must_change")?.value === "1";
 
     const isProtected =
         pathname === "/change-password" ||
         pathname.startsWith("/teacher") ||
         pathname.startsWith("/student") ||
-        pathname.startsWith("/ecmember");
+        pathname.startsWith("/ecmember") ||
+        pathname.startsWith("/admin");
 
     // 1) Not logged in → block protected routes
     if (isProtected && !loggedIn) {
@@ -81,9 +83,16 @@ export function middleware(req: NextRequest) {
         return NextResponse.redirect(url);
     }
 
+    if (pathname.startsWith("/admin") && role !== "admin") {
+        const url = req.nextUrl.clone();
+        url.pathname = ROLE_HOME[role ?? ""] ?? "/";
+        return NextResponse.redirect(url);
+    }
+
     return NextResponse.next();
 }
 
 export const config = {
     matcher: ["/((?!api).*)"],
 };
+
