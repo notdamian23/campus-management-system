@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { Card, CardBody } from "@heroui/card";
+import { CampusInput, CampusBadge } from "@/components/heroui";
+import { Select, SelectItem } from "@heroui/select";
 
 export default function StudentsPage() {
     const [showDetails, setShowDetails] = useState(false);
@@ -9,11 +12,13 @@ export default function StudentsPage() {
         <div className="w-full p-10 bg-gray-50 min-h-screen">
 
             {/* HEADER CARD */}
-            <div className="bg-white shadow-xl rounded-2xl p-8 mb-10 border border-gray-200">
-                <h1 className="text-4xl font-extrabold text-[#7b0000]">
-                    Engineering Student Management System
-                </h1>
-            </div>
+            <Card shadow="lg" className="mb-10">
+                <CardBody className="p-8">
+                    <h1 className="text-4xl font-extrabold text-[#7b0000]">
+                        Engineering Student Management System
+                    </h1>
+                </CardBody>
+            </Card>
 
             {/* STATS */}
             <div className="grid grid-cols-6 gap-4 mb-10">
@@ -25,35 +30,33 @@ export default function StudentsPage() {
                     ["1", "Computer"],
                     ["0", "Industrial"],
                 ].map(([value, label], idx) => (
-                    <div
-                        key={idx}
-                        className="bg-white rounded-xl px-6 py-5 shadow-md border border-gray-100 flex flex-col text-center"
-                    >
-                        <span className="text-4xl font-bold text-gray-800">{value}</span>
-                        <span className="text-sm text-gray-500 mt-1">{label}</span>
-                    </div>
+                    <Card key={idx} shadow="sm">
+                        <CardBody className="flex flex-col text-center">
+                            <span className="text-4xl font-bold text-gray-800">{value}</span>
+                            <span className="text-sm text-gray-500 mt-1">{label}</span>
+                        </CardBody>
+                    </Card>
                 ))}
             </div>
 
             {/* FILTERS */}
             <div className="flex items-center gap-3 mb-8">
-                <input
+                <CampusInput
                     placeholder="Search student name..."
-                    className="w-[300px] px-4 py-2 rounded-lg border border-gray-300 shadow-sm
-                    text-gray-700 placeholder-gray-500 focus:ring focus:ring-yellow-200"
+                    className="w-[300px]"
                 />
 
-                <select className="px-4 py-2 rounded-lg border border-gray-300 shadow-sm text-gray-700">
-                    <option>All Courses</option>
-                </select>
+                <Select size="sm" label="Course" className="w-[200px]">
+                    <SelectItem key="all">All Courses</SelectItem>
+                </Select>
 
-                <select className="px-4 py-2 rounded-lg border border-gray-300 shadow-sm text-gray-700">
-                    <option>All Years</option>
-                </select>
+                <Select size="sm" label="Year" className="w-[200px]">
+                    <SelectItem key="all">All Years</SelectItem>
+                </Select>
             </div>
 
             {/* STUDENT TABLE */}
-            <div className="bg-white shadow-xl rounded-2xl overflow-visible border border-gray-200">
+            <Card shadow="lg">
 
                 <table className="w-full">
                     <thead className="bg-gray-100 border-b">
@@ -92,11 +95,8 @@ export default function StudentsPage() {
 
                         <td className="p-4 text-gray-700">2nd Year</td>
 
-
                         <td className="p-4">
-                                <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm">
-                                    Active
-                                </span>
+                                <CampusBadge status="active">Active</CampusBadge>
                         </td>
 
                         {/* ACTIONS */}
@@ -178,24 +178,20 @@ export default function StudentsPage() {
                                         </div>
 
                                         {/* PAYMENT STATUS */}
-                                        <div className="flex justify-between items-center bg-green-50 border border-green-200 rounded-xl p-4">
+                                        <div className="space-y-3">
+                                            <div className="flex justify-between items-center bg-green-50 border border-green-200 rounded-xl p-4">
                                                 <span className="font-semibold text-gray-700">
                                                     Acquaintance Fee
                                                 </span>
+                                                <CampusBadge status="paid">PAID</CampusBadge>
+                                            </div>
 
-                                            <span className="px-4 py-1 bg-green-500 text-white rounded-full text-sm">
-                                                    PAID
-                                                </span>
-                                        </div>
-
-                                        <div className="flex justify-between items-center bg-red-50 border border-red-200 rounded-xl p-4">
+                                            <div className="flex justify-between items-center bg-red-50 border border-red-200 rounded-xl p-4">
                                                 <span className="font-semibold text-gray-700">
                                                     Engineering Merch
                                                 </span>
-
-                                            <span className="px-4 py-1 bg-red-800 text-white rounded-full text-sm">
-                                                    UNPAID
-                                                </span>
+                                                <CampusBadge status="unpaid">UNPAID</CampusBadge>
+                                            </div>
                                         </div>
 
                                     </div>
@@ -207,7 +203,7 @@ export default function StudentsPage() {
 
                     </tbody>
                 </table>
-            </div>
+            </Card>
         </div>
     );
 }

@@ -1,6 +1,9 @@
 "use client";
 import React, { useState } from "react";
 import { FiChevronDown, FiChevronUp, FiPlus } from "react-icons/fi";
+import { Card, CardBody } from "@heroui/card";
+import { CampusInput, CampusBadge } from "@/components/heroui";
+import { Select, SelectItem } from "@heroui/select";
 
 interface Student {
     id: string;
@@ -44,14 +47,14 @@ export default function ECStudentLookup() {
     return (
         <div className="p-6 space-y-6">
 
-            {/* 🔥 UPDATED HEADER – Matches your screenshot exactly */}
-            <div className="bg-white shadow-md rounded-xl px-6 py-4 flex justify-between items-center">
-                <h1 className="text-xl font-bold text-[#7b0000]">
-                    Engineering Student Management System
-                </h1>
-
-            </div>
-            {/* END HEADER */}
+            {/* HEADER */}
+            <Card shadow="sm">
+                <CardBody className="flex flex-row justify-between items-center px-6 py-4">
+                    <h1 className="text-xl font-bold text-[#7b0000]">
+                        Engineering Student Management System
+                    </h1>
+                </CardBody>
+            </Card>
 
             {/* TOP SUMMARY CARDS */}
             <div className="grid grid-cols-6 gap-4">

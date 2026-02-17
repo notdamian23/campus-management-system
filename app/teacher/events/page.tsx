@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { Card, CardBody } from "@heroui/card";
+import { CampusInput } from "@/components/heroui";
+import { Select, SelectItem } from "@heroui/select";
 
 export default function EventsPage() {
     const [openDetails, setOpenDetails] = useState<number | null>(null);
@@ -10,14 +13,16 @@ export default function EventsPage() {
         <div className="w-full p-10 bg-gray-50 min-h-screen">
 
             {/* HEADER */}
-            <div className="bg-white shadow-xl rounded-2xl p-8 mb-10 border border-gray-200">
-                <h1 className="text-3xl font-extrabold text-[#7b0000]">
-                    Campus Event Management System
-                </h1>
-                <p className="text-gray-600 mt-1">
-                    Organize, manage, and track all campus events in one centralized dashboard.
-                </p>
-            </div>
+            <Card shadow="lg" className="mb-10">
+                <CardBody className="p-8">
+                    <h1 className="text-3xl font-extrabold text-[#7b0000]">
+                        Campus Event Management System
+                    </h1>
+                    <p className="text-gray-600 mt-1">
+                        Organize, manage, and track all campus events in one centralized dashboard.
+                    </p>
+                </CardBody>
+            </Card>
 
             {/* STATS */}
             <div className="grid grid-cols-5 gap-4 mb-10">
@@ -28,37 +33,36 @@ export default function EventsPage() {
                     ["0", "Completed"],
                     ["0", "Participants"],
                 ].map(([value, label], idx) => (
-                    <div
-                        key={idx}
-                        className="bg-white rounded-xl px-6 py-5 shadow-md border border-gray-100 flex flex-col text-center"
-                    >
-                        <span className="text-3xl font-bold text-gray-800">{value}</span>
-                        <span className="text-sm text-gray-500 mt-1">{label}</span>
-                    </div>
+                    <Card key={idx} shadow="sm">
+                        <CardBody className="flex flex-col text-center">
+                            <span className="text-3xl font-bold text-gray-800">{value}</span>
+                            <span className="text-sm text-gray-500 mt-1">{label}</span>
+                        </CardBody>
+                    </Card>
                 ))}
             </div>
 
             {/* FILTERS */}
             <div className="flex items-center gap-3 mb-8">
-                <input
+                <CampusInput
                     placeholder="Search events by title, venue, or organizer..."
-                    className="w-[350px] px-4 py-2 rounded-lg border border-gray-300 shadow-sm
-                    text-gray-700 placeholder-gray-500 focus:ring focus:ring-yellow-200"
+                    className="w-[350px]"
                 />
-                <select className="px-4 py-2 rounded-lg border border-gray-300 shadow-sm text-gray-700">
-                    <option>All Categories</option>
-                </select>
-                <select className="px-4 py-2 rounded-lg border border-gray-300 shadow-sm text-gray-700">
-                    <option>All Status</option>
-                </select>
-                <input
+                <Select size="sm" label="Category" className="w-[180px]">
+                    <SelectItem key="all">All Categories</SelectItem>
+                </Select>
+                <Select size="sm" label="Status" className="w-[180px]">
+                    <SelectItem key="all">All Status</SelectItem>
+                </Select>
+                <CampusInput
                     type="date"
-                    className="px-4 py-2 rounded-lg border border-gray-300 shadow-sm text-gray-700"
+                    className="w-[180px]"
                 />
             </div>
 
             {/* EVENT LIST PANEL */}
-            <div className="bg-white shadow-xl rounded-2xl border border-gray-200 p-6 mb-6">
+            <Card shadow="lg" className="mb-6">
+                <CardBody className="p-6">
                 <h2 className="text-lg font-semibold text-gray-800 mb-4">Event List</h2>
 
                 {/* EVENT ITEM */}
@@ -281,7 +285,8 @@ export default function EventsPage() {
                         </div>
                     </>
                 )}
-            </div>
+                </CardBody>
+            </Card>
         </div>
     );
 }

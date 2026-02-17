@@ -1,5 +1,7 @@
 "use client";
 import { useState } from "react";
+import { Card, CardBody } from "@heroui/card";
+import { CampusBadge, CampusButton } from "@/components/heroui";
 
 type EventStatus = "Upcoming" | "Payment Due" | "Pre-registration" | "Attended" | "Missed";
 
@@ -150,58 +152,67 @@ export default function StudentEvents() {
                         <div className="space-y-4">
                             {group.items.map((item, j) => {
                                 const open = isOpen(i, j);
+                                const getStatusProp = (status: EventStatus) => {
+                                    if (status === "Upcoming") return "upcoming";
+                                    if (status === "Attended") return "completed";
+                                    if (status === "Missed") return "missed";
+                                    return undefined;
+                                };
 
                                 return (
-                                    <div
-                                        key={j}
-                                        className="bg-white border rounded-2xl shadow-sm hover:shadow-md transition p-5"
-                                    >
-                                        {/* TOP SECTION */}
-                                        <div className="flex items-start justify-between">
-                                            <div>
-                                                <h3 className="text-lg font-semibold">{item.event}</h3>
-                                                <p className="text-sm text-gray-600 mt-1">{item.description}</p>
-                                                <p className="text-xs text-gray-500 mt-2">
-                                                    {group.date} • {item.time}
-                                                </p>
-                                            </div>
+                                    <Card key={j} shadow="sm" isPressable>
+                                        <CardBody className="p-5">
+                                            {/* TOP SECTION */}
+                                            <div className="flex items-start justify-between">
+                                                <div>
+                                                    <h3 className="text-lg font-semibold">{item.event}</h3>
+                                                    <p className="text-sm text-gray-600 mt-1">{item.description}</p>
+                                                    <p className="text-xs text-gray-500 mt-2">
+                                                        {group.date} • {item.time}
+                                                    </p>
+                                                </div>
 
-                                            <div className="flex items-center gap-2">
-                                                {/* STATUS CHIP */}
-                                                <span
-                                                    className={`px-3 py-1 rounded-full text-sm font-medium ${statusColor[item.status]}`}
-                                                >
-                                                    {item.status}
-                                                </span>
+                                                <div className="flex items-center gap-2">
+                                                    {/* STATUS CHIP */}
+                                                    {getStatusProp(item.status) ? (
+                                                        <CampusBadge status={getStatusProp(item.status)}>
+                                                            {item.status}
+                                                        </CampusBadge>
+                                                    ) : (
+                                                        <span className={`px-3 py-1 rounded-full text-sm font-medium ${statusColor[item.status]}`}>
+                                                            {item.status}
+                                                        </span>
+                                                    )}
 
-                                                {/* DROPDOWN BUTTON */}
-                                                <button
-                                                    className="p-1 rounded-full hover:bg-gray-200 transition"
-                                                    onClick={() => toggleOpen(i, j)}
-                                                >
-                                                    <span className="material-icons text-gray-600 text-lg">
-                                                        {open ? "expand_less" : "expand_more"}
-                                                    </span>
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        {/* DROPDOWN DETAILS */}
-                                        {open && (
-                                            <div className="mt-4 p-4 bg-gray-50 rounded-xl border text-sm space-y-1 animate-fadeIn">
-                                                <p><span className="font-medium">Location:</span> {item.details.location}</p>
-                                                <p><span className="font-medium">Requirement:</span> {item.details.requirement}</p>
-                                                <p><span className="font-medium">Note:</span> {item.details.note}</p>
-
-                                                {/* Register button only for pre-registration */}
-                                                {item.status === "Pre-registration" && (
-                                                    <button className="mt-3 bg-yellow-400 hover:bg-yellow-500 text-black font-semibold px-4 py-2 rounded-lg">
-                                                        Register
+                                                    {/* DROPDOWN BUTTON */}
+                                                    <button
+                                                        className="p-1 rounded-full hover:bg-gray-200 transition"
+                                                        onClick={() => toggleOpen(i, j)}
+                                                    >
+                                                        <span className="material-icons text-gray-600 text-lg">
+                                                            {open ? "expand_less" : "expand_more"}
+                                                        </span>
                                                     </button>
-                                                )}
+                                                </div>
                                             </div>
-                                        )}
-                                    </div>
+
+                                            {/* DROPDOWN DETAILS */}
+                                            {open && (
+                                                <div className="mt-4 p-4 bg-gray-50 rounded-xl border text-sm space-y-1 animate-fadeIn">
+                                                    <p><span className="font-medium">Location:</span> {item.details.location}</p>
+                                                    <p><span className="font-medium">Requirement:</span> {item.details.requirement}</p>
+                                                    <p><span className="font-medium">Note:</span> {item.details.note}</p>
+
+                                                    {/* Register button only for pre-registration */}
+                                                    {item.status === "Pre-registration" && (
+                                                        <CampusButton variant="secondary" className="mt-3">
+                                                            Register
+                                                        </CampusButton>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </CardBody>
+                                    </Card>
                                 );
                             })}
                         </div>

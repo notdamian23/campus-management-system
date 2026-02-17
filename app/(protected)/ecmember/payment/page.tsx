@@ -1,6 +1,8 @@
 "use client";
 import { useState } from "react";
 import { FiCalendar } from "react-icons/fi";
+import { Card, CardBody } from "@heroui/card";
+import { CampusBadge } from "@/components/heroui";
 
 interface PaymentStudent {
     id: string;

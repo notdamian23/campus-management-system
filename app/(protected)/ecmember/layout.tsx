@@ -6,6 +6,7 @@ import { onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import Link from "next/link";
+import Image from "next/image";
 import { FiMenu, FiX } from "react-icons/fi";
 
 type Props = {
@@ -66,35 +67,35 @@ export default function ECLayout({ children }: Props) {
         <nav className="flex flex-col gap-2 px-4 mt-4">
             <Link
                 href="/ecmember"
-                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100"
+                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 transition-colors"
             >
                 <span className="material-icons">dashboard</span> Dashboard
             </Link>
 
             <Link
                 href="/ecmember/students"
-                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100"
+                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 transition-colors"
             >
                 <span className="material-icons">search</span> Student Lookup
             </Link>
 
             <Link
                 href="/ecmember/event"
-                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100"
+                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 transition-colors"
             >
                 <span className="material-icons">event</span> Event
             </Link>
 
             <Link
                 href="/ecmember/payment"
-                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100"
+                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 transition-colors"
             >
                 <span className="material-icons">payments</span> Payments
             </Link>
 
             <Link
                 href="/ecmember/document"
-                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100"
+                className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 transition-colors"
             >
                 <span className="material-icons">folder</span> Document
             </Link>
@@ -121,10 +122,12 @@ export default function ECLayout({ children }: Props) {
                 <aside className="hidden lg:block w-64 bg-white shadow-xl border-r min-h-[100dvh]">
                     <div className="w-full flex justify-center mt-6 mb-4">
                         <div className="flex flex-col items-center gap-3">
-                            <img
+                            <Image
                                 src="/new campus-logo.jpg"
-                                className="w-20 h-20 rounded-full object-cover shadow-md"
                                 alt="CAMPUS Logo"
+                                width={80}
+                                height={80}
+                                className="rounded-full object-cover shadow-md"
                             />
                             <h2 className="text-[#7b0000] font-black text-3xl">
                                 CAMPUS
@@ -157,10 +160,12 @@ export default function ECLayout({ children }: Props) {
                             </div>
 
                             <div className="w-full flex justify-center mt-6 mb-2">
-                                <img
+                                <Image
                                     src="/new campus-logo.jpg"
-                                    className="w-16 h-16 rounded-full object-cover shadow-md"
                                     alt="CAMPUS Logo"
+                                    width={64}
+                                    height={64}
+                                    className="rounded-full object-cover shadow-md"
                                 />
                             </div>
 

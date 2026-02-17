@@ -1,4 +1,6 @@
 import { ReactNode } from "react";
+import Link from "next/link";
+import Image from "next/image";
 
 export default function TeacherLayout({ children }: { children: ReactNode }) {
     return (
@@ -8,10 +10,12 @@ export default function TeacherLayout({ children }: { children: ReactNode }) {
             <aside className="w-64 bg-white shadow-xl border-r">
                 <div className="w-full flex justify-center mt-6 mb-4">
                     <div className="flex flex-col items-center justify-center gap-3">
-                        <img
+                        <Image
                             src="/new campus-logo.jpg"
                             alt="Campus Logo"
-                            className="w-24 h-24 rounded-full object-cover shadow-md"
+                            width={96}
+                            height={96}
+                            className="rounded-full object-cover shadow-md"
                         />
 
                         <h2 className="leading-none">
@@ -23,29 +27,29 @@ export default function TeacherLayout({ children }: { children: ReactNode }) {
                 </div>
 
                 <nav className="flex flex-col gap-2 px-4 mt-4">
-                    <a
+                    <Link
                         href="/teacher"
-                        className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 text-gray-700"
+                        className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 text-gray-700 transition-colors"
                     >
                         <span className="material-icons">dashboard</span>
                         Dashboard
-                    </a>
+                    </Link>
 
-                    <a
+                    <Link
                         href="/teacher/students"
-                        className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 text-gray-700"
+                        className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 text-gray-700 transition-colors"
                     >
                         <span className="material-icons">group</span>
                         Students
-                    </a>
+                    </Link>
 
-                    <a
+                    <Link
                         href="/teacher/events"
-                        className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 text-gray-700"
+                        className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-100 text-gray-700 transition-colors"
                     >
                         <span className="material-icons">event</span>
                         Events
-                    </a>
+                    </Link>
                 </nav>
             </aside>
 
