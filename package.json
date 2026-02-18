@@ -3,10 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "npm run build && next start",
+    "dev:hot": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "clean:next": "node -e \"const fs=require('fs');['.next','node_modules/.cache'].forEach(p=>fs.rmSync(p,{recursive:true,force:true}));console.log('Cleaned .next and node_modules/.cache');\""
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.95.3",
