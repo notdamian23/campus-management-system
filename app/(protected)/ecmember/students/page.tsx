@@ -1,285 +1,572 @@
 "use client";
-import React, { useState } from "react";
+
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { FiChevronDown, FiChevronUp, FiPlus } from "react-icons/fi";
 import { Card, CardBody } from "@heroui/card";
-import { CampusInput, CampusBadge } from "@/components/heroui";
-import { Select, SelectItem } from "@heroui/select";
+import { getFunctions, httpsCallable } from "firebase/functions";
+import { app } from "@/lib/firebase";
 
-interface Student {
-    id: string;
-    name: string;
-    course: string;
-    year: string;
-    status: string;
+type TimestampLike = {
+  toDate: () => Date;
+};
+
+type Student = {
+  uid: string;
+  id: string;
+  name: string;
+  course: string;
+  year: string;
+  status: string;
+  email?: string;
+  createdAt?: unknown;
+};
+
+type Role = "admin" | "ec" | "teacher" | "student";
+
+type Notice = {
+  type: "ok" | "err";
+  msg: string;
+};
+
+type RemoteStudent = {
+  uid?: string;
+  schoolId?: string;
+  studentName?: string;
+  name?: string;
+  course?: string;
+  year?: string;
+  status?: string;
+  email?: string;
+  createdAtMs?: number | null;
+};
+
+const DEFAULT_COURSES = [
+  "Computer Engineering",
+  "Electrical Engineering",
+  "Mechanical Engineering",
+  "Industrial Engineering",
+  "Electronics Engineering",
+];
+
+const DEFAULT_YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "5th Year"];
+
+function hasToDate(value: unknown): value is TimestampLike {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "toDate" in value &&
+    typeof (value as { toDate?: unknown }).toDate === "function"
+  );
+}
+
+function fmtTS(ts: unknown) {
+  try {
+    if (!ts) return "-";
+    const d = hasToDate(ts) ? ts.toDate() : new Date(ts as string | number | Date);
+    if (Number.isNaN(d.getTime())) return "-";
+    return d.toLocaleString();
+  } catch {
+    return "-";
+  }
+}
+
+function normalizeYear(raw: unknown) {
+  const value = String(raw ?? "").trim();
+  if (!value) return "Unassigned";
+
+  if (value === "1" || value.toLowerCase() === "1st year") return "1st Year";
+  if (value === "2" || value.toLowerCase() === "2nd year") return "2nd Year";
+  if (value === "3" || value.toLowerCase() === "3rd year") return "3rd Year";
+  if (value === "4" || value.toLowerCase() === "4th year") return "4th Year";
+  if (value === "5" || value.toLowerCase() === "5th year") return "5th Year";
+
+  return value;
+}
+
+function normalizeCourse(raw: unknown) {
+  const value = String(raw ?? "").trim();
+  return value || "Unassigned";
+}
+
+function mapRemoteStudent(data: RemoteStudent): Student {
+  const uid = String(data.uid ?? "").trim();
+  const schoolId = String(data.schoolId ?? "").trim() || uid;
+  const studentName = String(data.studentName ?? "").trim();
+  const fallbackName = String(data.name ?? "").trim();
+  const name = studentName || fallbackName || schoolId;
+  const status = String(data.status ?? "").trim() || "Active";
+
+  return {
+    uid,
+    id: schoolId,
+    name,
+    course: normalizeCourse(data.course),
+    year: normalizeYear(data.year),
+    status,
+    email: String(data.email ?? "").trim() || undefined,
+    createdAt: typeof data.createdAtMs === "number" ? data.createdAtMs : undefined,
+  };
+}
+
+function toErrorMessage(error: unknown, fallback: string) {
+  if (typeof error === "object" && error !== null) {
+    const maybe = error as { code?: unknown; message?: unknown };
+    const message = typeof maybe.message === "string" ? maybe.message : fallback;
+    if (typeof maybe.code === "string" && maybe.code) {
+      return `${maybe.code}: ${message}`;
+    }
+    return message;
+  }
+  if (error instanceof Error) return error.message;
+  return fallback;
 }
 
 export default function ECStudentLookup() {
-    const [expandedId, setExpandedId] = useState<string | null>(null);
-    const [query, setQuery] = useState<string>("");
-    const [course, setCourse] = useState<string>("");
-    const [year, setYear] = useState<string>("");
+  const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
 
-    const students: Student[] = [
-        {
-            id: "23200455",
-            name: "Rhodiel B. Badiongo",
-            course: "Computer Engineering",
-            year: "2",
-            status: "Active",
-        },
-    ];
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [queryText, setQueryText] = useState<string>("");
+  const [courseFilter, setCourseFilter] = useState<string>("");
+  const [yearFilter, setYearFilter] = useState<string>("");
 
-    const toggleExpand = (id: string) => {
-        setExpandedId(expandedId === id ? null : id);
-    };
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newSchoolId, setNewSchoolId] = useState("");
+  const [newStudentName, setNewStudentName] = useState("");
+  const [newRole] = useState<Role>("student");
+  const [newCourse, setNewCourse] = useState("");
+  const [newYear, setNewYear] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [creating, setCreating] = useState(false);
 
-    const filtered = students.filter((s) => {
-        const matchQuery =
-            s.name.toLowerCase().includes(query.toLowerCase()) ||
-            s.id.includes(query);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
 
-        const matchCourse = course ? s.course === course : true;
-        const matchYear = year ? s.year === year : true;
+  const loadStudents = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
 
-        return matchQuery && matchCourse && matchYear;
+    try {
+      const fn = httpsCallable<{ limit: number }, { students?: RemoteStudent[] }>(functions, "ecListStudents");
+      const res = await fn({ limit: 2000 });
+      const rows = (res.data?.students ?? []).map(mapRemoteStudent);
+      rows.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+      setStudents(rows);
+    } catch (error: unknown) {
+      setLoadError(toErrorMessage(error, "Failed to load students."));
+      setStudents([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [functions]);
+
+  useEffect(() => {
+    void loadStudents();
+  }, [loadStudents]);
+
+  const courseOptions = useMemo(() => {
+    const set = new Set(DEFAULT_COURSES);
+    students.forEach((s) => {
+      if (s.course && s.course !== "Unassigned") set.add(s.course);
     });
+    return Array.from(set);
+  }, [students]);
 
-    return (
-        <div className="p-6 space-y-6">
+  const yearOptions = useMemo(() => {
+    const set = new Set(DEFAULT_YEARS);
+    students.forEach((s) => {
+      if (s.year && s.year !== "Unassigned") set.add(s.year);
+    });
+    return Array.from(set);
+  }, [students]);
 
-            {/* HEADER */}
-            <Card shadow="sm">
-                <CardBody className="flex flex-row justify-between items-center px-6 py-4">
-                    <h1 className="text-xl font-bold text-primary-900">
-                        Engineering Student Management System
-                    </h1>
-                </CardBody>
-            </Card>
+  const filtered = useMemo(() => {
+    const search = queryText.trim().toLowerCase();
 
-            {/* TOP SUMMARY CARDS */}
-            <div className="grid grid-cols-6 gap-4">
-                {[
-                    { label: "Total Students", count: 1 },
-                    { label: "Mechanical", count: 0 },
-                    { label: "Electrical", count: 0 },
-                    { label: "Electronics", count: 0 },
-                    { label: "Computer", count: 1 },
-                    { label: "Industrial", count: 0 },
-                ].map((item, i) => (
-                    <div
-                        key={i}
-                        className="bg-white rounded-lg shadow p-4 text-center border"
-                    >
-                        <div className="text-2xl font-bold">{item.count}</div>
-                        <p className="text-sm text-campus-text-secondary">{item.label}</p>
-                    </div>
-                ))}
-            </div>
+    return students.filter((s) => {
+      const matchQuery =
+        !search ||
+        s.name.toLowerCase().includes(search) ||
+        s.id.toLowerCase().includes(search) ||
+        (s.email ?? "").toLowerCase().includes(search);
 
-            {/* SEARCH + FILTERS */}
-            <div className="flex gap-4 items-center">
+      const matchCourse = courseFilter ? s.course === courseFilter : true;
+      const matchYear = yearFilter ? s.year === yearFilter : true;
 
-                {/* Search Bar */}
-                <input
-                    type="text"
-                    placeholder="Search student name or student ID..."
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    className="flex-1 px-4 py-3 border rounded-lg shadow-sm"
-                />
+      return matchQuery && matchCourse && matchYear;
+    });
+  }, [students, queryText, courseFilter, yearFilter]);
 
-                {/* Course Filter */}
-                <select
-                    value={course}
-                    onChange={(e) => setCourse(e.target.value)}
-                    className="px-4 py-3 border rounded-lg shadow-sm"
-                >
-                    <option value="">All Courses</option>
-                    <option value="Computer Engineering">Computer Engineering</option>
-                    <option value="Mechanical Engineering">Mechanical Engineering</option>
-                    <option value="Electrical Engineering">Electrical Engineering</option>
-                    <option value="Electronics Engineering">Electronics Engineering</option>
-                    <option value="Industrial Engineering">Industrial Engineering</option>
-                </select>
+  const summaryCards = useMemo(
+    () => [
+      { label: "Total Students", count: students.length },
+      { label: "Mechanical", count: students.filter((s) => s.course === "Mechanical Engineering").length },
+      { label: "Electrical", count: students.filter((s) => s.course === "Electrical Engineering").length },
+      { label: "Electronics", count: students.filter((s) => s.course === "Electronics Engineering").length },
+      { label: "Computer", count: students.filter((s) => s.course === "Computer Engineering").length },
+      { label: "Industrial", count: students.filter((s) => s.course === "Industrial Engineering").length },
+    ],
+    [students]
+  );
 
-                {/* Year Filter */}
-                <select
-                    value={year}
-                    onChange={(e) => setYear(e.target.value)}
-                    className="px-4 py-3 border rounded-lg shadow-sm"
-                >
-                    <option value="">All Years</option>
-                    <option value="1">1st Year</option>
-                    <option value="2">2nd Year</option>
-                    <option value="3">3rd Year</option>
-                    <option value="4">4th Year</option>
-                </select>
+  const toggleExpand = (id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id));
+  };
 
-                {/* ⭐ MOVED ADD STUDENT BUTTON HERE ⭐ */}
-                <button className="flex items-center gap-2 bg-primary-500 text-white px-4 py-2 rounded-lg shadow hover:bg-red-800 transition">
-                    <FiPlus />
-                    Add Student
-                </button>
-            </div>
+  const clearFilters = () => {
+    setQueryText("");
+    setCourseFilter("");
+    setYearFilter("");
+    setExpandedId(null);
+  };
 
+  async function createStudentAccount() {
+    const schoolId = newSchoolId.trim();
+    const studentName = newStudentName.trim();
+    const course = newCourse.trim();
+    const year = newYear.trim();
+    const email = newEmail.trim();
 
-            {/* STUDENT TABLE */}
-            <div className="bg-white rounded-lg shadow border">
-                <table className="w-full text-left">
-                    <thead>
-                    <tr className="border-b bg-gray-50 text-sm text-campus-text-secondary">
-                        <th className="p-3">Student ID</th>
-                        <th className="p-3">Name</th>
-                        <th className="p-3">Course</th>
-                        <th className="p-3">Year Level</th>
-                        <th className="p-3">Status</th>
-                        <th className="p-3"></th>
-                    </tr>
-                    </thead>
+    if (!schoolId) return setNotice({ type: "err", msg: "School ID is required." });
+    if (!studentName) return setNotice({ type: "err", msg: "Student name is required." });
+    if (!course) return setNotice({ type: "err", msg: "Course is required." });
+    if (!year) return setNotice({ type: "err", msg: "Year is required." });
 
-                    <tbody>
-                    {filtered.map((student) => (
-                        <React.Fragment key={student.id}>
-                            <tr className="border-b hover:bg-gray-50">
-                                <td className="p-3">{student.id}</td>
-                                <td className="p-3">{student.name}</td>
-                                <td className="p-3">
-                                        <span className="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-600">
-                                            {student.course}
-                                        </span>
-                                </td>
-                                <td className="p-3">{student.year} </td>
-                                <td className="p-3">
-                                        <span className="px-3 py-1 text-xs bg-green-100 text-green-700 rounded-full">
-                                            {student.status}
-                                        </span>
-                                </td>
-                                <td className="p-3 text-right">
-                                    <button
-                                        onClick={() => toggleExpand(student.id)}
-                                        className="p-2 bg-transparent hover:bg-gray-100 text-gray-600 hover:text-gray-900 rounded-lg transition-colors"
-                                        aria-label={expandedId === student.id ? "Collapse details" : "Expand details"}
-                                    >
-                                        {expandedId === student.id ? (
-                                            <FiChevronUp size={20} />
-                                        ) : (
-                                            <FiChevronDown size={20} />
-                                        )}
-                                    </button>
-                                </td>
-                            </tr>
+    setCreating(true);
+    setNotice(null);
 
-                            {expandedId === student.id && (
-                                <tr>
-                                    <td colSpan={7} className="bg-gray-50 p-6">
-                                        <div className="space-y-6">
+    try {
+      const fn = httpsCallable<
+        {
+          schoolId: string;
+          studentName: string;
+          course: string;
+          year: string;
+          email: string | null;
+        },
+        { uid?: string }
+      >(functions, "ecCreateStudent");
 
-                                            <h3 className="text-lg font-semibold flex items-center gap-2">
-                                                    <span className="w-7 h-7 flex items-center justify-center rounded-full bg-primary-500 text-white font-bold">
-                                                        SR
-                                                    </span>
-                                                Student Record Overview
-                                            </h3>
+      const res = await fn({
+        schoolId,
+        studentName,
+        course,
+        year,
+        email: email || null,
+      });
 
-                                            {/* EVENTS ATTENDED */}
-                                            <div>
-                                                <h4 className="font-semibold text-sm mb-2">
-                                                    ✔ EVENTS ATTENDED
-                                                </h4>
+      setNotice({
+        type: "ok",
+        msg: `Student account created. UID: ${res.data?.uid ?? "-"}`,
+      });
+      setNewSchoolId("");
+      setNewStudentName("");
+      setNewCourse("");
+      setNewYear("");
+      setNewEmail("");
+      setShowAddForm(false);
+      await loadStudents();
+    } catch (error: unknown) {
+      setNotice({ type: "err", msg: toErrorMessage(error, "Failed to create student account.") });
+    } finally {
+      setCreating(false);
+    }
+  }
 
-                                                <div className="grid grid-cols-2 gap-4">
+  return (
+    <div className="p-6 space-y-6">
+      <Card shadow="sm">
+        <CardBody className="flex flex-row justify-between items-center px-6 py-4">
+          <h1 className="text-xl font-bold text-primary-900">Engineering Student Management System</h1>
+        </CardBody>
+      </Card>
 
-                                                    <div className="bg-white border rounded-lg p-3 relative">
-                                                        <button className="absolute right-3 top-3 text-blue-600 text-sm hover:underline">
-                                                            Edit
-                                                        </button>
-                                                        <p className="font-medium">Graduation Orientation</p>
-                                                        <p className="text-sm text-campus-text-secondary">
-                                                            March 15, 2024 | 9:00 AM – 5:00 PM <br /> Fab Lab
-                                                        </p>
-                                                    </div>
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
+        {summaryCards.map((item) => (
+          <div key={item.label} className="bg-white rounded-lg shadow p-4 text-center border">
+            <div className="text-2xl font-bold">{item.count}</div>
+            <p className="text-sm text-campus-text-secondary">{item.label}</p>
+          </div>
+        ))}
+      </div>
 
-                                                    <div className="bg-white border rounded-lg p-3 relative">
-                                                        <button className="absolute right-3 top-3 text-blue-600 text-sm hover:underline">
-                                                            Edit
-                                                        </button>
-                                                        <p className="font-medium">Programming Tutorial</p>
-                                                        <p className="text-sm text-campus-text-secondary">
-                                                            Feb 28, 2024 | 1:00 PM – 6:00 PM <br /> CBE 901
-                                                        </p>
-                                                    </div>
+      <div className="flex flex-wrap gap-4 items-center">
+        <input
+          type="text"
+          placeholder="Search student name, student ID, or email..."
+          value={queryText}
+          onChange={(e) => setQueryText(e.target.value)}
+          className="flex-1 min-w-[220px] px-4 py-3 border rounded-lg shadow-sm"
+        />
 
-                                                </div>
-                                            </div>
+        <select
+          value={courseFilter}
+          onChange={(e) => setCourseFilter(e.target.value)}
+          className="px-4 py-3 border rounded-lg shadow-sm min-w-[220px]"
+        >
+          <option value="">All Courses</option>
+          {courseOptions.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
 
-                                            {/* EVENTS MISSED */}
-                                            <div>
-                                                <h4 className="font-semibold text-sm mb-2">
-                                                    ❌ EVENTS MISSED
-                                                </h4>
+        <select
+          value={yearFilter}
+          onChange={(e) => setYearFilter(e.target.value)}
+          className="px-4 py-3 border rounded-lg shadow-sm min-w-[170px]"
+        >
+          <option value="">All Years</option>
+          {yearOptions.map((y) => (
+            <option key={y} value={y}>
+              {y}
+            </option>
+          ))}
+        </select>
 
-                                                <div className="bg-red-50 border border-red-200 rounded-lg p-3 relative">
-                                                    <button className="absolute right-3 top-3 text-blue-600 text-sm hover:underline">
-                                                        Edit
-                                                    </button>
-                                                    <p className="font-medium text-red-600">General Assembly</p>
-                                                    <p className="text-sm text-red-500">
-                                                        Jan 15, 2024 | 10:00 AM – 12:00 PM <br /> Maritime AVR
-                                                    </p>
-                                                </div>
-                                            </div>
+        <button
+          type="button"
+          onClick={clearFilters}
+          className="px-4 py-3 rounded-lg border bg-white hover:bg-gray-50 text-sm font-medium"
+        >
+          Clear Filters
+        </button>
 
-                                            {/* OTHER REQUIREMENTS */}
-                                            <div className="space-y-3">
+        <button
+          type="button"
+          onClick={() => setShowAddForm((prev) => !prev)}
+          className={[
+            "flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium text-white",
+            showAddForm ? "bg-gray-600 hover:bg-gray-700" : "bg-[#7b0000] hover:opacity-95",
+          ].join(" ")}
+        >
+          <FiPlus size={16} />
+          {showAddForm ? "Cancel Add Student" : "Add Student"}
+        </button>
+      </div>
 
-                                                <div className="flex justify-between items-center bg-green-50 border border-green-200 rounded-lg p-3">
-                                                    <span>Acquaintance Fee</span>
-                                                    <div className="flex items-center gap-3">
-                                                            <span className="px-3 py-1 rounded-full bg-green-500 text-white text-xs">
-                                                                PAID
-                                                            </span>
-                                                        <button className="text-blue-600 text-sm hover:underline">
-                                                            Edit
-                                                        </button>
-                                                    </div>
-                                                </div>
-
-                                                <div className="flex justify-between items-center bg-green-50 border border-green-200 rounded-lg p-3">
-                                                    <span>Membership Fee</span>
-                                                    <div className="flex items-center gap-3">
-                                                            <span className="px-3 py-1 rounded-full bg-green-500 text-white text-xs">
-                                                                PAID
-                                                            </span>
-                                                        <button className="text-blue-600 text-sm hover:underline">
-                                                            Edit
-                                                        </button>
-                                                    </div>
-                                                </div>
-
-                                                <div className="flex justify-between items-center bg-red-50 border border-red-200 rounded-lg p-3">
-                                                    <span>Engineering Merch</span>
-                                                    <div className="flex items-center gap-3">
-                                                            <span className="px-3 py-1 rounded-full bg-red-500 text-white text-xs">
-                                                                UNPAID
-                                                            </span>
-                                                        <button className="text-blue-600 text-sm hover:underline">
-                                                            Edit
-                                                        </button>
-                                                    </div>
-                                                </div>
-
-                                            </div>
-
-                                        </div>
-                                    </td>
-                                </tr>
-                            )}
-
-                        </React.Fragment>
-                    ))}
-                    </tbody>
-                </table>
-            </div>
+      {notice && (
+        <div
+          className={[
+            "rounded-lg border px-4 py-3 text-sm",
+            notice.type === "ok"
+              ? "bg-emerald-50 border-emerald-200 text-emerald-900"
+              : "bg-red-50 border-red-200 text-red-900",
+          ].join(" ")}
+        >
+          {notice.msg}
         </div>
-    );
+      )}
+
+      {showAddForm && (
+        <div className="bg-white rounded-lg shadow border p-5 space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Add Student Account</h2>
+            <p className="text-sm text-gray-600 mt-1">
+              Role is fixed to <span className="font-semibold">{newRole}</span>. EC can add students only.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-gray-600">School ID *</label>
+              <input
+                value={newSchoolId}
+                onChange={(e) => setNewSchoolId(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+                placeholder="e.g. 23209455"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-gray-600">Student Name *</label>
+              <input
+                value={newStudentName}
+                onChange={(e) => setNewStudentName(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+                placeholder="e.g. Juan Dela Cruz"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-gray-600">Role</label>
+              <input
+                value={newRole}
+                readOnly
+                className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-gray-600">Course *</label>
+              <select
+                value={newCourse}
+                onChange={(e) => setNewCourse(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+              >
+                <option value="">Select course</option>
+                {DEFAULT_COURSES.map((courseName) => (
+                  <option key={courseName} value={courseName}>
+                    {courseName}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-gray-600">Year *</label>
+              <select
+                value={newYear}
+                onChange={(e) => setNewYear(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+              >
+                <option value="">Select year</option>
+                {DEFAULT_YEARS.map((yearName) => (
+                  <option key={yearName} value={yearName}>
+                    {yearName}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-gray-600">Email (optional)</label>
+              <input
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+                placeholder="optional@email.com"
+              />
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={createStudentAccount}
+            disabled={creating}
+            className={[
+              "inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold",
+              creating ? "bg-gray-300 text-gray-700" : "bg-[#7b0000] text-white hover:opacity-95",
+            ].join(" ")}
+          >
+            {creating ? "Creating..." : "Create Student"}
+          </button>
+        </div>
+      )}
+
+      <div className="bg-white rounded-lg shadow border overflow-x-auto">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b bg-gray-50 text-sm text-campus-text-secondary">
+              <th className="p-3">Student ID</th>
+              <th className="p-3">Name</th>
+              <th className="p-3">Course</th>
+              <th className="p-3">Year Level</th>
+              <th className="p-3">Status</th>
+              <th className="p-3"></th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {loading && (
+              <tr>
+                <td colSpan={6} className="p-6 text-center text-sm text-gray-500">
+                  Loading students...
+                </td>
+              </tr>
+            )}
+
+            {!loading && loadError && (
+              <tr>
+                <td colSpan={6} className="p-6 text-center text-sm text-red-700">
+                  {loadError}
+                </td>
+              </tr>
+            )}
+
+            {!loading &&
+              !loadError &&
+              filtered.map((student) => (
+                <React.Fragment key={student.uid}>
+                  <tr className="border-b hover:bg-gray-50">
+                    <td className="p-3">{student.id}</td>
+                    <td className="p-3">{student.name}</td>
+                    <td className="p-3">
+                      <span className="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-700">{student.course}</span>
+                    </td>
+                    <td className="p-3">{student.year}</td>
+                    <td className="p-3">
+                      <span
+                        className={[
+                          "px-3 py-1 text-xs rounded-full",
+                          student.status.toLowerCase() === "active"
+                            ? "bg-green-100 text-green-700"
+                            : "bg-gray-200 text-gray-700",
+                        ].join(" ")}
+                      >
+                        {student.status}
+                      </span>
+                    </td>
+                    <td className="p-3 text-right">
+                      <button
+                        onClick={() => toggleExpand(student.uid)}
+                        className="p-2 bg-transparent hover:bg-gray-100 text-gray-600 hover:text-gray-900 rounded-lg transition-colors"
+                        aria-label={expandedId === student.uid ? "Collapse details" : "Expand details"}
+                      >
+                        {expandedId === student.uid ? <FiChevronUp size={20} /> : <FiChevronDown size={20} />}
+                      </button>
+                    </td>
+                  </tr>
+
+                  {expandedId === student.uid && (
+                    <tr>
+                      <td colSpan={6} className="bg-gray-50 p-6">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
+                          <div>
+                            <p className="text-gray-500">Student ID</p>
+                            <p className="font-semibold text-gray-900">{student.id}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">UID</p>
+                            <p className="font-semibold text-gray-900 break-all">{student.uid}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Email</p>
+                            <p className="font-semibold text-gray-900">{student.email ?? "-"}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Course</p>
+                            <p className="font-semibold text-gray-900">{student.course}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Year Level</p>
+                            <p className="font-semibold text-gray-900">{student.year}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Created At</p>
+                            <p className="font-semibold text-gray-900">{fmtTS(student.createdAt)}</p>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+
+            {!loading && !loadError && filtered.length === 0 && (
+              <tr>
+                <td colSpan={6} className="p-6 text-center text-sm text-gray-500">
+                  No students found.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }

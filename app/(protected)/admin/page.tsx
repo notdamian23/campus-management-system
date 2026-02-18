@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import LogoutButton from "@/component/LogoutButton";
+import LogoutButton from "@/components/LogoutButton";
 import { app } from "@/lib/firebase"; // you must export `app` from your firebase.ts
 
 import { auth, db } from "@/lib/firebase";
@@ -15,19 +15,26 @@ import {
   orderBy,
   query,
   updateDoc,
-  where,
 } from "firebase/firestore";
 import { httpsCallable, getFunctions } from "firebase/functions";
 
 type Role = "admin" | "ec" | "teacher" | "student";
+type Tab = "overview" | "users" | "logs" | "exports";
+
+type TimestampLike = {
+  toDate: () => Date;
+};
 
 type Profile = {
   id: string; // uid
   schoolId?: string;
   email?: string;
   role: Role;
+  studentName?: string;
+  course?: string;
+  year?: string;
   mustChangePassword?: boolean;
-  createdAt?: any;
+  createdAt?: unknown;
 };
 
 type LogItem = {
@@ -37,15 +44,15 @@ type LogItem = {
   actorSchoolId?: string;
   targetUid?: string;
   targetSchoolId?: string;
-  createdAt?: any;
-  meta?: any;
+  createdAt?: unknown;
+  meta?: unknown;
 };
 
 type EventItem = {
   id: string;
   title?: string;
-  dateStart?: any;
-  dateEnd?: any;
+  dateStart?: unknown;
+  dateEnd?: unknown;
 };
 
 const roleCards = [
@@ -55,13 +62,41 @@ const roleCards = [
   { role: "Student", summary: "Tracks status, notifications, and event participation.", route: "/student" },
 ];
 
-function fmtTS(ts: any) {
+function isRole(value: unknown): value is Role {
+  return value === "admin" || value === "ec" || value === "teacher" || value === "student";
+}
+
+function hasToDate(value: unknown): value is TimestampLike {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "toDate" in value &&
+    typeof (value as { toDate?: unknown }).toDate === "function"
+  );
+}
+
+function toErrorMessage(error: unknown, fallback: string) {
+  if (typeof error === "object" && error !== null) {
+    const maybe = error as { code?: unknown; message?: unknown };
+    const message = typeof maybe.message === "string" ? maybe.message : fallback;
+    if (typeof maybe.code === "string" && maybe.code) {
+      return `${maybe.code}: ${message}`;
+    }
+    return message;
+  }
+
+  if (error instanceof Error) return error.message;
+  return fallback;
+}
+
+function fmtTS(ts: unknown) {
   try {
-    if (!ts) return "—";
-    const d = ts?.toDate?.() ? ts.toDate() : new Date(ts);
+    if (!ts) return "-";
+    const d = hasToDate(ts) ? ts.toDate() : new Date(ts as string | number | Date);
+    if (Number.isNaN(d.getTime())) return "-";
     return d.toLocaleString();
   } catch {
-    return "—";
+    return "-";
   }
 }
 
@@ -86,7 +121,13 @@ export default function AdminDashboardPage() {
   const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
 
   // Tabs
-  const [tab, setTab] = useState<"overview" | "users" | "logs" | "exports">("overview");
+  const [tab, setTab] = useState<Tab>("overview");
+  const tabs: Array<{ key: Tab; label: string }> = [
+    { key: "overview", label: "Overview" },
+    { key: "users", label: "Users & Roles" },
+    { key: "logs", label: "Logs" },
+    { key: "exports", label: "Exports" },
+  ];
 
   // Guard / auth state
   const [checking, setChecking] = useState(true);
@@ -100,6 +141,9 @@ export default function AdminDashboardPage() {
   // Create user
   const [newSchoolId, setNewSchoolId] = useState("");
   const [newRole, setNewRole] = useState<Role>("student");
+  const [newStudentName, setNewStudentName] = useState("");
+  const [newCourse, setNewCourse] = useState("");
+  const [newYear, setNewYear] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -120,11 +164,6 @@ export default function AdminDashboardPage() {
   const [notice, setNotice] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
   const showOk = (msg: string) => setNotice({ type: "ok", msg });
   const showErr = (msg: string) => setNotice({ type: "err", msg });
-
-  //Error fedback
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
 
   // ---------------------------
   // Admin guard: must be admin
@@ -154,7 +193,7 @@ export default function AdminDashboardPage() {
         }
 
         setAdminUid(user.uid);
-      } catch (e) {
+      } catch {
         router.replace("/login");
       } finally {
         setChecking(false);
@@ -175,10 +214,20 @@ export default function AdminDashboardPage() {
     const unsub = onSnapshot(
       qy,
       (snap) => {
-        const rows: Profile[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        }));
+        const rows: Profile[] = snap.docs.map((d) => {
+          const data = d.data() as Partial<Profile>;
+          return {
+            id: d.id,
+            schoolId: data.schoolId,
+            email: data.email,
+            role: isRole(data.role) ? data.role : "student",
+            studentName: typeof data.studentName === "string" ? data.studentName : undefined,
+            course: typeof data.course === "string" ? data.course : undefined,
+            year: typeof data.year === "string" ? data.year : undefined,
+            mustChangePassword: data.mustChangePassword,
+            createdAt: data.createdAt,
+          };
+        });
         setProfiles(rows);
       },
       () => showErr("Failed to load profiles.")
@@ -198,10 +247,19 @@ export default function AdminDashboardPage() {
     const unsub = onSnapshot(
       qy,
       (snap) => {
-        const rows: LogItem[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        }));
+        const rows: LogItem[] = snap.docs.map((d) => {
+          const data = d.data() as Partial<LogItem>;
+          return {
+            id: d.id,
+            action: data.action,
+            actorUid: data.actorUid,
+            actorSchoolId: data.actorSchoolId,
+            targetUid: data.targetUid,
+            targetSchoolId: data.targetSchoolId,
+            createdAt: data.createdAt,
+            meta: data.meta,
+          };
+        });
         setLogs(rows);
         setLogsLoading(false);
       },
@@ -224,7 +282,15 @@ export default function AdminDashboardPage() {
     const unsub = onSnapshot(
       qy,
       (snap) => {
-        const rows: EventItem[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        const rows: EventItem[] = snap.docs.map((d) => {
+          const data = d.data() as Partial<EventItem>;
+          return {
+            id: d.id,
+            title: data.title,
+            dateStart: data.dateStart,
+            dateEnd: data.dateEnd,
+          };
+        });
         setEvents(rows);
         if (!eventId && rows.length) setEventId(rows[0].id);
       },
@@ -243,7 +309,10 @@ export default function AdminDashboardPage() {
       const b = (p.email ?? "").toLowerCase();
       const c = (p.role ?? "").toLowerCase();
       const d = (p.id ?? "").toLowerCase();
-      return a.includes(s) || b.includes(s) || c.includes(s) || d.includes(s);
+      const e = (p.studentName ?? "").toLowerCase();
+      const f = (p.course ?? "").toLowerCase();
+      const g = (p.year ?? "").toLowerCase();
+      return a.includes(s) || b.includes(s) || c.includes(s) || d.includes(s) || e.includes(s) || f.includes(s) || g.includes(s);
     });
   }, [profiles, userSearch]);
 
@@ -263,9 +332,15 @@ export default function AdminDashboardPage() {
   async function createAccount() {
     const schoolId = newSchoolId.trim();
     const email = newEmail.trim();
+    const studentName = newStudentName.trim();
+    const course = newCourse.trim();
+    const year = newYear.trim();
 
     if (!schoolId) return showErr("School ID is required.");
     if (!["admin", "ec", "teacher", "student"].includes(newRole)) return showErr("Invalid role.");
+    if (newRole === "student" && !studentName) return showErr("Student name is required for student role.");
+    if (newRole === "student" && !course) return showErr("Course is required for student role.");
+    if (newRole === "student" && !year) return showErr("Year is required for student role.");
 
     setCreating(true);
     setExportUrl(null);
@@ -275,27 +350,42 @@ export default function AdminDashboardPage() {
       // Server should:
       // - create auth user (email optional)
       // - set default password = schoolId (or your choice)
-      // - create /profiles/{uid} with { schoolId, role, mustChangePassword:true, email }
-      const fn = httpsCallable(functions, "adminCreateUser");
-      const res: any = await fn({ schoolId, role: newRole, email: email || null });
+      // - create /profiles/{uid} with { schoolId, role, studentName?, course?, year?, mustChangePassword:true, email }
+      const fn = httpsCallable<{
+        schoolId: string;
+        role: Role;
+        email: string | null;
+        studentName: string | null;
+        course: string | null;
+        year: string | null;
+      }, { uid?: string }>(
+        functions,
+        "adminCreateUser"
+      );
+      const res = await fn({
+        schoolId,
+        role: newRole,
+        email: email || null,
+        studentName: newRole === "student" ? studentName : null,
+        course: newRole === "student" ? course : null,
+        year: newRole === "student" ? year : null,
+      });
 
-      showOk(`Account created. UID: ${res?.data?.uid ?? "—"}`);
+      showOk(`Account created. UID: ${res.data?.uid ?? "-"}`);
 
       setNewSchoolId("");
+      setNewStudentName("");
+      setNewCourse("");
+      setNewYear("");
       setNewEmail("");
       setNewRole("student");
       setTab("users");
-    }} catch (e: any) {
-  console.error("adminCreateUser error:", e);
-
-  const msg =
-    e?.code ? `${e.code}: ${e.message}` :
-    e?.message || "Failed to create account.";
-
-  showErr(msg);
-} finally {
-  setCreating(false);
-}
+    } catch (e: unknown) {
+      console.error("adminCreateUser error:", e);
+      showErr(toErrorMessage(e, "Failed to create account."));
+    } finally {
+      setCreating(false);
+    }
   }
 
   async function removeAccount(uid: string) {
@@ -312,8 +402,8 @@ export default function AdminDashboardPage() {
       await fn({ uid });
 
       showOk("Account removed.");
-    } catch (e: any) {
-      showErr(e?.message || "Failed to remove account.");
+    } catch (e: unknown) {
+      showErr(toErrorMessage(e, "Failed to remove account."));
     } finally {
       setDeletingUid(null);
     }
@@ -331,18 +421,18 @@ export default function AdminDashboardPage() {
       // - generate CSV
       // - upload to Storage
       // - return a signed download URL (or a Storage path)
-      const fn = httpsCallable(functions, "adminExportAttendance");
-      const res: any = await fn({ eventId });
+      const fn = httpsCallable<{ eventId: string }, { downloadUrl?: string }>(functions, "adminExportAttendance");
+      const res = await fn({ eventId });
 
-      const url = res?.data?.downloadUrl;
+      const url = res.data?.downloadUrl;
       if (!url) {
         showErr("Export finished but no download URL returned.");
       } else {
         setExportUrl(url);
         showOk("Export ready.");
       }
-    } catch (e: any) {
-      showErr(e?.message || "Failed to export attendance.");
+    } catch (e: unknown) {
+      showErr(toErrorMessage(e, "Failed to export attendance."));
     } finally {
       setExporting(false);
     }
@@ -352,7 +442,7 @@ export default function AdminDashboardPage() {
     return (
       <div className="min-h-screen bg-[#f2f2f2] p-6 sm:p-8 lg:p-10">
         <div className="bg-white border shadow-sm rounded-2xl p-6">
-          <p className="text-sm text-gray-600">Checking admin access…</p>
+          <p className="text-sm text-gray-600">Checking admin access...</p>
         </div>
       </div>
     );
@@ -379,17 +469,12 @@ export default function AdminDashboardPage() {
 
         {/* Tabs */}
         <div className="mt-6 flex flex-wrap gap-2">
-          {[
-            { key: "overview", label: "Overview" },
-            { key: "users", label: "Users & Roles" },
-            { key: "logs", label: "Logs" },
-            { key: "exports", label: "Exports" },
-          ].map((t) => {
-            const active = tab === (t.key as any);
+          {tabs.map((t) => {
+            const active = tab === t.key;
             return (
               <button
                 key={t.key}
-                onClick={() => setTab(t.key as any)}
+                onClick={() => setTab(t.key)}
                 className={[
                   "px-4 py-2 rounded-xl text-sm font-semibold border transition",
                   active
@@ -490,7 +575,7 @@ export default function AdminDashboardPage() {
               <input
                 value={userSearch}
                 onChange={(e) => setUserSearch(e.target.value)}
-                placeholder="Search schoolId, email, role, uid…"
+                placeholder="Search schoolId, email, role, uid..."
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
               />
             </div>
@@ -502,9 +587,12 @@ export default function AdminDashboardPage() {
             <p className="text-sm text-gray-600 mt-1">
               Recommended: default password = School ID, then force change password on first login.
             </p>
+            <p className="text-xs text-gray-500 mt-1">
+              Student Name, Course, and Year are required when Role is set to student.
+            </p>
 
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-3">
-              <div className="md:col-span-1">
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+              <div>
                 <label className="text-xs font-semibold text-gray-600">School ID *</label>
                 <input
                   value={newSchoolId}
@@ -514,7 +602,17 @@ export default function AdminDashboardPage() {
                 />
               </div>
 
-              <div className="md:col-span-1">
+              <div>
+                <label className="text-xs font-semibold text-gray-600">Student Name</label>
+                <input
+                  value={newStudentName}
+                  onChange={(e) => setNewStudentName(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+                  placeholder="e.g. Juan Dela Cruz"
+                />
+              </div>
+
+              <div>
                 <label className="text-xs font-semibold text-gray-600">Role</label>
                 <select
                   value={newRole}
@@ -528,7 +626,41 @@ export default function AdminDashboardPage() {
                 </select>
               </div>
 
-              <div className="md:col-span-2">
+              <div>
+                <label className="text-xs font-semibold text-gray-600">Course</label>
+                <select
+                  value={newCourse}
+                  onChange={(e) => setNewCourse(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+                >
+                  <option value="">Select course</option>
+                  <option value="Computer Engineering">Computer Engineering</option>
+                  <option value="Electrical Engineering">Electrical Engineering</option>
+                  <option value="Mechanical Engineering">Mechanical Engineering</option>
+                  <option value="Industrial Engineering">Industrial Engineering</option>
+                  <option value="Electronics Engineering">Electronics Engineering</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-gray-600">Year</label>
+                <select
+                  value={newYear}
+                  onChange={(e) => setNewYear(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+                >
+                  <option value="">Select year</option>
+                  <option value="1st Year">1st Year</option>
+                  <option value="2nd Year">2nd Year</option>
+                  <option value="3rd Year">3rd Year</option>
+                  <option value="4th Year">4th Year</option>
+                  <option value="5th Year">5th Year</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
                 <label className="text-xs font-semibold text-gray-600">Email (optional)</label>
                 <input
                   value={newEmail}
@@ -547,7 +679,7 @@ export default function AdminDashboardPage() {
                 creating ? "bg-gray-300 text-gray-700" : "bg-[#7b0000] text-white hover:opacity-95",
               ].join(" ")}
             >
-              {creating ? "Creating…" : "Create Account"}
+              {creating ? "Creating..." : "Create Account"}
             </button>
 
 
@@ -568,8 +700,8 @@ export default function AdminDashboardPage() {
               <tbody>
                 {filteredProfiles.map((p) => (
                   <tr key={p.id} className="border-t">
-                    <td className="px-4 py-3 font-medium text-gray-900">{p.schoolId ?? "—"}</td>
-                    <td className="px-4 py-3 text-gray-700">{p.email ?? "—"}</td>
+                    <td className="px-4 py-3 font-medium text-gray-900">{p.schoolId ?? "-"}</td>
+                    <td className="px-4 py-3 text-gray-700">{p.email ?? "-"}</td>
                     <td className="px-4 py-3 text-gray-500">{p.id}</td>
                     <td className="px-4 py-3">
                       <span className={badge(p.role)}>{p.role}</span>
@@ -598,7 +730,7 @@ export default function AdminDashboardPage() {
                               : "bg-white text-red-700 border-red-200 hover:bg-red-50",
                           ].join(" ")}
                         >
-                          {deletingUid === p.id ? "Removing…" : "Remove"}
+                          {deletingUid === p.id ? "Removing..." : "Remove"}
                         </button>
                       </div>
                     </td>
@@ -629,7 +761,7 @@ export default function AdminDashboardPage() {
           </div>
 
           {logsLoading ? (
-            <div className="text-sm text-gray-600">Loading logs…</div>
+            <div className="text-sm text-gray-600">Loading logs...</div>
           ) : (
             <div className="overflow-x-auto border rounded-2xl">
               <table className="min-w-full text-sm">
@@ -645,13 +777,13 @@ export default function AdminDashboardPage() {
                   {logs.map((l) => (
                     <tr key={l.id} className="border-t">
                       <td className="px-4 py-3 text-gray-700">{fmtTS(l.createdAt)}</td>
-                      <td className="px-4 py-3 font-medium text-gray-900">{l.action ?? "—"}</td>
+                      <td className="px-4 py-3 font-medium text-gray-900">{l.action ?? "-"}</td>
                       <td className="px-4 py-3 text-gray-700">
-                        {l.actorSchoolId ?? "—"}
+                        {l.actorSchoolId ?? "-"}
                         <div className="text-xs text-gray-500">{l.actorUid ?? ""}</div>
                       </td>
                       <td className="px-4 py-3 text-gray-700">
-                        {l.targetSchoolId ?? "—"}
+                        {l.targetSchoolId ?? "-"}
                         <div className="text-xs text-gray-500">{l.targetUid ?? ""}</div>
                       </td>
                     </tr>
@@ -704,7 +836,7 @@ export default function AdminDashboardPage() {
                   exporting ? "bg-gray-300 text-gray-700" : "bg-[#7b0000] text-white hover:opacity-95",
                 ].join(" ")}
               >
-                {exporting ? "Exporting…" : "Generate Export"}
+                {exporting ? "Exporting..." : "Generate Export"}
               </button>
             </div>
           </div>
@@ -725,10 +857,12 @@ export default function AdminDashboardPage() {
           )}
 
           <div className="text-xs text-gray-500">
-            If you want “Export by date range” or “Export all events”, the export function can accept extra parameters.
+            If you want &quot;Export by date range&quot; or &quot;Export all events&quot;, the export function can accept extra
+            parameters.
           </div>
         </section>
       )}
     </div>
   );
 }
+
