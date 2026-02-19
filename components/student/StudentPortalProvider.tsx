@@ -710,6 +710,10 @@ export function StudentPortalProvider({
           doc(db, "events", eventId, "registrations", uid),
           {
             uid,
+            schoolId: profile.schoolId,
+            studentName: profile.studentName,
+            course: profile.course,
+            year: profile.year,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           },

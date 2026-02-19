@@ -11,6 +11,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -51,6 +52,16 @@ type EventFile = {
   size?: number;
   createdAt?: any;
   uploadedByUid?: string;
+};
+
+type RegistrationDoc = {
+  id: string;
+  uid: string;
+  schoolId: string;
+  studentName: string;
+  course: string;
+  year: string;
+  createdAt?: any;
 };
 
 function pad2(n: number) {
@@ -128,6 +139,31 @@ function to24hString(parts: TimeParts): string {
 function format12h(time24: string) {
   const p = to12hParts(time24);
   return `${p.hour}:${pad2(p.minute)} ${p.ampm}`;
+}
+
+function toMillis(value: any): number {
+  if (value && typeof value === "object" && typeof value.toMillis === "function") {
+    return value.toMillis();
+  }
+  if (value && typeof value === "object" && typeof value.seconds === "number") {
+    return Number(value.seconds) * 1000;
+  }
+  const d = new Date(value as string | number | Date);
+  return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function formatDateTime(value: any): string {
+  const ms = toMillis(value);
+  if (!ms) return "-";
+  return new Date(ms).toLocaleString();
+}
+
+function csvCell(value: string | number) {
+  const raw = String(value ?? "");
+  if (raw.includes(",") || raw.includes('"') || raw.includes("\n")) {
+    return `"${raw.replace(/"/g, '""')}"`;
+  }
+  return raw;
 }
 
 function TimePickerModal({
@@ -479,8 +515,12 @@ export default function EventDashboard() {
   // Files per event (subcollections)
   const [eventImages, setEventImages] = useState<Record<string, EventFile[]>>({});
   const [eventDocs, setEventDocs] = useState<Record<string, EventFile[]>>({});
+  const [eventRegistrations, setEventRegistrations] = useState<Record<string, RegistrationDoc[]>>({});
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string>("");
+  const [exportingEventId, setExportingEventId] = useState<string | null>(null);
+  const [exportMsg, setExportMsg] = useState<string>("");
+  const [exportError, setExportError] = useState<string>("");
 
   // Role check
   useEffect(() => {
@@ -557,6 +597,47 @@ export default function EventDashboard() {
     };
   }, [expandedEventId]);
 
+  // Live registrations for pre-registration events
+  useEffect(() => {
+    const preRegEventIds = events.filter((ev) => ev.isPreReg).map((ev) => ev.id);
+
+    if (preRegEventIds.length === 0) {
+      setEventRegistrations({});
+      return;
+    }
+
+    const unsubs = preRegEventIds.map((eventId) =>
+      onSnapshot(
+        collection(db, "events", eventId, "registrations"),
+        (snap) => {
+          const rows: RegistrationDoc[] = snap.docs
+            .map((d) => {
+              const data = d.data() as Partial<RegistrationDoc>;
+              return {
+                id: d.id,
+                uid: String(data.uid ?? d.id),
+                schoolId: String(data.schoolId ?? ""),
+                studentName: String(data.studentName ?? ""),
+                course: String(data.course ?? ""),
+                year: String(data.year ?? ""),
+                createdAt: data.createdAt,
+              };
+            })
+            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+
+          setEventRegistrations((prev) => ({ ...prev, [eventId]: rows }));
+        },
+        () => {
+          setEventRegistrations((prev) => ({ ...prev, [eventId]: [] }));
+        }
+      )
+    );
+
+    return () => {
+      unsubs.forEach((unsub) => unsub());
+    };
+  }, [events]);
+
   const filteredEvents = useMemo(() => {
     const s = searchText.trim().toLowerCase();
     return events.filter((ev) => {
@@ -580,6 +661,11 @@ export default function EventDashboard() {
     const completed = events.filter((e) => computeStatus(e) === "completed").length;
     return { total, upcoming, ongoing, completed };
   }, [events]);
+
+  const totalParticipants = useMemo(
+    () => Object.values(eventRegistrations).reduce((sum, rows) => sum + rows.length, 0),
+    [eventRegistrations]
+  );
 
   const statusChip = (status: EventStatus) => {
     if (status === "completed") return "bg-green-100 text-green-700";
@@ -699,6 +785,140 @@ export default function EventDashboard() {
     }
   };
 
+  const exportEventAttendanceCSV = async (ev: EventDoc) => {
+    setExportMsg("");
+    setExportError("");
+    setExportingEventId(ev.id);
+
+    try {
+      const [attendanceSnap, registrationsSnap] = await Promise.all([
+        getDocs(collection(db, "events", ev.id, "attendance")),
+        getDocs(collection(db, "events", ev.id, "registrations")),
+      ]);
+
+      const rowsByUid = new Map<
+        string,
+        {
+          uid: string;
+          schoolId: string;
+          studentName: string;
+          course: string;
+          year: string;
+          registrationTime: string;
+          attendanceStatus: string;
+          attendanceTime: string;
+        }
+      >();
+
+      registrationsSnap.docs.forEach((d) => {
+        const data = d.data() as Partial<RegistrationDoc>;
+        const uid = String(data.uid ?? d.id);
+        if (!uid) return;
+
+        rowsByUid.set(uid, {
+          uid,
+          schoolId: String(data.schoolId ?? ""),
+          studentName: String(data.studentName ?? ""),
+          course: String(data.course ?? ""),
+          year: String(data.year ?? ""),
+          registrationTime: formatDateTime(data.createdAt),
+          attendanceStatus: "Registered",
+          attendanceTime: "-",
+        });
+      });
+
+      attendanceSnap.docs.forEach((d) => {
+        const data = d.data() as {
+          uid?: string;
+          studentUid?: string;
+          schoolId?: string;
+          studentName?: string;
+          name?: string;
+          course?: string;
+          year?: string;
+          status?: string;
+          attendanceStatus?: string;
+          present?: boolean;
+          createdAt?: any;
+          updatedAt?: any;
+        };
+
+        const uid = String(data.uid ?? data.studentUid ?? d.id);
+        if (!uid) return;
+
+        const existing = rowsByUid.get(uid);
+        const fallbackStatus = typeof data.present === "boolean" ? (data.present ? "Present" : "Absent") : "";
+        const status = String(data.status ?? data.attendanceStatus ?? fallbackStatus ?? "").trim() || "Recorded";
+
+        rowsByUid.set(uid, {
+          uid,
+          schoolId: String(data.schoolId ?? existing?.schoolId ?? ""),
+          studentName: String(data.studentName ?? data.name ?? existing?.studentName ?? ""),
+          course: String(data.course ?? existing?.course ?? ""),
+          year: String(data.year ?? existing?.year ?? ""),
+          registrationTime: existing?.registrationTime ?? "-",
+          attendanceStatus: status,
+          attendanceTime: formatDateTime(data.updatedAt ?? data.createdAt),
+        });
+      });
+
+      const rows = Array.from(rowsByUid.values()).sort((a, b) => {
+        const byName = a.studentName.localeCompare(b.studentName);
+        if (byName !== 0) return byName;
+        return a.uid.localeCompare(b.uid);
+      });
+
+      if (rows.length === 0) {
+        setExportError("No registration or attendance records found for this event.");
+        return;
+      }
+
+      const csvLines = [
+        `Event Title,${csvCell(ev.title)}`,
+        `Date,${csvCell(ev.date)}`,
+        `Time Start,${csvCell(ev.timeStart ?? "-")}`,
+        `Time End,${csvCell(ev.timeEnd ?? "-")}`,
+        `Location,${csvCell(ev.location ?? "-")}`,
+        `Generated At,${csvCell(new Date().toLocaleString())}`,
+        "",
+        "UID,School ID,Student Name,Course,Year,Registration Time,Attendance Status,Attendance Time",
+        ...rows.map((row) =>
+          [
+            csvCell(row.uid),
+            csvCell(row.schoolId),
+            csvCell(row.studentName),
+            csvCell(row.course),
+            csvCell(row.year),
+            csvCell(row.registrationTime),
+            csvCell(row.attendanceStatus),
+            csvCell(row.attendanceTime),
+          ].join(",")
+        ),
+      ];
+
+      const blob = new Blob([csvLines.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const slug = (ev.title || ev.id)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+
+      a.href = url;
+      a.download = `${slug || ev.id}-attendance.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      setExportMsg(`Exported ${rows.length} row(s) for "${ev.title}".`);
+    } catch (err: any) {
+      setExportError(err?.message || "Failed to export attendance.");
+    } finally {
+      setExportingEventId(null);
+    }
+  };
+
   return (
     <div className="px-3 py-4 sm:p-6 space-y-4 sm:space-y-6">
       {/* HEADER */}
@@ -716,7 +936,7 @@ export default function EventDashboard() {
           <StatMini label="Upcoming" value={summary.upcoming} />
           <StatMini label="Ongoing" value={summary.ongoing} />
           <StatMini label="Completed" value={summary.completed} />
-          <StatMini label="Participants" value={0} />
+          <StatMini label="Participants" value={totalParticipants} />
           <div className="hidden sm:block" />
         </div>
       </div>
@@ -996,6 +1216,8 @@ export default function EventDashboard() {
       {/* EVENT LIST */}
       <div className="bg-white border rounded-xl shadow-sm p-4 sm:p-6">
         <h3 className="text-lg font-semibold mb-4">Event List</h3>
+        {exportError && <p className="text-sm text-red-600 mb-3">{exportError}</p>}
+        {exportMsg && <p className="text-sm text-green-600 mb-3">{exportMsg}</p>}
 
         {eventsLoading ? (
           <p className="text-sm text-campus-text-secondary">Loading events...</p>
@@ -1006,7 +1228,16 @@ export default function EventDashboard() {
             {filteredEvents.map((ev) => {
               const liveStatus = computeStatus(ev);
               const hasSlots = ev.isPreReg && typeof ev.preRegSlots === "number";
-              const used = typeof ev.preRegCount === "number" ? ev.preRegCount : 0;
+              const registrations = eventRegistrations[ev.id];
+              const used = hasSlots
+                ? registrations
+                  ? registrations.length
+                  : typeof ev.preRegCount === "number"
+                    ? ev.preRegCount
+                    : 0
+                : typeof ev.preRegCount === "number"
+                  ? ev.preRegCount
+                  : 0;
               const total = typeof ev.preRegSlots === "number" ? ev.preRegSlots : 0;
               const left = hasSlots ? Math.max(0, total - used) : null;
 
@@ -1049,6 +1280,23 @@ export default function EventDashboard() {
 
                   {expandedEventId === ev.id && (
                     <div className="mt-4 p-4 border rounded-lg bg-gray-50 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm text-campus-text-primary">
+                          <b>Pre-Registrations:</b> {registrations ? registrations.length : used}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void exportEventAttendanceCSV(ev);
+                          }}
+                          disabled={exportingEventId === ev.id}
+                          className="px-3 py-1.5 text-xs rounded-lg bg-primary-500 text-white hover:bg-primary-600 disabled:opacity-60"
+                        >
+                          {exportingEventId === ev.id ? "Exporting..." : "Export Attendance CSV"}
+                        </button>
+                      </div>
+
                       <p className="text-sm text-campus-text-primary">
                         <b>Course:</b> {ev.course ?? "—"}
                       </p>
@@ -1061,8 +1309,38 @@ export default function EventDashboard() {
 
                       {ev.isPreReg && typeof ev.preRegSlots === "number" && (
                         <p className="text-sm text-campus-text-primary">
-                          <b>Slots:</b> {ev.preRegCount ?? 0} / {ev.preRegSlots} (left: {Math.max(0, ev.preRegSlots - (ev.preRegCount ?? 0))})
+                          <b>Slots:</b> {used} / {ev.preRegSlots} (left: {Math.max(0, ev.preRegSlots - used)})
                         </p>
+                      )}
+
+                      {ev.isPreReg && registrations && registrations.length > 0 && (
+                        <div className="space-y-2">
+                          <p className="text-sm font-semibold text-campus-text-primary">Registered Students</p>
+                          <div className="overflow-x-auto rounded-lg border bg-white">
+                            <table className="w-full text-xs sm:text-sm">
+                              <thead className="bg-gray-100 text-campus-text-secondary">
+                                <tr>
+                                  <th className="p-2 text-left">School ID</th>
+                                  <th className="p-2 text-left">Name</th>
+                                  <th className="p-2 text-left">Course</th>
+                                  <th className="p-2 text-left">Year</th>
+                                  <th className="p-2 text-left">Registered At</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {registrations.map((reg) => (
+                                  <tr key={reg.id} className="border-t">
+                                    <td className="p-2">{reg.schoolId || "-"}</td>
+                                    <td className="p-2">{reg.studentName || reg.uid}</td>
+                                    <td className="p-2">{reg.course || "-"}</td>
+                                    <td className="p-2">{reg.year || "-"}</td>
+                                    <td className="p-2">{formatDateTime(reg.createdAt)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
                       )}
 
                       {/* FILES */}
