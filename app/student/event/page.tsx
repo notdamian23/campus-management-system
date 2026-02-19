@@ -41,9 +41,7 @@ function eventStatusChip(status: StudentEventStatus) {
 }
 
 function formatTimeRange(event: StudentEvent) {
-  const start = event.timeStart || "TBA";
-  const end = event.timeEnd || "";
-  return end ? `${start} - ${end}` : start;
+  return event.scheduledTime || "TBA";
 }
 
 export default function StudentEvents() {

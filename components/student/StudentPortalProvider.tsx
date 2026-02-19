@@ -34,7 +34,8 @@ export type StudentNotificationType =
   | "upcoming"
   | "payment"
   | "missed"
-  | "preregister";
+  | "preregister"
+  | "announcement";
 
 export type StudentProfile = {
   uid: string;
@@ -62,8 +63,7 @@ export type StudentEvent = {
   description: string;
   details: string;
   date: string;
-  timeStart: string;
-  timeEnd: string;
+  scheduledTime: string;
   location: string;
   course: string;
   yearLevel: string;
@@ -102,11 +102,13 @@ type RawEventDoc = {
   id: string;
   title: string;
   date: string;
+  scheduledTime: string;
   timeStart: string;
   timeEnd: string;
   location: string;
   yearLevel: string;
   course: string;
+  targetStudent: string;
   details: string;
   isPreReg: boolean;
   withPayment: boolean;
@@ -125,6 +127,25 @@ type PaymentAssignmentData = {
   status?: string;
   createdAt?: { toMillis?: () => number };
   updatedAt?: { toMillis?: () => number };
+};
+
+type ProfileNotificationDocData = {
+  title?: string;
+  message?: string;
+  date?: string;
+  scheduledTime?: string;
+  type?: string;
+  createdAt?: { toMillis?: () => number };
+};
+
+type ProfileNotificationDoc = {
+  id: string;
+  title: string;
+  message: string;
+  date: string;
+  scheduledTime: string;
+  type: StudentNotificationType;
+  createdAt?: { toMillis?: () => number };
 };
 
 type AttendanceDocData = {
@@ -215,15 +236,15 @@ function toDateWithMinutes(baseDate: Date, minutes: number) {
   return date;
 }
 
-function computeLifecycle(date: string, timeStart: string, timeEnd: string) {
+function computeLifecycle(date: string, scheduledTime: string, timeEnd: string) {
   const baseDate = parseDateOnly(date);
   if (!baseDate) return "upcoming" as LifecycleStatus;
 
   const now = new Date();
-  const startMin = parseTime12ToMinutes(timeStart);
+  const startMin = parseTime12ToMinutes(scheduledTime);
   const endMin = parseTime12ToMinutes(timeEnd);
 
-  if (startMin == null || endMin == null) {
+  if (startMin == null) {
     const start = new Date(baseDate);
     start.setHours(0, 0, 0, 0);
     const end = new Date(baseDate);
@@ -235,6 +256,11 @@ function computeLifecycle(date: string, timeStart: string, timeEnd: string) {
   }
 
   const start = toDateWithMinutes(baseDate, startMin);
+  if (endMin == null) {
+    if (now < start) return "upcoming";
+    return "completed";
+  }
+
   const safeEndMin = endMin >= startMin ? endMin : startMin + 60;
   const end = toDateWithMinutes(baseDate, safeEndMin);
 
@@ -243,11 +269,11 @@ function computeLifecycle(date: string, timeStart: string, timeEnd: string) {
   return "ongoing";
 }
 
-function toEventDate(date: string, timeStart: string) {
+function toEventDate(date: string, scheduledTime: string) {
   const baseDate = parseDateOnly(date);
   if (!baseDate) return null;
 
-  const startMin = parseTime12ToMinutes(timeStart);
+  const startMin = parseTime12ToMinutes(scheduledTime);
   if (startMin == null) return baseDate;
 
   return toDateWithMinutes(baseDate, startMin);
@@ -263,6 +289,16 @@ function formatDateTime(d: Date) {
   });
 }
 
+function toMillis(value: unknown) {
+  if (typeof value === "object" && value !== null) {
+    const maybe = value as { toMillis?: () => number };
+    if (typeof maybe.toMillis === "function") {
+      return maybe.toMillis();
+    }
+  }
+  return 0;
+}
+
 function matchesTarget(
   eventValue: string,
   studentValue: string,
@@ -276,6 +312,24 @@ function matchesTarget(
   return normalizeText(eventTarget) === normalizeText(studentTarget);
 }
 
+function matchesSpecificStudentTarget(
+  targetValue: string,
+  schoolId: string,
+  studentName: string
+) {
+  const target = normalizeText(targetValue);
+  if (!target) return true;
+
+  const sid = normalizeText(schoolId);
+  const name = normalizeText(studentName);
+
+  if (!sid && !name) return false;
+  if (target === sid || target === name) return true;
+  if (target.length >= 3 && name.includes(target)) return true;
+
+  return false;
+}
+
 export function StudentPortalProvider({
   children,
 }: {
@@ -284,6 +338,9 @@ export function StudentPortalProvider({
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [rawEvents, setRawEvents] = useState<RawEventDoc[]>([]);
   const [payments, setPayments] = useState<StudentPayment[]>([]);
+  const [profileNotifications, setProfileNotifications] = useState<
+    ProfileNotificationDoc[]
+  >([]);
   const [attendanceByEvent, setAttendanceByEvent] = useState<
     Record<string, string | null>
   >({});
@@ -292,6 +349,8 @@ export function StudentPortalProvider({
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [loadingPayments, setLoadingPayments] = useState(true);
+  const [loadingProfileNotifications, setLoadingProfileNotifications] =
+    useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -355,11 +414,13 @@ export function StudentPortalProvider({
               id: d.id,
               title: String(data.title ?? "Untitled Event"),
               date: String(data.date ?? ""),
+              scheduledTime: String(data.scheduledTime ?? data.timeStart ?? ""),
               timeStart: String(data.timeStart ?? ""),
               timeEnd: String(data.timeEnd ?? ""),
               location: String(data.location ?? ""),
               yearLevel: String(data.yearLevel ?? "All Years"),
               course: String(data.course ?? "All Courses"),
+              targetStudent: String(data.targetStudent ?? ""),
               details: String(data.details ?? ""),
               isPreReg: data.isPreReg === true,
               withPayment: data.withPayment === true,
@@ -376,7 +437,12 @@ export function StudentPortalProvider({
               profile.year,
               "All Years"
             );
-            return courseMatch && yearMatch;
+            const studentMatch = matchesSpecificStudentTarget(
+              event.targetStudent,
+              profile.schoolId,
+              profile.studentName
+            );
+            return courseMatch && yearMatch && studentMatch;
           });
 
         setRawEvents(mapped);
@@ -474,6 +540,60 @@ export function StudentPortalProvider({
       active = false;
       unsub();
     };
+  }, [profile]);
+
+  useEffect(() => {
+    if (!profile) {
+      setProfileNotifications([]);
+      setLoadingProfileNotifications(false);
+      return;
+    }
+
+    setLoadingProfileNotifications(true);
+    const qy = query(
+      collection(db, "profiles", profile.uid, "notifications"),
+      orderBy("createdAt", "desc")
+    );
+
+    const unsub = onSnapshot(
+      qy,
+      (snap) => {
+        const rows: ProfileNotificationDoc[] = snap.docs.map((d) => {
+          const data = d.data() as ProfileNotificationDocData;
+          const rawType = normalizeText(data.type);
+          const type: StudentNotificationType =
+            rawType === "announcement"
+              ? "announcement"
+              : rawType === "payment"
+              ? "payment"
+              : rawType === "missed"
+              ? "missed"
+              : rawType === "preregister"
+              ? "preregister"
+              : "upcoming";
+
+          return {
+            id: d.id,
+            title: String(data.title ?? "Notification"),
+            message: String(data.message ?? ""),
+            date: String(data.date ?? ""),
+            scheduledTime: String(data.scheduledTime ?? ""),
+            type,
+            createdAt: data.createdAt,
+          };
+        });
+
+        setProfileNotifications(rows);
+        setLoadingProfileNotifications(false);
+      },
+      (e) => {
+        setProfileNotifications([]);
+        setLoadingProfileNotifications(false);
+        setError(toErrorMessage(e, "Failed to load notifications."));
+      }
+    );
+
+    return () => unsub();
   }, [profile]);
 
   useEffect(() => {
@@ -576,8 +696,9 @@ export function StudentPortalProvider({
 
     return rawEvents
       .map((raw) => {
-        const eventDate = toEventDate(raw.date, raw.timeStart);
-        const lifecycle = computeLifecycle(raw.date, raw.timeStart, raw.timeEnd);
+        const scheduledTime = raw.scheduledTime || raw.timeStart;
+        const eventDate = toEventDate(raw.date, scheduledTime);
+        const lifecycle = computeLifecycle(raw.date, scheduledTime, raw.timeEnd);
         const attendanceRaw = normalizeText(attendanceByEvent[raw.id] ?? "");
         const paymentMatch = paymentByTitle.get(normalizeText(raw.title));
 
@@ -606,8 +727,7 @@ export function StudentPortalProvider({
           description: raw.details || "No description provided.",
           details: raw.details || "",
           date: raw.date,
-          timeStart: raw.timeStart || "TBA",
-          timeEnd: raw.timeEnd || "",
+          scheduledTime: scheduledTime || "TBA",
           location: raw.location || "TBA",
           course: raw.course || "All Courses",
           yearLevel: raw.yearLevel || "All Years",
@@ -641,6 +761,20 @@ export function StudentPortalProvider({
         displayDate: formatDateTime(item.date),
       });
     };
+
+    profileNotifications.forEach((note) => {
+      const scheduledDate = toEventDate(note.date, note.scheduledTime);
+      const createdAtMs = toMillis(note.createdAt);
+      const when = scheduledDate ?? (createdAtMs ? new Date(createdAtMs) : new Date());
+
+      pushItem(`profile-notification:${note.id}`, {
+        id: `profile-notification:${note.id}`,
+        title: note.title || "Notification",
+        description: note.message || "No message provided.",
+        type: note.type,
+        date: when,
+      });
+    });
 
     events.forEach((ev) => {
       const date = ev.eventDate ?? new Date();
@@ -696,7 +830,7 @@ export function StudentPortalProvider({
     });
 
     return items.sort((a, b) => b.date.getTime() - a.date.getTime());
-  }, [events, payments]);
+  }, [profileNotifications, events, payments]);
 
   const registerForEvent = useCallback(
     async (eventId: string) => {
@@ -735,7 +869,11 @@ export function StudentPortalProvider({
     [profile]
   );
 
-  const loading = loadingProfile || loadingEvents || loadingPayments;
+  const loading =
+    loadingProfile ||
+    loadingEvents ||
+    loadingPayments ||
+    loadingProfileNotifications;
 
   const value = useMemo<StudentPortalContextValue>(
     () => ({

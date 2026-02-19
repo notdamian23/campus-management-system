@@ -31,6 +31,18 @@ service cloud.firestore {
       allow create: if isAdmin();
       allow update: if isSelf(uid) || isAdmin();
       allow delete: if isAdmin();
+
+      // EC member personal documents
+      match /documents/{docId} {
+        allow read: if isSelf(uid) || isAdmin();
+        allow create, update, delete: if (isSelf(uid) && isEC()) || isAdmin();
+      }
+
+      // Student notifications written by EC/Admin
+      match /notifications/{notificationId} {
+        allow read: if isSelf(uid) || isAdminOrEC();
+        allow create, update, delete: if isAdminOrEC();
+      }
     }
 
     // Admin logs (written by Admin SDK / Cloud Functions)
@@ -72,6 +84,12 @@ service cloud.firestore {
           (signedIn() && resource.data.uid == request.auth.uid);
         allow create, update, delete: if isAdminOrEC();
       }
+    }
+
+    // Shared EC document library (1 GB shared pool handled by app logic)
+    match /ecDocuments/{docId} {
+      allow read: if isAdminOrEC();
+      allow create, update, delete: if isAdminOrEC();
     }
 
     // Deny everything else by default.

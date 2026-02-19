@@ -19,6 +19,9 @@ function getCardClasses(type: StudentNotificationType) {
   if (type === "missed") {
     return "bg-red-50 border-l-4 border-red-400";
   }
+  if (type === "announcement") {
+    return "bg-indigo-50 border-l-4 border-indigo-400";
+  }
   return "bg-white border-l-4 border-gray-200";
 }
 

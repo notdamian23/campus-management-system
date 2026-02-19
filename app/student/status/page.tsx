@@ -142,8 +142,7 @@ export default function StudentStatus() {
                     </h3>
                     <p className="text-sm text-campus-text-secondary">
                       {formatEventDate(event.eventDate, event.date)} |{" "}
-                      {event.timeStart}
-                      {event.timeEnd ? ` - ${event.timeEnd}` : ""}
+                      {event.scheduledTime}
                     </p>
                     <p className="text-xs text-campus-text-secondary">
                       {event.location || "TBA"}
@@ -184,8 +183,7 @@ export default function StudentStatus() {
                     </h3>
                     <p className="text-sm text-campus-text-secondary">
                       {formatEventDate(event.eventDate, event.date)} |{" "}
-                      {event.timeStart}
-                      {event.timeEnd ? ` - ${event.timeEnd}` : ""}
+                      {event.scheduledTime}
                     </p>
                     <p className="text-xs text-campus-text-secondary">
                       {event.location || "TBA"}

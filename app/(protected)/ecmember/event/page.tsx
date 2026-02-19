@@ -1,22 +1,27 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiCalendar } from "react-icons/fi";
 
-import { auth, db, storage } from "@/lib/firebase";
+import { app, auth, db, storage } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import {
   addDoc,
+  collectionGroup,
   collection,
   deleteDoc,
   doc,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
+  writeBatch,
 } from "firebase/firestore";
+import { getFunctions, httpsCallable } from "firebase/functions";
+import { Tab, Tabs } from "@heroui/tabs";
 import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 
 type Role = "teacher" | "student" | "ec";
@@ -27,10 +32,13 @@ type EventDoc = {
   title: string;
   location?: string;
   date: string;
+  scheduledTime?: string;
+  // Legacy fields kept for older records
   timeStart?: string;
   timeEnd?: string;
   yearLevel?: string;
   course?: string;
+  targetStudent?: string;
   details?: string;
   isPreReg?: boolean;
   withPayment?: boolean;
@@ -64,6 +72,42 @@ type RegistrationDoc = {
   createdAt?: any;
 };
 
+type RemoteStudent = {
+  uid?: string;
+  schoolId?: string;
+  studentName?: string;
+  name?: string;
+  course?: string;
+  year?: string;
+};
+
+type StudentLookup = {
+  uid: string;
+  schoolId: string;
+  studentName: string;
+  course: string;
+  year: string;
+  searchText: string;
+};
+
+type NotificationListStatus = "scheduled" | "sent";
+
+type NotificationSummary = {
+  id: string;
+  dispatchId: string;
+  title: string;
+  message: string;
+  date: string;
+  scheduledTime: string;
+  recipientType: "all" | "course" | "year" | "student";
+  course: string;
+  yearLevel: string;
+  targetStudent: string;
+  createdAt?: any;
+  recipientCount: number;
+  status: NotificationListStatus;
+};
+
 function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
@@ -93,10 +137,15 @@ function parseTime12ToMinutes(t?: string) {
   return hour * 60 + min;
 }
 
-function computeStatus(ev: { date: string; timeStart?: string; timeEnd?: string }): EventStatus {
-  const startM = parseTime12ToMinutes(ev.timeStart);
+function computeStatus(ev: {
+  date: string;
+  scheduledTime?: string;
+  timeStart?: string;
+  timeEnd?: string;
+}): EventStatus {
+  const startM = parseTime12ToMinutes(ev.scheduledTime || ev.timeStart);
   const endM = parseTime12ToMinutes(ev.timeEnd);
-  if (startM == null || endM == null) return "upcoming";
+  if (startM == null) return "upcoming";
 
   const now = new Date();
   const [y, mo, d] = ev.date.split("-").map(Number);
@@ -107,8 +156,13 @@ function computeStatus(ev: { date: string; timeStart?: string; timeEnd?: string 
   const start = new Date(eventDate);
   start.setHours(Math.floor(startM / 60), startM % 60, 0, 0);
 
+  if (endM == null) {
+    return now < start ? "upcoming" : "completed";
+  }
+
+  const safeEnd = endM >= startM ? endM : startM + 60;
   const end = new Date(eventDate);
-  end.setHours(Math.floor(endM / 60), endM % 60, 0, 0);
+  end.setHours(Math.floor(safeEnd / 60), safeEnd % 60, 0, 0);
 
   if (now < start) return "upcoming";
   if (now >= start && now <= end) return "ongoing";
@@ -156,6 +210,29 @@ function formatDateTime(value: any): string {
   const ms = toMillis(value);
   if (!ms) return "-";
   return new Date(ms).toLocaleString();
+}
+
+function getDateTimeMs(date: string, time12?: string) {
+  const raw = String(date ?? "").trim();
+  if (!raw) return 0;
+
+  const [y, m, d] = raw.split("-").map(Number);
+  if (!y || !m || !d) return 0;
+
+  const out = new Date(y, m - 1, d);
+  const mins = parseTime12ToMinutes(time12);
+  if (mins != null) {
+    out.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+  } else {
+    out.setHours(0, 0, 0, 0);
+  }
+  return out.getTime();
+}
+
+function computeNotificationStatus(date: string, scheduledTime?: string): NotificationListStatus {
+  const when = getDateTimeMs(date, scheduledTime);
+  if (!when) return "sent";
+  return when > Date.now() ? "scheduled" : "sent";
 }
 
 function csvCell(value: string | number) {
@@ -467,21 +544,34 @@ function StatMini({ label, value }: { label: string; value: number }) {
 }
 
 export default function EventDashboard() {
+  const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
   const [showAddEventForm, setShowAddEventForm] = useState(false);
   const [showNotificationForm, setShowNotificationForm] = useState(false);
+  const [listTab, setListTab] = useState<"events" | "notifications">("events");
 
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | EventStatus>("all");
-  const [recipientType, setRecipientType] = useState<"all" | "course" | "year">("all");
+  const [eventDateFilter, setEventDateFilter] = useState("");
+  const [recipientType, setRecipientType] = useState<"all" | "course" | "year" | "student">("all");
 
   const [notifTitle, setNotifTitle] = useState("");
   const [notifDate, setNotifDate] = useState("");
   const [notifMessage, setNotifMessage] = useState("");
   const [notifCourse, setNotifCourse] = useState("Computer Engineering");
   const [notifYear, setNotifYear] = useState("1st Year");
-  const [notifStartTime, setNotifStartTime] = useState("07:00");
-  const [notifEndTime, setNotifEndTime] = useState("08:00");
-  const [timePickerOpen, setTimePickerOpen] = useState<null | "start" | "end">(null);
+  const [notifSearchName, setNotifSearchName] = useState("");
+  const [notifSearchId, setNotifSearchId] = useState("");
+  const [selectedNotifStudents, setSelectedNotifStudents] = useState<StudentLookup[]>([]);
+  const [notifScheduled24, setNotifScheduled24] = useState("07:00");
+  const [timePickerOpen, setTimePickerOpen] = useState<null | "scheduled">(null);
+  const [sendingNotif, setSendingNotif] = useState(false);
+  const [notifError, setNotifError] = useState("");
+  const [notifMsg, setNotifMsg] = useState("");
+  const [studentsLoading, setStudentsLoading] = useState(false);
+  const [studentsError, setStudentsError] = useState("");
+  const [studentOptions, setStudentOptions] = useState<StudentLookup[]>([]);
+  const [showStudentDropdown, setShowStudentDropdown] = useState(false);
+  const studentPickerRef = useRef<HTMLDivElement | null>(null);
 
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
 
@@ -493,10 +583,10 @@ export default function EventDashboard() {
   const [details, setDetails] = useState("");
   const [isPreReg, setIsPreReg] = useState(false);
   const [withPayment, setWithPayment] = useState(false);
+  const [eventTargetStudent, setEventTargetStudent] = useState("");
 
-  const [eventStart24, setEventStart24] = useState("07:00");
-  const [eventEnd24, setEventEnd24] = useState("08:00");
-  const [eventTimePickerOpen, setEventTimePickerOpen] = useState<null | "start" | "end">(null);
+  const [eventScheduled24, setEventScheduled24] = useState("07:00");
+  const [eventTimePickerOpen, setEventTimePickerOpen] = useState<null | "scheduled">(null);
 
   const [preRegSlots, setPreRegSlots] = useState<number>(50);
 
@@ -509,6 +599,11 @@ export default function EventDashboard() {
 
   const [events, setEvents] = useState<EventDoc[]>([]);
   const [eventsLoading, setEventsLoading] = useState(true);
+  const [notifications, setNotifications] = useState<NotificationSummary[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(true);
+  const [notificationSearchText, setNotificationSearchText] = useState("");
+  const [notificationStatusFilter, setNotificationStatusFilter] = useState<"all" | NotificationListStatus>("all");
+  const [notificationDateFilter, setNotificationDateFilter] = useState("");
 
   const [currentUser, setCurrentUser] = useState<any>(null);
 
@@ -548,6 +643,158 @@ export default function EventDashboard() {
 
     return () => unsub();
   }, []);
+
+  const loadStudentsForNotifications = useCallback(async (): Promise<StudentLookup[]> => {
+    if (!isECUser) return [];
+    if (studentsLoading) return studentOptions;
+
+    setStudentsLoading(true);
+    setStudentsError("");
+
+    try {
+      const fn = httpsCallable<{ limit: number }, { students?: RemoteStudent[] }>(functions, "ecListStudents");
+      const res = await fn({ limit: 2000 });
+      const rows = (res.data?.students ?? [])
+        .map((s) => {
+          const uid = String(s.uid ?? "").trim();
+          const schoolId = String(s.schoolId ?? "").trim();
+          const studentName = String(s.studentName ?? s.name ?? "").trim() || schoolId || uid;
+          const course = String(s.course ?? "").trim();
+          const year = String(s.year ?? "").trim();
+
+          if (!uid) return null;
+
+          const searchText = `${studentName} ${schoolId} ${course} ${year}`.toLowerCase();
+          return { uid, schoolId, studentName, course, year, searchText } as StudentLookup;
+        })
+        .filter((s): s is StudentLookup => Boolean(s))
+        .sort((a, b) => a.studentName.localeCompare(b.studentName) || a.schoolId.localeCompare(b.schoolId));
+
+      setStudentOptions(rows);
+      return rows;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Failed to load students.";
+      setStudentsError(message);
+      setStudentOptions([]);
+      return [];
+    } finally {
+      setStudentsLoading(false);
+    }
+  }, [functions, isECUser, studentsLoading, studentOptions]);
+
+  useEffect(() => {
+    if (!showNotificationForm) return;
+    if (!isECUser) return;
+    if (studentOptions.length > 0) return;
+    void loadStudentsForNotifications();
+  }, [showNotificationForm, isECUser, studentOptions.length, loadStudentsForNotifications]);
+
+  useEffect(() => {
+    if (recipientType !== "student") return;
+
+    const onDocMouseDown = (event: MouseEvent) => {
+      if (!studentPickerRef.current) return;
+      if (studentPickerRef.current.contains(event.target as Node)) return;
+      setShowStudentDropdown(false);
+    };
+
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [recipientType]);
+
+  // Live sent notifications (grouped by dispatchId)
+  useEffect(() => {
+    if (!currentUser || !isECUser) {
+      setNotifications([]);
+      setNotificationsLoading(false);
+      return;
+    }
+
+    setNotificationsLoading(true);
+    const qy = query(collectionGroup(db, "notifications"), orderBy("createdAt", "desc"), limit(1200));
+
+    const unsub = onSnapshot(
+      qy,
+      (snap) => {
+        const grouped = new Map<string, NotificationSummary>();
+
+        snap.docs.forEach((d) => {
+          const data = d.data() as {
+            dispatchId?: string;
+            title?: string;
+            message?: string;
+            date?: string;
+            scheduledTime?: string;
+            recipientType?: string;
+            course?: string;
+            yearLevel?: string;
+            targetStudent?: string;
+            createdAt?: any;
+            createdByUid?: string;
+          };
+
+          const createdByUid = String(data.createdByUid ?? "");
+          if (createdByUid && createdByUid !== currentUser.uid) return;
+
+          const title = String(data.title ?? "Notification");
+          const message = String(data.message ?? "");
+          const date = String(data.date ?? "");
+          const scheduledTime = String(data.scheduledTime ?? "");
+          const createdAtMs = toMillis(data.createdAt);
+          const recipientTypeRaw = String(data.recipientType ?? "all");
+          const recipientType: NotificationSummary["recipientType"] =
+            recipientTypeRaw === "course" || recipientTypeRaw === "year" || recipientTypeRaw === "student"
+              ? recipientTypeRaw
+              : "all";
+
+          const dispatchId = String(data.dispatchId ?? "").trim();
+          const fallbackGroupKey = [
+            createdByUid || currentUser.uid,
+            title,
+            message,
+            date,
+            scheduledTime,
+            String(createdAtMs ? Math.floor(createdAtMs / 60000) : 0),
+          ].join("|");
+          const groupKey = dispatchId || fallbackGroupKey;
+
+          if (!grouped.has(groupKey)) {
+            grouped.set(groupKey, {
+              id: d.id,
+              dispatchId: groupKey,
+              title,
+              message,
+              date,
+              scheduledTime,
+              recipientType,
+              course: String(data.course ?? ""),
+              yearLevel: String(data.yearLevel ?? ""),
+              targetStudent: String(data.targetStudent ?? ""),
+              createdAt: data.createdAt,
+              recipientCount: 0,
+              status: computeNotificationStatus(date, scheduledTime),
+            });
+          }
+
+          const current = grouped.get(groupKey)!;
+          current.recipientCount += 1;
+          if (toMillis(data.createdAt) > toMillis(current.createdAt)) {
+            current.createdAt = data.createdAt;
+          }
+        });
+
+        const rows = Array.from(grouped.values()).sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+        setNotifications(rows);
+        setNotificationsLoading(false);
+      },
+      () => {
+        setNotifications([]);
+        setNotificationsLoading(false);
+      }
+    );
+
+    return () => unsub();
+  }, [currentUser, isECUser]);
 
   // Live events
   useEffect(() => {
@@ -643,16 +890,55 @@ export default function EventDashboard() {
     return events.filter((ev) => {
       const liveStatus = computeStatus(ev);
       const matchesStatus = statusFilter === "all" || liveStatus === statusFilter;
+      const matchesDate = !eventDateFilter || String(ev.date ?? "") === eventDateFilter;
 
       const matchesSearch =
         !s ||
         ev.title.toLowerCase().includes(s) ||
         (ev.location ?? "").toLowerCase().includes(s) ||
+        (ev.targetStudent ?? "").toLowerCase().includes(s) ||
         (ev.details ?? "").toLowerCase().includes(s);
 
-      return matchesStatus && matchesSearch;
+      return matchesStatus && matchesSearch && matchesDate;
     });
-  }, [events, searchText, statusFilter]);
+  }, [events, searchText, statusFilter, eventDateFilter]);
+
+  const selectedNotifStudentIds = useMemo(
+    () => new Set(selectedNotifStudents.map((student) => student.uid)),
+    [selectedNotifStudents]
+  );
+
+  const filteredStudentOptions = useMemo(() => {
+    if (recipientType !== "student") return [];
+
+    const nameQuery = notifSearchName.trim().toLowerCase();
+    const idQuery = notifSearchId.trim().toLowerCase();
+
+    return studentOptions
+      .filter((student) => {
+        if (selectedNotifStudentIds.has(student.uid)) return false;
+        const matchesName = !nameQuery || student.studentName.toLowerCase().includes(nameQuery);
+        const matchesId = !idQuery || student.schoolId.toLowerCase().includes(idQuery);
+        return matchesName && matchesId;
+      })
+      .slice(0, 20);
+  }, [recipientType, notifSearchName, notifSearchId, studentOptions, selectedNotifStudentIds]);
+
+  const filteredNotifications = useMemo(() => {
+    const s = notificationSearchText.trim().toLowerCase();
+    return notifications.filter((item) => {
+      const matchesStatus = notificationStatusFilter === "all" || item.status === notificationStatusFilter;
+      const matchesDate = !notificationDateFilter || item.date === notificationDateFilter;
+      const matchesSearch =
+        !s ||
+        item.title.toLowerCase().includes(s) ||
+        item.message.toLowerCase().includes(s) ||
+        item.recipientType.toLowerCase().includes(s) ||
+        item.targetStudent.toLowerCase().includes(s);
+
+      return matchesStatus && matchesDate && matchesSearch;
+    });
+  }, [notifications, notificationSearchText, notificationStatusFilter, notificationDateFilter]);
 
   const summary = useMemo(() => {
     const total = events.length;
@@ -666,11 +952,24 @@ export default function EventDashboard() {
     () => Object.values(eventRegistrations).reduce((sum, rows) => sum + rows.length, 0),
     [eventRegistrations]
   );
+  const hasSpecificTarget = eventTargetStudent.trim().length > 0;
 
   const statusChip = (status: EventStatus) => {
     if (status === "completed") return "bg-green-100 text-green-700";
     if (status === "ongoing") return "bg-orange-100 text-orange-700";
     return "bg-blue-100 text-blue-700";
+  };
+
+  const notifStatusChip = (status: NotificationListStatus) => {
+    if (status === "scheduled") return "bg-blue-100 text-blue-700";
+    return "bg-green-100 text-green-700";
+  };
+
+  const notifTargetLabel = (item: NotificationSummary) => {
+    if (item.recipientType === "course") return `Course: ${item.course || "-"}`;
+    if (item.recipientType === "year") return `Year: ${item.yearLevel || "-"}`;
+    if (item.recipientType === "student") return `Students: ${item.targetStudent || "-"}`;
+    return "All Students";
   };
 
   async function uploadToEvent(eventId: string, kind: "images" | "docs", file: File) {
@@ -727,6 +1026,108 @@ export default function EventDashboard() {
     await deleteDoc(doc(db, "events", eventId, kind, fileDocId));
   }
 
+  const handleSendNotification = async () => {
+    setNotifError("");
+    setNotifMsg("");
+
+    if (roleLoading) return setNotifError("Checking your role, please wait...");
+    if (!isECUser) return setNotifError("Only EC members can send notifications.");
+    if (!notifTitle.trim()) return setNotifError("Notification title is required.");
+    if (!notifDate) return setNotifError("Notification date is required.");
+    if (!notifMessage.trim()) return setNotifError("Notification message is required.");
+
+    let students = studentOptions;
+    if (studentsLoading && students.length === 0) {
+      return setNotifError("Students are still loading. Please wait.");
+    }
+    if (students.length === 0) {
+      students = await loadStudentsForNotifications();
+    }
+    if (students.length === 0) return setNotifError("No student records found.");
+
+    let recipients: StudentLookup[] = [];
+
+    if (recipientType === "all") {
+      recipients = students;
+    } else if (recipientType === "course") {
+      recipients = students.filter((s) => s.course === notifCourse);
+    } else if (recipientType === "year") {
+      recipients = students.filter((s) => s.year === notifYear);
+    } else {
+      if (selectedNotifStudents.length === 0) {
+        return setNotifError("Choose at least one student from the dropdown list.");
+      }
+      recipients = selectedNotifStudents;
+    }
+
+    if (recipients.length === 0) {
+      if (recipientType === "course") return setNotifError(`No students found in ${notifCourse}.`);
+      if (recipientType === "year") return setNotifError(`No students found in ${notifYear}.`);
+      return setNotifError("No recipients found.");
+    }
+
+    const title = notifTitle.trim();
+    const message = notifMessage.trim();
+    const scheduledTime = format12h(notifScheduled24);
+    const dispatchId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const selectedLabel =
+      recipientType === "student"
+        ? recipients.map((student) => `${student.studentName} (${student.schoolId})`).join("; ")
+        : "";
+
+    try {
+      setSendingNotif(true);
+      const chunkSize = 400;
+
+      for (let i = 0; i < recipients.length; i += chunkSize) {
+        const chunk = recipients.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+
+        chunk.forEach((student) => {
+          const notifRef = doc(collection(db, "profiles", student.uid, "notifications"));
+          batch.set(notifRef, {
+            title,
+            message,
+            date: notifDate,
+            scheduledTime,
+            type: "announcement",
+            dispatchId,
+            recipientType,
+            course: recipientType === "course" ? notifCourse : "",
+            yearLevel: recipientType === "year" ? notifYear : "",
+            targetStudent: recipientType === "student" ? selectedLabel : "",
+            studentUid: student.uid,
+            studentName: student.studentName,
+            schoolId: student.schoolId,
+            createdByUid: currentUser ? currentUser.uid : null,
+            createdAt: serverTimestamp(),
+            read: false,
+          });
+        });
+
+        await batch.commit();
+      }
+
+      setNotifMsg(`Notification sent to ${recipients.length} student(s).`);
+      setNotifTitle("");
+      setNotifDate("");
+      setNotifMessage("");
+      setNotifSearchName("");
+      setNotifSearchId("");
+      setSelectedNotifStudents([]);
+      setShowStudentDropdown(false);
+      setNotifScheduled24("07:00");
+      setRecipientType("all");
+      setNotifCourse("Computer Engineering");
+      setNotifYear("1st Year");
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Failed to send notification.";
+      setNotifError(message);
+    } finally {
+      setSendingNotif(false);
+    }
+  };
+
   const handleSaveEvent = async () => {
     setSaveError("");
     setSaveMsg("");
@@ -740,16 +1141,18 @@ export default function EventDashboard() {
     try {
       setSaving(true);
       const slots = isPreReg ? preRegSlots : null;
+      const studentTarget = eventTargetStudent.trim();
+      const isSpecificTarget = Boolean(studentTarget);
 
       await addDoc(collection(db, "events"), {
         title: title.trim(),
         location: location.trim(),
         date,
-        timeStart: format12h(eventStart24),
-        timeEnd: format12h(eventEnd24),
+        scheduledTime: format12h(eventScheduled24),
 
-        yearLevel: isPreReg ? "All Years" : yearLevel,
-        course: isPreReg ? "All Courses" : course,
+        yearLevel: isPreReg || isSpecificTarget ? "All Years" : yearLevel,
+        course: isPreReg || isSpecificTarget ? "All Courses" : course,
+        targetStudent: isPreReg ? "" : studentTarget,
 
         details: details.trim(),
         isPreReg,
@@ -774,9 +1177,9 @@ export default function EventDashboard() {
       setDetails("");
       setIsPreReg(false);
       setWithPayment(false);
+      setEventTargetStudent("");
       setPreRegSlots(50);
-      setEventStart24("07:00");
-      setEventEnd24("08:00");
+      setEventScheduled24("07:00");
       setShowAddEventForm(false);
     } catch (err: any) {
       setSaveError(err?.message || "Failed to save event.");
@@ -876,9 +1279,9 @@ export default function EventDashboard() {
       const csvLines = [
         `Event Title,${csvCell(ev.title)}`,
         `Date,${csvCell(ev.date)}`,
-        `Time Start,${csvCell(ev.timeStart ?? "-")}`,
-        `Time End,${csvCell(ev.timeEnd ?? "-")}`,
+        `Scheduled Time,${csvCell(ev.scheduledTime || ev.timeStart || "-")}`,
         `Location,${csvCell(ev.location ?? "-")}`,
+        `Target Student,${csvCell(ev.targetStudent || "-")}`,
         `Generated At,${csvCell(new Date().toLocaleString())}`,
         "",
         "UID,School ID,Student Name,Course,Year,Registration Time,Attendance Status,Attendance Time",
@@ -943,43 +1346,17 @@ export default function EventDashboard() {
 
       {/* ACTIONS */}
       <div className="bg-white border rounded-xl shadow-sm p-3 space-y-3">
-        <input
-          type="text"
-          placeholder="Search events..."
-          value={searchText}
-          onChange={(e) => setSearchText(e.target.value)}
-          className="w-full px-3 py-2 border rounded-lg text-sm"
-        />
-
-        <div className="grid grid-cols-1 gap-2">
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as any)}
-            className="w-full px-3 py-2 border rounded-lg text-sm"
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => setShowNotificationForm((v) => !v)}
+            className="py-2 rounded-lg bg-primary-500 text-white text-sm font-semibold"
           >
-            <option value="all">All Status</option>
-            <option value="upcoming">Upcoming</option>
-            <option value="ongoing">Ongoing</option>
-            <option value="completed">Completed</option>
-          </select>
+            Notify
+          </button>
 
-          <div className="flex items-center gap-2 px-3 py-2 border rounded-lg bg-white text-sm">
-            <FiCalendar />
-            <input type="date" className="outline-none w-full" />
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => setShowNotificationForm((v) => !v)}
-              className="py-2 rounded-lg bg-primary-500 text-white text-sm font-semibold"
-            >
-              Notify
-            </button>
-
-            <button onClick={() => setShowAddEventForm((v) => !v)} className="py-2 rounded-lg bg-primary-500 text-white text-sm font-semibold">
-              Add
-            </button>
-          </div>
+          <button onClick={() => setShowAddEventForm((v) => !v)} className="py-2 rounded-lg bg-primary-500 text-white text-sm font-semibold">
+            Add
+          </button>
         </div>
       </div>
 
@@ -1000,6 +1377,7 @@ export default function EventDashboard() {
                     if (checked) {
                       setYearLevel("All Years");
                       setCourse("All Courses");
+                      setEventTargetStudent("");
                     }
                   }}
                   className="w-5 h-5"
@@ -1029,28 +1407,15 @@ export default function EventDashboard() {
             <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm" />
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="text-sm font-medium">Time Start</label>
-              <button
-                type="button"
-                onClick={() => setEventTimePickerOpen("start")}
-                className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm bg-white text-left hover:bg-gray-50"
-              >
-                {format12h(eventStart24)}
-              </button>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium">Time End</label>
-              <button
-                type="button"
-                onClick={() => setEventTimePickerOpen("end")}
-                className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm bg-white text-left hover:bg-gray-50"
-              >
-                {format12h(eventEnd24)}
-              </button>
-            </div>
+          <div>
+            <label className="text-sm font-medium">Scheduled Time</label>
+            <button
+              type="button"
+              onClick={() => setEventTimePickerOpen("scheduled")}
+              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm bg-white text-left hover:bg-gray-50"
+            >
+              {format12h(eventScheduled24)}
+            </button>
           </div>
 
           <div>
@@ -1058,9 +1423,9 @@ export default function EventDashboard() {
             <select
               value={yearLevel}
               onChange={(e) => setYearLevel(e.target.value)}
-              disabled={isPreReg}
+              disabled={isPreReg || hasSpecificTarget}
               className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${
-                isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
+                isPreReg || hasSpecificTarget ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
               }`}
             >
               <option>All Years</option>
@@ -1076,9 +1441,9 @@ export default function EventDashboard() {
             <select
               value={course}
               onChange={(e) => setCourse(e.target.value)}
-              disabled={isPreReg}
+              disabled={isPreReg || hasSpecificTarget}
               className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${
-                isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
+                isPreReg || hasSpecificTarget ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
               }`}
             >
               <option>All Courses</option>
@@ -1090,6 +1455,25 @@ export default function EventDashboard() {
             </select>
 
             {isPreReg && <p className="text-xs text-campus-text-secondary mt-1">Pre-Registration events are open to all year levels and courses.</p>}
+            {!isPreReg && hasSpecificTarget && (
+              <p className="text-xs text-campus-text-secondary mt-1">Specific student targeting sets Year Level and Course to all students.</p>
+            )}
+          </div>
+
+          <div>
+            <label className="text-sm font-medium">Specific Student (Optional)</label>
+            <input
+              value={eventTargetStudent}
+              onChange={(e) => setEventTargetStudent(e.target.value)}
+              disabled={isPreReg}
+              placeholder="Enter School ID or Student Name"
+              className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${
+                isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
+              }`}
+            />
+            <p className="text-xs text-campus-text-secondary mt-1">
+              Leave blank to use Year Level/Course targeting. If filled, this event is sent only to this student.
+            </p>
           </div>
 
           <div>
@@ -1131,7 +1515,7 @@ export default function EventDashboard() {
         </div>
       )}
 
-      {/* NOTIFICATION FORM (UI only for now) */}
+      {/* NOTIFICATION FORM */}
       {showNotificationForm && (
         <div className="bg-white p-6 border rounded-xl shadow space-y-4 animate-slideDown">
           <h2 className="text-xl font-semibold text-blue-600">Create Notification</h2>
@@ -1146,36 +1530,34 @@ export default function EventDashboard() {
             <input value={notifDate} onChange={(e) => setNotifDate(e.target.value)} type="date" className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm" />
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="text-sm font-medium">Start Time</label>
-              <button
-                type="button"
-                onClick={() => setTimePickerOpen("start")}
-                className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm bg-white text-left hover:bg-gray-50"
-              >
-                {format12h(notifStartTime)}
-              </button>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium">End Time</label>
-              <button
-                type="button"
-                onClick={() => setTimePickerOpen("end")}
-                className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm bg-white text-left hover:bg-gray-50"
-              >
-                {format12h(notifEndTime)}
-              </button>
-            </div>
+          <div>
+            <label className="text-sm font-medium">Scheduled Time</label>
+            <button
+              type="button"
+              onClick={() => setTimePickerOpen("scheduled")}
+              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm bg-white text-left hover:bg-gray-50"
+            >
+              {format12h(notifScheduled24)}
+            </button>
           </div>
 
           <div>
             <label className="text-sm font-medium">Send To</label>
-            <select className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm" value={recipientType} onChange={(e) => setRecipientType(e.target.value as any)}>
+            <select
+              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
+              value={recipientType}
+              onChange={(e) => {
+                setRecipientType(e.target.value as any);
+                setNotifSearchName("");
+                setNotifSearchId("");
+                setSelectedNotifStudents([]);
+                setShowStudentDropdown(false);
+              }}
+            >
               <option value="all">All Students</option>
               <option value="course">By Course</option>
               <option value="year">By Year Level</option>
+              <option value="student">Specific Student (ID/Name)</option>
             </select>
           </div>
 
@@ -1204,20 +1586,152 @@ export default function EventDashboard() {
             </div>
           )}
 
+          {recipientType === "student" && (
+            <div>
+              <label className="text-sm font-medium">To *</label>
+
+              <div className="mt-1 rounded-lg border px-3 py-2 shadow-sm min-h-[52px]">
+                <div className="flex flex-wrap gap-2">
+                  {selectedNotifStudents.length === 0 ? (
+                    <span className="text-sm text-campus-text-secondary">No student selected yet.</span>
+                  ) : (
+                    selectedNotifStudents.map((student) => (
+                      <span key={student.uid} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                        <span className="font-medium">{student.studentName}</span>
+                        <span className="text-campus-text-secondary">({student.schoolId})</span>
+                        <button
+                          type="button"
+                          className="text-campus-text-secondary hover:text-campus-text-primary"
+                          onClick={() => {
+                            setSelectedNotifStudents((prev) => prev.filter((x) => x.uid !== student.uid));
+                          }}
+                          aria-label={`Remove ${student.studentName}`}
+                        >
+                          x
+                        </button>
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div ref={studentPickerRef} className="mt-2 space-y-2">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <input
+                    value={notifSearchName}
+                    onChange={(e) => {
+                      setNotifSearchName(e.target.value);
+                      setShowStudentDropdown(true);
+                    }}
+                    onFocus={() => setShowStudentDropdown(true)}
+                    placeholder="Search by name"
+                    className="w-full px-4 py-3 border rounded-lg shadow-sm"
+                  />
+
+                  <input
+                    value={notifSearchId}
+                    onChange={(e) => {
+                      setNotifSearchId(e.target.value);
+                      setShowStudentDropdown(true);
+                    }}
+                    onFocus={() => setShowStudentDropdown(true)}
+                    placeholder="Search by ID number"
+                    className="w-full px-4 py-3 border rounded-lg shadow-sm"
+                  />
+                </div>
+
+                {showStudentDropdown && (
+                  <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
+                    {studentsLoading ? (
+                      <p className="px-4 py-2 text-sm text-campus-text-secondary">Loading students...</p>
+                    ) : filteredStudentOptions.length === 0 ? (
+                      <p className="px-4 py-2 text-sm text-campus-text-secondary">No matching students.</p>
+                    ) : (
+                      filteredStudentOptions.map((student) => (
+                        <button
+                          key={student.uid}
+                          type="button"
+                          className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                          onClick={() => {
+                            setSelectedNotifStudents((prev) =>
+                              prev.some((x) => x.uid === student.uid) ? prev : [...prev, student]
+                            );
+                            setNotifSearchName("");
+                            setNotifSearchId("");
+                            setShowStudentDropdown(true);
+                          }}
+                        >
+                          <div className="text-sm font-medium text-campus-text-primary">{student.studentName}</div>
+                          <div className="text-xs text-campus-text-secondary">
+                            {student.schoolId} | {student.course || "Unassigned"} | {student.year || "Unassigned"}
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div>
             <label className="text-sm font-medium">Message</label>
             <textarea value={notifMessage} onChange={(e) => setNotifMessage(e.target.value)} className="w-full h-28 mt-1 px-4 py-3 border rounded-lg shadow-sm" />
           </div>
 
-          <button className="px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600">Send Notification (later)</button>
+          {studentsError && <p className="text-red-600 text-sm">{studentsError}</p>}
+          {notifError && <p className="text-red-600 text-sm">{notifError}</p>}
+          {notifMsg && <p className="text-green-600 text-sm">{notifMsg}</p>}
+
+          <button
+            type="button"
+            onClick={handleSendNotification}
+            disabled={sendingNotif || roleLoading || !isECUser}
+            className="px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
+          >
+            {sendingNotif ? "Sending..." : "Send Notification"}
+          </button>
         </div>
       )}
 
-      {/* EVENT LIST */}
+      {/* LIST TABS */}
       <div className="bg-white border rounded-xl shadow-sm p-4 sm:p-6">
-        <h3 className="text-lg font-semibold mb-4">Event List</h3>
-        {exportError && <p className="text-sm text-red-600 mb-3">{exportError}</p>}
-        {exportMsg && <p className="text-sm text-green-600 mb-3">{exportMsg}</p>}
+        <Tabs
+          aria-label="Dashboard lists"
+          selectedKey={listTab}
+          onSelectionChange={(key) => setListTab(String(key) as "events" | "notifications")}
+          classNames={{ tabList: "mb-4" }}
+        >
+          <Tab key="events" title="Event List">
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <input
+                  type="text"
+                  placeholder="Search events..."
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as any)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                >
+                  <option value="all">All Status</option>
+                  <option value="upcoming">Upcoming</option>
+                  <option value="ongoing">Ongoing</option>
+                  <option value="completed">Completed</option>
+                </select>
+
+                <div className="flex items-center gap-2 px-3 py-2 border rounded-lg bg-white text-sm">
+                  <FiCalendar />
+                  <input type="date" value={eventDateFilter} onChange={(e) => setEventDateFilter(e.target.value)} className="outline-none w-full" />
+                </div>
+              </div>
+
+              {exportError && <p className="text-sm text-red-600">{exportError}</p>}
+              {exportMsg && <p className="text-sm text-green-600">{exportMsg}</p>}
 
         {eventsLoading ? (
           <p className="text-sm text-campus-text-secondary">Loading events...</p>
@@ -1274,7 +1788,7 @@ export default function EventDashboard() {
 
                   <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 mt-3 text-sm text-campus-text-secondary">
                     <span>📅 {ev.date}</span>
-                    <span>⏰ {ev.timeStart ?? "—"} – {ev.timeEnd ?? "—"}</span>
+                    <span>⏰ {ev.scheduledTime || ev.timeStart || "—"}</span>
                     <span>📍 {ev.location || "—"}</span>
                   </div>
 
@@ -1303,6 +1817,11 @@ export default function EventDashboard() {
                       <p className="text-sm text-campus-text-primary">
                         <b>Year Level:</b> {ev.yearLevel ?? "—"}
                       </p>
+                      {ev.targetStudent && (
+                        <p className="text-sm text-campus-text-primary">
+                          <b>Target Student:</b> {ev.targetStudent}
+                        </p>
+                      )}
                       <p className="text-sm text-campus-text-primary">
                         <b>Pre-Reg:</b> {ev.isPreReg ? "Yes" : "No"} | <b>With Payment:</b> {ev.withPayment ? "Yes" : "No"}
                       </p>
@@ -1473,50 +1992,99 @@ export default function EventDashboard() {
             })}
           </div>
         )}
+            </div>
+          </Tab>
+
+          <Tab key="notifications" title="Notification List">
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <input
+                  type="text"
+                  placeholder="Search notifications..."
+                  value={notificationSearchText}
+                  onChange={(e) => setNotificationSearchText(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+
+                <select
+                  value={notificationStatusFilter}
+                  onChange={(e) => setNotificationStatusFilter(e.target.value as any)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                >
+                  <option value="all">All Status</option>
+                  <option value="scheduled">Scheduled</option>
+                  <option value="sent">Sent</option>
+                </select>
+
+                <div className="flex items-center gap-2 px-3 py-2 border rounded-lg bg-white text-sm">
+                  <FiCalendar />
+                  <input
+                    type="date"
+                    value={notificationDateFilter}
+                    onChange={(e) => setNotificationDateFilter(e.target.value)}
+                    className="outline-none w-full"
+                  />
+                </div>
+              </div>
+
+              {notificationsLoading ? (
+                <p className="text-sm text-campus-text-secondary">Loading notifications...</p>
+              ) : filteredNotifications.length === 0 ? (
+                <p className="text-sm text-campus-text-secondary">No notifications match your filter/search.</p>
+              ) : (
+                <div className="space-y-3">
+                  {filteredNotifications.map((item) => (
+                    <div key={item.dispatchId} className="border rounded-lg p-3 sm:p-4 shadow-sm">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <h4 className="font-semibold text-campus-text-primary">{item.title || "Notification"}</h4>
+                          <span className={`px-3 py-1 text-xs rounded-full ${notifStatusChip(item.status)}`}>{item.status}</span>
+                        </div>
+                        <p className="text-xs text-campus-text-secondary">Created: {formatDateTime(item.createdAt)}</p>
+                      </div>
+
+                      <p className="text-sm text-campus-text-secondary mt-2">{item.message || "-"}</p>
+
+                      <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-campus-text-secondary">
+                        <div>
+                          <b>Date/Time:</b> {item.date || "-"} {item.scheduledTime || ""}
+                        </div>
+                        <div>
+                          <b>Target:</b> {notifTargetLabel(item)}
+                        </div>
+                        <div>
+                          <b>Recipients:</b> {item.recipientCount}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Tab>
+        </Tabs>
       </div>
 
       {/* Time picker modals (Notification) */}
       <TimePickerModal
-        open={timePickerOpen === "start"}
-        label="Start Time:"
-        value24={notifStartTime}
+        open={timePickerOpen === "scheduled"}
+        label="Scheduled Time:"
+        value24={notifScheduled24}
         onClose={() => setTimePickerOpen(null)}
         onConfirm={(val) => {
-          setNotifStartTime(val);
-          setTimePickerOpen(null);
-        }}
-      />
-
-      <TimePickerModal
-        open={timePickerOpen === "end"}
-        label="End Time:"
-        value24={notifEndTime}
-        onClose={() => setTimePickerOpen(null)}
-        onConfirm={(val) => {
-          setNotifEndTime(val);
+          setNotifScheduled24(val);
           setTimePickerOpen(null);
         }}
       />
 
       {/* Time picker modals (Add Event) */}
       <TimePickerModal
-        open={eventTimePickerOpen === "start"}
-        label="Start Time:"
-        value24={eventStart24}
+        open={eventTimePickerOpen === "scheduled"}
+        label="Scheduled Time:"
+        value24={eventScheduled24}
         onClose={() => setEventTimePickerOpen(null)}
         onConfirm={(val) => {
-          setEventStart24(val);
-          setEventTimePickerOpen(null);
-        }}
-      />
-
-      <TimePickerModal
-        open={eventTimePickerOpen === "end"}
-        label="End Time:"
-        value24={eventEnd24}
-        onClose={() => setEventTimePickerOpen(null)}
-        onConfirm={(val) => {
-          setEventEnd24(val);
+          setEventScheduled24(val);
           setEventTimePickerOpen(null);
         }}
       />
