@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { FiChevronDown } from "react-icons/fi";
 import { onAuthStateChanged } from "firebase/auth";
 import {
     collection,
@@ -19,6 +20,8 @@ import {
     type UploadTaskSnapshot,
     uploadBytesResumable,
 } from "firebase/storage";
+import { Button } from "@heroui/button";
+import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
 import { addToast } from "@heroui/toast";
 import { auth, db, storage } from "@/lib/firebase";
 
@@ -66,6 +69,8 @@ type DocumentItem = {
     downloadUrl: string;
     storagePath: string;
 };
+
+type SortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
 
 const toMillis = (value: FirestoreDocumentRecord["createdAt"]): number => {
     if (value && typeof value === "object" && typeof value.toMillis === "function") {
@@ -207,7 +212,7 @@ export default function DocumentsPage() {
     const [search, setSearch] = useState("");
     const [typeFilter, setTypeFilter] = useState<DocType | "All Types">("All Types");
     const [categoryFilter, setCategoryFilter] = useState<DocCategory | "All Categories">("All Categories");
-    const [dateFilter, setDateFilter] = useState("");
+    const [documentSortMode, setDocumentSortMode] = useState<SortMode>("latest_to_oldest");
 
     const [pendingFiles, setPendingFiles] = useState<File[]>([]);
     const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
@@ -299,10 +304,32 @@ export default function DocumentsPage() {
             const matchesSearch = docItem.name.toLowerCase().includes(search.trim().toLowerCase());
             const matchesType = typeFilter === "All Types" || docItem.type === typeFilter;
             const matchesCategory = categoryFilter === "All Categories" || docItem.category === categoryFilter;
-            const matchesDate = !dateFilter || docItem.uploadedAt === dateFilter;
-            return matchesSearch && matchesType && matchesCategory && matchesDate;
+            return matchesSearch && matchesType && matchesCategory;
         });
-    }, [documents, search, typeFilter, categoryFilter, dateFilter]);
+    }, [documents, search, typeFilter, categoryFilter]);
+
+    const sortedFilteredDocuments = useMemo(() => {
+        const list = [...filteredDocuments];
+
+        if (documentSortMode === "alphabetical") {
+            list.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+            return list;
+        }
+
+        list.sort((a, b) => {
+            const aMs = Number(a.createdAtMs ?? 0);
+            const bMs = Number(b.createdAtMs ?? 0);
+            return documentSortMode === "oldest_to_latest" ? aMs - bMs : bMs - aMs;
+        });
+
+        return list;
+    }, [filteredDocuments, documentSortMode]);
+
+    const documentSortLabel = useMemo(() => {
+        if (documentSortMode === "oldest_to_latest") return "Date, old to new";
+        if (documentSortMode === "alphabetical") return "Alphabetically, A-Z";
+        return "Date, new to old";
+    }, [documentSortMode]);
 
     const totalStorageBytes = useMemo(() => {
         return documents.reduce((sum, docItem) => sum + docItem.sizeBytes, 0);
@@ -612,8 +639,8 @@ export default function DocumentsPage() {
     };
 
     return (
-        <div className="p-6 space-y-6">
-            <div className="bg-white p-6 rounded-xl shadow border">
+        <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
+            <div className="bg-white p-4 sm:p-6 rounded-xl shadow border">
                 <h1 className="text-2xl font-bold text-primary-900">Manage and Access Documents</h1>
                 <p className="text-campus-text-secondary text-sm mt-1">
                     Upload, organize, and review documents. Everything stored securely in one place.
@@ -621,34 +648,34 @@ export default function DocumentsPage() {
                 {documentsError && <p className="text-sm text-red-600 mt-2">{documentsError}</p>}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-white border shadow rounded-xl p-5">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
+                <div className="bg-white border shadow rounded-xl p-4 sm:p-5">
                     <p className="text-campus-text-secondary text-sm">Total Documents</p>
                     <h2 className="text-3xl font-bold text-blue-600 mt-2">{documents.length}</h2>
                 </div>
 
-                <div className="bg-white border shadow rounded-xl p-5">
+                <div className="bg-white border shadow rounded-xl p-4 sm:p-5">
                     <p className="text-campus-text-secondary text-sm">Recent Uploads</p>
                     <h2 className="text-3xl font-bold text-green-600 mt-2">{recentUploads}</h2>
                 </div>
 
-                <div className="bg-white border shadow rounded-xl p-5">
+                <div className="bg-white border shadow rounded-xl p-4 sm:p-5">
                     <p className="text-campus-text-secondary text-sm">Storage Used</p>
                     <h2 className="text-3xl font-bold text-orange-600 mt-2">{totalStorageMB.toFixed(2)} MB</h2>
                 </div>
             </div>
 
-            <div className="flex flex-col md:flex-row items-center gap-4 bg-white p-4 border shadow rounded-xl">
+            <div className="flex flex-col md:flex-row items-stretch md:items-center gap-3 sm:gap-4 bg-white p-4 border shadow rounded-xl">
                 <input
                     type="text"
                     placeholder="Search documents..."
-                    className="flex-1 px-4 py-2 border rounded-lg shadow-sm"
+                    className="w-full md:flex-1 px-4 py-2 border rounded-lg shadow-sm"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                 />
 
                 <select
-                    className="px-3 py-2 border rounded-lg shadow-sm"
+                    className="w-full md:w-auto px-3 py-2 border rounded-lg shadow-sm"
                     value={typeFilter}
                     onChange={(e) => setTypeFilter(e.target.value as DocType | "All Types")}
                 >
@@ -660,7 +687,7 @@ export default function DocumentsPage() {
                 </select>
 
                 <select
-                    className="px-3 py-2 border rounded-lg shadow-sm"
+                    className="w-full md:w-auto px-3 py-2 border rounded-lg shadow-sm"
                     value={categoryFilter}
                     onChange={(e) => setCategoryFilter(e.target.value as DocCategory | "All Categories")}
                 >
@@ -670,13 +697,6 @@ export default function DocumentsPage() {
                     <option>Clearance</option>
                     <option>General</option>
                 </select>
-
-                <input
-                    type="date"
-                    className="px-3 py-2 border rounded-lg shadow-sm"
-                    value={dateFilter}
-                    onChange={(e) => setDateFilter(e.target.value)}
-                />
 
                 <input
                     ref={fileInputRef}
@@ -689,7 +709,7 @@ export default function DocumentsPage() {
 
                 <button
                     type="button"
-                    className="px-4 py-2 bg-primary-600 text-white rounded-lg shadow hover:bg-primary-700 transition disabled:opacity-60"
+                    className="w-full md:w-auto px-4 py-2 bg-primary-600 text-white rounded-lg shadow hover:bg-primary-700 transition disabled:opacity-60"
                     onClick={handleUploadClick}
                     disabled={uploading || !activeUid}
                 >
@@ -697,21 +717,46 @@ export default function DocumentsPage() {
                 </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-white border shadow rounded-xl p-6">
-                    <h2 className="font-semibold text-gray-700 mb-3">Document Library</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+                <div className="bg-white border shadow rounded-xl p-4 sm:p-6">
+                    <h2 className="font-semibold text-gray-700">Document Library</h2>
+                    <div className="mt-2 mb-3 flex items-center">
+                        <Dropdown placement="bottom-start">
+                            <DropdownTrigger>
+                                <Button
+                                    variant="light"
+                                    className="h-auto min-w-0 px-0 text-sm font-medium text-campus-text-primary data-[hover=true]:bg-transparent"
+                                >
+                                    <span className="text-campus-text-secondary mr-1">Sort by:</span>
+                                    <span>{documentSortLabel}</span>
+                                    <FiChevronDown className="ml-1" />
+                                </Button>
+                            </DropdownTrigger>
+                            <DropdownMenu
+                                aria-label="Sort documents"
+                                disallowEmptySelection
+                                selectionMode="single"
+                                selectedKeys={new Set([documentSortMode])}
+                                onAction={(key) => setDocumentSortMode(String(key) as SortMode)}
+                            >
+                                <DropdownItem key="latest_to_oldest">Date, new to old</DropdownItem>
+                                <DropdownItem key="oldest_to_latest">Date, old to new</DropdownItem>
+                                <DropdownItem key="alphabetical">Alphabetically, A-Z</DropdownItem>
+                            </DropdownMenu>
+                        </Dropdown>
+                    </div>
 
                     {documentsLoading ? (
                         <div className="border border-dashed rounded-lg h-72 flex items-center justify-center text-campus-text-secondary">
                             Loading documents...
                         </div>
-                    ) : filteredDocuments.length === 0 ? (
+                    ) : sortedFilteredDocuments.length === 0 ? (
                         <div className="border border-dashed rounded-lg h-72 flex items-center justify-center text-campus-text-secondary">
                             No matching documents found.
                         </div>
                     ) : (
                         <div className="border rounded-lg h-72 overflow-y-auto">
-                            {filteredDocuments.map((docItem) => (
+                            {sortedFilteredDocuments.map((docItem) => (
                                 <button
                                     key={docItem.id}
                                     type="button"
@@ -728,7 +773,7 @@ export default function DocumentsPage() {
                     )}
                 </div>
 
-                <div className="bg-white border shadow rounded-xl p-6">
+                <div className="bg-white border shadow rounded-xl p-4 sm:p-6">
                     <h2 className="font-semibold text-gray-700 mb-3">Document Details</h2>
 
                     {selectedDocument ? (
@@ -780,7 +825,7 @@ export default function DocumentsPage() {
                 </div>
             </div>
 
-            <div className="bg-white border shadow rounded-xl p-6">
+            <div className="bg-white border shadow rounded-xl p-4 sm:p-6">
                 <h2 className="font-semibold text-gray-700 mb-3">Storage Analytics</h2>
 
                 <div className="w-full bg-gray-200 rounded-full h-3">

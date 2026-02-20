@@ -4,12 +4,12 @@ import { Card, CardBody } from "@heroui/card";
 
 export default function ECMemberDashboard() {
     return (
-        <div className="p-6">
-            <h1 className="text-3xl font-bold text-primary-900 mb-6">
+        <div className="p-3 sm:p-6">
+            <h1 className="text-2xl sm:text-3xl font-bold text-primary-900 mb-4 sm:mb-6">
                 EC Member Dashboard
             </h1>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
                 <Card shadow="sm">
                     <CardBody>
                         <p className="text-campus-text-secondary text-sm">Total Students</p>

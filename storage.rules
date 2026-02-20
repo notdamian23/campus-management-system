@@ -5,10 +5,14 @@ service firebase.storage {
       return request.auth != null;
     }
 
+    function profilePath() {
+      return /databases/(default)/documents/profiles/$(request.auth.uid);
+    }
+
     function role() {
-      return firestore.get(
-        /databases/(default)/documents/profiles/$(request.auth.uid)
-      ).data.role;
+      return signedIn() && firestore.exists(profilePath())
+        ? firestore.get(profilePath()).data.role
+        : "";
     }
 
     function isAdmin() {

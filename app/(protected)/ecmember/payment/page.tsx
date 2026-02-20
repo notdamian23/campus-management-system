@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { FiCalendar } from "react-icons/fi";
+import { FiCalendar, FiChevronDown } from "react-icons/fi";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import {
   collection,
@@ -15,6 +15,8 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { app, auth, db } from "@/lib/firebase";
+import { Button } from "@heroui/button";
+import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
 
 type PaymentStudentStatus = "Paid" | "Unpaid";
 
@@ -60,6 +62,8 @@ type Notice = {
   type: "ok" | "err";
   msg: string;
 };
+
+type SortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
 
 function normalizeYear(raw: unknown) {
   const value = String(raw ?? "").trim();
@@ -123,6 +127,26 @@ function formatDate(value: string) {
   return d.toLocaleDateString();
 }
 
+function toMillis(value: unknown) {
+  if (value && typeof value === "object" && typeof (value as { toMillis?: () => number }).toMillis === "function") {
+    return (value as { toMillis: () => number }).toMillis();
+  }
+  if (value && typeof value === "object" && typeof (value as { seconds?: number }).seconds === "number") {
+    return Number((value as { seconds: number }).seconds) * 1000;
+  }
+  const parsed = new Date(value as string | number | Date).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function toPaymentDateMs(payment: Payment) {
+  const rawDate = String(payment.date ?? "").trim();
+  if (rawDate) {
+    const parsed = new Date(`${rawDate}T00:00:00`).getTime();
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return toMillis(payment.createdAt);
+}
+
 function makePaymentRef(paymentId: string) {
   const year = new Date().getFullYear();
   return `PMT-${year}-${paymentId.slice(0, 6).toUpperCase()}`;
@@ -148,6 +172,7 @@ export default function PaymentDashboard() {
 
   const [queryText, setQueryText] = useState("");
   const [dateFilter, setDateFilter] = useState("");
+  const [paymentSortMode, setPaymentSortMode] = useState<SortMode>("latest_to_oldest");
 
   const [title, setTitle] = useState("");
   const [amount, setAmount] = useState("");
@@ -302,6 +327,27 @@ export default function PaymentDashboard() {
       return matchesDate && matchesSearch;
     });
   }, [payments, queryText, dateFilter]);
+
+  const sortedFilteredPayments = useMemo(() => {
+    const list = [...filteredPayments];
+    if (paymentSortMode === "alphabetical") {
+      list.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+      return list;
+    }
+
+    list.sort((a, b) => {
+      const aMs = toPaymentDateMs(a);
+      const bMs = toPaymentDateMs(b);
+      return paymentSortMode === "oldest_to_latest" ? aMs - bMs : bMs - aMs;
+    });
+    return list;
+  }, [filteredPayments, paymentSortMode]);
+
+  const paymentSortLabel = useMemo(() => {
+    if (paymentSortMode === "oldest_to_latest") return "Date, old to new";
+    if (paymentSortMode === "alphabetical") return "Alphabetically, A-Z";
+    return "Date, new to old";
+  }, [paymentSortMode]);
 
   function resetForm() {
     setTitle("");
@@ -491,9 +537,9 @@ export default function PaymentDashboard() {
   }
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="bg-white p-6 shadow rounded-xl border">
-        <h1 className="text-2xl font-bold text-primary-900">Campus Payment Management</h1>
+    <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
+      <div className="bg-white p-4 sm:p-6 shadow rounded-xl border">
+        <h1 className="text-xl sm:text-2xl font-bold text-primary-900">Campus Payment Management</h1>
         <p className="text-campus-text-secondary text-sm mt-1">Track, verify, and manage student payments.</p>
       </div>
 
@@ -510,42 +556,68 @@ export default function PaymentDashboard() {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-4">
+      <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 sm:gap-4">
         <input
           type="text"
           placeholder="Search by title, reference, course, or year..."
           value={queryText}
           onChange={(e) => setQueryText(e.target.value)}
-          className="flex-1 min-w-[260px] px-4 py-3 border rounded-lg shadow-sm"
+          className="w-full lg:flex-1 lg:min-w-[260px] px-4 py-3 border rounded-lg shadow-sm"
         />
 
-        <div className="flex items-center gap-2 px-4 py-3 border rounded-lg shadow-sm bg-white">
+        <div className="w-full sm:w-auto flex items-center gap-2 px-4 py-3 border rounded-lg shadow-sm bg-white">
           <FiCalendar />
           <input
             type="date"
             value={dateFilter}
             onChange={(e) => setDateFilter(e.target.value)}
-            className="outline-none"
+            className="outline-none w-full sm:w-auto"
             aria-label="Filter by date"
           />
         </div>
 
         <button
           onClick={() => setShowAddPaymentForm(true)}
-          className="bg-primary-500 text-white px-4 py-3 rounded-lg shadow hover:bg-primary-600 transition"
+          className="w-full sm:w-auto bg-primary-500 text-white px-4 py-3 rounded-lg shadow hover:bg-primary-600 transition"
         >
           + Add Payment
         </button>
       </div>
 
+      <div className="flex items-center">
+        <Dropdown placement="bottom-start">
+          <DropdownTrigger>
+            <Button
+              variant="light"
+              className="h-auto min-w-0 px-0 text-sm font-medium text-campus-text-primary data-[hover=true]:bg-transparent"
+            >
+              <span className="text-campus-text-secondary mr-1">Sort by:</span>
+              <span>{paymentSortLabel}</span>
+              <FiChevronDown className="ml-1" />
+            </Button>
+          </DropdownTrigger>
+          <DropdownMenu
+            aria-label="Sort payments"
+            disallowEmptySelection
+            selectionMode="single"
+            selectedKeys={new Set([paymentSortMode])}
+            onAction={(key) => setPaymentSortMode(String(key) as SortMode)}
+          >
+            <DropdownItem key="latest_to_oldest">Date, new to old</DropdownItem>
+            <DropdownItem key="oldest_to_latest">Date, old to new</DropdownItem>
+            <DropdownItem key="alphabetical">Alphabetically, A-Z</DropdownItem>
+          </DropdownMenu>
+        </Dropdown>
+      </div>
+
       {showAddPaymentForm && (
-        <div className="bg-white p-6 border rounded-xl shadow space-y-4 animate-slideDown">
-          <div className="flex items-start justify-between">
+        <div className="bg-white p-4 sm:p-6 border rounded-xl shadow space-y-4 animate-slideDown">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
             <h2 className="text-xl font-semibold text-primary-900">Add New Payment</h2>
 
             <button
               onClick={() => setShowAddPaymentForm(false)}
-              className="px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded text-sm"
+              className="w-full sm:w-auto px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded text-sm"
             >
               Close
             </button>
@@ -643,15 +715,15 @@ export default function PaymentDashboard() {
         </div>
       )}
 
-      <div className="bg-white border shadow rounded-lg p-6">
+      <div className="bg-white border shadow rounded-lg p-4 sm:p-6">
         <h3 className="text-lg font-semibold mb-4">Payment List</h3>
 
         {paymentsLoading ? (
           <p className="text-sm text-campus-text-secondary">Loading payments...</p>
-        ) : filteredPayments.length === 0 ? (
+        ) : sortedFilteredPayments.length === 0 ? (
           <p className="text-sm text-campus-text-secondary">No payments found.</p>
         ) : (
-          filteredPayments.map((p) => {
+          sortedFilteredPayments.map((p) => {
             const rows = paymentStudents[p.id] ?? [];
             const paid = rows.length ? rows.filter((s) => s.status === "Paid").length : p.paidCount;
             const unpaid = rows.length ? rows.filter((s) => s.status === "Unpaid").length : p.unpaidCount;
@@ -664,8 +736,8 @@ export default function PaymentDashboard() {
                   : "bg-gray-100 text-campus-text-primary";
 
             return (
-              <div key={p.id} className="border rounded-lg p-4 shadow-sm hover:bg-gray-50 transition mb-4">
-                <div className="flex justify-between items-center gap-4">
+              <div key={p.id} className="border rounded-lg p-3 sm:p-4 shadow-sm hover:bg-gray-50 transition mb-4">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 sm:gap-4">
                   <div>
                     <h4 className="font-semibold text-campus-text-primary">{p.title}</h4>
                     <p className="text-sm text-campus-text-secondary">Reference: {p.ref}</p>
@@ -677,7 +749,7 @@ export default function PaymentDashboard() {
                     </div>
                   </div>
 
-                  <div className="flex flex-col items-end gap-2">
+                  <div className="flex flex-col items-start sm:items-end gap-2">
                     <span className={`px-3 py-1 rounded-full text-xs ${statusClass}`}>{statusLabel}</span>
 
                     <button
@@ -691,7 +763,7 @@ export default function PaymentDashboard() {
 
                 {expandedPayment === p.id && (
                   <div className="mt-4 border-t pt-3">
-                    <div className="flex justify-end mb-3">
+                    <div className="flex justify-start sm:justify-end mb-3">
                       <button
                         onClick={() => exportCsv(p)}
                         className="px-4 py-2 bg-primary-100 hover:bg-primary-200 text-primary-700 font-semibold rounded-lg shadow"
@@ -700,7 +772,7 @@ export default function PaymentDashboard() {
                       </button>
                     </div>
 
-                    <div className="flex gap-4 mb-4">
+                    <div className="flex flex-wrap gap-2 sm:gap-4 mb-4">
                       <span className="px-4 py-1 bg-green-100 text-green-700 rounded-full font-semibold text-sm">
                         Paid: {paid}
                       </span>
@@ -718,7 +790,7 @@ export default function PaymentDashboard() {
                       <p className="text-sm text-campus-text-secondary">No student assignments yet.</p>
                     ) : (
                       <div className="overflow-x-auto">
-                        <table className="w-full text-sm">
+                        <table className="w-full min-w-[760px] text-sm">
                           <thead className="bg-gray-100 text-campus-text-secondary">
                             <tr>
                               <th className="p-2 text-left">Student ID</th>

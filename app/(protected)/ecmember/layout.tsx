@@ -78,15 +78,15 @@ export default function ECLayout({ children }: Props) {
     }, [router]);
 
     if (!allowed) {
-        return <div className="p-6">Loading...</div>;
+        return <div className="p-3 sm:p-6">Loading...</div>;
     }
 
     return (
         <div className="min-h-[100dvh] bg-[#f2f2f2]">
-            <div className="flex">
+            <div className="flex flex-col lg:flex-row">
                 <Sidebar navItems={ecNavItems} enableMobileDrawer titleSize="sm" logoSize={80} />
 
-                <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-10">
+                <main className="flex-1 min-w-0 p-3 sm:p-6 lg:p-10">
                     {children}
                 </main>
             </div>

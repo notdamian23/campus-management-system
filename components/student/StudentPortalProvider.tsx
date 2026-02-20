@@ -108,6 +108,8 @@ type RawEventDoc = {
   location: string;
   yearLevel: string;
   course: string;
+  yearLevels: string[];
+  courses: string[];
   targetStudent: string;
   details: string;
   isPreReg: boolean;
@@ -299,17 +301,31 @@ function toMillis(value: unknown) {
   return 0;
 }
 
-function matchesTarget(
-  eventValue: string,
-  studentValue: string,
-  allLabel: string
-) {
-  const eventTarget = String(eventValue ?? "").trim();
+function toTargetList(value: unknown) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean);
+  }
+
+  const eventTarget = String(value ?? "").trim();
+  if (!eventTarget) return [];
+
+  return eventTarget
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function matchesTarget(eventValue: unknown, studentValue: string, allLabel: string) {
+  const eventTargets = toTargetList(eventValue);
   const studentTarget = String(studentValue ?? "").trim();
 
-  if (!eventTarget) return true;
-  if (normalizeText(eventTarget) === normalizeText(allLabel)) return true;
-  return normalizeText(eventTarget) === normalizeText(studentTarget);
+  if (eventTargets.length === 0) return true;
+  if (eventTargets.some((item) => normalizeText(item) === normalizeText(allLabel))) {
+    return true;
+  }
+  return eventTargets.some((item) => normalizeText(item) === normalizeText(studentTarget));
 }
 
 function matchesSpecificStudentTarget(
@@ -317,15 +333,35 @@ function matchesSpecificStudentTarget(
   schoolId: string,
   studentName: string
 ) {
-  const target = normalizeText(targetValue);
-  if (!target) return true;
-
+  const rawTarget = String(targetValue ?? "").trim();
+  if (!rawTarget) return true;
   const sid = normalizeText(schoolId);
   const name = normalizeText(studentName);
-
   if (!sid && !name) return false;
-  if (target === sid || target === name) return true;
-  if (target.length >= 3 && name.includes(target)) return true;
+
+  const parts = rawTarget
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  for (const part of parts.length ? parts : [rawTarget]) {
+    const normalized = normalizeText(part);
+    const withoutParens = normalizeText(part.replace(/\([^)]*\)/g, " ").trim());
+    const parenMatch = part.match(/\(([^)]+)\)/);
+    const insideParen = normalizeText(parenMatch?.[1] ?? "");
+
+    if (normalized === sid || normalized === name) return true;
+    if (insideParen && insideParen === sid) return true;
+    if (withoutParens && (withoutParens === name || name.includes(withoutParens) || withoutParens.includes(name))) return true;
+
+    if (sid && normalized.includes(sid)) return true;
+    if (name && normalized.includes(name)) return true;
+
+    if (normalized.length >= 3) {
+      if (sid && sid.includes(normalized)) return true;
+      if (name && name.includes(normalized)) return true;
+    }
+  }
 
   return false;
 }
@@ -409,7 +445,12 @@ export function StudentPortalProvider({
       (snap) => {
         const mapped: RawEventDoc[] = snap.docs
           .map((d) => {
-            const data = d.data() as Partial<RawEventDoc>;
+            const data = d.data() as Partial<RawEventDoc> & {
+              yearLevels?: unknown;
+              courses?: unknown;
+            };
+            const yearLevels = toTargetList(data.yearLevels);
+            const courses = toTargetList(data.courses);
             return {
               id: d.id,
               title: String(data.title ?? "Untitled Event"),
@@ -418,8 +459,14 @@ export function StudentPortalProvider({
               timeStart: String(data.timeStart ?? ""),
               timeEnd: String(data.timeEnd ?? ""),
               location: String(data.location ?? ""),
-              yearLevel: String(data.yearLevel ?? "All Years"),
-              course: String(data.course ?? "All Courses"),
+              yearLevel:
+                String(data.yearLevel ?? "").trim() ||
+                (yearLevels.length > 0 ? yearLevels.join(", ") : "All Years"),
+              course:
+                String(data.course ?? "").trim() ||
+                (courses.length > 0 ? courses.join(", ") : "All Courses"),
+              yearLevels,
+              courses,
               targetStudent: String(data.targetStudent ?? ""),
               details: String(data.details ?? ""),
               isPreReg: data.isPreReg === true,
@@ -428,12 +475,12 @@ export function StudentPortalProvider({
           })
           .filter((event) => {
             const courseMatch = matchesTarget(
-              event.course,
+              event.courses.length > 0 ? event.courses : event.course,
               profile.course,
               "All Courses"
             );
             const yearMatch = matchesTarget(
-              event.yearLevel,
+              event.yearLevels.length > 0 ? event.yearLevels : event.yearLevel,
               profile.year,
               "All Years"
             );

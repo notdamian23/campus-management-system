@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FiCalendar } from "react-icons/fi";
+import { FiCalendar, FiChevronDown } from "react-icons/fi";
 
 import { app, auth, db, storage } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
@@ -17,12 +17,23 @@ import {
   onSnapshot,
   orderBy,
   query,
+  setDoc,
   serverTimestamp,
   writeBatch,
 } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
+import { Button } from "@heroui/button";
+import { DatePicker } from "@heroui/date-picker";
+import { TimeInput } from "@heroui/date-input";
+import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
+import { Input } from "@heroui/input";
+import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/modal";
+import { Pagination } from "@heroui/pagination";
+import { Switch } from "@heroui/switch";
 import { Tab, Tabs } from "@heroui/tabs";
+import { addToast } from "@heroui/toast";
 import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { CalendarDate, getLocalTimeZone, Time, today } from "@internationalized/date";
 
 type Role = "teacher" | "student" | "ec";
 type EventStatus = "upcoming" | "ongoing" | "completed";
@@ -38,6 +49,8 @@ type EventDoc = {
   timeEnd?: string;
   yearLevel?: string;
   course?: string;
+  yearLevels?: string[];
+  courses?: string[];
   targetStudent?: string;
   details?: string;
   isPreReg?: boolean;
@@ -91,6 +104,8 @@ type StudentLookup = {
 };
 
 type NotificationListStatus = "scheduled" | "sent";
+type EventFilesTab = "images" | "docs";
+type EventSortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
 
 type NotificationSummary = {
   id: string;
@@ -108,18 +123,33 @@ type NotificationSummary = {
   status: NotificationListStatus;
 };
 
+const ONE_MB_IN_BYTES = 1024 * 1024;
+const MAX_EVENT_FILE_SIZE_BYTES = 10 * ONE_MB_IN_BYTES;
+const MAX_IMAGE_DIMENSION = 2048;
+const IMAGE_COMPRESSION_QUALITY_STEPS = [0.9, 0.82, 0.74, 0.66, 0.58, 0.5, 0.42];
+const IMAGE_COMPRESSION_SCALE_STEPS = [1, 0.9, 0.8, 0.72, 0.64];
+const EVENT_DOC_EXTENSIONS = new Set(["pdf", "doc", "docx"]);
+const EVENT_DOC_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+const EVENT_YEAR_LEVEL_CHOICES = ["1st Year", "2nd Year", "3rd Year", "4th Year"];
+const EVENT_COURSE_CHOICES = [
+  "Computer Engineering",
+  "Mechanical Engineering",
+  "Electrical Engineering",
+  "Electronics Engineering",
+  "Industrial Engineering",
+];
+const ITEMS_PER_PAGE = 5;
+
 function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
 
 function clamp(val: number, min: number, max: number) {
   return Math.max(min, Math.min(max, val));
-}
-
-function clampWrap(val: number, min: number, max: number) {
-  if (val < min) return max;
-  if (val > max) return min;
-  return val;
 }
 
 function parseTime12ToMinutes(t?: string) {
@@ -183,16 +213,54 @@ function to12hParts(time24: string): TimeParts {
   return { hour, minute: clamp(minute || 0, 0, 59), ampm };
 }
 
-function to24hString(parts: TimeParts): string {
-  let h = parts.hour % 12;
-  if (parts.ampm === "PM") h += 12;
-  if (parts.ampm === "AM" && parts.hour === 12) h = 0;
-  return `${pad2(h)}:${pad2(parts.minute)}`;
-}
-
 function format12h(time24: string) {
   const p = to12hParts(time24);
   return `${p.hour}:${pad2(p.minute)} ${p.ampm}`;
+}
+
+function isoDateToday() {
+  const now = new Date();
+  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+}
+
+function toIsoDate(value: { year: number; month: number; day: number } | null) {
+  if (!value) return "";
+  return `${value.year}-${pad2(value.month)}-${pad2(value.day)}`;
+}
+
+function toCalendarDate(isoDate: string) {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  if (!y || !m || !d) {
+    return today(getLocalTimeZone());
+  }
+  return new CalendarDate(y, m, d);
+}
+
+function now24h() {
+  const now = new Date();
+  return `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+}
+
+function parse24h(time24: string) {
+  const [hourRaw, minuteRaw] = String(time24 || "").split(":");
+  const hour = clamp(Number(hourRaw) || 0, 0, 23);
+  const minute = clamp(Number(minuteRaw) || 0, 0, 59);
+  return { hour, minute };
+}
+
+function to24hStringFromValue(value: { hour: number; minute: number } | null) {
+  if (!value) return "00:00";
+  return `${pad2(value.hour)}:${pad2(value.minute)}`;
+}
+
+function toTimeValue(time24: string) {
+  const { hour, minute } = parse24h(time24);
+  return new Time(hour, minute);
+}
+
+function toMinutesFrom24h(time24: string) {
+  const { hour, minute } = parse24h(time24);
+  return hour * 60 + minute;
 }
 
 function toMillis(value: any): number {
@@ -243,295 +311,104 @@ function csvCell(value: string | number) {
   return raw;
 }
 
-function TimePickerModal({
-  open,
-  label,
-  value24,
-  onClose,
-  onConfirm,
-}: {
-  open: boolean;
-  label: string;
-  value24: string;
-  onClose: () => void;
-  onConfirm: (newValue24: string) => void;
-}) {
-  const [parts, setParts] = useState<TimeParts>(() => to12hParts(value24));
-  const hourRef = useRef<HTMLInputElement | null>(null);
-  const minRef = useRef<HTMLInputElement | null>(null);
+function getFileExtension(filename: string) {
+  const i = filename.lastIndexOf(".");
+  return i >= 0 ? filename.slice(i + 1).toLowerCase() : "";
+}
 
-  const [hourDraft, setHourDraft] = useState("07");
-  const [minDraft, setMinDraft] = useState("00");
+function isAllowedEventDocument(file: File) {
+  const ext = getFileExtension(file.name);
+  if (EVENT_DOC_EXTENSIONS.has(ext)) return true;
+  return EVENT_DOC_MIME_TYPES.has(file.type);
+}
 
-  const hourBufRef = useRef<{ s: string; t: number }>({ s: "", t: 0 });
-  const minBufRef = useRef<{ s: string; t: number }>({ s: "", t: 0 });
+function toMegabytesText(bytes: number) {
+  return `${(bytes / ONE_MB_IN_BYTES).toFixed(2)}MB`;
+}
 
-  useEffect(() => {
-    if (!open) return;
+function toCompressedImageName(filename: string) {
+  const i = filename.lastIndexOf(".");
+  const stem = i >= 0 ? filename.slice(0, i) : filename;
+  return `${stem}.jpg`;
+}
 
-    const p = to12hParts(value24);
-    setParts(p);
-    setHourDraft(pad2(p.hour));
-    setMinDraft(pad2(p.minute));
-    hourBufRef.current = { s: "", t: 0 };
-    minBufRef.current = { s: "", t: 0 };
-
-    setTimeout(() => {
-      hourRef.current?.focus();
-      hourRef.current?.select();
-    }, 0);
-  }, [open, value24]);
-
-  if (!open) return null;
-
-  const toggleAmPm = () => setParts((p) => ({ ...p, ampm: p.ampm === "AM" ? "PM" : "AM" }));
-
-  const commitHour = (n: number) => {
-    const next = clamp(n, 1, 12);
-    setParts((p) => {
-      const prev = p.hour;
-      const crossedUp = prev === 11 && next === 12;
-      const crossedDown = prev === 12 && next === 11;
-
-      return {
-        ...p,
-        hour: next,
-        ampm: crossedUp || crossedDown ? (p.ampm === "AM" ? "PM" : "AM") : p.ampm,
-      };
-    });
-
-    setHourDraft(pad2(next));
-  };
-
-  const commitMinute = (n: number) => {
-    const next = clamp(n, 0, 59);
-    setParts((p) => ({ ...p, minute: next }));
-    setMinDraft(pad2(next));
-  };
-
-  const incHour = () =>
-    setParts((p) => {
-      const nextHour = clampWrap(p.hour + 1, 1, 12);
-      const crossed = p.hour === 11 && nextHour === 12;
-      const nextAmpm = crossed ? (p.ampm === "AM" ? "PM" : "AM") : p.ampm;
-
-      setHourDraft(pad2(nextHour));
-      hourBufRef.current = { s: "", t: 0 };
-      return { ...p, hour: nextHour, ampm: nextAmpm };
-    });
-
-  const decHour = () =>
-    setParts((p) => {
-      const nextHour = clampWrap(p.hour - 1, 1, 12);
-      const crossed = p.hour === 12 && nextHour === 11;
-      const nextAmpm = crossed ? (p.ampm === "AM" ? "PM" : "AM") : p.ampm;
-
-      setHourDraft(pad2(nextHour));
-      hourBufRef.current = { s: "", t: 0 };
-      return { ...p, hour: nextHour, ampm: nextAmpm };
-    });
-
-  const incMin = () =>
-    setParts((p) => {
-      const next = clampWrap(p.minute + 1, 0, 59);
-      setMinDraft(pad2(next));
-      minBufRef.current = { s: "", t: 0 };
-      return { ...p, minute: next };
-    });
-
-  const decMin = () =>
-    setParts((p) => {
-      const next = clampWrap(p.minute - 1, 0, 59);
-      setMinDraft(pad2(next));
-      minBufRef.current = { s: "", t: 0 };
-      return { ...p, minute: next };
-    });
-
-  const confirmNow = () => {
-    const h = clamp(Number(hourDraft) || parts.hour, 1, 12);
-    const m = clamp(Number(minDraft) || parts.minute, 0, 59);
-    onConfirm(to24hString({ ...parts, hour: h, minute: m }));
-  };
-
-  const onKeyGlobal = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") onClose();
-    if (e.key === "Enter") confirmNow();
-  };
-
-  const handleDigitBuffer = (which: "hour" | "min", digit: string, focusNext?: () => void) => {
-    const refB = which === "hour" ? hourBufRef : minBufRef;
-    const now = Date.now();
-
-    let s = refB.current.s;
-    if (now - refB.current.t > 900) s = "";
-    s = (s + digit).slice(-2);
-
-    refB.current = { s, t: now };
-
-    if (which === "hour") {
-      setHourDraft(s);
-      if (s.length === 2) {
-        commitHour(Number(s));
-        focusNext?.();
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Unable to compress image."));
+        return;
       }
-    } else {
-      setMinDraft(s);
-      if (s.length === 2) commitMinute(Number(s));
+      resolve(blob);
+    }, type, quality);
+  });
+}
+
+function loadImage(file: File) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error(`"${file.name}" is not a readable image.`));
+    };
+
+    image.src = objectUrl;
+  });
+}
+
+async function compressImageForUpload(file: File, maxBytes: number) {
+  const image = await loadImage(file);
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+  if (!sourceWidth || !sourceHeight) {
+    throw new Error(`"${file.name}" has invalid image dimensions.`);
+  }
+
+  const longestEdge = Math.max(sourceWidth, sourceHeight);
+  const baseRatio = longestEdge > MAX_IMAGE_DIMENSION ? MAX_IMAGE_DIMENSION / longestEdge : 1;
+  const baseWidth = Math.max(1, Math.round(sourceWidth * baseRatio));
+  const baseHeight = Math.max(1, Math.round(sourceHeight * baseRatio));
+
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Image compression is not available in this browser.");
+
+  let smallestBlob: Blob | null = null;
+
+  for (const scale of IMAGE_COMPRESSION_SCALE_STEPS) {
+    canvas.width = Math.max(1, Math.round(baseWidth * scale));
+    canvas.height = Math.max(1, Math.round(baseHeight * scale));
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    for (const quality of IMAGE_COMPRESSION_QUALITY_STEPS) {
+      const blob = await canvasToBlob(canvas, "image/jpeg", quality);
+      if (!smallestBlob || blob.size < smallestBlob.size) smallestBlob = blob;
+
+      if (blob.size <= maxBytes) {
+        return new File([blob], toCompressedImageName(file.name), {
+          type: "image/jpeg",
+          lastModified: Date.now(),
+        });
+      }
     }
-  };
+  }
 
-  return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center">
-      <button aria-label="Close time picker" onClick={onClose} className="absolute inset-0 bg-black/55" />
+  if (!smallestBlob) {
+    throw new Error(`Unable to compress "${file.name}".`);
+  }
 
-      <div className="relative w-[340px] rounded-xl bg-[#2b2b2b] text-white shadow-2xl border border-white/10">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-          <p className="font-semibold">{label}</p>
-          <button onClick={onClose} className="text-white/70 hover:text-white text-xl leading-none" aria-label="Close">
-            ×
-          </button>
-        </div>
-
-        <div className="px-6 py-5">
-          <div className="flex items-center justify-center gap-6">
-            <div className="flex flex-col items-center">
-              <button onClick={incHour} className="text-[#1ee6c5] text-xl font-bold hover:opacity-80" aria-label="Increase hour">
-                ▲
-              </button>
-
-              <input
-                ref={hourRef}
-                type="text"
-                inputMode="numeric"
-                value={hourDraft}
-                onKeyDown={(e) => {
-                  onKeyGlobal(e);
-
-                  if (e.key === "ArrowUp") {
-                    e.preventDefault();
-                    incHour();
-                    return;
-                  }
-                  if (e.key === "ArrowDown") {
-                    e.preventDefault();
-                    decHour();
-                    return;
-                  }
-
-                  if (/^\d$/.test(e.key)) {
-                    e.preventDefault();
-                    handleDigitBuffer("hour", e.key, () => {
-                      minRef.current?.focus();
-                      minRef.current?.select();
-                    });
-                    return;
-                  }
-
-                  if (e.key === "Backspace") {
-                    e.preventDefault();
-                    hourBufRef.current = { s: "", t: 0 };
-                    setHourDraft("");
-                    return;
-                  }
-
-                  if (e.key.length === 1) e.preventDefault();
-                }}
-                onFocus={(e) => e.currentTarget.select()}
-                onBlur={() => {
-                  const n = Number(hourDraft);
-                  if (!Number.isFinite(n)) {
-                    setHourDraft(pad2(parts.hour));
-                    return;
-                  }
-                  commitHour(n);
-                }}
-                className="mt-2 mb-2 w-[70px] rounded-lg bg-white text-black text-3xl font-bold text-center py-2 outline-none"
-              />
-
-              <button onClick={decHour} className="text-[#1ee6c5] text-xl font-bold hover:opacity-80" aria-label="Decrease hour">
-                ▼
-              </button>
-            </div>
-
-            <div className="text-3xl font-bold">:</div>
-
-            <div className="flex flex-col items-center">
-              <button onClick={incMin} className="text-[#1ee6c5] text-xl font-bold hover:opacity-80" aria-label="Increase minute">
-                ▲
-              </button>
-
-              <input
-                ref={minRef}
-                type="text"
-                inputMode="numeric"
-                value={minDraft}
-                onKeyDown={(e) => {
-                  onKeyGlobal(e);
-
-                  if (e.key === "ArrowUp") {
-                    e.preventDefault();
-                    incMin();
-                    return;
-                  }
-                  if (e.key === "ArrowDown") {
-                    e.preventDefault();
-                    decMin();
-                    return;
-                  }
-
-                  if (/^\d$/.test(e.key)) {
-                    e.preventDefault();
-                    handleDigitBuffer("min", e.key);
-                    return;
-                  }
-
-                  if (e.key === "Backspace") {
-                    e.preventDefault();
-                    minBufRef.current = { s: "", t: 0 };
-                    setMinDraft("");
-                    return;
-                  }
-
-                  if (e.key.length === 1) e.preventDefault();
-                }}
-                onFocus={(e) => e.currentTarget.select()}
-                onBlur={() => {
-                  const n = Number(minDraft);
-                  if (!Number.isFinite(n)) {
-                    setMinDraft(pad2(parts.minute));
-                    return;
-                  }
-                  commitMinute(n);
-                }}
-                className="mt-2 mb-2 w-[70px] rounded-lg bg-white text-black text-3xl font-bold text-center py-2 outline-none"
-              />
-
-              <button onClick={decMin} className="text-[#1ee6c5] text-xl font-bold hover:opacity-80" aria-label="Decrease minute">
-                ▼
-              </button>
-            </div>
-
-            <button
-              onClick={toggleAmPm}
-              className="h-[58px] px-4 rounded-lg bg-white/10 hover:bg-white/15 border border-white/10 font-semibold"
-              aria-label="Toggle AM/PM"
-            >
-              {parts.ampm}
-            </button>
-          </div>
-
-          <div className="mt-6 flex justify-end gap-3">
-            <button onClick={onClose} className="px-4 py-2 rounded-lg bg-white/10 hover:bg-white/15">
-              Cancel
-            </button>
-            <button onClick={confirmNow} className="px-4 py-2 rounded-lg bg-[#2f7dff] hover:opacity-90 font-semibold">
-              OK
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+  return new File([smallestBlob], toCompressedImageName(file.name), {
+    type: "image/jpeg",
+    lastModified: Date.now(),
+  });
 }
 
 function StatMini({ label, value }: { label: string; value: number }) {
@@ -552,18 +429,21 @@ export default function EventDashboard() {
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | EventStatus>("all");
   const [eventDateFilter, setEventDateFilter] = useState("");
+  const [eventSortMode, setEventSortMode] = useState<EventSortMode>("latest_to_oldest");
+  const [eventPage, setEventPage] = useState(1);
   const [recipientType, setRecipientType] = useState<"all" | "course" | "year" | "student">("all");
 
   const [notifTitle, setNotifTitle] = useState("");
-  const [notifDate, setNotifDate] = useState("");
+  const [notifDate, setNotifDate] = useState<string>(() => isoDateToday());
+  const [notifDateValue, setNotifDateValue] = useState<any>(() => toCalendarDate(isoDateToday()));
   const [notifMessage, setNotifMessage] = useState("");
   const [notifCourse, setNotifCourse] = useState("Computer Engineering");
   const [notifYear, setNotifYear] = useState("1st Year");
   const [notifSearchName, setNotifSearchName] = useState("");
   const [notifSearchId, setNotifSearchId] = useState("");
   const [selectedNotifStudents, setSelectedNotifStudents] = useState<StudentLookup[]>([]);
-  const [notifScheduled24, setNotifScheduled24] = useState("07:00");
-  const [timePickerOpen, setTimePickerOpen] = useState<null | "scheduled">(null);
+  const [notifScheduled24, setNotifScheduled24] = useState<string>(() => now24h());
+  const [notifScheduledValue, setNotifScheduledValue] = useState<Time | null>(() => toTimeValue(now24h()));
   const [sendingNotif, setSendingNotif] = useState(false);
   const [notifError, setNotifError] = useState("");
   const [notifMsg, setNotifMsg] = useState("");
@@ -572,21 +452,36 @@ export default function EventDashboard() {
   const [studentOptions, setStudentOptions] = useState<StudentLookup[]>([]);
   const [showStudentDropdown, setShowStudentDropdown] = useState(false);
   const studentPickerRef = useRef<HTMLDivElement | null>(null);
+  const [eventSearchName, setEventSearchName] = useState("");
+  const [selectedEventStudents, setSelectedEventStudents] = useState<StudentLookup[]>([]);
+  const [showEventStudentDropdown, setShowEventStudentDropdown] = useState(false);
+  const [eventYearSearch, setEventYearSearch] = useState("");
+  const [selectedEventYearLevels, setSelectedEventYearLevels] = useState<string[]>([]);
+  const [showEventYearDropdown, setShowEventYearDropdown] = useState(false);
+  const [isAllYearsExplicit, setIsAllYearsExplicit] = useState(false);
+  const [eventCourseSearch, setEventCourseSearch] = useState("");
+  const [selectedEventCourses, setSelectedEventCourses] = useState<string[]>([]);
+  const [showEventCourseDropdown, setShowEventCourseDropdown] = useState(false);
+  const [isAllCoursesExplicit, setIsAllCoursesExplicit] = useState(false);
+  const [registrantsModalOpen, setRegistrantsModalOpen] = useState(false);
+  const eventStudentPickerRef = useRef<HTMLDivElement | null>(null);
+  const eventYearPickerRef = useRef<HTMLDivElement | null>(null);
+  const eventCoursePickerRef = useRef<HTMLDivElement | null>(null);
 
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [location, setLocation] = useState("");
-  const [date, setDate] = useState("");
-  const [yearLevel, setYearLevel] = useState("All Years");
-  const [course, setCourse] = useState("All Courses");
+  const [date, setDate] = useState<string>(() => isoDateToday());
+  const [eventDateValue, setEventDateValue] = useState<any>(() => toCalendarDate(isoDateToday()));
   const [details, setDetails] = useState("");
   const [isPreReg, setIsPreReg] = useState(false);
   const [withPayment, setWithPayment] = useState(false);
-  const [eventTargetStudent, setEventTargetStudent] = useState("");
 
   const [eventScheduled24, setEventScheduled24] = useState("07:00");
-  const [eventTimePickerOpen, setEventTimePickerOpen] = useState<null | "scheduled">(null);
+  const [eventStartTimeValue, setEventStartTimeValue] = useState<Time | null>(() => toTimeValue("07:00"));
+  const [eventEnd24, setEventEnd24] = useState("08:00");
+  const [eventEndTimeValue, setEventEndTimeValue] = useState<Time | null>(() => toTimeValue("08:00"));
 
   const [preRegSlots, setPreRegSlots] = useState<number>(50);
 
@@ -604,6 +499,8 @@ export default function EventDashboard() {
   const [notificationSearchText, setNotificationSearchText] = useState("");
   const [notificationStatusFilter, setNotificationStatusFilter] = useState<"all" | NotificationListStatus>("all");
   const [notificationDateFilter, setNotificationDateFilter] = useState("");
+  const [notificationSortMode, setNotificationSortMode] = useState<EventSortMode>("latest_to_oldest");
+  const [notificationPage, setNotificationPage] = useState(1);
 
   const [currentUser, setCurrentUser] = useState<any>(null);
 
@@ -611,8 +508,21 @@ export default function EventDashboard() {
   const [eventImages, setEventImages] = useState<Record<string, EventFile[]>>({});
   const [eventDocs, setEventDocs] = useState<Record<string, EventFile[]>>({});
   const [eventRegistrations, setEventRegistrations] = useState<Record<string, RegistrationDoc[]>>({});
+  const [eventFilesTab, setEventFilesTab] = useState<EventFilesTab>("images");
+  const [viewAllFilesModal, setViewAllFilesModal] = useState<{
+    open: boolean;
+    eventId: string | null;
+    eventTitle: string;
+    kind: EventFilesTab;
+  }>({
+    open: false,
+    eventId: null,
+    eventTitle: "",
+    kind: "images",
+  });
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string>("");
+  const [uploadMsg, setUploadMsg] = useState<string>("");
   const [exportingEventId, setExportingEventId] = useState<string | null>(null);
   const [exportMsg, setExportMsg] = useState<string>("");
   const [exportError, setExportError] = useState<string>("");
@@ -683,24 +593,142 @@ export default function EventDashboard() {
   }, [functions, isECUser, studentsLoading, studentOptions]);
 
   useEffect(() => {
-    if (!showNotificationForm) return;
+    if (!showNotificationForm && !showAddEventForm) return;
     if (!isECUser) return;
     if (studentOptions.length > 0) return;
     void loadStudentsForNotifications();
-  }, [showNotificationForm, isECUser, studentOptions.length, loadStudentsForNotifications]);
+  }, [showNotificationForm, showAddEventForm, isECUser, studentOptions.length, loadStudentsForNotifications]);
 
   useEffect(() => {
-    if (recipientType !== "student") return;
+    if (recipientType !== "student" && !showAddEventForm) return;
 
     const onDocMouseDown = (event: MouseEvent) => {
-      if (!studentPickerRef.current) return;
-      if (studentPickerRef.current.contains(event.target as Node)) return;
+      const target = event.target as Node;
+      if (studentPickerRef.current?.contains(target)) return;
+      if (eventStudentPickerRef.current?.contains(target)) return;
+      if (eventYearPickerRef.current?.contains(target)) return;
+      if (eventCoursePickerRef.current?.contains(target)) return;
       setShowStudentDropdown(false);
+      setShowEventStudentDropdown(false);
+      setShowEventYearDropdown(false);
+      setShowEventCourseDropdown(false);
     };
 
     document.addEventListener("mousedown", onDocMouseDown);
     return () => document.removeEventListener("mousedown", onDocMouseDown);
-  }, [recipientType]);
+  }, [recipientType, showAddEventForm]);
+
+  const mapNotificationSummaryRows = useCallback(
+    (docs: Array<{ id: string; data: () => any }>): NotificationSummary[] => {
+      if (!currentUser) return [];
+
+      const grouped = new Map<string, NotificationSummary>();
+
+      docs.forEach((d) => {
+        const data = d.data() as {
+          dispatchId?: string;
+          title?: string;
+          message?: string;
+          date?: string;
+          scheduledTime?: string;
+          recipientType?: string;
+          course?: string;
+          yearLevel?: string;
+          targetStudent?: string;
+          recipientCount?: number;
+          createdAt?: any;
+          createdByUid?: string;
+        };
+
+        const createdByUid = String(data.createdByUid ?? "");
+        if (createdByUid && createdByUid !== currentUser.uid) return;
+
+        const title = String(data.title ?? "Notification");
+        const message = String(data.message ?? "");
+        const date = String(data.date ?? "");
+        const scheduledTime = String(data.scheduledTime ?? "");
+        const createdAtMs = toMillis(data.createdAt);
+        const recipientTypeRaw = String(data.recipientType ?? "all");
+        const recipientType: NotificationSummary["recipientType"] =
+          recipientTypeRaw === "course" || recipientTypeRaw === "year" || recipientTypeRaw === "student"
+            ? recipientTypeRaw
+            : "all";
+        const explicitRecipientCount = Number(data.recipientCount ?? 0);
+
+        const dispatchId = String(data.dispatchId ?? "").trim();
+        const fallbackGroupKey = [
+          createdByUid || currentUser.uid,
+          title,
+          message,
+          date,
+          scheduledTime,
+          String(createdAtMs ? Math.floor(createdAtMs / 60000) : 0),
+        ].join("|");
+        const groupKey = dispatchId || fallbackGroupKey;
+
+        if (!grouped.has(groupKey)) {
+          grouped.set(groupKey, {
+            id: d.id,
+            dispatchId: groupKey,
+            title,
+            message,
+            date,
+            scheduledTime,
+            recipientType,
+            course: String(data.course ?? ""),
+            yearLevel: String(data.yearLevel ?? ""),
+            targetStudent: String(data.targetStudent ?? ""),
+            createdAt: data.createdAt,
+            recipientCount: explicitRecipientCount > 0 ? explicitRecipientCount : 0,
+            status: computeNotificationStatus(date, scheduledTime),
+          });
+        }
+
+        const current = grouped.get(groupKey)!;
+        if (explicitRecipientCount > 0) {
+          current.recipientCount = Math.max(current.recipientCount, explicitRecipientCount);
+        } else {
+          current.recipientCount += 1;
+        }
+        if (toMillis(data.createdAt) > toMillis(current.createdAt)) {
+          current.createdAt = data.createdAt;
+        }
+      });
+
+      return Array.from(grouped.values()).sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+    },
+    [currentUser]
+  );
+
+  const refreshSentNotificationsOnce = useCallback(async () => {
+    if (!currentUser || !isECUser) {
+      setNotifications([]);
+      setNotificationsLoading(false);
+      return;
+    }
+
+    try {
+      const ownQ = query(collection(db, "profiles", currentUser.uid, "notifications"), orderBy("createdAt", "desc"), limit(1200));
+      const ownSnap = await getDocs(ownQ);
+      let rows = mapNotificationSummaryRows(ownSnap.docs);
+
+      if (rows.length === 0) {
+        try {
+          const legacyQ = query(collectionGroup(db, "notifications"), orderBy("createdAt", "desc"), limit(1200));
+          const legacySnap = await getDocs(legacyQ);
+          rows = mapNotificationSummaryRows(legacySnap.docs);
+        } catch {
+          // Ignore legacy fallback errors and keep rows from own profile query.
+        }
+      }
+
+      setNotifications(rows);
+    } catch {
+      setNotifications((prev) => prev);
+    } finally {
+      setNotificationsLoading(false);
+    }
+  }, [currentUser, isECUser, mapNotificationSummaryRows]);
 
   // Live sent notifications (grouped by dispatchId)
   useEffect(() => {
@@ -711,90 +739,22 @@ export default function EventDashboard() {
     }
 
     setNotificationsLoading(true);
-    const qy = query(collectionGroup(db, "notifications"), orderBy("createdAt", "desc"), limit(1200));
+    const qy = query(collection(db, "profiles", currentUser.uid, "notifications"), orderBy("createdAt", "desc"), limit(1200));
+    void refreshSentNotificationsOnce();
 
     const unsub = onSnapshot(
       qy,
       (snap) => {
-        const grouped = new Map<string, NotificationSummary>();
-
-        snap.docs.forEach((d) => {
-          const data = d.data() as {
-            dispatchId?: string;
-            title?: string;
-            message?: string;
-            date?: string;
-            scheduledTime?: string;
-            recipientType?: string;
-            course?: string;
-            yearLevel?: string;
-            targetStudent?: string;
-            createdAt?: any;
-            createdByUid?: string;
-          };
-
-          const createdByUid = String(data.createdByUid ?? "");
-          if (createdByUid && createdByUid !== currentUser.uid) return;
-
-          const title = String(data.title ?? "Notification");
-          const message = String(data.message ?? "");
-          const date = String(data.date ?? "");
-          const scheduledTime = String(data.scheduledTime ?? "");
-          const createdAtMs = toMillis(data.createdAt);
-          const recipientTypeRaw = String(data.recipientType ?? "all");
-          const recipientType: NotificationSummary["recipientType"] =
-            recipientTypeRaw === "course" || recipientTypeRaw === "year" || recipientTypeRaw === "student"
-              ? recipientTypeRaw
-              : "all";
-
-          const dispatchId = String(data.dispatchId ?? "").trim();
-          const fallbackGroupKey = [
-            createdByUid || currentUser.uid,
-            title,
-            message,
-            date,
-            scheduledTime,
-            String(createdAtMs ? Math.floor(createdAtMs / 60000) : 0),
-          ].join("|");
-          const groupKey = dispatchId || fallbackGroupKey;
-
-          if (!grouped.has(groupKey)) {
-            grouped.set(groupKey, {
-              id: d.id,
-              dispatchId: groupKey,
-              title,
-              message,
-              date,
-              scheduledTime,
-              recipientType,
-              course: String(data.course ?? ""),
-              yearLevel: String(data.yearLevel ?? ""),
-              targetStudent: String(data.targetStudent ?? ""),
-              createdAt: data.createdAt,
-              recipientCount: 0,
-              status: computeNotificationStatus(date, scheduledTime),
-            });
-          }
-
-          const current = grouped.get(groupKey)!;
-          current.recipientCount += 1;
-          if (toMillis(data.createdAt) > toMillis(current.createdAt)) {
-            current.createdAt = data.createdAt;
-          }
-        });
-
-        const rows = Array.from(grouped.values()).sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-        setNotifications(rows);
+        setNotifications(mapNotificationSummaryRows(snap.docs));
         setNotificationsLoading(false);
       },
       () => {
-        setNotifications([]);
-        setNotificationsLoading(false);
+        void refreshSentNotificationsOnce();
       }
     );
 
     return () => unsub();
-  }, [currentUser, isECUser]);
+  }, [currentUser, isECUser, mapNotificationSummaryRows, refreshSentNotificationsOnce]);
 
   // Live events
   useEffect(() => {
@@ -907,6 +867,18 @@ export default function EventDashboard() {
     () => new Set(selectedNotifStudents.map((student) => student.uid)),
     [selectedNotifStudents]
   );
+  const selectedEventStudentIds = useMemo(
+    () => new Set(selectedEventStudents.map((student) => student.uid)),
+    [selectedEventStudents]
+  );
+  const selectedEventYearLevelsSet = useMemo(
+    () => new Set(selectedEventYearLevels),
+    [selectedEventYearLevels]
+  );
+  const selectedEventCoursesSet = useMemo(
+    () => new Set(selectedEventCourses),
+    [selectedEventCourses]
+  );
 
   const filteredStudentOptions = useMemo(() => {
     if (recipientType !== "student") return [];
@@ -924,6 +896,43 @@ export default function EventDashboard() {
       .slice(0, 20);
   }, [recipientType, notifSearchName, notifSearchId, studentOptions, selectedNotifStudentIds]);
 
+  const filteredEventStudentOptions = useMemo(() => {
+    const query = eventSearchName.trim().toLowerCase();
+    return studentOptions
+      .filter((student) => {
+        if (selectedEventStudentIds.has(student.uid)) return false;
+        if (!query) return true;
+        return student.searchText.includes(query);
+      })
+      .slice(0, 20);
+  }, [eventSearchName, studentOptions, selectedEventStudentIds]);
+
+  const filteredEventYearOptions = useMemo(() => {
+    const query = eventYearSearch.trim().toLowerCase();
+    return EVENT_YEAR_LEVEL_CHOICES.filter((item) => {
+      if (selectedEventYearLevelsSet.has(item)) return false;
+      if (!query) return true;
+      return item.toLowerCase().includes(query);
+    }).slice(0, 20);
+  }, [eventYearSearch, selectedEventYearLevelsSet]);
+
+  const filteredEventCourseOptions = useMemo(() => {
+    const query = eventCourseSearch.trim().toLowerCase();
+    return EVENT_COURSE_CHOICES.filter((item) => {
+      if (selectedEventCoursesSet.has(item)) return false;
+      if (!query) return true;
+      return item.toLowerCase().includes(query);
+    }).slice(0, 20);
+  }, [eventCourseSearch, selectedEventCoursesSet]);
+  const showAllYearsOption = useMemo(() => {
+    const query = eventYearSearch.trim().toLowerCase();
+    return !query || "all years".includes(query);
+  }, [eventYearSearch]);
+  const showAllCoursesOption = useMemo(() => {
+    const query = eventCourseSearch.trim().toLowerCase();
+    return !query || "all courses".includes(query);
+  }, [eventCourseSearch]);
+
   const filteredNotifications = useMemo(() => {
     const s = notificationSearchText.trim().toLowerCase();
     return notifications.filter((item) => {
@@ -940,6 +949,86 @@ export default function EventDashboard() {
     });
   }, [notifications, notificationSearchText, notificationStatusFilter, notificationDateFilter]);
 
+  const sortedFilteredEvents = useMemo(() => {
+    const list = [...filteredEvents];
+
+    if (eventSortMode === "alphabetical") {
+      list.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+      return list;
+    }
+
+    list.sort((a, b) => {
+      const aMs = getDateTimeMs(a.date, a.scheduledTime || a.timeStart) || toMillis(a.createdAt);
+      const bMs = getDateTimeMs(b.date, b.scheduledTime || b.timeStart) || toMillis(b.createdAt);
+      return eventSortMode === "oldest_to_latest" ? aMs - bMs : bMs - aMs;
+    });
+
+    return list;
+  }, [filteredEvents, eventSortMode]);
+
+  const sortedFilteredNotifications = useMemo(() => {
+    const list = [...filteredNotifications];
+
+    if (notificationSortMode === "alphabetical") {
+      list.sort((a, b) => (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" }));
+      return list;
+    }
+
+    list.sort((a, b) => {
+      const aMs = toMillis(a.createdAt) || getDateTimeMs(a.date, a.scheduledTime);
+      const bMs = toMillis(b.createdAt) || getDateTimeMs(b.date, b.scheduledTime);
+      return notificationSortMode === "oldest_to_latest" ? aMs - bMs : bMs - aMs;
+    });
+
+    return list;
+  }, [filteredNotifications, notificationSortMode]);
+
+  const eventTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(sortedFilteredEvents.length / ITEMS_PER_PAGE)),
+    [sortedFilteredEvents.length]
+  );
+  const paginatedEvents = useMemo(() => {
+    const start = (eventPage - 1) * ITEMS_PER_PAGE;
+    return sortedFilteredEvents.slice(start, start + ITEMS_PER_PAGE);
+  }, [sortedFilteredEvents, eventPage]);
+
+  const notificationTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(sortedFilteredNotifications.length / ITEMS_PER_PAGE)),
+    [sortedFilteredNotifications.length]
+  );
+  const paginatedNotifications = useMemo(() => {
+    const start = (notificationPage - 1) * ITEMS_PER_PAGE;
+    return sortedFilteredNotifications.slice(start, start + ITEMS_PER_PAGE);
+  }, [sortedFilteredNotifications, notificationPage]);
+
+  useEffect(() => {
+    setEventPage(1);
+  }, [searchText, statusFilter, eventDateFilter, eventSortMode]);
+
+  useEffect(() => {
+    setNotificationPage(1);
+  }, [notificationSearchText, notificationStatusFilter, notificationDateFilter, notificationSortMode]);
+
+  useEffect(() => {
+    setEventPage((prev) => Math.min(Math.max(prev, 1), eventTotalPages));
+  }, [eventTotalPages]);
+
+  useEffect(() => {
+    setNotificationPage((prev) => Math.min(Math.max(prev, 1), notificationTotalPages));
+  }, [notificationTotalPages]);
+
+  const eventSortLabel = useMemo(() => {
+    if (eventSortMode === "oldest_to_latest") return "Date, old to new";
+    if (eventSortMode === "alphabetical") return "Alphabetically, A-Z";
+    return "Date, new to old";
+  }, [eventSortMode]);
+
+  const notificationSortLabel = useMemo(() => {
+    if (notificationSortMode === "oldest_to_latest") return "Date, old to new";
+    if (notificationSortMode === "alphabetical") return "Alphabetically, A-Z";
+    return "Date, new to old";
+  }, [notificationSortMode]);
+
   const summary = useMemo(() => {
     const total = events.length;
     const upcoming = events.filter((e) => computeStatus(e) === "upcoming").length;
@@ -952,7 +1041,24 @@ export default function EventDashboard() {
     () => Object.values(eventRegistrations).reduce((sum, rows) => sum + rows.length, 0),
     [eventRegistrations]
   );
-  const hasSpecificTarget = eventTargetStudent.trim().length > 0;
+  const hasSpecificTarget = selectedEventStudents.length > 0;
+  const eventYearLevelLabel = selectedEventYearLevels.length > 0 ? selectedEventYearLevels.join(", ") : "All Years";
+  const eventCourseLabel = selectedEventCourses.length > 0 ? selectedEventCourses.join(", ") : "All Courses";
+  const viewAllModalImages = viewAllFilesModal.eventId ? eventImages[viewAllFilesModal.eventId] ?? [] : [];
+  const viewAllModalDocs = viewAllFilesModal.eventId ? eventDocs[viewAllFilesModal.eventId] ?? [] : [];
+
+  const openViewAllFilesModal = (eventId: string, eventTitle: string, kind: EventFilesTab) => {
+    setViewAllFilesModal({
+      open: true,
+      eventId,
+      eventTitle,
+      kind,
+    });
+  };
+
+  const closeViewAllFilesModal = () => {
+    setViewAllFilesModal((prev) => ({ ...prev, open: false }));
+  };
 
   const statusChip = (status: EventStatus) => {
     if (status === "completed") return "bg-green-100 text-green-700";
@@ -997,27 +1103,174 @@ export default function EventDashboard() {
     return downloadURL;
   }
 
-  async function handlePickFiles(eventId: string, kind: "images" | "docs", files: FileList | null) {
-    if (!files || files.length === 0) return;
-
+  function downloadEventFile(file: EventFile, fallbackName: string) {
     setUploadErr("");
-    setUploadingFor(eventId);
+    if (!file.downloadURL) {
+      setUploadErr(`"${file.name || fallbackName}" has no download URL.`);
+      return;
+    }
 
     try {
-      for (const file of Array.from(files)) {
-        if (kind === "images" && !file.type.startsWith("image/")) {
-          throw new Error("Only image files are allowed for Images.");
+      const safeName = String(file.name || fallbackName).trim() || fallbackName;
+      const params = new URLSearchParams({ url: file.downloadURL, name: safeName });
+      const anchor = document.createElement("a");
+      anchor.href = `/api/download?${params.toString()}`;
+      anchor.download = safeName;
+      anchor.style.display = "none";
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+    } catch (e: any) {
+      setUploadErr(e?.message || "Failed to start download.");
+    }
+  }
+
+  async function handlePickFiles(
+    eventId: string,
+    kind: "images" | "docs",
+    files: FileList | File[] | null
+  ) {
+    if (!files || files.length === 0) {
+      const msg = "No files were selected.";
+      setUploadErr(msg);
+      addToast({
+        title: "No files selected",
+        description: msg,
+        color: "warning",
+        timeout: 4500,
+      });
+      return;
+    }
+
+    const pickedFiles = Array.isArray(files) ? files : Array.from(files);
+    if (pickedFiles.length === 0) {
+      const msg = "No files were selected.";
+      setUploadErr(msg);
+      addToast({
+        title: "No files selected",
+        description: msg,
+        color: "warning",
+        timeout: 4500,
+      });
+      return;
+    }
+
+    setUploadErr("");
+    setUploadMsg(`Uploading ${pickedFiles.length} file${pickedFiles.length === 1 ? "" : "s"}...`);
+    setUploadingFor(eventId);
+    let uploaded = 0;
+    const rejected: string[] = [];
+
+    try {
+      for (const file of pickedFiles) {
+        if (kind === "images") {
+          if (!file.type.startsWith("image/")) {
+            rejected.push(`${file.name}: only image files are allowed.`);
+            continue;
+          }
+
+          let compressed: File;
+          try {
+            compressed = await compressImageForUpload(file, MAX_EVENT_FILE_SIZE_BYTES);
+          } catch (e: any) {
+            rejected.push(`${file.name}: ${e?.message || "Image compression failed."}`);
+            continue;
+          }
+
+          if (compressed.size > MAX_EVENT_FILE_SIZE_BYTES) {
+            rejected.push(
+              `${file.name}: still ${toMegabytesText(compressed.size)} after compression. Max is 10MB.`
+            );
+            continue;
+          }
+
+          try {
+            await uploadToEvent(eventId, kind, compressed);
+            uploaded += 1;
+          } catch (e: any) {
+            rejected.push(`${file.name}: ${e?.message || "Upload failed."}`);
+          }
+          continue;
         }
-        if (file.size > 10 * 1024 * 1024) {
-          throw new Error("Max file size is 10MB.");
+
+        if (!isAllowedEventDocument(file)) {
+          rejected.push(`${file.name}: only PDF, DOC, or DOCX files are allowed.`);
+          continue;
         }
-        await uploadToEvent(eventId, kind, file);
+
+        if (file.size > MAX_EVENT_FILE_SIZE_BYTES) {
+          rejected.push(`${file.name}: exceeds 10MB.`);
+          continue;
+        }
+
+        try {
+          await uploadToEvent(eventId, kind, file);
+          uploaded += 1;
+        } catch (e: any) {
+          rejected.push(`${file.name}: ${e?.message || "Upload failed."}`);
+        }
       }
     } catch (e: any) {
-      setUploadErr(e?.message || "Upload failed.");
+      const msg = e?.message || "Unexpected upload error.";
+      rejected.push(msg);
     } finally {
       setUploadingFor(null);
     }
+
+    if (uploaded > 0) {
+      const successMsg = `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}${kind === "images" ? " (auto-compressed)." : "."}`;
+      setUploadMsg(successMsg);
+      addToast({
+        title: "Upload complete",
+        description: successMsg,
+        color: "success",
+        timeout: 4500,
+      });
+    }
+
+    if (rejected.length > 0) {
+      const preview = rejected.slice(0, 2).join(" ");
+      const overflow = rejected.length > 2 ? ` (+${rejected.length - 2} more)` : "";
+      const errorMsg = `${preview}${overflow}`;
+      setUploadErr(errorMsg);
+      addToast({
+        title: uploaded > 0 ? "Some files were not uploaded" : "Upload failed",
+        description: errorMsg,
+        color: uploaded > 0 ? "warning" : "danger",
+        timeout: 7000,
+      });
+    }
+
+    if (uploaded === 0 && rejected.length === 0) {
+      const msg = "No files were uploaded.";
+      setUploadErr(msg);
+      addToast({
+        title: "Upload failed",
+        description: msg,
+        color: "danger",
+        timeout: 5000,
+      });
+    }
+  }
+
+  function handleFileInputChange(
+    eventId: string,
+    kind: "images" | "docs",
+    e: React.ChangeEvent<HTMLInputElement>
+  ) {
+    const pickedFiles = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = "";
+
+    if (pickedFiles.length > 0) {
+      addToast({
+        title: kind === "images" ? "Preparing image upload" : "Preparing document upload",
+        description: `${pickedFiles.length} file${pickedFiles.length === 1 ? "" : "s"} selected.`,
+        color: "success",
+        timeout: 2500,
+      });
+    }
+
+    void handlePickFiles(eventId, kind, pickedFiles);
   }
 
   async function deleteEventFile(eventId: string, kind: "images" | "docs", fileDocId: string, path: string) {
@@ -1108,15 +1361,62 @@ export default function EventDashboard() {
         await batch.commit();
       }
 
+      if (currentUser?.uid) {
+        await setDoc(doc(db, "profiles", currentUser.uid, "notifications", `dispatch_${dispatchId}`), {
+          title,
+          message,
+          date: notifDate,
+          scheduledTime,
+          type: "announcement",
+          dispatchId,
+          recipientType,
+          course: recipientType === "course" ? notifCourse : "",
+          yearLevel: recipientType === "year" ? notifYear : "",
+          targetStudent: recipientType === "student" ? selectedLabel : "",
+          recipientCount: recipients.length,
+          createdByUid: currentUser.uid,
+          createdAt: serverTimestamp(),
+          read: true,
+        });
+      }
+
+      const optimisticCreatedAt = new Date();
+      const optimisticRow: NotificationSummary = {
+        id: dispatchId,
+        dispatchId,
+        title,
+        message,
+        date: notifDate,
+        scheduledTime,
+        recipientType,
+        course: recipientType === "course" ? notifCourse : "",
+        yearLevel: recipientType === "year" ? notifYear : "",
+        targetStudent: recipientType === "student" ? selectedLabel : "",
+        createdAt: optimisticCreatedAt,
+        recipientCount: recipients.length,
+        status: computeNotificationStatus(notifDate, scheduledTime),
+      };
+
+      setNotifications((prev) => {
+        const next = [optimisticRow, ...prev.filter((item) => item.dispatchId !== dispatchId)];
+        return next.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+      });
+      setNotificationPage(1);
+      void refreshSentNotificationsOnce();
+
       setNotifMsg(`Notification sent to ${recipients.length} student(s).`);
       setNotifTitle("");
-      setNotifDate("");
+      const nextNotifDate = isoDateToday();
+      const nextNotifTime = now24h();
+      setNotifDate(nextNotifDate);
+      setNotifDateValue(toCalendarDate(nextNotifDate));
       setNotifMessage("");
       setNotifSearchName("");
       setNotifSearchId("");
       setSelectedNotifStudents([]);
       setShowStudentDropdown(false);
-      setNotifScheduled24("07:00");
+      setNotifScheduled24(nextNotifTime);
+      setNotifScheduledValue(toTimeValue(nextNotifTime));
       setRecipientType("all");
       setNotifCourse("Computer Engineering");
       setNotifYear("1st Year");
@@ -1136,22 +1436,36 @@ export default function EventDashboard() {
     if (!isECUser) return setSaveError("Only EC members can create events.");
     if (!title.trim()) return setSaveError("Title is required.");
     if (!date) return setSaveError("Date is required.");
-    if (isPreReg && (!preRegSlots || preRegSlots < 1)) return setSaveError("Pre-reg slots must be at least 1.");
+    if (toMinutesFrom24h(eventEnd24) <= toMinutesFrom24h(eventScheduled24)) {
+      return setSaveError("End time must be later than start time.");
+    }
+    if (isPreReg && (Number.isNaN(preRegSlots) || preRegSlots < 0)) {
+      return setSaveError("Pre-reg slots must be at least 0.");
+    }
 
     try {
       setSaving(true);
       const slots = isPreReg ? preRegSlots : null;
-      const studentTarget = eventTargetStudent.trim();
-      const isSpecificTarget = Boolean(studentTarget);
+      const studentTarget = selectedEventStudents
+        .map((student) => `${student.studentName} (${student.schoolId})`)
+        .join("; ");
+      const startTime = format12h(eventScheduled24);
+      const endTime = format12h(eventEnd24);
+      const yearLevelValue = selectedEventYearLevels.length > 0 ? selectedEventYearLevels.join(", ") : "All Years";
+      const courseValue = selectedEventCourses.length > 0 ? selectedEventCourses.join(", ") : "All Courses";
 
       await addDoc(collection(db, "events"), {
         title: title.trim(),
         location: location.trim(),
         date,
-        scheduledTime: format12h(eventScheduled24),
+        scheduledTime: startTime,
+        timeStart: startTime,
+        timeEnd: endTime,
 
-        yearLevel: isPreReg || isSpecificTarget ? "All Years" : yearLevel,
-        course: isPreReg || isSpecificTarget ? "All Courses" : course,
+        yearLevel: isPreReg ? "All Years" : yearLevelValue,
+        course: isPreReg ? "All Courses" : courseValue,
+        yearLevels: isPreReg ? [] : selectedEventYearLevels,
+        courses: isPreReg ? [] : selectedEventCourses,
         targetStudent: isPreReg ? "" : studentTarget,
 
         details: details.trim(),
@@ -1171,15 +1485,28 @@ export default function EventDashboard() {
 
       setTitle("");
       setLocation("");
-      setDate("");
-      setYearLevel("All Years");
-      setCourse("All Courses");
+      const nextEventDate = isoDateToday();
+      setDate(nextEventDate);
+      setEventDateValue(toCalendarDate(nextEventDate));
+      setSelectedEventYearLevels([]);
+      setSelectedEventCourses([]);
+      setIsAllYearsExplicit(false);
+      setIsAllCoursesExplicit(false);
       setDetails("");
       setIsPreReg(false);
       setWithPayment(false);
-      setEventTargetStudent("");
+      setSelectedEventStudents([]);
+      setEventYearSearch("");
+      setEventCourseSearch("");
+      setEventSearchName("");
+      setShowEventYearDropdown(false);
+      setShowEventCourseDropdown(false);
+      setShowEventStudentDropdown(false);
       setPreRegSlots(50);
       setEventScheduled24("07:00");
+      setEventStartTimeValue(toTimeValue("07:00"));
+      setEventEnd24("08:00");
+      setEventEndTimeValue(toTimeValue("08:00"));
       setShowAddEventForm(false);
     } catch (err: any) {
       setSaveError(err?.message || "Failed to save event.");
@@ -1334,64 +1661,100 @@ export default function EventDashboard() {
 
       {/* SUMMARY */}
       <div className="bg-white border rounded-xl shadow-sm p-3">
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           <StatMini label="Total" value={summary.total} />
           <StatMini label="Upcoming" value={summary.upcoming} />
           <StatMini label="Ongoing" value={summary.ongoing} />
           <StatMini label="Completed" value={summary.completed} />
           <StatMini label="Participants" value={totalParticipants} />
-          <div className="hidden sm:block" />
         </div>
       </div>
 
       {/* ACTIONS */}
       <div className="bg-white border rounded-xl shadow-sm p-3 space-y-3">
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            onClick={() => setShowNotificationForm((v) => !v)}
-            className="py-2 rounded-lg bg-primary-500 text-white text-sm font-semibold"
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <Button
+            color="primary"
+            className="text-sm font-semibold"
+            onPress={() =>
+              setShowNotificationForm((v) => {
+                const next = !v;
+                if (next) {
+                  const nextNotifDate = isoDateToday();
+                  const nextNotifTime = now24h();
+                  setNotifDate(nextNotifDate);
+                  setNotifDateValue(toCalendarDate(nextNotifDate));
+                  setNotifScheduled24(nextNotifTime);
+                  setNotifScheduledValue(toTimeValue(nextNotifTime));
+                  setShowAddEventForm(false);
+                }
+                return next;
+              })
+            }
           >
-            Notify
-          </button>
+            Create notification
+          </Button>
 
-          <button onClick={() => setShowAddEventForm((v) => !v)} className="py-2 rounded-lg bg-primary-500 text-white text-sm font-semibold">
-            Add
-          </button>
+          <Button
+            color="primary"
+            className="text-sm font-semibold"
+            onPress={() =>
+              setShowAddEventForm((v) => {
+                const next = !v;
+                if (next) {
+                  const nextEventDate = isoDateToday();
+                  setDate(nextEventDate);
+                  setEventDateValue(toCalendarDate(nextEventDate));
+                  setShowNotificationForm(false);
+                }
+                return next;
+              })
+            }
+          >
+            Create Event
+          </Button>
         </div>
       </div>
 
       {/* ADD EVENT FORM */}
       {showAddEventForm && (
-        <div className="bg-white p-6 border rounded-xl shadow space-y-4 animate-slideDown">
-          <div className="flex items-start justify-between">
+        <div className="bg-white p-4 sm:p-6 border rounded-xl shadow space-y-4 animate-slideDown">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <h2 className="text-xl font-semibold text-primary-900">Add New Event</h2>
 
-            <div className="flex flex-col items-end space-y-3">
-              <label className="flex items-center gap-3 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={isPreReg}
-                  onChange={(e) => {
-                    const checked = e.target.checked;
-                    setIsPreReg(checked);
-                    if (checked) {
-                      setYearLevel("All Years");
-                      setCourse("All Courses");
-                      setEventTargetStudent("");
-                    }
-                  }}
-                  className="w-5 h-5"
-                />
-                <span>Pre-Registration</span>
-              </label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Switch
+                isSelected={isPreReg}
+                onValueChange={(checked) => {
+                  setIsPreReg(checked);
+                  if (checked) {
+                    setRegistrantsModalOpen(false);
+                    setSelectedEventYearLevels([]);
+                    setSelectedEventCourses([]);
+                    setIsAllYearsExplicit(false);
+                    setIsAllCoursesExplicit(false);
+                    setSelectedEventStudents([]);
+                    setEventYearSearch("");
+                    setEventCourseSearch("");
+                    setEventSearchName("");
+                    setShowEventYearDropdown(false);
+                    setShowEventCourseDropdown(false);
+                    setShowEventStudentDropdown(false);
+                  }
+                }}
+              >
+                Pre-Registration
+              </Switch>
 
-              <label className="flex items-center gap-3 cursor-pointer select-none">
-                <input type="checkbox" checked={withPayment} onChange={(e) => setWithPayment(e.target.checked)} className="w-5 h-5" />
-                <span>With Payment</span>
-              </label>
+              <Switch
+                isSelected={withPayment}
+                onValueChange={(checked) => setWithPayment(checked)}
+              >
+                With Payment
+              </Switch>
             </div>
           </div>
-
+          
           <div>
             <label className="text-sm font-medium">Title</label>
             <input value={title} onChange={(e) => setTitle(e.target.value)} className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm" />
@@ -1404,75 +1767,391 @@ export default function EventDashboard() {
 
           <div>
             <label className="text-sm font-medium">Date</label>
-            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm" />
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Scheduled Time</label>
-            <button
-              type="button"
-              onClick={() => setEventTimePickerOpen("scheduled")}
-              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm bg-white text-left hover:bg-gray-50"
-            >
-              {format12h(eventScheduled24)}
-            </button>
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Year Level</label>
-            <select
-              value={yearLevel}
-              onChange={(e) => setYearLevel(e.target.value)}
-              disabled={isPreReg || hasSpecificTarget}
-              className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${
-                isPreReg || hasSpecificTarget ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
-              }`}
-            >
-              <option>All Years</option>
-              <option>1st Year</option>
-              <option>2nd Year</option>
-              <option>3rd Year</option>
-              <option>4th Year</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Course</label>
-            <select
-              value={course}
-              onChange={(e) => setCourse(e.target.value)}
-              disabled={isPreReg || hasSpecificTarget}
-              className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${
-                isPreReg || hasSpecificTarget ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
-              }`}
-            >
-              <option>All Courses</option>
-              <option>Computer Engineering</option>
-              <option>Mechanical Engineering</option>
-              <option>Electrical Engineering</option>
-              <option>Electronics Engineering</option>
-              <option>Industrial Engineering</option>
-            </select>
-
-            {isPreReg && <p className="text-xs text-campus-text-secondary mt-1">Pre-Registration events are open to all year levels and courses.</p>}
-            {!isPreReg && hasSpecificTarget && (
-              <p className="text-xs text-campus-text-secondary mt-1">Specific student targeting sets Year Level and Course to all students.</p>
-            )}
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Specific Student (Optional)</label>
-            <input
-              value={eventTargetStudent}
-              onChange={(e) => setEventTargetStudent(e.target.value)}
-              disabled={isPreReg}
-              placeholder="Enter School ID or Student Name"
-              className={`w-full mt-1 px-4 py-3 border rounded-lg shadow-sm ${
-                isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
-              }`}
+            <DatePicker
+              aria-label="Event date"
+              className="w-full mt-1"
+              value={eventDateValue}
+              onChange={(value) => {
+                setEventDateValue(value);
+                setDate(toIsoDate(value));
+              }}
+              granularity="day"
             />
-            <p className="text-xs text-campus-text-secondary mt-1">
-              Leave blank to use Year Level/Course targeting. If filled, this event is sent only to this student.
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-sm font-medium">Start Time</label>
+              <TimeInput
+                aria-label="Event start time"
+                className="w-full mt-1"
+                value={eventStartTimeValue}
+                onChange={(value) => {
+                  setEventStartTimeValue(value);
+                  setEventScheduled24(to24hStringFromValue(value));
+                }}
+                granularity="minute"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium">End Time</label>
+              <TimeInput
+                aria-label="Event end time"
+                className="w-full mt-1"
+                value={eventEndTimeValue}
+                onChange={(value) => {
+                  setEventEndTimeValue(value);
+                  setEventEnd24(to24hStringFromValue(value));
+                }}
+                granularity="minute"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Registrants</label>
+            <Button
+              variant="bordered"
+              className="w-full justify-between"
+              isDisabled={isPreReg}
+              onPress={() => {
+                setShowEventYearDropdown(false);
+                setShowEventCourseDropdown(false);
+                setShowEventStudentDropdown(false);
+                setRegistrantsModalOpen(true);
+              }}
+            >
+              Registrants
+            </Button>
+            <Modal
+              isOpen={registrantsModalOpen}
+              onOpenChange={(open) => {
+                setRegistrantsModalOpen(open);
+                if (!open) {
+                  setShowEventYearDropdown(false);
+                  setShowEventCourseDropdown(false);
+                  setShowEventStudentDropdown(false);
+                }
+              }}
+              size="2xl"
+              scrollBehavior="inside"
+            >
+              <ModalContent>
+                {(onClose) => (
+                  <>
+                    <ModalHeader>Registrants</ModalHeader>
+                    <ModalBody>
+                      <div className="space-y-3">
+                        <div>
+                          <label className="text-xs font-medium text-campus-text-secondary">Year Level</label>
+
+                          {(isAllYearsExplicit || selectedEventYearLevels.length > 0) && (
+                            <div className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isPreReg ? "bg-gray-100" : "bg-white"}`}>
+                              <div className="flex flex-wrap gap-2">
+                                {isAllYearsExplicit && selectedEventYearLevels.length === 0 ? (
+                                  <span className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                    <span className="font-medium">All Years</span>
+                                    <button
+                                      type="button"
+                                      className="text-campus-text-secondary hover:text-campus-text-primary"
+                                      onClick={() => {
+                                        setIsAllYearsExplicit(false);
+                                      }}
+                                      aria-label="Remove All Years"
+                                    >
+                                      x
+                                    </button>
+                                  </span>
+                                ) : (
+                                  selectedEventYearLevels.map((item) => (
+                                    <span key={item} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                      <span className="font-medium">{item}</span>
+                                      <button
+                                        type="button"
+                                        className="text-campus-text-secondary hover:text-campus-text-primary"
+                                        onClick={() => {
+                                          setIsAllYearsExplicit(false);
+                                          setSelectedEventYearLevels((prev) => prev.filter((x) => x !== item));
+                                        }}
+                                        aria-label={`Remove ${item}`}
+                                      >
+                                        x
+                                      </button>
+                                    </span>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          <div ref={eventYearPickerRef} className="mt-2 space-y-2">
+                            <input
+                              value={eventYearSearch}
+                              onChange={(e) => {
+                                setEventYearSearch(e.target.value);
+                                setShowEventYearDropdown(true);
+                              }}
+                              onFocus={() => setShowEventYearDropdown(true)}
+                              disabled={isPreReg}
+                              placeholder="Search year level"
+                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
+                                isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
+                              }`}
+                            />
+
+                            {!isPreReg && showEventYearDropdown && (
+                              <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
+                                {!showAllYearsOption && filteredEventYearOptions.length === 0 ? (
+                                  <p className="px-4 py-2 text-sm text-campus-text-secondary">
+                                    {selectedEventYearLevels.length === EVENT_YEAR_LEVEL_CHOICES.length
+                                      ? "All year levels selected."
+                                      : "No matching year levels."}
+                                  </p>
+                                ) : (
+                                  <>
+                                    {showAllYearsOption && (
+                                      <button
+                                        type="button"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                        onClick={() => {
+                                          setSelectedEventYearLevels([]);
+                                          setIsAllYearsExplicit(true);
+                                          setEventYearSearch("");
+                                          setShowEventYearDropdown(true);
+                                        }}
+                                      >
+                                        <div className="text-sm font-medium text-campus-text-primary">All Years</div>
+                                      </button>
+                                    )}
+
+                                    {filteredEventYearOptions.map((item) => (
+                                      <button
+                                        key={item}
+                                        type="button"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                        onClick={() => {
+                                          setIsAllYearsExplicit(false);
+                                          setSelectedEventYearLevels((prev) => (prev.includes(item) ? prev : [...prev, item]));
+                                          setEventYearSearch("");
+                                          setShowEventYearDropdown(true);
+                                        }}
+                                      >
+                                        <div className="text-sm font-medium text-campus-text-primary">{item}</div>
+                                      </button>
+                                    ))}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-xs font-medium text-campus-text-secondary">Course</label>
+
+                          {(isAllCoursesExplicit || selectedEventCourses.length > 0) && (
+                            <div className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isPreReg ? "bg-gray-100" : "bg-white"}`}>
+                              <div className="flex flex-wrap gap-2">
+                                {isAllCoursesExplicit && selectedEventCourses.length === 0 ? (
+                                  <span className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                    <span className="font-medium">All Courses</span>
+                                    <button
+                                      type="button"
+                                      className="text-campus-text-secondary hover:text-campus-text-primary"
+                                      onClick={() => {
+                                        setIsAllCoursesExplicit(false);
+                                      }}
+                                      aria-label="Remove All Courses"
+                                    >
+                                      x
+                                    </button>
+                                  </span>
+                                ) : (
+                                  selectedEventCourses.map((item) => (
+                                    <span key={item} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                      <span className="font-medium">{item}</span>
+                                      <button
+                                        type="button"
+                                        className="text-campus-text-secondary hover:text-campus-text-primary"
+                                        onClick={() => {
+                                          setIsAllCoursesExplicit(false);
+                                          setSelectedEventCourses((prev) => prev.filter((x) => x !== item));
+                                        }}
+                                        aria-label={`Remove ${item}`}
+                                      >
+                                        x
+                                      </button>
+                                    </span>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          <div ref={eventCoursePickerRef} className="mt-2 space-y-2">
+                            <input
+                              value={eventCourseSearch}
+                              onChange={(e) => {
+                                setEventCourseSearch(e.target.value);
+                                setShowEventCourseDropdown(true);
+                              }}
+                              onFocus={() => setShowEventCourseDropdown(true)}
+                              disabled={isPreReg}
+                              placeholder="Search course"
+                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
+                                isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
+                              }`}
+                            />
+
+                            {!isPreReg && showEventCourseDropdown && (
+                              <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
+                                {!showAllCoursesOption && filteredEventCourseOptions.length === 0 ? (
+                                  <p className="px-4 py-2 text-sm text-campus-text-secondary">
+                                    {selectedEventCourses.length === EVENT_COURSE_CHOICES.length
+                                      ? "All courses selected."
+                                      : "No matching courses."}
+                                  </p>
+                                ) : (
+                                  <>
+                                    {showAllCoursesOption && (
+                                      <button
+                                        type="button"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                        onClick={() => {
+                                          setSelectedEventCourses([]);
+                                          setIsAllCoursesExplicit(true);
+                                          setEventCourseSearch("");
+                                          setShowEventCourseDropdown(true);
+                                        }}
+                                      >
+                                        <div className="text-sm font-medium text-campus-text-primary">All Courses</div>
+                                      </button>
+                                    )}
+
+                                    {filteredEventCourseOptions.map((item) => (
+                                      <button
+                                        key={item}
+                                        type="button"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                        onClick={() => {
+                                          setIsAllCoursesExplicit(false);
+                                          setSelectedEventCourses((prev) => (prev.includes(item) ? prev : [...prev, item]));
+                                          setEventCourseSearch("");
+                                          setShowEventCourseDropdown(true);
+                                        }}
+                                      >
+                                        <div className="text-sm font-medium text-campus-text-primary">{item}</div>
+                                      </button>
+                                    ))}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-xs font-medium text-campus-text-secondary">To *</label>
+
+                          {selectedEventStudents.length > 0 && (
+                            <div className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isPreReg ? "bg-gray-100" : "bg-white"}`}>
+                              <div className="flex flex-wrap gap-2">
+                                {selectedEventStudents.map((student) => (
+                                  <span key={student.uid} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                    <span className="font-medium">{student.studentName}</span>
+                                    <span className="text-campus-text-secondary">({student.schoolId})</span>
+                                    <button
+                                      type="button"
+                                      className="text-campus-text-secondary hover:text-campus-text-primary"
+                                      onClick={() => {
+                                        setSelectedEventStudents((prev) => prev.filter((x) => x.uid !== student.uid));
+                                      }}
+                                      aria-label={`Remove ${student.studentName}`}
+                                    >
+                                      x
+                                    </button>
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <div ref={eventStudentPickerRef} className="mt-2 space-y-2">
+                            <input
+                              value={eventSearchName}
+                              onChange={(e) => {
+                                setEventSearchName(e.target.value);
+                                setShowEventStudentDropdown(true);
+                              }}
+                              onFocus={() => setShowEventStudentDropdown(true)}
+                              disabled={isPreReg}
+                              placeholder="Search by name"
+                              className={`w-full px-3 py-2 border rounded-lg text-sm ${isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""}`}
+                            />
+
+                            {!isPreReg && showEventStudentDropdown && (
+                              <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
+                                {studentsLoading ? (
+                                  <p className="px-4 py-2 text-sm text-campus-text-secondary">Loading students...</p>
+                                ) : filteredEventStudentOptions.length === 0 ? (
+                                  <p className="px-4 py-2 text-sm text-campus-text-secondary">No matching students.</p>
+                                ) : (
+                                  filteredEventStudentOptions.map((student) => (
+                                    <button
+                                      key={student.uid}
+                                      type="button"
+                                      className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                      onClick={() => {
+                                        setSelectedEventStudents((prev) =>
+                                          prev.some((x) => x.uid === student.uid) ? prev : [...prev, student]
+                                        );
+                                        setEventSearchName("");
+                                        setShowEventStudentDropdown(true);
+                                      }}
+                                    >
+                                      <div className="text-sm font-medium text-campus-text-primary">{student.studentName}</div>
+                                      <div className="text-xs text-campus-text-secondary">
+                                        {student.schoolId} | {student.course || "Unassigned"} | {student.year || "Unassigned"}
+                                      </div>
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </ModalBody>
+                    <ModalFooter>
+                      <Button
+                        variant="light"
+                        onPress={() => {
+                          setShowEventYearDropdown(false);
+                          setShowEventCourseDropdown(false);
+                          setShowEventStudentDropdown(false);
+                          onClose();
+                        }}
+                      >
+                        Done
+                      </Button>
+                    </ModalFooter>
+                  </>
+                )}
+              </ModalContent>
+            </Modal>
+
+            {isPreReg && <p className="text-xs text-campus-text-secondary">Pre-Registration events are open to all year levels and courses.</p>}
+            {!isPreReg && hasSpecificTarget && (
+              <p className="text-xs text-campus-text-secondary">Year Level and Course are optional when targeting specific students.</p>
+            )}
+            {!isPreReg && (
+              <p className="text-xs text-campus-text-secondary">
+                Current filters: Year Level - {eventYearLevelLabel}; Course - {eventCourseLabel}.
+              </p>
+            )}
+            <p className="text-xs text-campus-text-secondary">
+              Choose one or more specific students if needed. You can still set Year Level and Course filters.
             </p>
           </div>
 
@@ -1484,12 +2163,22 @@ export default function EventDashboard() {
           {isPreReg && (
             <div>
               <label className="text-sm font-medium">Pre-Registration Slots</label>
-              <input
+              <Input
+                aria-label="Pre-registration slots"
                 type="number"
-                min={1}
-                value={preRegSlots}
-                onChange={(e) => setPreRegSlots(Number(e.target.value))}
-                className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
+                min={0}
+                step={1}
+                value={String(preRegSlots)}
+                onValueChange={(value) => {
+                  const parsed = Number(value);
+                  if (Number.isNaN(parsed)) {
+                    setPreRegSlots(0);
+                    return;
+                  }
+
+                  setPreRegSlots(Math.max(0, Math.trunc(parsed)));
+                }}
+                className="w-full mt-1"
                 placeholder="e.g. 100"
               />
               <p className="text-xs text-campus-text-secondary mt-1">This is the maximum number of students allowed to pre-register.</p>
@@ -1517,7 +2206,7 @@ export default function EventDashboard() {
 
       {/* NOTIFICATION FORM */}
       {showNotificationForm && (
-        <div className="bg-white p-6 border rounded-xl shadow space-y-4 animate-slideDown">
+        <div className="bg-white p-4 sm:p-6 border rounded-xl shadow space-y-4 animate-slideDown">
           <h2 className="text-xl font-semibold text-blue-600">Create Notification</h2>
 
           <div>
@@ -1527,18 +2216,30 @@ export default function EventDashboard() {
 
           <div>
             <label className="text-sm font-medium">Date</label>
-            <input value={notifDate} onChange={(e) => setNotifDate(e.target.value)} type="date" className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm" />
+            <DatePicker
+              aria-label="Notification date"
+              className="w-full mt-1"
+              value={notifDateValue}
+              onChange={(value) => {
+                setNotifDateValue(value);
+                setNotifDate(toIsoDate(value));
+              }}
+              granularity="day"
+            />
           </div>
 
           <div>
             <label className="text-sm font-medium">Scheduled Time</label>
-            <button
-              type="button"
-              onClick={() => setTimePickerOpen("scheduled")}
-              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm bg-white text-left hover:bg-gray-50"
-            >
-              {format12h(notifScheduled24)}
-            </button>
+            <TimeInput
+              aria-label="Notification scheduled time"
+              className="w-full mt-1"
+              value={notifScheduledValue}
+              onChange={(value) => {
+                setNotifScheduledValue(value);
+                setNotifScheduled24(to24hStringFromValue(value));
+              }}
+              granularity="minute"
+            />
           </div>
 
           <div>
@@ -1687,7 +2388,7 @@ export default function EventDashboard() {
             type="button"
             onClick={handleSendNotification}
             disabled={sendingNotif || roleLoading || !isECUser}
-            className="px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
+            className="w-full sm:w-auto px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
           >
             {sendingNotif ? "Sending..." : "Send Notification"}
           </button>
@@ -1698,11 +2399,24 @@ export default function EventDashboard() {
       <div className="bg-white border rounded-xl shadow-sm p-4 sm:p-6">
         <Tabs
           aria-label="Dashboard lists"
+          fullWidth
           selectedKey={listTab}
           onSelectionChange={(key) => setListTab(String(key) as "events" | "notifications")}
-          classNames={{ tabList: "mb-4" }}
+          classNames={{
+            tabList: "mb-4 w-full grid grid-cols-2",
+            tab: "w-full min-w-0 px-2",
+            tabContent: "truncate text-xs sm:text-sm",
+          }}
         >
-          <Tab key="events" title="Event List">
+          <Tab
+            key="events"
+            title={
+              <span className="whitespace-nowrap">
+                <span className="sm:hidden">Events</span>
+                <span className="hidden sm:inline">Event List</span>
+              </span>
+            }
+          >
             <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                 <input
@@ -1730,16 +2444,42 @@ export default function EventDashboard() {
                 </div>
               </div>
 
+              <div className="flex items-center">
+                <Dropdown placement="bottom-start">
+                  <DropdownTrigger>
+                    <Button
+                      variant="light"
+                      className="h-auto min-w-0 px-0 text-sm font-medium text-campus-text-primary data-[hover=true]:bg-transparent"
+                    >
+                      <span className="text-campus-text-secondary mr-1">Sort by:</span>
+                      <span>{eventSortLabel}</span>
+                      <FiChevronDown className="ml-1" />
+                    </Button>
+                  </DropdownTrigger>
+                  <DropdownMenu
+                    aria-label="Sort events"
+                    disallowEmptySelection
+                    selectionMode="single"
+                    selectedKeys={new Set([eventSortMode])}
+                    onAction={(key) => setEventSortMode(String(key) as EventSortMode)}
+                  >
+                    <DropdownItem key="latest_to_oldest">Date, new to old</DropdownItem>
+                    <DropdownItem key="oldest_to_latest">Date, old to new</DropdownItem>
+                    <DropdownItem key="alphabetical">Alphabetically, A-Z</DropdownItem>
+                  </DropdownMenu>
+                </Dropdown>
+              </div>
+
               {exportError && <p className="text-sm text-red-600">{exportError}</p>}
               {exportMsg && <p className="text-sm text-green-600">{exportMsg}</p>}
 
         {eventsLoading ? (
           <p className="text-sm text-campus-text-secondary">Loading events...</p>
-        ) : filteredEvents.length === 0 ? (
+        ) : sortedFilteredEvents.length === 0 ? (
           <p className="text-sm text-campus-text-secondary">No events match your filter/search.</p>
         ) : (
           <div className="space-y-3">
-            {filteredEvents.map((ev) => {
+            {paginatedEvents.map((ev) => {
               const liveStatus = computeStatus(ev);
               const hasSlots = ev.isPreReg && typeof ev.preRegSlots === "number";
               const registrations = eventRegistrations[ev.id];
@@ -1757,15 +2497,21 @@ export default function EventDashboard() {
 
               const imgs = eventImages[ev.id] ?? [];
               const docs = eventDocs[ev.id] ?? [];
+              const previewImgs = imgs.slice(0, 3);
+              const previewDocs = docs.slice(0, 3);
 
               return (
                 <div
                   key={ev.id}
                   className="border rounded-lg p-3 sm:p-4 shadow-sm hover:bg-gray-50 transition cursor-pointer"
-                  onClick={() => setExpandedEventId(expandedEventId === ev.id ? null : ev.id)}
+                  onClick={() => {
+                    const nextExpanded = expandedEventId === ev.id ? null : ev.id;
+                    setExpandedEventId(nextExpanded);
+                    if (nextExpanded) setEventFilesTab("images");
+                  }}
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
                       <h4 className="font-semibold text-campus-text-primary">{ev.title}</h4>
                       <span className={`px-3 py-1 text-xs rounded-full ${statusChip(liveStatus)}`}>{liveStatus}</span>
 
@@ -1774,11 +2520,19 @@ export default function EventDashboard() {
                       )}
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <button type="button" className="px-4 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex w-full sm:w-auto flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        className="flex-1 sm:flex-none px-4 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         Info ▼
                       </button>
-                      <button type="button" className="px-4 py-1 bg-primary-500 text-white text-xs rounded-lg" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="flex-1 sm:flex-none px-4 py-1 bg-primary-500 text-white text-xs rounded-lg"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         Edit (later)
                       </button>
                     </div>
@@ -1788,12 +2542,15 @@ export default function EventDashboard() {
 
                   <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 mt-3 text-sm text-campus-text-secondary">
                     <span>📅 {ev.date}</span>
-                    <span>⏰ {ev.scheduledTime || ev.timeStart || "—"}</span>
+                    <span>
+                      ⏰ {ev.scheduledTime || ev.timeStart || "—"}
+                      {ev.timeEnd ? ` - ${ev.timeEnd}` : ""}
+                    </span>
                     <span>📍 {ev.location || "—"}</span>
                   </div>
 
                   {expandedEventId === ev.id && (
-                    <div className="mt-4 p-4 border rounded-lg bg-gray-50 space-y-3">
+                    <div className="mt-4 p-4 border rounded-lg bg-gray-50 space-y-3" onClick={(e) => e.stopPropagation()}>
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm text-campus-text-primary">
                           <b>Pre-Registrations:</b> {registrations ? registrations.length : used}
@@ -1864,125 +2621,183 @@ export default function EventDashboard() {
 
                       {/* FILES */}
                       <div className="pt-3 border-t space-y-4">
-                        <div className="flex items-center justify-between">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="font-semibold text-campus-text-primary">Event Files</p>
-                          {uploadingFor === ev.id && <span className="text-xs text-campus-text-secondary">Uploading…</span>}
+                          {uploadingFor === ev.id && <span className="text-xs text-campus-text-secondary">Uploading...</span>}
                         </div>
 
                         {uploadErr && <p className="text-sm text-red-600">{uploadErr}</p>}
+                        {uploadMsg && <p className="text-sm text-green-600">{uploadMsg}</p>}
 
                         {/* Upload controls (EC only) */}
                         {isECUser && (
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            <label className="border rounded-lg p-3 bg-white cursor-pointer hover:bg-gray-50">
+                            <label
+                              className="border rounded-lg p-3 bg-white cursor-pointer hover:bg-gray-50"
+                              onClick={(e) => e.stopPropagation()}
+                            >
                               <div className="text-sm font-semibold">Upload Images</div>
-                              <div className="text-xs text-gray-500">JPG/PNG (max 10MB)</div>
+                              <div className="text-xs text-gray-500">Auto-compressed before upload (max 10MB final size)</div>
                               <input
                                 type="file"
                                 multiple
                                 accept="image/*"
                                 className="hidden"
-                                onChange={(e) => handlePickFiles(ev.id, "images", e.target.files)}
+                                onChange={(e) => handleFileInputChange(ev.id, "images", e)}
                               />
                             </label>
 
-                            <label className="border rounded-lg p-3 bg-white cursor-pointer hover:bg-gray-50">
+                            <label
+                              className="border rounded-lg p-3 bg-white cursor-pointer hover:bg-gray-50"
+                              onClick={(e) => e.stopPropagation()}
+                            >
                               <div className="text-sm font-semibold">Upload Documents</div>
-                              <div className="text-xs text-gray-500">PDF/DOCX (max 10MB)</div>
+                              <div className="text-xs text-gray-500">PDF/DOC/DOCX (max 10MB each)</div>
                               <input
                                 type="file"
                                 multiple
-                                accept=".pdf,.doc,.docx,application/pdf"
+                                accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                                 className="hidden"
-                                onChange={(e) => handlePickFiles(ev.id, "docs", e.target.files)}
+                                onChange={(e) => handleFileInputChange(ev.id, "docs", e)}
                               />
                             </label>
                           </div>
                         )}
 
-                        {/* Images */}
-                        <div>
-                          <p className="text-sm font-semibold mb-2">Images</p>
-                          {imgs.length === 0 ? (
-                            <p className="text-xs text-gray-500">No images uploaded yet.</p>
-                          ) : (
-                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                              {imgs.map((img) => (
-                                <div key={img.id} className="border rounded-lg bg-white p-2">
-                                  <a href={img.downloadURL} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
-                                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                                    <img
-                                      src={img.downloadURL}
-                                      alt={img.name || "event image"}
-                                      className="w-full h-28 object-cover rounded-md"
-                                    />
-                                  </a>
-
-                                  <div className="mt-2 flex items-center justify-between gap-2">
-                                    <p className="text-xs truncate">{img.name}</p>
-
-                                    {isECUser && img.path && (
-                                      <button
-                                        type="button"
-                                        className="text-xs text-red-600 hover:underline"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          deleteEventFile(ev.id, "images", img.id, img.path!);
-                                        }}
-                                      >
-                                        Delete
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Docs */}
-                        <div>
-                          <p className="text-sm font-semibold mb-2">Documents</p>
-                          {docs.length === 0 ? (
-                            <p className="text-xs text-gray-500">No documents uploaded yet.</p>
-                          ) : (
+                        <Tabs
+                          aria-label={`Event files for ${ev.title}`}
+                          selectedKey={eventFilesTab}
+                          onSelectionChange={(key) => setEventFilesTab(String(key) as EventFilesTab)}
+                        >
+                          <Tab key="images" title={`Images (${imgs.length})`}>
                             <div className="space-y-2">
-                              {docs.map((f) => (
-                                <div key={f.id} className="border rounded-lg bg-white p-3 flex items-center justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <p className="text-sm font-medium truncate">{f.name}</p>
-                                    <p className="text-xs text-gray-500">{f.contentType || "file"}</p>
-                                  </div>
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-sm font-semibold">Images</p>
+                                {imgs.length > 3 && (
+                                  <button
+                                    type="button"
+                                    className="text-xs text-primary-600 hover:underline"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openViewAllFilesModal(ev.id, ev.title, "images");
+                                    }}
+                                  >
+                                    View all ({imgs.length})
+                                  </button>
+                                )}
+                              </div>
 
-                                  <div className="flex items-center gap-3 shrink-0">
-                                    <a
-                                      href={f.downloadURL}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="text-sm text-primary-600 hover:underline"
-                                      onClick={(e) => e.stopPropagation()}
-                                    >
-                                      Download
-                                    </a>
+                              {imgs.length === 0 ? (
+                                <p className="text-xs text-gray-500">No images uploaded yet.</p>
+                              ) : (
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                  {previewImgs.map((img) => (
+                                    <div key={img.id} className="border rounded-lg bg-white p-2">
+                                      <a href={img.downloadURL} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img
+                                          src={img.downloadURL}
+                                          alt={img.name || "event image"}
+                                          className="w-full h-28 object-cover rounded-md"
+                                        />
+                                      </a>
 
-                                    {isECUser && f.path && (
-                                      <button
-                                        type="button"
-                                        className="text-sm text-red-600 hover:underline"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          deleteEventFile(ev.id, "docs", f.id, f.path!);
-                                        }}
-                                      >
-                                        Delete
-                                      </button>
-                                    )}
-                                  </div>
+                                      <div className="mt-2 space-y-1">
+                                        <p className="text-xs truncate">{img.name}</p>
+                                        <div className="flex items-center justify-between gap-2">
+                                          <button
+                                            type="button"
+                                            className="text-xs text-primary-600 hover:underline"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              downloadEventFile(img, img.name || "event-image.jpg");
+                                            }}
+                                          >
+                                            Download
+                                          </button>
+
+                                          {isECUser && img.path && (
+                                            <button
+                                              type="button"
+                                              className="text-xs text-red-600 hover:underline"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                deleteEventFile(ev.id, "images", img.id, img.path!);
+                                              }}
+                                            >
+                                              Delete
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ))}
                                 </div>
-                              ))}
+                              )}
                             </div>
-                          )}
-                        </div>
+                          </Tab>
+
+                          <Tab key="docs" title={`Documents (${docs.length})`}>
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-sm font-semibold">Documents</p>
+                                {docs.length > 3 && (
+                                  <button
+                                    type="button"
+                                    className="text-xs text-primary-600 hover:underline"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openViewAllFilesModal(ev.id, ev.title, "docs");
+                                    }}
+                                  >
+                                    View all ({docs.length})
+                                  </button>
+                                )}
+                              </div>
+
+                              {docs.length === 0 ? (
+                                <p className="text-xs text-gray-500">No documents uploaded yet.</p>
+                              ) : (
+                                <div className="space-y-2">
+                                  {previewDocs.map((f) => (
+                                    <div key={f.id} className="border rounded-lg bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <p className="text-sm font-medium truncate">{f.name}</p>
+                                        <p className="text-xs text-gray-500">{f.contentType || "file"}</p>
+                                      </div>
+
+                                      <div className="flex items-center gap-3 shrink-0 self-start sm:self-auto">
+                                        <button
+                                          type="button"
+                                          className="text-sm text-primary-600 hover:underline"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            downloadEventFile(f, f.name || "event-document");
+                                          }}
+                                        >
+                                          Download
+                                        </button>
+
+                                        {isECUser && f.path && (
+                                          <button
+                                            type="button"
+                                            className="text-sm text-red-600 hover:underline"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              deleteEventFile(ev.id, "docs", f.id, f.path!);
+                                            }}
+                                          >
+                                            Delete
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </Tab>
+                        </Tabs>
                       </div>
                       {/* END FILES */}
                     </div>
@@ -1992,10 +2807,28 @@ export default function EventDashboard() {
             })}
           </div>
         )}
+              {!eventsLoading && sortedFilteredEvents.length > ITEMS_PER_PAGE && (
+                <div className="flex justify-center pt-2">
+                  <Pagination
+                    showControls
+                    page={eventPage}
+                    total={eventTotalPages}
+                    onChange={(page) => setEventPage(page)}
+                  />
+                </div>
+              )}
             </div>
           </Tab>
 
-          <Tab key="notifications" title="Notification List">
+          <Tab
+            key="notifications"
+            title={
+              <span className="whitespace-nowrap">
+                <span className="sm:hidden">Notifications</span>
+                <span className="hidden sm:inline">Notification List</span>
+              </span>
+            }
+          >
             <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                 <input
@@ -2027,16 +2860,42 @@ export default function EventDashboard() {
                 </div>
               </div>
 
+              <div className="flex items-center">
+                <Dropdown placement="bottom-start">
+                  <DropdownTrigger>
+                    <Button
+                      variant="light"
+                      className="h-auto min-w-0 px-0 text-sm font-medium text-campus-text-primary data-[hover=true]:bg-transparent"
+                    >
+                      <span className="text-campus-text-secondary mr-1">Sort by:</span>
+                      <span>{notificationSortLabel}</span>
+                      <FiChevronDown className="ml-1" />
+                    </Button>
+                  </DropdownTrigger>
+                  <DropdownMenu
+                    aria-label="Sort notifications"
+                    disallowEmptySelection
+                    selectionMode="single"
+                    selectedKeys={new Set([notificationSortMode])}
+                    onAction={(key) => setNotificationSortMode(String(key) as EventSortMode)}
+                  >
+                    <DropdownItem key="latest_to_oldest">Date, new to old</DropdownItem>
+                    <DropdownItem key="oldest_to_latest">Date, old to new</DropdownItem>
+                    <DropdownItem key="alphabetical">Alphabetically, A-Z</DropdownItem>
+                  </DropdownMenu>
+                </Dropdown>
+              </div>
+
               {notificationsLoading ? (
                 <p className="text-sm text-campus-text-secondary">Loading notifications...</p>
-              ) : filteredNotifications.length === 0 ? (
+              ) : sortedFilteredNotifications.length === 0 ? (
                 <p className="text-sm text-campus-text-secondary">No notifications match your filter/search.</p>
               ) : (
                 <div className="space-y-3">
-                  {filteredNotifications.map((item) => (
+                  {paginatedNotifications.map((item) => (
                     <div key={item.dispatchId} className="border rounded-lg p-3 sm:p-4 shadow-sm">
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                        <div className="flex items-center gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
                           <h4 className="font-semibold text-campus-text-primary">{item.title || "Notification"}</h4>
                           <span className={`px-3 py-1 text-xs rounded-full ${notifStatusChip(item.status)}`}>{item.status}</span>
                         </div>
@@ -2060,34 +2919,143 @@ export default function EventDashboard() {
                   ))}
                 </div>
               )}
+              {!notificationsLoading && sortedFilteredNotifications.length > ITEMS_PER_PAGE && (
+                <div className="flex justify-center pt-2">
+                  <Pagination
+                    showControls
+                    page={notificationPage}
+                    total={notificationTotalPages}
+                    onChange={(page) => setNotificationPage(page)}
+                  />
+                </div>
+              )}
             </div>
           </Tab>
         </Tabs>
       </div>
 
-      {/* Time picker modals (Notification) */}
-      <TimePickerModal
-        open={timePickerOpen === "scheduled"}
-        label="Scheduled Time:"
-        value24={notifScheduled24}
-        onClose={() => setTimePickerOpen(null)}
-        onConfirm={(val) => {
-          setNotifScheduled24(val);
-          setTimePickerOpen(null);
+      <Modal
+        isOpen={viewAllFilesModal.open}
+        onOpenChange={(open) => {
+          if (!open) closeViewAllFilesModal();
         }}
-      />
+        size="5xl"
+        scrollBehavior="inside"
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader className="flex flex-col gap-1">
+                <span>{viewAllFilesModal.kind === "images" ? "All Images" : "All Documents"}</span>
+                <span className="text-xs font-normal text-campus-text-secondary">
+                  {viewAllFilesModal.eventTitle || "Event files"}
+                </span>
+              </ModalHeader>
 
-      {/* Time picker modals (Add Event) */}
-      <TimePickerModal
-        open={eventTimePickerOpen === "scheduled"}
-        label="Scheduled Time:"
-        value24={eventScheduled24}
-        onClose={() => setEventTimePickerOpen(null)}
-        onConfirm={(val) => {
-          setEventScheduled24(val);
-          setEventTimePickerOpen(null);
-        }}
-      />
+              <ModalBody>
+                {viewAllFilesModal.kind === "images" ? (
+                  viewAllModalImages.length === 0 ? (
+                    <p className="text-sm text-campus-text-secondary">No images available.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                      {viewAllModalImages.map((img) => (
+                        <div key={img.id} className="border rounded-lg bg-white p-2">
+                          <a href={img.downloadURL} target="_blank" rel="noreferrer">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={img.downloadURL}
+                              alt={img.name || "event image"}
+                              className="w-full h-32 object-cover rounded-md"
+                            />
+                          </a>
+
+                          <div className="mt-2 space-y-1">
+                            <p className="text-xs truncate">{img.name}</p>
+                            <div className="flex items-center justify-between gap-2">
+                              <button
+                                type="button"
+                                className="text-xs text-primary-600 hover:underline"
+                                onClick={() => downloadEventFile(img, img.name || "event-image.jpg")}
+                              >
+                                Download
+                              </button>
+
+                              {isECUser && img.path && viewAllFilesModal.eventId && (
+                                <button
+                                  type="button"
+                                  className="text-xs text-red-600 hover:underline"
+                                  onClick={() => {
+                                    const modalEventId = viewAllFilesModal.eventId;
+                                    if (!modalEventId) return;
+                                    deleteEventFile(modalEventId, "images", img.id, img.path!);
+                                  }}
+                                >
+                                  Delete
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                ) : viewAllModalDocs.length === 0 ? (
+                  <p className="text-sm text-campus-text-secondary">No documents available.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {viewAllModalDocs.map((file) => (
+                      <div key={file.id} className="border rounded-lg bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{file.name}</p>
+                          <p className="text-xs text-gray-500">{file.contentType || "file"}</p>
+                        </div>
+
+                        <div className="flex items-center gap-3 shrink-0 self-start sm:self-auto">
+                          <button
+                            type="button"
+                            className="text-sm text-primary-600 hover:underline"
+                            onClick={() => downloadEventFile(file, file.name || "event-document")}
+                          >
+                            Download
+                          </button>
+
+                          {isECUser && file.path && viewAllFilesModal.eventId && (
+                            <button
+                              type="button"
+                              className="text-sm text-red-600 hover:underline"
+                              onClick={() => {
+                                const modalEventId = viewAllFilesModal.eventId;
+                                if (!modalEventId) return;
+                                deleteEventFile(modalEventId, "docs", file.id, file.path!);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </ModalBody>
+
+              <ModalFooter>
+                <button
+                  type="button"
+                  className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-100"
+                  onClick={() => {
+                    onClose();
+                    closeViewAllFilesModal();
+                  }}
+                >
+                  Close
+                </button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
     </div>
   );
 }
+

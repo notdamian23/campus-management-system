@@ -5,8 +5,14 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function profilePath() {
+      return /databases/$(database)/documents/profiles/$(request.auth.uid);
+    }
+
     function role() {
-      return get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.role;
+      return signedIn() && exists(profilePath())
+        ? get(profilePath()).data.role
+        : "";
     }
 
     function isSelf(uid) {
