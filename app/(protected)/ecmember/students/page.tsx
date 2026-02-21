@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FiPlus } from "react-icons/fi";
+import { FiChevronDown, FiPlus } from "react-icons/fi";
+import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
+import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
 import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
+import { Tab, Tabs } from "@heroui/tabs";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { collection, doc, getDoc, getDocs, orderBy, query } from "firebase/firestore";
 import { app, db } from "@/lib/firebase";
@@ -41,9 +44,9 @@ type StudentStatusPayment = {
   updatedAtMs: number;
 };
 
-type StudentStatusFilter = "all" | "attended" | "missed" | "payments";
+type StudentStatusTab = "attended" | "missed" | "payments";
 
-type PaymentSortMode = "default" | "paid" | "unpaid";
+type PaymentSortMode = "paid" | "unpaid";
 
 type RawEventDoc = {
   id: string;
@@ -107,6 +110,7 @@ const DEFAULT_COURSES = [
 
 const DEFAULT_YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "5th Year"];
 const STUDENTS_PER_PAGE = 25;
+const STATUS_ITEMS_PER_PAGE = 4;
 
 function initialsFromName(name: string) {
   const parts = name
@@ -362,8 +366,14 @@ export default function ECStudentLookup() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [statusModalOpen, setStatusModalOpen] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
-  const [statusFilter, setStatusFilter] = useState<StudentStatusFilter>("all");
-  const [paymentSortMode, setPaymentSortMode] = useState<PaymentSortMode>("default");
+  const [statusTab, setStatusTab] = useState<StudentStatusTab>("attended");
+  const [attendedSearch, setAttendedSearch] = useState("");
+  const [missedSearch, setMissedSearch] = useState("");
+  const [paymentsSearch, setPaymentsSearch] = useState("");
+  const [attendedPage, setAttendedPage] = useState(1);
+  const [missedPage, setMissedPage] = useState(1);
+  const [paymentsPage, setPaymentsPage] = useState(1);
+  const [paymentSortMode, setPaymentSortMode] = useState<PaymentSortMode>("paid");
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusEvents, setStatusEvents] = useState<StudentStatusEvent[]>([]);
@@ -450,21 +460,91 @@ export default function ECStudentLookup() {
     [statusEvents]
   );
 
+  const filteredAttendedEvents = useMemo(() => {
+    const search = attendedSearch.trim().toLowerCase();
+    if (!search) return attendedEvents;
+    return attendedEvents.filter((event) => {
+      return (
+        event.title.toLowerCase().includes(search) ||
+        event.location.toLowerCase().includes(search) ||
+        event.date.toLowerCase().includes(search) ||
+        event.scheduledTime.toLowerCase().includes(search)
+      );
+    });
+  }, [attendedEvents, attendedSearch]);
+
+  const filteredMissedEvents = useMemo(() => {
+    const search = missedSearch.trim().toLowerCase();
+    if (!search) return missedEvents;
+    return missedEvents.filter((event) => {
+      return (
+        event.title.toLowerCase().includes(search) ||
+        event.location.toLowerCase().includes(search) ||
+        event.date.toLowerCase().includes(search) ||
+        event.scheduledTime.toLowerCase().includes(search)
+      );
+    });
+  }, [missedEvents, missedSearch]);
+
+  const filteredStatusPayments = useMemo(() => {
+    const search = paymentsSearch.trim().toLowerCase();
+    if (!search) return statusPayments;
+    return statusPayments.filter((payment) => {
+      return (
+        payment.title.toLowerCase().includes(search) ||
+        payment.ref.toLowerCase().includes(search) ||
+        payment.date.toLowerCase().includes(search) ||
+        payment.status.toLowerCase().includes(search)
+      );
+    });
+  }, [statusPayments, paymentsSearch]);
+
   const sortedStatusPayments = useMemo(() => {
-    const rows = [...statusPayments];
+    const rows = [...filteredStatusPayments];
     rows.sort((a, b) => {
-      if (paymentSortMode === "paid") {
-        if (a.status === b.status) return 0;
-        return a.status === "PAID" ? -1 : 1;
-      }
-      if (paymentSortMode === "unpaid") {
-        if (a.status === b.status) return 0;
+      if (a.status !== b.status) {
+        if (paymentSortMode === "paid") return a.status === "PAID" ? -1 : 1;
         return a.status === "UNPAID" ? -1 : 1;
       }
       return b.updatedAtMs - a.updatedAtMs;
     });
     return rows;
-  }, [statusPayments, paymentSortMode]);
+  }, [filteredStatusPayments, paymentSortMode]);
+
+  const paymentSortLabel = useMemo(
+    () => (paymentSortMode === "paid" ? "Paid" : "Unpaid"),
+    [paymentSortMode]
+  );
+
+  const attendedTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredAttendedEvents.length / STATUS_ITEMS_PER_PAGE)),
+    [filteredAttendedEvents.length]
+  );
+
+  const paginatedAttendedEvents = useMemo(() => {
+    const start = (attendedPage - 1) * STATUS_ITEMS_PER_PAGE;
+    return filteredAttendedEvents.slice(start, start + STATUS_ITEMS_PER_PAGE);
+  }, [filteredAttendedEvents, attendedPage]);
+
+  const missedTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredMissedEvents.length / STATUS_ITEMS_PER_PAGE)),
+    [filteredMissedEvents.length]
+  );
+
+  const paginatedMissedEvents = useMemo(() => {
+    const start = (missedPage - 1) * STATUS_ITEMS_PER_PAGE;
+    return filteredMissedEvents.slice(start, start + STATUS_ITEMS_PER_PAGE);
+  }, [filteredMissedEvents, missedPage]);
+
+  const paymentsTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(sortedStatusPayments.length / STATUS_ITEMS_PER_PAGE)),
+    [sortedStatusPayments.length]
+  );
+
+  const paginatedStatusPayments = useMemo(() => {
+    const start = (paymentsPage - 1) * STATUS_ITEMS_PER_PAGE;
+    return sortedStatusPayments.slice(start, start + STATUS_ITEMS_PER_PAGE);
+  }, [sortedStatusPayments, paymentsPage]);
 
   useEffect(() => {
     setStudentPage(1);
@@ -473,6 +553,30 @@ export default function ECStudentLookup() {
   useEffect(() => {
     setStudentPage((prev) => Math.min(Math.max(prev, 1), studentTotalPages));
   }, [studentTotalPages]);
+
+  useEffect(() => {
+    setAttendedPage(1);
+  }, [attendedSearch, selectedStudent?.uid]);
+
+  useEffect(() => {
+    setMissedPage(1);
+  }, [missedSearch, selectedStudent?.uid]);
+
+  useEffect(() => {
+    setPaymentsPage(1);
+  }, [paymentsSearch, paymentSortMode, selectedStudent?.uid]);
+
+  useEffect(() => {
+    setAttendedPage((prev) => Math.min(Math.max(prev, 1), attendedTotalPages));
+  }, [attendedTotalPages]);
+
+  useEffect(() => {
+    setMissedPage((prev) => Math.min(Math.max(prev, 1), missedTotalPages));
+  }, [missedTotalPages]);
+
+  useEffect(() => {
+    setPaymentsPage((prev) => Math.min(Math.max(prev, 1), paymentsTotalPages));
+  }, [paymentsTotalPages]);
 
   useEffect(() => {
     if (!statusModalOpen || !selectedStudent) return;
@@ -610,8 +714,14 @@ export default function ECStudentLookup() {
 
   const openStudentStatusModal = (student: Student) => {
     setSelectedStudent(student);
-    setStatusFilter("all");
-    setPaymentSortMode("default");
+    setStatusTab("attended");
+    setAttendedSearch("");
+    setMissedSearch("");
+    setPaymentsSearch("");
+    setAttendedPage(1);
+    setMissedPage(1);
+    setPaymentsPage(1);
+    setPaymentSortMode("paid");
     setStatusError(null);
     setStatusModalOpen(true);
   };
@@ -949,6 +1059,14 @@ export default function ECStudentLookup() {
             setStatusEvents([]);
             setStatusPayments([]);
             setStatusError(null);
+            setStatusTab("attended");
+            setAttendedSearch("");
+            setMissedSearch("");
+            setPaymentsSearch("");
+            setAttendedPage(1);
+            setMissedPage(1);
+            setPaymentsPage(1);
+            setPaymentSortMode("paid");
           }
         }}
         size="5xl"
@@ -982,136 +1100,188 @@ export default function ECStudentLookup() {
                   </div>
                 )}
 
-                <div className="flex flex-wrap gap-2 bg-white border rounded-xl p-3 shadow-sm">
-                  {[
-                    { label: "All", value: "all" },
-                    { label: "Events Attended", value: "attended" },
-                    { label: "Events Missed", value: "missed" },
-                    { label: "Payments", value: "payments" },
-                  ].map((item) => (
-                    <button
-                      key={item.value}
-                      type="button"
-                      onClick={() => setStatusFilter(item.value as StudentStatusFilter)}
-                      className={`px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition ${
-                        statusFilter === item.value
-                          ? "bg-primary-500 text-white"
-                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                      }`}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
+                <Tabs
+                  aria-label="Student status tabs"
+                  selectedKey={statusTab}
+                  onSelectionChange={(key) => setStatusTab(String(key) as StudentStatusTab)}
+                  fullWidth
+                  classNames={{
+                    tabList: "w-full grid grid-cols-3",
+                    tab: "w-full min-w-0 px-2",
+                    tabContent: "truncate text-xs sm:text-sm",
+                  }}
+                >
+                  <Tab key="attended" title="Events Attended">
+                    <div className="space-y-3 pt-2">
+                      <input
+                        type="text"
+                        value={attendedSearch}
+                        onChange={(e) => setAttendedSearch(e.target.value)}
+                        placeholder="Search attended events..."
+                        className="w-full px-3 py-2 border rounded-lg text-sm"
+                      />
 
-                {(statusFilter === "all" || statusFilter === "attended") && (
-                  <section>
-                    <h3 className="font-semibold text-campus-text-primary mb-3 flex items-center gap-2">
-                      <span className="text-green-600">+</span> Events Attended
-                    </h3>
-
-                    {statusLoading ? (
-                      <p className="text-sm text-campus-text-secondary">Loading attended events...</p>
-                    ) : attendedEvents.length === 0 ? (
-                      <p className="text-sm text-campus-text-secondary">No attended events found yet.</p>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {attendedEvents.map((event) => (
-                          <Card key={event.id} shadow="sm">
-                            <CardBody>
-                              <h4 className="font-semibold text-campus-text-primary">{event.title}</h4>
-                              <p className="text-sm text-campus-text-secondary">
-                                {formatEventDate(event.eventDate, event.date)} | {event.scheduledTime}
-                              </p>
-                              <p className="text-xs text-campus-text-secondary">{event.location || "TBA"}</p>
-                            </CardBody>
-                          </Card>
-                        ))}
-                      </div>
-                    )}
-                  </section>
-                )}
-
-                {(statusFilter === "all" || statusFilter === "missed") && (
-                  <section>
-                    <h3 className="font-semibold text-campus-text-primary mb-3 flex items-center gap-2">
-                      <span className="text-red-600">x</span> Events Missed
-                    </h3>
-
-                    {statusLoading ? (
-                      <p className="text-sm text-campus-text-secondary">Loading missed events...</p>
-                    ) : missedEvents.length === 0 ? (
-                      <p className="text-sm text-campus-text-secondary">No missed events found.</p>
-                    ) : (
-                      <div className="space-y-3">
-                        {missedEvents.map((event) => (
-                          <Card key={event.id} shadow="sm" className="bg-red-50 border-red-100">
-                            <CardBody>
-                              <h4 className="font-semibold text-campus-text-primary">{event.title}</h4>
-                              <p className="text-sm text-campus-text-secondary">
-                                {formatEventDate(event.eventDate, event.date)} | {event.scheduledTime}
-                              </p>
-                              <p className="text-xs text-campus-text-secondary">{event.location || "TBA"}</p>
-                            </CardBody>
-                          </Card>
-                        ))}
-                      </div>
-                    )}
-                  </section>
-                )}
-
-                {(statusFilter === "all" || statusFilter === "payments") && (
-                  <section>
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
-                      <h3 className="font-semibold text-campus-text-primary text-lg">Payments</h3>
-
-                      <select
-                        value={paymentSortMode}
-                        onChange={(e) => setPaymentSortMode(e.target.value as PaymentSortMode)}
-                        className="w-full sm:w-auto px-3 py-2 border rounded-lg text-sm"
-                      >
-                        <option value="default">Default</option>
-                        <option value="paid">PAID First</option>
-                        <option value="unpaid">UNPAID First</option>
-                      </select>
+                      {statusLoading ? (
+                        <p className="text-sm text-campus-text-secondary">Loading attended events...</p>
+                      ) : filteredAttendedEvents.length === 0 ? (
+                        <p className="text-sm text-campus-text-secondary">No attended events found.</p>
+                      ) : (
+                        <>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {paginatedAttendedEvents.map((event) => (
+                              <Card key={event.id} shadow="sm">
+                                <CardBody>
+                                  <h4 className="font-semibold text-campus-text-primary">{event.title}</h4>
+                                  <p className="text-sm text-campus-text-secondary">
+                                    {formatEventDate(event.eventDate, event.date)} | {event.scheduledTime}
+                                  </p>
+                                  <p className="text-xs text-campus-text-secondary">{event.location || "TBA"}</p>
+                                </CardBody>
+                              </Card>
+                            ))}
+                          </div>
+                          {filteredAttendedEvents.length > STATUS_ITEMS_PER_PAGE && (
+                            <div className="flex justify-center pt-2">
+                              <Pagination
+                                showControls
+                                page={attendedPage}
+                                total={attendedTotalPages}
+                                onChange={(page) => setAttendedPage(page)}
+                              />
+                            </div>
+                          )}
+                        </>
+                      )}
                     </div>
+                  </Tab>
 
-                    {statusLoading ? (
-                      <p className="text-sm text-campus-text-secondary">Loading payments...</p>
-                    ) : sortedStatusPayments.length === 0 ? (
-                      <p className="text-sm text-campus-text-secondary">No payment records found for this student.</p>
-                    ) : (
-                      <div className="space-y-3">
-                        {sortedStatusPayments.map((payment) => (
-                          <Card
-                            key={payment.paymentId}
-                            shadow="sm"
-                            className={payment.status === "PAID" ? "bg-green-50 border-green-100" : "bg-red-50 border-red-100"}
+                  <Tab key="missed" title="Events Missed">
+                    <div className="space-y-3 pt-2">
+                      <input
+                        type="text"
+                        value={missedSearch}
+                        onChange={(e) => setMissedSearch(e.target.value)}
+                        placeholder="Search missed events..."
+                        className="w-full px-3 py-2 border rounded-lg text-sm"
+                      />
+
+                      {statusLoading ? (
+                        <p className="text-sm text-campus-text-secondary">Loading missed events...</p>
+                      ) : filteredMissedEvents.length === 0 ? (
+                        <p className="text-sm text-campus-text-secondary">No missed events found.</p>
+                      ) : (
+                        <>
+                          <div className="space-y-3">
+                            {paginatedMissedEvents.map((event) => (
+                              <Card key={event.id} shadow="sm" className="bg-red-50 border-red-100">
+                                <CardBody>
+                                  <h4 className="font-semibold text-campus-text-primary">{event.title}</h4>
+                                  <p className="text-sm text-campus-text-secondary">
+                                    {formatEventDate(event.eventDate, event.date)} | {event.scheduledTime}
+                                  </p>
+                                  <p className="text-xs text-campus-text-secondary">{event.location || "TBA"}</p>
+                                </CardBody>
+                              </Card>
+                            ))}
+                          </div>
+                          {filteredMissedEvents.length > STATUS_ITEMS_PER_PAGE && (
+                            <div className="flex justify-center pt-2">
+                              <Pagination
+                                showControls
+                                page={missedPage}
+                                total={missedTotalPages}
+                                onChange={(page) => setMissedPage(page)}
+                              />
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </Tab>
+
+                  <Tab key="payments" title="Payments">
+                    <div className="space-y-3 pt-2">
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                        <input
+                          type="text"
+                          value={paymentsSearch}
+                          onChange={(e) => setPaymentsSearch(e.target.value)}
+                          placeholder="Search payments..."
+                          className="w-full px-3 py-2 border rounded-lg text-sm"
+                        />
+
+                        <Dropdown placement="bottom-end">
+                          <DropdownTrigger>
+                            <Button
+                              variant="bordered"
+                              className="w-full sm:w-auto justify-between min-w-[140px]"
+                            >
+                              <span>Sort by: {paymentSortLabel}</span>
+                              <FiChevronDown className="ml-2" />
+                            </Button>
+                          </DropdownTrigger>
+                          <DropdownMenu
+                            aria-label="Sort payments by status"
+                            disallowEmptySelection
+                            selectionMode="single"
+                            selectedKeys={new Set([paymentSortMode])}
+                            onAction={(key) => setPaymentSortMode(String(key) as PaymentSortMode)}
                           >
-                            <CardBody className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                              <div>
-                                <p className="font-medium text-campus-text-primary">{payment.title}</p>
-                                <p className="text-xs text-campus-text-secondary">
-                                  Ref: {payment.ref} | Date: {payment.date || "-"}
-                                </p>
-                              </div>
-
-                              <span
-                                className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold ${
-                                  payment.status === "PAID"
-                                    ? "bg-green-600 text-white"
-                                    : "bg-red-600 text-white"
-                                }`}
-                              >
-                                {payment.status}
-                              </span>
-                            </CardBody>
-                          </Card>
-                        ))}
+                            <DropdownItem key="paid">Paid</DropdownItem>
+                            <DropdownItem key="unpaid">Unpaid</DropdownItem>
+                          </DropdownMenu>
+                        </Dropdown>
                       </div>
-                    )}
-                  </section>
-                )}
+
+                      {statusLoading ? (
+                        <p className="text-sm text-campus-text-secondary">Loading payments...</p>
+                      ) : sortedStatusPayments.length === 0 ? (
+                        <p className="text-sm text-campus-text-secondary">No payment records found for this student.</p>
+                      ) : (
+                        <>
+                          <div className="space-y-3">
+                            {paginatedStatusPayments.map((payment) => (
+                              <Card
+                                key={payment.paymentId}
+                                shadow="sm"
+                                className={payment.status === "PAID" ? "bg-green-50 border-green-100" : "bg-red-50 border-red-100"}
+                              >
+                                <CardBody className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                  <div>
+                                    <p className="font-medium text-campus-text-primary">{payment.title}</p>
+                                    <p className="text-xs text-campus-text-secondary">
+                                      Ref: {payment.ref} | Date: {payment.date || "-"}
+                                    </p>
+                                  </div>
+
+                                  <span
+                                    className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold ${
+                                      payment.status === "PAID"
+                                        ? "bg-green-600 text-white"
+                                        : "bg-red-600 text-white"
+                                    }`}
+                                  >
+                                    {payment.status}
+                                  </span>
+                                </CardBody>
+                              </Card>
+                            ))}
+                          </div>
+                          {sortedStatusPayments.length > STATUS_ITEMS_PER_PAGE && (
+                            <div className="flex justify-center pt-2">
+                              <Pagination
+                                showControls
+                                page={paymentsPage}
+                                total={paymentsTotalPages}
+                                onChange={(page) => setPaymentsPage(page)}
+                              />
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </Tab>
+                </Tabs>
 
                 <div className="flex justify-end">
                   <button

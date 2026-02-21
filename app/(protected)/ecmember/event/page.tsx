@@ -19,6 +19,7 @@ import {
   query,
   setDoc,
   serverTimestamp,
+  where,
   writeBatch,
 } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
@@ -106,6 +107,15 @@ type StudentLookup = {
 type NotificationListStatus = "scheduled" | "sent";
 type EventFilesTab = "images" | "docs";
 type EventSortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
+type ImageModalSortMode = "ascending" | "descending";
+type DocumentModalSortMode = "ascending" | "descending";
+type PendingDeleteFile = {
+  eventId: string;
+  kind: "images" | "docs";
+  fileDocId: string;
+  path: string;
+  fileName: string;
+};
 
 type NotificationSummary = {
   id: string;
@@ -261,6 +271,68 @@ function toTimeValue(time24: string) {
 function toMinutesFrom24h(time24: string) {
   const { hour, minute } = parse24h(time24);
   return hour * 60 + minute;
+}
+
+function minutesTo24h(totalMinutes: number) {
+  const normalized = ((totalMinutes % (24 * 60)) + 24 * 60) % (24 * 60);
+  const hour = Math.floor(normalized / 60);
+  const minute = normalized % 60;
+  return `${pad2(hour)}:${pad2(minute)}`;
+}
+
+function splitCommaValues(raw: string | undefined) {
+  return String(raw ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function parseTargetStudents(targetStudent: string | undefined, allStudents: StudentLookup[]) {
+  const tokens = String(targetStudent ?? "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+
+  if (tokens.length === 0) return [] as StudentLookup[];
+
+  const seen = new Set<string>();
+  const selected: StudentLookup[] = [];
+
+  tokens.forEach((token, index) => {
+    const match = token.match(/^(.*)\(([^)]+)\)$/);
+    const studentName = String(match?.[1] ?? token).trim();
+    const schoolId = String(match?.[2] ?? "").trim();
+
+    const fromOptions =
+      (schoolId ? allStudents.find((student) => student.schoolId === schoolId) : undefined) ??
+      allStudents.find((student) => student.studentName.toLowerCase() === studentName.toLowerCase());
+
+    if (fromOptions) {
+      const key = `uid:${fromOptions.uid}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        selected.push(fromOptions);
+      }
+      return;
+    }
+
+    const fallbackName = studentName || schoolId || `Student ${index + 1}`;
+    const fallbackSchoolId = schoolId || "Unknown ID";
+    const fallbackKey = `manual:${fallbackSchoolId}|${fallbackName}`.toLowerCase();
+    if (seen.has(fallbackKey)) return;
+
+    seen.add(fallbackKey);
+    selected.push({
+      uid: `manual-${index}-${fallbackSchoolId}-${fallbackName}`.replace(/\s+/g, "-").toLowerCase(),
+      schoolId: fallbackSchoolId,
+      studentName: fallbackName,
+      course: "",
+      year: "",
+      searchText: `${fallbackName} ${fallbackSchoolId}`.toLowerCase(),
+    });
+  });
+
+  return selected;
 }
 
 function toMillis(value: any): number {
@@ -444,6 +516,7 @@ export default function EventDashboard() {
   const [selectedNotifStudents, setSelectedNotifStudents] = useState<StudentLookup[]>([]);
   const [notifScheduled24, setNotifScheduled24] = useState<string>(() => now24h());
   const [notifScheduledValue, setNotifScheduledValue] = useState<Time | null>(() => toTimeValue(now24h()));
+  const [editingNotificationDispatchId, setEditingNotificationDispatchId] = useState<string | null>(null);
   const [sendingNotif, setSendingNotif] = useState(false);
   const [notifError, setNotifError] = useState("");
   const [notifMsg, setNotifMsg] = useState("");
@@ -469,6 +542,7 @@ export default function EventDashboard() {
   const eventCoursePickerRef = useRef<HTMLDivElement | null>(null);
 
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [location, setLocation] = useState("");
@@ -496,6 +570,7 @@ export default function EventDashboard() {
   const [eventsLoading, setEventsLoading] = useState(true);
   const [notifications, setNotifications] = useState<NotificationSummary[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
+  const [expandedNotificationId, setExpandedNotificationId] = useState<string | null>(null);
   const [notificationSearchText, setNotificationSearchText] = useState("");
   const [notificationStatusFilter, setNotificationStatusFilter] = useState<"all" | NotificationListStatus>("all");
   const [notificationDateFilter, setNotificationDateFilter] = useState("");
@@ -520,6 +595,11 @@ export default function EventDashboard() {
     eventTitle: "",
     kind: "images",
   });
+  const [imageModalSortMode, setImageModalSortMode] = useState<ImageModalSortMode>("ascending");
+  const [documentModalSortMode, setDocumentModalSortMode] = useState<DocumentModalSortMode>("ascending");
+  const [documentModalSearch, setDocumentModalSearch] = useState("");
+  const [pendingDeleteFile, setPendingDeleteFile] = useState<PendingDeleteFile | null>(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string>("");
   const [uploadMsg, setUploadMsg] = useState<string>("");
@@ -1007,6 +1087,7 @@ export default function EventDashboard() {
 
   useEffect(() => {
     setNotificationPage(1);
+    setExpandedNotificationId(null);
   }, [notificationSearchText, notificationStatusFilter, notificationDateFilter, notificationSortMode]);
 
   useEffect(() => {
@@ -1016,6 +1097,14 @@ export default function EventDashboard() {
   useEffect(() => {
     setNotificationPage((prev) => Math.min(Math.max(prev, 1), notificationTotalPages));
   }, [notificationTotalPages]);
+
+  useEffect(() => {
+    if (!expandedNotificationId) return;
+    const stillExists = sortedFilteredNotifications.some((item) => item.dispatchId === expandedNotificationId);
+    if (!stillExists) {
+      setExpandedNotificationId(null);
+    }
+  }, [expandedNotificationId, sortedFilteredNotifications]);
 
   const eventSortLabel = useMemo(() => {
     if (eventSortMode === "oldest_to_latest") return "Date, old to new";
@@ -1041,13 +1130,58 @@ export default function EventDashboard() {
     () => Object.values(eventRegistrations).reduce((sum, rows) => sum + rows.length, 0),
     [eventRegistrations]
   );
+  const isEditingEvent = Boolean(editingEventId);
+  const isEditingNotification = Boolean(editingNotificationDispatchId);
   const hasSpecificTarget = selectedEventStudents.length > 0;
   const eventYearLevelLabel = selectedEventYearLevels.length > 0 ? selectedEventYearLevels.join(", ") : "All Years";
   const eventCourseLabel = selectedEventCourses.length > 0 ? selectedEventCourses.join(", ") : "All Courses";
-  const viewAllModalImages = viewAllFilesModal.eventId ? eventImages[viewAllFilesModal.eventId] ?? [] : [];
-  const viewAllModalDocs = viewAllFilesModal.eventId ? eventDocs[viewAllFilesModal.eventId] ?? [] : [];
+  const viewAllModalImages = useMemo(() => {
+    if (!viewAllFilesModal.eventId) return [];
+    return eventImages[viewAllFilesModal.eventId] ?? [];
+  }, [eventImages, viewAllFilesModal.eventId]);
+  const viewAllModalDocs = useMemo(() => {
+    if (!viewAllFilesModal.eventId) return [];
+    return eventDocs[viewAllFilesModal.eventId] ?? [];
+  }, [eventDocs, viewAllFilesModal.eventId]);
+  const sortedViewAllModalImages = useMemo(() => {
+    const list = [...viewAllModalImages];
+    list.sort((a, b) => {
+      const aName = String(a.name ?? a.id).toLowerCase();
+      const bName = String(b.name ?? b.id).toLowerCase();
+      return imageModalSortMode === "ascending"
+        ? aName.localeCompare(bName)
+        : bName.localeCompare(aName);
+    });
+    return list;
+  }, [viewAllModalImages, imageModalSortMode]);
+  const sortedFilteredViewAllModalDocs = useMemo(() => {
+    const search = documentModalSearch.trim().toLowerCase();
+    const filtered = viewAllModalDocs.filter((file) => {
+      if (!search) return true;
+      const name = String(file.name ?? "").toLowerCase();
+      const contentType = String(file.contentType ?? "").toLowerCase();
+      return name.includes(search) || contentType.includes(search);
+    });
+
+    const sorted = [...filtered];
+    sorted.sort((a, b) => {
+      const aName = String(a.name ?? a.id).toLowerCase();
+      const bName = String(b.name ?? b.id).toLowerCase();
+      return documentModalSortMode === "ascending"
+        ? aName.localeCompare(bName)
+        : bName.localeCompare(aName);
+    });
+    return sorted;
+  }, [documentModalSearch, documentModalSortMode, viewAllModalDocs]);
 
   const openViewAllFilesModal = (eventId: string, eventTitle: string, kind: EventFilesTab) => {
+    if (kind === "images") {
+      setImageModalSortMode("ascending");
+    }
+    if (kind === "docs") {
+      setDocumentModalSortMode("ascending");
+      setDocumentModalSearch("");
+    }
     setViewAllFilesModal({
       open: true,
       eventId,
@@ -1279,6 +1413,141 @@ export default function EventDashboard() {
     await deleteDoc(doc(db, "events", eventId, kind, fileDocId));
   }
 
+  function requestDeleteEventFile(
+    eventId: string,
+    kind: "images" | "docs",
+    fileDocId: string,
+    path: string,
+    fileName: string
+  ) {
+    if (!isECUser) return;
+    setPendingDeleteFile({
+      eventId,
+      kind,
+      fileDocId,
+      path,
+      fileName,
+    });
+  }
+
+  async function confirmDeleteEventFile() {
+    if (!pendingDeleteFile) return;
+
+    setDeleteSubmitting(true);
+    setUploadErr("");
+
+    try {
+      await deleteEventFile(
+        pendingDeleteFile.eventId,
+        pendingDeleteFile.kind,
+        pendingDeleteFile.fileDocId,
+        pendingDeleteFile.path
+      );
+
+      addToast({
+        title: "File deleted",
+        description: `${pendingDeleteFile.fileName} was removed.`,
+        color: "success",
+        timeout: 3500,
+      });
+
+      setPendingDeleteFile(null);
+    } catch (error: any) {
+      const message = error?.message || "Failed to delete file.";
+      setUploadErr(message);
+      addToast({
+        title: "Delete failed",
+        description: message,
+        color: "danger",
+        timeout: 5500,
+      });
+    } finally {
+      setDeleteSubmitting(false);
+    }
+  }
+
+  const resetNotificationComposer = useCallback(() => {
+    setNotifTitle("");
+    const nextNotifDate = isoDateToday();
+    const nextNotifTime = now24h();
+    setNotifDate(nextNotifDate);
+    setNotifDateValue(toCalendarDate(nextNotifDate));
+    setNotifMessage("");
+    setNotifSearchName("");
+    setNotifSearchId("");
+    setSelectedNotifStudents([]);
+    setShowStudentDropdown(false);
+    setNotifScheduled24(nextNotifTime);
+    setNotifScheduledValue(toTimeValue(nextNotifTime));
+    setRecipientType("all");
+    setNotifCourse("Computer Engineering");
+    setNotifYear("1st Year");
+    setEditingNotificationDispatchId(null);
+  }, []);
+
+  const handleStartEditScheduledNotification = async (item: NotificationSummary) => {
+    setNotifError("");
+    setNotifMsg("");
+
+    if (roleLoading) {
+      addToast({
+        title: "Please wait",
+        description: "Role check is still in progress.",
+        color: "warning",
+        timeout: 4500,
+      });
+      return;
+    }
+
+    if (!isECUser) {
+      addToast({
+        title: "Access denied",
+        description: "Only EC members can edit notifications.",
+        color: "danger",
+        timeout: 5000,
+      });
+      return;
+    }
+
+    if (item.status !== "scheduled") {
+      addToast({
+        title: "Edit unavailable",
+        description: "Only scheduled notifications can be edited.",
+        color: "warning",
+        timeout: 5000,
+      });
+      return;
+    }
+
+    let parsedSelectedStudents: StudentLookup[] = [];
+    if (item.recipientType === "student") {
+      const allStudents = studentOptions.length > 0 ? studentOptions : await loadStudentsForNotifications();
+      parsedSelectedStudents = parseTargetStudents(item.targetStudent, allStudents);
+    }
+
+    const nextDate = /^\d{4}-\d{2}-\d{2}$/.test(String(item.date ?? "")) ? String(item.date) : isoDateToday();
+    const scheduledMinutes = parseTime12ToMinutes(item.scheduledTime);
+    const nextScheduled24 = scheduledMinutes == null ? now24h() : minutesTo24h(scheduledMinutes);
+
+    setEditingNotificationDispatchId(item.dispatchId);
+    setNotifTitle(String(item.title ?? ""));
+    setNotifDate(nextDate);
+    setNotifDateValue(toCalendarDate(nextDate));
+    setNotifMessage(String(item.message ?? ""));
+    setNotifScheduled24(nextScheduled24);
+    setNotifScheduledValue(toTimeValue(nextScheduled24));
+    setRecipientType(item.recipientType);
+    setNotifCourse(String(item.course ?? "") || "Computer Engineering");
+    setNotifYear(String(item.yearLevel ?? "") || "1st Year");
+    setSelectedNotifStudents(parsedSelectedStudents);
+    setNotifSearchName("");
+    setNotifSearchId("");
+    setShowStudentDropdown(false);
+
+    setShowAddEventForm(false);
+    setShowNotificationForm(true);
+  };
+
   const handleSendNotification = async () => {
     setNotifError("");
     setNotifMsg("");
@@ -1288,6 +1557,138 @@ export default function EventDashboard() {
     if (!notifTitle.trim()) return setNotifError("Notification title is required.");
     if (!notifDate) return setNotifError("Notification date is required.");
     if (!notifMessage.trim()) return setNotifError("Notification message is required.");
+    const title = notifTitle.trim();
+    const message = notifMessage.trim();
+    const scheduledTime = format12h(notifScheduled24);
+
+    if (editingNotificationDispatchId) {
+      if (!currentUser?.uid) return setNotifError("Session not ready. Please sign in again.");
+
+      const existing = notifications.find((item) => item.dispatchId === editingNotificationDispatchId) ?? null;
+      if (!existing) return setNotifError("Notification record not found.");
+      if (computeNotificationStatus(existing.date, existing.scheduledTime) !== "scheduled") {
+        return setNotifError("Only scheduled notifications can be edited.");
+      }
+
+      const selectedLabel =
+        recipientType === "student"
+          ? selectedNotifStudents.length > 0
+            ? selectedNotifStudents.map((student) => `${student.studentName} (${student.schoolId})`).join("; ")
+            : existing.targetStudent
+          : "";
+
+      const payload = {
+        title,
+        message,
+        date: notifDate,
+        scheduledTime,
+        recipientType,
+        course: recipientType === "course" ? notifCourse : "",
+        yearLevel: recipientType === "year" ? notifYear : "",
+        targetStudent: recipientType === "student" ? selectedLabel : "",
+        status: computeNotificationStatus(notifDate, scheduledTime),
+        updatedAt: serverTimestamp(),
+      };
+
+      try {
+        setSendingNotif(true);
+        // Always update the EC sender summary document first.
+        await setDoc(
+          doc(db, "profiles", currentUser.uid, "notifications", `dispatch_${editingNotificationDispatchId}`),
+          {
+            ...payload,
+            dispatchId: editingNotificationDispatchId,
+            recipientCount: existing.recipientCount,
+            createdByUid: currentUser.uid,
+            read: true,
+            type: "announcement",
+          },
+          { merge: true }
+        );
+
+        let bulkUpdateBlockedByPermissions = false;
+
+        try {
+          const dispatchQ = query(collectionGroup(db, "notifications"), where("dispatchId", "==", editingNotificationDispatchId), limit(2000));
+          const dispatchSnap = await getDocs(dispatchQ);
+          const docsToUpdate = dispatchSnap.docs.filter((d) => String(d.data()?.createdByUid ?? "") === currentUser.uid);
+
+          if (docsToUpdate.length > 0) {
+            const chunkSize = 400;
+            for (let i = 0; i < docsToUpdate.length; i += chunkSize) {
+              const chunk = docsToUpdate.slice(i, i + chunkSize);
+              const batch = writeBatch(db);
+              chunk.forEach((d) => {
+                batch.set(d.ref, payload, { merge: true });
+              });
+              await batch.commit();
+            }
+          }
+        } catch (bulkError: any) {
+          const code = String(bulkError?.code ?? "");
+          const message = String(bulkError?.message ?? "");
+          const permissionDenied =
+            code === "permission-denied" ||
+            message.toLowerCase().includes("insufficient permissions") ||
+            message.toLowerCase().includes("missing or insufficient permissions");
+
+          if (!permissionDenied) {
+            throw bulkError;
+          }
+
+          bulkUpdateBlockedByPermissions = true;
+          console.warn("[EC Notifications] Bulk recipient update skipped due to Firestore permissions.", {
+            dispatchId: editingNotificationDispatchId,
+            code,
+            message,
+          });
+        }
+
+        setNotifications((prev) =>
+          prev
+            .map((item) =>
+              item.dispatchId === editingNotificationDispatchId
+                ? {
+                    ...item,
+                    title,
+                    message,
+                    date: notifDate,
+                    scheduledTime,
+                    recipientType,
+                    course: recipientType === "course" ? notifCourse : "",
+                    yearLevel: recipientType === "year" ? notifYear : "",
+                    targetStudent: recipientType === "student" ? selectedLabel : "",
+                    status: computeNotificationStatus(notifDate, scheduledTime),
+                  }
+                : item
+            )
+            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt))
+        );
+
+        resetNotificationComposer();
+        if (bulkUpdateBlockedByPermissions) {
+          setNotifMsg("Notification updated in EC list. Recipient records were not updated due to Firestore permissions.");
+          addToast({
+            title: "Updated with limits",
+            description: "EC notification copy was updated, but recipient copies require broader Firestore update permissions.",
+            color: "warning",
+            timeout: 6500,
+          });
+        } else {
+          setNotifMsg("Notification updated.");
+        }
+        setNotificationPage(1);
+        setExpandedNotificationId(editingNotificationDispatchId);
+        void refreshSentNotificationsOnce();
+        return;
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Failed to update notification.";
+        setNotifError(message);
+        return;
+      } finally {
+        setSendingNotif(false);
+      }
+    }
 
     let students = studentOptions;
     if (studentsLoading && students.length === 0) {
@@ -1319,9 +1720,6 @@ export default function EventDashboard() {
       return setNotifError("No recipients found.");
     }
 
-    const title = notifTitle.trim();
-    const message = notifMessage.trim();
-    const scheduledTime = format12h(notifScheduled24);
     const dispatchId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const selectedLabel =
       recipientType === "student"
@@ -1405,21 +1803,7 @@ export default function EventDashboard() {
       void refreshSentNotificationsOnce();
 
       setNotifMsg(`Notification sent to ${recipients.length} student(s).`);
-      setNotifTitle("");
-      const nextNotifDate = isoDateToday();
-      const nextNotifTime = now24h();
-      setNotifDate(nextNotifDate);
-      setNotifDateValue(toCalendarDate(nextNotifDate));
-      setNotifMessage("");
-      setNotifSearchName("");
-      setNotifSearchId("");
-      setSelectedNotifStudents([]);
-      setShowStudentDropdown(false);
-      setNotifScheduled24(nextNotifTime);
-      setNotifScheduledValue(toTimeValue(nextNotifTime));
-      setRecipientType("all");
-      setNotifCourse("Computer Engineering");
-      setNotifYear("1st Year");
+      resetNotificationComposer();
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Failed to send notification.";
       setNotifError(message);
@@ -1428,12 +1812,146 @@ export default function EventDashboard() {
     }
   };
 
+  const resetEventComposer = useCallback(() => {
+    const nextEventDate = isoDateToday();
+    setTitle("");
+    setLocation("");
+    setDate(nextEventDate);
+    setEventDateValue(toCalendarDate(nextEventDate));
+    setSelectedEventYearLevels([]);
+    setSelectedEventCourses([]);
+    setIsAllYearsExplicit(false);
+    setIsAllCoursesExplicit(false);
+    setDetails("");
+    setIsPreReg(false);
+    setWithPayment(false);
+    setSelectedEventStudents([]);
+    setEventYearSearch("");
+    setEventCourseSearch("");
+    setEventSearchName("");
+    setShowEventYearDropdown(false);
+    setShowEventCourseDropdown(false);
+    setShowEventStudentDropdown(false);
+    setRegistrantsModalOpen(false);
+    setPreRegSlots(50);
+    setEventScheduled24("07:00");
+    setEventStartTimeValue(toTimeValue("07:00"));
+    setEventEnd24("08:00");
+    setEventEndTimeValue(toTimeValue("08:00"));
+  }, []);
+
+  const handleStartEditUpcomingEvent = async (eventToEdit: EventDoc) => {
+    setSaveError("");
+    setSaveMsg("");
+
+    if (roleLoading) {
+      addToast({
+        title: "Please wait",
+        description: "Role check is still in progress.",
+        color: "warning",
+        timeout: 4500,
+      });
+      return;
+    }
+
+    if (!isECUser) {
+      addToast({
+        title: "Access denied",
+        description: "Only EC members can edit events.",
+        color: "danger",
+        timeout: 5000,
+      });
+      return;
+    }
+
+    if (computeStatus(eventToEdit) !== "upcoming") {
+      addToast({
+        title: "Edit unavailable",
+        description: "Only upcoming events can be edited.",
+        color: "warning",
+        timeout: 5000,
+      });
+      return;
+    }
+
+    const allStudents = studentOptions.length > 0 ? studentOptions : await loadStudentsForNotifications();
+
+    const startMinutes = parseTime12ToMinutes(eventToEdit.scheduledTime || eventToEdit.timeStart);
+    const start24 = startMinutes == null ? "07:00" : minutesTo24h(startMinutes);
+    const endMinutes = parseTime12ToMinutes(eventToEdit.timeEnd);
+    const end24 = endMinutes == null ? minutesTo24h((startMinutes ?? toMinutesFrom24h(start24)) + 60) : minutesTo24h(endMinutes);
+
+    const selectedYearsFromArray = Array.isArray(eventToEdit.yearLevels)
+      ? eventToEdit.yearLevels.map((item) => String(item).trim()).filter(Boolean)
+      : [];
+    const selectedCoursesFromArray = Array.isArray(eventToEdit.courses)
+      ? eventToEdit.courses.map((item) => String(item).trim()).filter(Boolean)
+      : [];
+
+    const legacyYears = splitCommaValues(eventToEdit.yearLevel);
+    const legacyCourses = splitCommaValues(eventToEdit.course);
+
+    const selectedYears = (selectedYearsFromArray.length > 0 ? selectedYearsFromArray : legacyYears).filter((item) =>
+      EVENT_YEAR_LEVEL_CHOICES.includes(item)
+    );
+    const selectedCourses = (selectedCoursesFromArray.length > 0 ? selectedCoursesFromArray : legacyCourses).filter((item) =>
+      EVENT_COURSE_CHOICES.includes(item)
+    );
+    const allYearsExplicit = selectedYears.length === 0 && legacyYears.some((item) => item.toLowerCase() === "all years");
+    const allCoursesExplicit = selectedCourses.length === 0 && legacyCourses.some((item) => item.toLowerCase() === "all courses");
+
+    const parsedTargets = parseTargetStudents(eventToEdit.targetStudent, allStudents);
+    const nextDate = /^\d{4}-\d{2}-\d{2}$/.test(String(eventToEdit.date ?? "")) ? String(eventToEdit.date) : isoDateToday();
+
+    setEditingEventId(eventToEdit.id);
+    setTitle(String(eventToEdit.title ?? ""));
+    setLocation(String(eventToEdit.location ?? ""));
+    setDate(nextDate);
+    setEventDateValue(toCalendarDate(nextDate));
+    setDetails(String(eventToEdit.details ?? ""));
+
+    const preRegEnabled = Boolean(eventToEdit.isPreReg);
+    setIsPreReg(preRegEnabled);
+    setWithPayment(Boolean(eventToEdit.withPayment));
+    setPreRegSlots(typeof eventToEdit.preRegSlots === "number" && eventToEdit.preRegSlots >= 0 ? Math.trunc(eventToEdit.preRegSlots) : 50);
+
+    setEventScheduled24(start24);
+    setEventStartTimeValue(toTimeValue(start24));
+    setEventEnd24(end24);
+    setEventEndTimeValue(toTimeValue(end24));
+
+    if (preRegEnabled) {
+      setSelectedEventYearLevels([]);
+      setSelectedEventCourses([]);
+      setIsAllYearsExplicit(false);
+      setIsAllCoursesExplicit(false);
+      setSelectedEventStudents([]);
+    } else {
+      setSelectedEventYearLevels(selectedYears);
+      setSelectedEventCourses(selectedCourses);
+      setIsAllYearsExplicit(allYearsExplicit);
+      setIsAllCoursesExplicit(allCoursesExplicit);
+      setSelectedEventStudents(parsedTargets);
+    }
+
+    setEventYearSearch("");
+    setEventCourseSearch("");
+    setEventSearchName("");
+    setShowEventYearDropdown(false);
+    setShowEventCourseDropdown(false);
+    setShowEventStudentDropdown(false);
+    setRegistrantsModalOpen(false);
+
+    setShowNotificationForm(false);
+    setShowAddEventForm(true);
+  };
+
   const handleSaveEvent = async () => {
     setSaveError("");
     setSaveMsg("");
 
     if (roleLoading) return setSaveError("Checking your role, please wait...");
-    if (!isECUser) return setSaveError("Only EC members can create events.");
+    if (!isECUser) return setSaveError("Only EC members can save events.");
     if (!title.trim()) return setSaveError("Title is required.");
     if (!date) return setSaveError("Date is required.");
     if (toMinutesFrom24h(eventEnd24) <= toMinutesFrom24h(eventScheduled24)) {
@@ -1441,6 +1959,14 @@ export default function EventDashboard() {
     }
     if (isPreReg && (Number.isNaN(preRegSlots) || preRegSlots < 0)) {
       return setSaveError("Pre-reg slots must be at least 0.");
+    }
+
+    const eventBeingEdited = editingEventId ? events.find((ev) => ev.id === editingEventId) ?? null : null;
+    if (editingEventId && !eventBeingEdited) {
+      return setSaveError("The event you are editing no longer exists.");
+    }
+    if (eventBeingEdited && computeStatus(eventBeingEdited) !== "upcoming") {
+      return setSaveError("Only upcoming events can be edited.");
     }
 
     try {
@@ -1453,63 +1979,51 @@ export default function EventDashboard() {
       const endTime = format12h(eventEnd24);
       const yearLevelValue = selectedEventYearLevels.length > 0 ? selectedEventYearLevels.join(", ") : "All Years";
       const courseValue = selectedEventCourses.length > 0 ? selectedEventCourses.join(", ") : "All Courses";
-
-      await addDoc(collection(db, "events"), {
+      const savePayload = {
         title: title.trim(),
         location: location.trim(),
         date,
         scheduledTime: startTime,
         timeStart: startTime,
         timeEnd: endTime,
-
         yearLevel: isPreReg ? "All Years" : yearLevelValue,
         course: isPreReg ? "All Courses" : courseValue,
         yearLevels: isPreReg ? [] : selectedEventYearLevels,
         courses: isPreReg ? [] : selectedEventCourses,
         targetStudent: isPreReg ? "" : studentTarget,
-
         details: details.trim(),
-        isPreReg,
-        withPayment,
+      };
 
-        preRegSlots: slots,
-        preRegCount: 0,
-        preRegRemaining: isPreReg ? slots : 0,
+      if (editingEventId) {
+        await setDoc(
+          doc(db, "events", editingEventId),
+          {
+            ...savePayload,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+        setSaveMsg("Event updated!");
+      } else {
+        await addDoc(collection(db, "events"), {
+          ...savePayload,
+          isPreReg,
+          withPayment,
+          preRegSlots: slots,
+          preRegCount: 0,
+          preRegRemaining: isPreReg ? slots : 0,
+          createdBy: currentUser ? currentUser.uid : null,
+          createdAt: serverTimestamp(),
+          status: "upcoming",
+        });
+        setSaveMsg("Event saved!");
+      }
 
-        createdBy: currentUser ? currentUser.uid : null,
-        createdAt: serverTimestamp(),
-        status: "upcoming",
-      });
-
-      setSaveMsg("Event saved!");
-
-      setTitle("");
-      setLocation("");
-      const nextEventDate = isoDateToday();
-      setDate(nextEventDate);
-      setEventDateValue(toCalendarDate(nextEventDate));
-      setSelectedEventYearLevels([]);
-      setSelectedEventCourses([]);
-      setIsAllYearsExplicit(false);
-      setIsAllCoursesExplicit(false);
-      setDetails("");
-      setIsPreReg(false);
-      setWithPayment(false);
-      setSelectedEventStudents([]);
-      setEventYearSearch("");
-      setEventCourseSearch("");
-      setEventSearchName("");
-      setShowEventYearDropdown(false);
-      setShowEventCourseDropdown(false);
-      setShowEventStudentDropdown(false);
-      setPreRegSlots(50);
-      setEventScheduled24("07:00");
-      setEventStartTimeValue(toTimeValue("07:00"));
-      setEventEnd24("08:00");
-      setEventEndTimeValue(toTimeValue("08:00"));
+      setEditingEventId(null);
+      resetEventComposer();
       setShowAddEventForm(false);
     } catch (err: any) {
-      setSaveError(err?.message || "Failed to save event.");
+      setSaveError(err?.message || (editingEventId ? "Failed to update event." : "Failed to save event."));
     } finally {
       setSaving(false);
     }
@@ -1680,13 +2194,11 @@ export default function EventDashboard() {
               setShowNotificationForm((v) => {
                 const next = !v;
                 if (next) {
-                  const nextNotifDate = isoDateToday();
-                  const nextNotifTime = now24h();
-                  setNotifDate(nextNotifDate);
-                  setNotifDateValue(toCalendarDate(nextNotifDate));
-                  setNotifScheduled24(nextNotifTime);
-                  setNotifScheduledValue(toTimeValue(nextNotifTime));
+                  setNotifError("");
+                  setNotifMsg("");
+                  resetNotificationComposer();
                   setShowAddEventForm(false);
+                  setEditingEventId(null);
                 }
                 return next;
               })
@@ -1702,10 +2214,15 @@ export default function EventDashboard() {
               setShowAddEventForm((v) => {
                 const next = !v;
                 if (next) {
-                  const nextEventDate = isoDateToday();
-                  setDate(nextEventDate);
-                  setEventDateValue(toCalendarDate(nextEventDate));
+                  setEditingEventId(null);
+                  setEditingNotificationDispatchId(null);
+                  setSaveError("");
+                  setSaveMsg("");
+                  resetEventComposer();
                   setShowNotificationForm(false);
+                } else {
+                  setEditingEventId(null);
+                  setEditingNotificationDispatchId(null);
                 }
                 return next;
               })
@@ -1720,11 +2237,12 @@ export default function EventDashboard() {
       {showAddEventForm && (
         <div className="bg-white p-4 sm:p-6 border rounded-xl shadow space-y-4 animate-slideDown">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <h2 className="text-xl font-semibold text-primary-900">Add New Event</h2>
+            <h2 className="text-xl font-semibold text-primary-900">{isEditingEvent ? "Edit Event" : "Add New Event"}</h2>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Switch
                 isSelected={isPreReg}
+                isDisabled={isEditingEvent}
                 onValueChange={(checked) => {
                   setIsPreReg(checked);
                   if (checked) {
@@ -1748,6 +2266,7 @@ export default function EventDashboard() {
 
               <Switch
                 isSelected={withPayment}
+                isDisabled={isEditingEvent}
                 onValueChange={(checked) => setWithPayment(checked)}
               >
                 With Payment
@@ -2169,6 +2688,7 @@ export default function EventDashboard() {
                 min={0}
                 step={1}
                 value={String(preRegSlots)}
+                isDisabled={isEditingEvent}
                 onValueChange={(value) => {
                   const parsed = Number(value);
                   if (Number.isNaN(parsed)) {
@@ -2185,6 +2705,12 @@ export default function EventDashboard() {
             </div>
           )}
 
+          {isEditingEvent && (
+            <p className="text-xs text-campus-text-secondary">
+              Editing is limited to title, location, date, start/end time, registrants, and details for upcoming events.
+            </p>
+          )}
+
           {saveError && <p className="text-red-600 text-sm">{saveError}</p>}
           {saveMsg && <p className="text-green-600 text-sm">{saveMsg}</p>}
 
@@ -2193,7 +2719,7 @@ export default function EventDashboard() {
             disabled={saving || roleLoading || !isECUser}
             className="w-full px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
           >
-            {roleLoading ? "Checking role..." : saving ? "Saving..." : "Save"}
+            {roleLoading ? "Checking role..." : saving ? (isEditingEvent ? "Updating..." : "Saving...") : isEditingEvent ? "Update Event" : "Save"}
           </button>
 
           {!roleLoading && !isECUser && (
@@ -2207,7 +2733,7 @@ export default function EventDashboard() {
       {/* NOTIFICATION FORM */}
       {showNotificationForm && (
         <div className="bg-white p-4 sm:p-6 border rounded-xl shadow space-y-4 animate-slideDown">
-          <h2 className="text-xl font-semibold text-blue-600">Create Notification</h2>
+          <h2 className="text-xl font-semibold text-blue-600">{isEditingNotification ? "Edit Scheduled Notification" : "Create Notification"}</h2>
 
           <div>
             <label className="text-sm font-medium">Notification Title</label>
@@ -2247,6 +2773,7 @@ export default function EventDashboard() {
             <select
               className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
               value={recipientType}
+              disabled={isEditingNotification}
               onChange={(e) => {
                 setRecipientType(e.target.value as any);
                 setNotifSearchName("");
@@ -2265,7 +2792,12 @@ export default function EventDashboard() {
           {recipientType === "course" && (
             <div>
               <label className="text-sm font-medium">Select Course</label>
-              <select value={notifCourse} onChange={(e) => setNotifCourse(e.target.value)} className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm">
+              <select
+                value={notifCourse}
+                disabled={isEditingNotification}
+                onChange={(e) => setNotifCourse(e.target.value)}
+                className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
+              >
                 <option>Computer Engineering</option>
                 <option>Mechanical Engineering</option>
                 <option>Electrical Engineering</option>
@@ -2278,7 +2810,12 @@ export default function EventDashboard() {
           {recipientType === "year" && (
             <div>
               <label className="text-sm font-medium">Select Year Level</label>
-              <select value={notifYear} onChange={(e) => setNotifYear(e.target.value)} className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm">
+              <select
+                value={notifYear}
+                disabled={isEditingNotification}
+                onChange={(e) => setNotifYear(e.target.value)}
+                className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
+              >
                 <option>1st Year</option>
                 <option>2nd Year</option>
                 <option>3rd Year</option>
@@ -2302,7 +2839,8 @@ export default function EventDashboard() {
                         <span className="text-campus-text-secondary">({student.schoolId})</span>
                         <button
                           type="button"
-                          className="text-campus-text-secondary hover:text-campus-text-primary"
+                          className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
+                          disabled={isEditingNotification}
                           onClick={() => {
                             setSelectedNotifStudents((prev) => prev.filter((x) => x.uid !== student.uid));
                           }}
@@ -2325,8 +2863,9 @@ export default function EventDashboard() {
                       setShowStudentDropdown(true);
                     }}
                     onFocus={() => setShowStudentDropdown(true)}
+                    disabled={isEditingNotification}
                     placeholder="Search by name"
-                    className="w-full px-4 py-3 border rounded-lg shadow-sm"
+                    className={`w-full px-4 py-3 border rounded-lg shadow-sm ${isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""}`}
                   />
 
                   <input
@@ -2336,12 +2875,13 @@ export default function EventDashboard() {
                       setShowStudentDropdown(true);
                     }}
                     onFocus={() => setShowStudentDropdown(true)}
+                    disabled={isEditingNotification}
                     placeholder="Search by ID number"
-                    className="w-full px-4 py-3 border rounded-lg shadow-sm"
+                    className={`w-full px-4 py-3 border rounded-lg shadow-sm ${isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""}`}
                   />
                 </div>
 
-                {showStudentDropdown && (
+                {!isEditingNotification && showStudentDropdown && (
                   <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
                     {studentsLoading ? (
                       <p className="px-4 py-2 text-sm text-campus-text-secondary">Loading students...</p>
@@ -2375,6 +2915,12 @@ export default function EventDashboard() {
             </div>
           )}
 
+          {isEditingNotification && (
+            <p className="text-xs text-campus-text-secondary">
+              Editing scheduled notifications updates title, date/time, and message while keeping the same recipients.
+            </p>
+          )}
+
           <div>
             <label className="text-sm font-medium">Message</label>
             <textarea value={notifMessage} onChange={(e) => setNotifMessage(e.target.value)} className="w-full h-28 mt-1 px-4 py-3 border rounded-lg shadow-sm" />
@@ -2390,7 +2936,7 @@ export default function EventDashboard() {
             disabled={sendingNotif || roleLoading || !isECUser}
             className="w-full sm:w-auto px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
           >
-            {sendingNotif ? "Sending..." : "Send Notification"}
+            {sendingNotif ? (isEditingNotification ? "Updating..." : "Sending...") : isEditingNotification ? "Update Notification" : "Send Notification"}
           </button>
         </div>
       )}
@@ -2530,10 +3076,19 @@ export default function EventDashboard() {
                       </button>
                       <button
                         type="button"
-                        className="flex-1 sm:flex-none px-4 py-1 bg-primary-500 text-white text-xs rounded-lg"
-                        onClick={(e) => e.stopPropagation()}
+                        className={`flex-1 sm:flex-none px-4 py-1 text-xs rounded-lg ${
+                          liveStatus === "upcoming"
+                            ? "bg-primary-500 text-white"
+                            : "bg-gray-200 text-campus-text-secondary cursor-not-allowed"
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (liveStatus !== "upcoming") return;
+                          void handleStartEditUpcomingEvent(ev);
+                        }}
+                        disabled={liveStatus !== "upcoming"}
                       >
-                        Edit (later)
+                        {liveStatus === "upcoming" ? "Edit" : "Edit (later)"}
                       </button>
                     </div>
                   </div>
@@ -2674,16 +3229,19 @@ export default function EventDashboard() {
                               <div className="flex items-center justify-between gap-2">
                                 <p className="text-sm font-semibold">Images</p>
                                 {imgs.length > 3 && (
-                                  <button
+                                  <Button
                                     type="button"
-                                    className="text-xs text-primary-600 hover:underline"
+                                    size="sm"
+                                    variant="light"
+                                    color="primary"
+                                    className="h-7 min-w-0 px-2 text-xs"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       openViewAllFilesModal(ev.id, ev.title, "images");
                                     }}
                                   >
                                     View all ({imgs.length})
-                                  </button>
+                                  </Button>
                                 )}
                               </div>
 
@@ -2705,28 +3263,40 @@ export default function EventDashboard() {
                                       <div className="mt-2 space-y-1">
                                         <p className="text-xs truncate">{img.name}</p>
                                         <div className="flex items-center justify-between gap-2">
-                                          <button
+                                          <Button
                                             type="button"
-                                            className="text-xs text-primary-600 hover:underline"
+                                            size="sm"
+                                            variant="light"
+                                            color="primary"
+                                            className="h-7 min-w-0 px-2 text-xs"
                                             onClick={(e) => {
                                               e.stopPropagation();
                                               downloadEventFile(img, img.name || "event-image.jpg");
                                             }}
                                           >
                                             Download
-                                          </button>
+                                          </Button>
 
                                           {isECUser && img.path && (
-                                            <button
+                                            <Button
                                               type="button"
-                                              className="text-xs text-red-600 hover:underline"
+                                              size="sm"
+                                              variant="light"
+                                              color="danger"
+                                              className="h-7 min-w-0 px-2 text-xs"
                                               onClick={(e) => {
                                                 e.stopPropagation();
-                                                deleteEventFile(ev.id, "images", img.id, img.path!);
+                                                requestDeleteEventFile(
+                                                  ev.id,
+                                                  "images",
+                                                  img.id,
+                                                  img.path!,
+                                                  img.name || "event-image.jpg"
+                                                );
                                               }}
                                             >
                                               Delete
-                                            </button>
+                                            </Button>
                                           )}
                                         </div>
                                       </div>
@@ -2742,16 +3312,19 @@ export default function EventDashboard() {
                               <div className="flex items-center justify-between gap-2">
                                 <p className="text-sm font-semibold">Documents</p>
                                 {docs.length > 3 && (
-                                  <button
+                                  <Button
                                     type="button"
-                                    className="text-xs text-primary-600 hover:underline"
+                                    size="sm"
+                                    variant="light"
+                                    color="primary"
+                                    className="h-7 min-w-0 px-2 text-xs"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       openViewAllFilesModal(ev.id, ev.title, "docs");
                                     }}
                                   >
                                     View all ({docs.length})
-                                  </button>
+                                  </Button>
                                 )}
                               </div>
 
@@ -2763,32 +3336,43 @@ export default function EventDashboard() {
                                     <div key={f.id} className="border rounded-lg bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                                       <div className="min-w-0">
                                         <p className="text-sm font-medium truncate">{f.name}</p>
-                                        <p className="text-xs text-gray-500">{f.contentType || "file"}</p>
                                       </div>
 
                                       <div className="flex items-center gap-3 shrink-0 self-start sm:self-auto">
-                                        <button
+                                        <Button
                                           type="button"
-                                          className="text-sm text-primary-600 hover:underline"
+                                          size="sm"
+                                          variant="light"
+                                          color="primary"
+                                          className="h-7 min-w-0 px-2 text-xs sm:text-sm"
                                           onClick={(e) => {
                                             e.stopPropagation();
                                             downloadEventFile(f, f.name || "event-document");
                                           }}
                                         >
                                           Download
-                                        </button>
+                                        </Button>
 
                                         {isECUser && f.path && (
-                                          <button
+                                          <Button
                                             type="button"
-                                            className="text-sm text-red-600 hover:underline"
+                                            size="sm"
+                                            variant="light"
+                                            color="danger"
+                                            className="h-7 min-w-0 px-2 text-xs sm:text-sm"
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              deleteEventFile(ev.id, "docs", f.id, f.path!);
+                                              requestDeleteEventFile(
+                                                ev.id,
+                                                "docs",
+                                                f.id,
+                                                f.path!,
+                                                f.name || "event-document"
+                                              );
                                             }}
                                           >
                                             Delete
-                                          </button>
+                                          </Button>
                                         )}
                                       </div>
                                     </div>
@@ -2892,31 +3476,74 @@ export default function EventDashboard() {
                 <p className="text-sm text-campus-text-secondary">No notifications match your filter/search.</p>
               ) : (
                 <div className="space-y-3">
-                  {paginatedNotifications.map((item) => (
-                    <div key={item.dispatchId} className="border rounded-lg p-3 sm:p-4 shadow-sm">
-                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <h4 className="font-semibold text-campus-text-primary">{item.title || "Notification"}</h4>
-                          <span className={`px-3 py-1 text-xs rounded-full ${notifStatusChip(item.status)}`}>{item.status}</span>
-                        </div>
-                        <p className="text-xs text-campus-text-secondary">Created: {formatDateTime(item.createdAt)}</p>
-                      </div>
+                  {paginatedNotifications.map((item) => {
+                    const isExpanded = expandedNotificationId === item.dispatchId;
 
-                      <p className="text-sm text-campus-text-secondary mt-2">{item.message || "-"}</p>
+                    return (
+                      <div
+                        key={item.dispatchId}
+                        className="border rounded-lg p-3 sm:p-4 shadow-sm hover:bg-gray-50 transition cursor-pointer"
+                        onClick={() => {
+                          setExpandedNotificationId((prev) => (prev === item.dispatchId ? null : item.dispatchId));
+                        }}
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <h4 className="font-semibold text-campus-text-primary">{item.title || "Notification"}</h4>
+                            <span className={`px-3 py-1 text-xs rounded-full ${notifStatusChip(item.status)}`}>{item.status}</span>
+                          </div>
 
-                      <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-campus-text-secondary">
-                        <div>
-                          <b>Date/Time:</b> {item.date || "-"} {item.scheduledTime || ""}
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs text-campus-text-secondary">Created: {formatDateTime(item.createdAt)}</p>
+                            <button
+                              type="button"
+                              className="px-3 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg hover:bg-gray-300 transition"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedNotificationId((prev) => (prev === item.dispatchId ? null : item.dispatchId));
+                              }}
+                            >
+                              {isExpanded ? "Hide Info" : "Info"}
+                            </button>
+                            <button
+                              type="button"
+                              className={`px-3 py-1 text-xs rounded-lg transition ${
+                                item.status === "scheduled"
+                                  ? "bg-primary-500 text-white hover:bg-primary-600"
+                                  : "bg-gray-200 text-campus-text-secondary cursor-not-allowed"
+                              }`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (item.status !== "scheduled") return;
+                                void handleStartEditScheduledNotification(item);
+                              }}
+                              disabled={item.status !== "scheduled"}
+                            >
+                              {item.status === "scheduled" ? "Edit" : "Edit (later)"}
+                            </button>
+                          </div>
                         </div>
-                        <div>
-                          <b>Target:</b> {notifTargetLabel(item)}
-                        </div>
-                        <div>
-                          <b>Recipients:</b> {item.recipientCount}
-                        </div>
+
+                        {isExpanded && (
+                          <>
+                            <p className="text-sm text-campus-text-secondary mt-2">{item.message || "-"}</p>
+
+                            <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-campus-text-secondary">
+                              <div>
+                                <b>Date/Time:</b> {item.date || "-"} {item.scheduledTime || ""}
+                              </div>
+                              <div>
+                                <b>Target:</b> {notifTargetLabel(item)}
+                              </div>
+                              <div>
+                                <b>Recipients:</b> {item.recipientCount}
+                              </div>
+                            </div>
+                          </>
+                        )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
               {!notificationsLoading && sortedFilteredNotifications.length > ITEMS_PER_PAGE && (
@@ -2957,84 +3584,163 @@ export default function EventDashboard() {
                   viewAllModalImages.length === 0 ? (
                     <p className="text-sm text-campus-text-secondary">No images available.</p>
                   ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                      {viewAllModalImages.map((img) => (
-                        <div key={img.id} className="border rounded-lg bg-white p-2">
-                          <a href={img.downloadURL} target="_blank" rel="noreferrer">
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img
-                              src={img.downloadURL}
-                              alt={img.name || "event image"}
-                              className="w-full h-32 object-cover rounded-md"
-                            />
-                          </a>
+                    <div className="space-y-3">
+                      <div className="flex justify-end">
+                        <Dropdown placement="bottom-end">
+                          <DropdownTrigger>
+                            <Button variant="bordered" className="h-8 min-w-0 px-3 text-xs sm:text-sm">
+                              <span>Sort by: {imageModalSortMode === "ascending" ? "Ascending" : "Descending"}</span>
+                              <FiChevronDown className="ml-2" />
+                            </Button>
+                          </DropdownTrigger>
+                          <DropdownMenu
+                            aria-label="Sort all images"
+                            disallowEmptySelection
+                            selectionMode="single"
+                            selectedKeys={new Set([imageModalSortMode])}
+                            onAction={(key) => setImageModalSortMode(String(key) as ImageModalSortMode)}
+                          >
+                            <DropdownItem key="ascending">Ascending</DropdownItem>
+                            <DropdownItem key="descending">Descending</DropdownItem>
+                          </DropdownMenu>
+                        </Dropdown>
+                      </div>
 
-                          <div className="mt-2 space-y-1">
-                            <p className="text-xs truncate">{img.name}</p>
-                            <div className="flex items-center justify-between gap-2">
-                              <button
-                                type="button"
-                                className="text-xs text-primary-600 hover:underline"
-                                onClick={() => downloadEventFile(img, img.name || "event-image.jpg")}
-                              >
-                                Download
-                              </button>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                        {sortedViewAllModalImages.map((img) => (
+                          <div key={img.id} className="border rounded-lg bg-white p-2">
+                            <a href={img.downloadURL} target="_blank" rel="noreferrer">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={img.downloadURL}
+                                alt={img.name || "event image"}
+                                className="w-full h-32 object-cover rounded-md"
+                              />
+                            </a>
 
-                              {isECUser && img.path && viewAllFilesModal.eventId && (
-                                <button
+                            <div className="mt-2 space-y-1">
+                              <p className="text-xs truncate">{img.name}</p>
+                              <div className="flex items-center justify-between gap-2">
+                                <Button
                                   type="button"
-                                  className="text-xs text-red-600 hover:underline"
-                                  onClick={() => {
-                                    const modalEventId = viewAllFilesModal.eventId;
-                                    if (!modalEventId) return;
-                                    deleteEventFile(modalEventId, "images", img.id, img.path!);
-                                  }}
+                                  size="sm"
+                                  variant="light"
+                                  color="primary"
+                                  className="h-7 min-w-0 px-2 text-xs"
+                                  onClick={() => downloadEventFile(img, img.name || "event-image.jpg")}
                                 >
-                                  Delete
-                                </button>
-                              )}
+                                  Download
+                                </Button>
+
+                                {isECUser && img.path && viewAllFilesModal.eventId && (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="light"
+                                    color="danger"
+                                    className="h-7 min-w-0 px-2 text-xs"
+                                    onClick={() => {
+                                      const modalEventId = viewAllFilesModal.eventId;
+                                      if (!modalEventId) return;
+                                      requestDeleteEventFile(
+                                        modalEventId,
+                                        "images",
+                                        img.id,
+                                        img.path!,
+                                        img.name || "event-image.jpg"
+                                      );
+                                    }}
+                                  >
+                                    Delete
+                                  </Button>
+                                )}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
                     </div>
                   )
                 ) : viewAllModalDocs.length === 0 ? (
                   <p className="text-sm text-campus-text-secondary">No documents available.</p>
                 ) : (
-                  <div className="space-y-2">
-                    {viewAllModalDocs.map((file) => (
+                  <div className="space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                      <Input
+                        value={documentModalSearch}
+                        onValueChange={setDocumentModalSearch}
+                        placeholder="Search documents..."
+                        size="sm"
+                        className="w-full"
+                      />
+
+                      <Dropdown placement="bottom-end">
+                        <DropdownTrigger>
+                          <Button variant="bordered" className="h-8 min-w-0 px-3 text-xs sm:text-sm">
+                            <span>Sort by: {documentModalSortMode === "ascending" ? "Ascending" : "Descending"}</span>
+                            <FiChevronDown className="ml-2" />
+                          </Button>
+                        </DropdownTrigger>
+                        <DropdownMenu
+                          aria-label="Sort all documents"
+                          disallowEmptySelection
+                          selectionMode="single"
+                          selectedKeys={new Set([documentModalSortMode])}
+                          onAction={(key) => setDocumentModalSortMode(String(key) as DocumentModalSortMode)}
+                        >
+                          <DropdownItem key="ascending">Ascending</DropdownItem>
+                          <DropdownItem key="descending">Descending</DropdownItem>
+                        </DropdownMenu>
+                      </Dropdown>
+                    </div>
+
+                    {sortedFilteredViewAllModalDocs.length === 0 ? (
+                      <p className="text-sm text-campus-text-secondary">No documents match your search.</p>
+                    ) : (
+                      sortedFilteredViewAllModalDocs.map((file) => (
                       <div key={file.id} className="border rounded-lg bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                         <div className="min-w-0">
                           <p className="text-sm font-medium truncate">{file.name}</p>
-                          <p className="text-xs text-gray-500">{file.contentType || "file"}</p>
                         </div>
 
                         <div className="flex items-center gap-3 shrink-0 self-start sm:self-auto">
-                          <button
+                          <Button
                             type="button"
-                            className="text-sm text-primary-600 hover:underline"
+                            size="sm"
+                            variant="light"
+                            color="primary"
+                            className="h-7 min-w-0 px-2 text-xs sm:text-sm"
                             onClick={() => downloadEventFile(file, file.name || "event-document")}
                           >
                             Download
-                          </button>
+                          </Button>
 
                           {isECUser && file.path && viewAllFilesModal.eventId && (
-                            <button
+                            <Button
                               type="button"
-                              className="text-sm text-red-600 hover:underline"
+                              size="sm"
+                              variant="light"
+                              color="danger"
+                              className="h-7 min-w-0 px-2 text-xs sm:text-sm"
                               onClick={() => {
                                 const modalEventId = viewAllFilesModal.eventId;
                                 if (!modalEventId) return;
-                                deleteEventFile(modalEventId, "docs", file.id, file.path!);
+                                requestDeleteEventFile(
+                                  modalEventId,
+                                  "docs",
+                                  file.id,
+                                  file.path!,
+                                  file.name || "event-document"
+                                );
                               }}
                             >
                               Delete
-                            </button>
+                            </Button>
                           )}
                         </div>
                       </div>
-                    ))}
+                      ))
+                    )}
                   </div>
                 )}
               </ModalBody>
@@ -3050,6 +3756,51 @@ export default function EventDashboard() {
                 >
                   Close
                 </button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      <Modal
+        isOpen={Boolean(pendingDeleteFile)}
+        onOpenChange={(open) => {
+          if (!open && !deleteSubmitting) {
+            setPendingDeleteFile(null);
+          }
+        }}
+        size="md"
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>Delete File</ModalHeader>
+              <ModalBody className="space-y-2">
+                <p className="text-base text-campus-text-primary">Are you sure you want to delete this file?</p>
+                {pendingDeleteFile?.fileName && (
+                  <p className="text-sm text-campus-text-secondary break-all">{pendingDeleteFile.fileName}</p>
+                )}
+              </ModalBody>
+              <ModalFooter className="justify-between">
+                <Button
+                  variant="bordered"
+                  onPress={() => {
+                    setPendingDeleteFile(null);
+                    onClose();
+                  }}
+                  isDisabled={deleteSubmitting}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  color="warning"
+                  onPress={() => {
+                    void confirmDeleteEventFile();
+                  }}
+                  isLoading={deleteSubmitting}
+                >
+                  Delete
+                </Button>
               </ModalFooter>
             </>
           )}

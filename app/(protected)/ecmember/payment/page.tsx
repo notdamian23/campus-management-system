@@ -64,6 +64,7 @@ type Notice = {
 };
 
 type SortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
+type StudentStatusSortMode = "paid" | "unpaid";
 
 function normalizeYear(raw: unknown) {
   const value = String(raw ?? "").trim();
@@ -188,6 +189,10 @@ export default function PaymentDashboard() {
   const [expandedStudentsLoading, setExpandedStudentsLoading] = useState(false);
   const [savingPayment, setSavingPayment] = useState(false);
   const [updatingStatusKey, setUpdatingStatusKey] = useState<string | null>(null);
+  const [studentSearchText, setStudentSearchText] = useState("");
+  const [studentYearFilter, setStudentYearFilter] = useState<string>("");
+  const [studentCourseFilter, setStudentCourseFilter] = useState<string>("");
+  const [studentStatusSortMode, setStudentStatusSortMode] = useState<StudentStatusSortMode>("paid");
 
   const [notice, setNotice] = useState<Notice | null>(null);
   const [paymentStudents, setPaymentStudents] = useState<Record<string, PaymentStudent[]>>({});
@@ -295,6 +300,13 @@ export default function PaymentDashboard() {
     return () => unsub();
   }, [expandedPayment]);
 
+  useEffect(() => {
+    setStudentSearchText("");
+    setStudentYearFilter("");
+    setStudentCourseFilter("");
+    setStudentStatusSortMode("paid");
+  }, [expandedPayment]);
+
   const courseOptions = useMemo(() => {
     const set = new Set<string>();
     students.forEach((s) => {
@@ -348,6 +360,11 @@ export default function PaymentDashboard() {
     if (paymentSortMode === "alphabetical") return "Alphabetically, A-Z";
     return "Date, new to old";
   }, [paymentSortMode]);
+
+  const studentStatusSortLabel = useMemo(
+    () => (studentStatusSortMode === "paid" ? "Paid" : "Unpaid"),
+    [studentStatusSortMode]
+  );
 
   function resetForm() {
     setTitle("");
@@ -734,6 +751,34 @@ export default function PaymentDashboard() {
                 : statusLabel === "Pending"
                   ? "bg-amber-100 text-amber-800"
                   : "bg-gray-100 text-campus-text-primary";
+            const studentYearOptions = Array.from(
+              new Set(rows.map((student) => student.year).filter((year) => Boolean(year) && year !== "Unassigned"))
+            ).sort((a, b) => a.localeCompare(b));
+            const studentCourseOptions = Array.from(
+              new Set(rows.map((student) => student.course).filter((courseName) => Boolean(courseName) && courseName !== "Unassigned"))
+            ).sort((a, b) => a.localeCompare(b));
+            const filteredSortedStudentRows = rows
+              .filter((student) => {
+                const search = studentSearchText.trim().toLowerCase();
+                const matchesSearch =
+                  !search ||
+                  student.schoolId.toLowerCase().includes(search) ||
+                  student.name.toLowerCase().includes(search) ||
+                  student.course.toLowerCase().includes(search) ||
+                  student.year.toLowerCase().includes(search) ||
+                  student.section.toLowerCase().includes(search);
+                const matchesYear = !studentYearFilter || student.year === studentYearFilter;
+                const matchesCourse = !studentCourseFilter || student.course === studentCourseFilter;
+                return matchesSearch && matchesYear && matchesCourse;
+              })
+              .sort((a, b) => {
+                if (a.status !== b.status) {
+                  if (studentStatusSortMode === "paid") return a.status === "Paid" ? -1 : 1;
+                  return a.status === "Unpaid" ? -1 : 1;
+                }
+
+                return a.name.localeCompare(b.name) || a.schoolId.localeCompare(b.schoolId);
+              });
 
             return (
               <div key={p.id} className="border rounded-lg p-3 sm:p-4 shadow-sm hover:bg-gray-50 transition mb-4">
@@ -784,6 +829,66 @@ export default function PaymentDashboard() {
 
                     <h4 className="font-semibold text-campus-text-primary mb-2">Students</h4>
 
+                    <div className="mb-3 grid grid-cols-1 md:grid-cols-4 gap-2">
+                      <input
+                        type="text"
+                        placeholder="Search students..."
+                        value={studentSearchText}
+                        onChange={(e) => setStudentSearchText(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-lg text-sm md:col-span-2"
+                      />
+
+                      <select
+                        value={studentYearFilter}
+                        onChange={(e) => setStudentYearFilter(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-lg text-sm"
+                      >
+                        <option value="">All Years</option>
+                        {studentYearOptions.map((yearName) => (
+                          <option key={yearName} value={yearName}>
+                            {yearName}
+                          </option>
+                        ))}
+                      </select>
+
+                      <select
+                        value={studentCourseFilter}
+                        onChange={(e) => setStudentCourseFilter(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-lg text-sm"
+                      >
+                        <option value="">All Courses</option>
+                        {studentCourseOptions.map((courseName) => (
+                          <option key={courseName} value={courseName}>
+                            {courseName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="mb-3 flex justify-start sm:justify-end">
+                      <Dropdown placement="bottom-end">
+                        <DropdownTrigger>
+                          <Button
+                            variant="bordered"
+                            className="w-full sm:w-auto justify-between min-w-[150px]"
+                          >
+                            <span>Sort by: {studentStatusSortLabel}</span>
+                            <FiChevronDown className="ml-2" />
+                          </Button>
+                        </DropdownTrigger>
+                        <DropdownMenu
+                          aria-label="Sort students by payment status"
+                          disallowEmptySelection
+                          selectionMode="single"
+                          selectedKeys={new Set([studentStatusSortMode])}
+                          onAction={(key) => setStudentStatusSortMode(String(key) as StudentStatusSortMode)}
+                        >
+                          <DropdownItem key="paid">Paid</DropdownItem>
+                          <DropdownItem key="unpaid">Unpaid</DropdownItem>
+                        </DropdownMenu>
+                      </Dropdown>
+                    </div>
+
                     {expandedStudentsLoading && rows.length === 0 ? (
                       <p className="text-sm text-campus-text-secondary">Loading student assignments...</p>
                     ) : rows.length === 0 ? (
@@ -804,7 +909,7 @@ export default function PaymentDashboard() {
                           </thead>
 
                           <tbody>
-                            {rows.map((student) => {
+                            {filteredSortedStudentRows.map((student) => {
                               const actionKey = `${p.id}:${student.uid}`;
                               const nextStatusLabel = student.status === "Paid" ? "Mark Unpaid" : "Mark Paid";
 
@@ -840,6 +945,13 @@ export default function PaymentDashboard() {
                                 </tr>
                               );
                             })}
+                            {filteredSortedStudentRows.length === 0 && (
+                              <tr>
+                                <td colSpan={7} className="p-3 text-center text-sm text-campus-text-secondary">
+                                  No students match your search/filter.
+                                </td>
+                              </tr>
+                            )}
                           </tbody>
                         </table>
                       </div>

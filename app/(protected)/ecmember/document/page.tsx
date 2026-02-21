@@ -5,6 +5,7 @@ import { FiChevronDown } from "react-icons/fi";
 import { onAuthStateChanged } from "firebase/auth";
 import {
     collection,
+    deleteDoc,
     doc,
     onSnapshot,
     orderBy,
@@ -22,6 +23,7 @@ import {
 } from "firebase/storage";
 import { Button } from "@heroui/button";
 import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
+import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/modal";
 import { addToast } from "@heroui/toast";
 import { auth, db, storage } from "@/lib/firebase";
 
@@ -219,6 +221,8 @@ export default function DocumentsPage() {
     const [uploadCategory, setUploadCategory] = useState<DocCategory>("General");
     const [uploading, setUploading] = useState(false);
     const [uploadError, setUploadError] = useState("");
+    const [pendingDeleteDocument, setPendingDeleteDocument] = useState<DocumentItem | null>(null);
+    const [deleteSubmitting, setDeleteSubmitting] = useState(false);
 
     const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -638,6 +642,63 @@ export default function DocumentsPage() {
         }
     };
 
+    const confirmDeleteDocument = async () => {
+        if (!pendingDeleteDocument) return;
+
+        const targetDoc = pendingDeleteDocument;
+        setDeleteSubmitting(true);
+
+        try {
+            if (targetDoc.storagePath) {
+                try {
+                    await withTimeout(
+                        deleteObject(ref(storage, targetDoc.storagePath)),
+                        CLEANUP_TIMEOUT_MS,
+                        "Delete storage object",
+                    );
+                } catch (storageError) {
+                    if (toErrorCode(storageError) !== "storage/object-not-found") {
+                        throw storageError;
+                    }
+
+                    console.warn("[EC Documents] Storage object already missing during delete.", {
+                        docId: targetDoc.id,
+                        name: targetDoc.name,
+                        storagePath: targetDoc.storagePath,
+                    });
+                }
+            }
+
+            await withTimeout(deleteDoc(doc(db, "ecDocuments", targetDoc.id)), WRITE_DOC_TIMEOUT_MS, "Delete Firestore metadata");
+
+            addToast({
+                title: "Document deleted",
+                description: `${targetDoc.name} was removed.`,
+                color: "success",
+                timeout: 5000,
+            });
+
+            setPendingDeleteDocument(null);
+        } catch (error) {
+            console.error("[EC Documents] Delete failed.", {
+                docId: targetDoc.id,
+                name: targetDoc.name,
+                code: toErrorCode(error),
+                message: toErrorMessage(error),
+                raw: error,
+            });
+
+            addToast({
+                title: "Delete failed",
+                description: toErrorMessage(error),
+                color: "danger",
+                timeout: 7000,
+            });
+        } finally {
+            setDeleteSubmitting(false);
+        }
+    };
+
     return (
         <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
             <div className="bg-white p-4 sm:p-6 rounded-xl shadow border">
@@ -805,16 +866,26 @@ export default function DocumentsPage() {
                                 </div>
                             </div>
 
-                            <button
-                                type="button"
-                                onClick={() => {
+                            <Button
+                                color="warning"
+                                className="mt-3 w-full shrink-0"
+                                onPress={() => {
                                     handleDownload(selectedDocument);
                                 }}
-                                className="mt-3 w-full px-4 py-2 bg-primary-600 text-white rounded-lg shadow hover:bg-primary-700 transition disabled:opacity-60 shrink-0"
-                                disabled={!selectedDocument.downloadUrl}
+                                isDisabled={!selectedDocument.downloadUrl}
                             >
                                 Download Document
-                            </button>
+                            </Button>
+                            <Button
+                                color="danger"
+                                className="mt-2 w-full shrink-0"
+                                onPress={() => {
+                                    setPendingDeleteDocument(selectedDocument);
+                                }}
+                                isDisabled={deleteSubmitting}
+                            >
+                                Delete Document
+                            </Button>
                         </div>
                     ) : (
                         <div className="border border-dashed rounded-lg h-72 flex flex-col items-center justify-center text-campus-text-secondary">
@@ -882,6 +953,51 @@ export default function DocumentsPage() {
                     </div>
                 </div>
             ) : null}
+
+            <Modal
+                isOpen={Boolean(pendingDeleteDocument)}
+                onOpenChange={(open) => {
+                    if (!open && !deleteSubmitting) {
+                        setPendingDeleteDocument(null);
+                    }
+                }}
+                size="md"
+            >
+                <ModalContent>
+                    {(onClose) => (
+                        <>
+                            <ModalHeader>Delete File</ModalHeader>
+                            <ModalBody className="space-y-2">
+                                <p className="text-base text-campus-text-primary">Are you sure you want to delete this file?</p>
+                                {pendingDeleteDocument?.name ? (
+                                    <p className="text-sm text-campus-text-secondary break-all">{pendingDeleteDocument.name}</p>
+                                ) : null}
+                            </ModalBody>
+                            <ModalFooter className="justify-between">
+                                <Button
+                                    variant="bordered"
+                                    onPress={() => {
+                                        setPendingDeleteDocument(null);
+                                        onClose();
+                                    }}
+                                    isDisabled={deleteSubmitting}
+                                >
+                                    Cancel
+                                </Button>
+                                <Button
+                                    color="danger"
+                                    onPress={() => {
+                                        void confirmDeleteDocument();
+                                    }}
+                                    isLoading={deleteSubmitting}
+                                >
+                                    Delete
+                                </Button>
+                            </ModalFooter>
+                        </>
+                    )}
+                </ModalContent>
+            </Modal>
         </div>
     );
 }
