@@ -1,6 +1,6 @@
 "use client";
 
-import { ReactNode, useMemo } from "react";
+import { ReactNode, useEffect, useMemo, useState } from "react";
 import { Sidebar, NavItem } from "@/components/Sidebar";
 import {
   StudentPortalProvider,
@@ -16,10 +16,19 @@ export default function StudentLayout({ children }: { children: ReactNode }) {
 }
 
 function StudentLayoutShell({ children }: { children: ReactNode }) {
-  const { notifications } = useStudentPortal();
+  const { unreadNotificationsCount } = useStudentPortal();
+  const [canSwitchToEc, setCanSwitchToEc] = useState(false);
+
+  useEffect(() => {
+    const roleCookie = document.cookie
+      .split("; ")
+      .find((item) => item.startsWith("campus_role="));
+    const role = roleCookie?.slice("campus_role=".length) ?? "";
+    setCanSwitchToEc(role === "ec");
+  }, []);
 
   const navItems = useMemo<NavItem[]>(() => {
-    const notificationCount = notifications.length;
+    const notificationCount = unreadNotificationsCount;
 
     const baseItems: NavItem[] = [
       {
@@ -37,6 +46,11 @@ function StudentLayoutShell({ children }: { children: ReactNode }) {
         icon: "event",
         label: "Events",
       },
+      {
+        href: "/student/payment",
+        icon: "payments",
+        label: "Payments",
+      },
     ];
 
     const notificationsItem: NavItem = {
@@ -53,13 +67,23 @@ function StudentLayoutShell({ children }: { children: ReactNode }) {
     }
 
     return [...baseItems, notificationsItem];
-  }, [notifications.length]);
+  }, [unreadNotificationsCount]);
 
   return (
-    <div className="min-h-screen flex bg-[#f2f2f2]">
-      <Sidebar navItems={navItems} />
+    <div className="min-h-[100dvh] bg-[#f2f2f2]">
+      <div className="flex flex-col lg:flex-row">
+        <Sidebar
+          navItems={navItems}
+          enableMobileDrawer
+          titleSize="sm"
+          logoSize={80}
+          showStudentAccountSwitch={canSwitchToEc}
+          studentAccountHref="/ecmember"
+          studentAccountLabel="EC Account"
+        />
 
-      <main className="flex-1 p-10">{children}</main>
+        <main className="flex-1 min-w-0 p-3 sm:p-6 lg:p-10">{children}</main>
+      </div>
     </div>
   );
 }

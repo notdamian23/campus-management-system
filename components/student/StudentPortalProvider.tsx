@@ -89,12 +89,14 @@ type StudentPortalContextValue = {
   events: StudentEvent[];
   payments: StudentPayment[];
   notifications: StudentNotification[];
+  unreadNotificationsCount: number;
   registeredEventIds: string[];
   loading: boolean;
   loadingProfile: boolean;
   loadingEvents: boolean;
   loadingPayments: boolean;
   error: string | null;
+  markNotificationRead: (notificationId: string) => void;
   registerForEvent: (eventId: string) => Promise<{ ok: boolean; msg: string }>;
 };
 
@@ -377,6 +379,7 @@ export function StudentPortalProvider({
   const [profileNotifications, setProfileNotifications] = useState<
     ProfileNotificationDoc[]
   >([]);
+  const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
   const [attendanceByEvent, setAttendanceByEvent] = useState<
     Record<string, string | null>
   >({});
@@ -879,6 +882,92 @@ export function StudentPortalProvider({
     return items.sort((a, b) => b.date.getTime() - a.date.getTime());
   }, [profileNotifications, events, payments]);
 
+  const notificationReadStorageKey = useMemo(
+    () =>
+      profile?.uid
+        ? `campus_student_read_notifications:${profile.uid}`
+        : "",
+    [profile?.uid]
+  );
+
+  useEffect(() => {
+    if (!notificationReadStorageKey) {
+      setReadNotificationIds([]);
+      return;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(notificationReadStorageKey);
+      if (!raw) {
+        setReadNotificationIds([]);
+        return;
+      }
+
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        setReadNotificationIds([]);
+        return;
+      }
+
+      const normalized = Array.from(
+        new Set(
+          parsed
+            .map((item) => String(item ?? "").trim())
+            .filter((item) => item.length > 0)
+        )
+      );
+      setReadNotificationIds(normalized);
+    } catch {
+      setReadNotificationIds([]);
+    }
+  }, [notificationReadStorageKey]);
+
+  useEffect(() => {
+    if (!notificationReadStorageKey) return;
+
+    try {
+      window.localStorage.setItem(
+        notificationReadStorageKey,
+        JSON.stringify(readNotificationIds)
+      );
+    } catch {
+      // Ignore storage quota/private mode errors.
+    }
+  }, [notificationReadStorageKey, readNotificationIds]);
+
+  useEffect(() => {
+    if (notifications.length === 0) return;
+
+    const validIds = new Set(notifications.map((item) => item.id));
+    setReadNotificationIds((prev) => {
+      const next = prev.filter((id) => validIds.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [notifications]);
+
+  const readNotificationSet = useMemo(
+    () => new Set(readNotificationIds),
+    [readNotificationIds]
+  );
+
+  const unreadNotificationsCount = useMemo(
+    () =>
+      notifications.reduce(
+        (total, item) => total + (readNotificationSet.has(item.id) ? 0 : 1),
+        0
+      ),
+    [notifications, readNotificationSet]
+  );
+
+  const markNotificationRead = useCallback((notificationId: string) => {
+    const normalized = String(notificationId ?? "").trim();
+    if (!normalized) return;
+
+    setReadNotificationIds((prev) =>
+      prev.includes(normalized) ? prev : [...prev, normalized]
+    );
+  }, []);
+
   const registerForEvent = useCallback(
     async (eventId: string) => {
       if (!profile?.uid) {
@@ -928,12 +1017,14 @@ export function StudentPortalProvider({
       events,
       payments,
       notifications,
+      unreadNotificationsCount,
       registeredEventIds,
       loading,
       loadingProfile,
       loadingEvents,
       loadingPayments,
       error,
+      markNotificationRead,
       registerForEvent,
     }),
     [
@@ -941,12 +1032,14 @@ export function StudentPortalProvider({
       events,
       payments,
       notifications,
+      unreadNotificationsCount,
       registeredEventIds,
       loading,
       loadingProfile,
       loadingEvents,
       loadingPayments,
       error,
+      markNotificationRead,
       registerForEvent,
     ]
   );

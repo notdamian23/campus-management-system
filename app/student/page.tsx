@@ -90,9 +90,9 @@ export default function StudentDashboard() {
   const recentNotifications = notifications.slice(0, 2);
 
   return (
-    <div className="p-8 space-y-8">
+    <div className="space-y-5 sm:space-y-8">
       <div>
-        <h1 className="text-3xl font-bold text-primary-900">
+        <h1 className="text-2xl sm:text-3xl font-bold text-primary-900">
           Welcome back{profile?.studentName ? `, ${profile.studentName}` : ""}!
         </h1>
         <p className="text-campus-text-secondary text-sm">
@@ -106,7 +106,7 @@ export default function StudentDashboard() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Card shadow="sm" isPressable>
           <CardBody>
             <p className="text-campus-text-secondary text-sm">Upcoming Events</p>
@@ -139,7 +139,7 @@ export default function StudentDashboard() {
       </div>
 
       <Card shadow="sm">
-        <CardHeader className="flex justify-between items-center">
+        <CardHeader className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg font-semibold text-campus-text-primary">
             Events Overview
           </h2>
@@ -162,7 +162,7 @@ export default function StudentDashboard() {
               {eventOverview.map((event) => (
                 <div
                   key={event.id}
-                  className="border rounded-lg p-4 flex justify-between items-center gap-3 hover:bg-gray-50 transition"
+                  className="border rounded-lg p-4 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between hover:bg-gray-50 transition"
                 >
                   <div>
                     <h3 className="font-semibold text-campus-text-primary">
@@ -181,7 +181,7 @@ export default function StudentDashboard() {
       </Card>
 
       <Card shadow="sm">
-        <CardHeader className="flex justify-between items-center">
+        <CardHeader className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
           <h3 className="text-lg font-semibold text-campus-text-primary">
             Recent Notifications
           </h3>
@@ -201,10 +201,10 @@ export default function StudentDashboard() {
               {recentNotifications.map((item) => (
                 <div
                   key={item.id}
-                  className="p-3 border rounded-lg hover:bg-gray-50 transition flex justify-between gap-4"
+                  className="p-3 border rounded-lg hover:bg-gray-50 transition flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between"
                 >
                   <span className="text-campus-text-primary">{item.title}</span>
-                  <span className="text-xs text-campus-text-secondary whitespace-nowrap">
+                  <span className="text-xs text-campus-text-secondary sm:whitespace-nowrap">
                     {toRelativeTime(item.date)}
                   </span>
                 </div>

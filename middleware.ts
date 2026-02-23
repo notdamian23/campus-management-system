@@ -71,7 +71,8 @@ export function middleware(req: NextRequest) {
         return NextResponse.redirect(url);
     }
 
-    if (pathname.startsWith("/student") && role !== "student") {
+    // EC members can use student routes, while regular students remain student-only.
+    if (pathname.startsWith("/student") && role !== "student" && role !== "ec") {
         const url = req.nextUrl.clone();
         url.pathname = ROLE_HOME[role ?? ""] ?? "/";
         return NextResponse.redirect(url);

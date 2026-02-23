@@ -17,6 +17,8 @@ import {
 import { app, auth, db } from "@/lib/firebase";
 import { Button } from "@heroui/button";
 import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
+import { Input, Textarea } from "@heroui/input";
+import { Select, SelectItem } from "@heroui/select";
 
 type PaymentStudentStatus = "Paid" | "Unpaid";
 
@@ -61,6 +63,11 @@ interface Payment {
 type Notice = {
   type: "ok" | "err";
   msg: string;
+};
+
+type SelectOption = {
+  key: string;
+  label: string;
 };
 
 type SortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
@@ -323,6 +330,22 @@ export default function PaymentDashboard() {
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [students]);
 
+  const paymentYearSelectItems = useMemo<SelectOption[]>(
+    () => [
+      { key: "All Years", label: "All Years" },
+      ...yearOptions.map((yearName) => ({ key: yearName, label: yearName })),
+    ],
+    [yearOptions]
+  );
+
+  const paymentCourseSelectItems = useMemo<SelectOption[]>(
+    () => [
+      { key: "All Courses", label: "All Courses" },
+      ...courseOptions.map((courseName) => ({ key: courseName, label: courseName })),
+    ],
+    [courseOptions]
+  );
+
   const filteredPayments = useMemo(() => {
     const search = queryText.trim().toLowerCase();
 
@@ -574,31 +597,31 @@ export default function PaymentDashboard() {
       )}
 
       <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 sm:gap-4">
-        <input
+        <Input
+          aria-label="Search payments"
           type="text"
           placeholder="Search by title, reference, course, or year..."
           value={queryText}
-          onChange={(e) => setQueryText(e.target.value)}
-          className="w-full lg:flex-1 lg:min-w-[260px] px-4 py-3 border rounded-lg shadow-sm"
+          onValueChange={setQueryText}
+          className="w-full lg:flex-1 lg:min-w-[260px]"
         />
 
-        <div className="w-full sm:w-auto flex items-center gap-2 px-4 py-3 border rounded-lg shadow-sm bg-white">
-          <FiCalendar />
-          <input
-            type="date"
-            value={dateFilter}
-            onChange={(e) => setDateFilter(e.target.value)}
-            className="outline-none w-full sm:w-auto"
-            aria-label="Filter by date"
-          />
-        </div>
+        <Input
+          aria-label="Filter by date"
+          type="date"
+          value={dateFilter}
+          onValueChange={setDateFilter}
+          startContent={<FiCalendar />}
+          className="w-full sm:w-auto"
+        />
 
-        <button
-          onClick={() => setShowAddPaymentForm(true)}
-          className="w-full sm:w-auto bg-primary-500 text-white px-4 py-3 rounded-lg shadow hover:bg-primary-600 transition"
+        <Button
+          onPress={() => setShowAddPaymentForm(true)}
+          className="w-full sm:w-auto text-white px-4"
+          style={{ backgroundColor: "#7b0000" }}
         >
           + Add Payment
-        </button>
+        </Button>
       </div>
 
       <div className="flex items-center">
@@ -632,88 +655,102 @@ export default function PaymentDashboard() {
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
             <h2 className="text-xl font-semibold text-primary-900">Add New Payment</h2>
 
-            <button
-              onClick={() => setShowAddPaymentForm(false)}
-              className="w-full sm:w-auto px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded text-sm"
+            <Button
+              variant="flat"
+              onPress={() => setShowAddPaymentForm(false)}
+              className="w-full sm:w-auto px-3 text-sm"
             >
               Close
-            </button>
+            </Button>
           </div>
 
           <div>
             <label className="text-sm font-medium">Payment Title</label>
-            <input
+            <Input
+              aria-label="Payment title"
               type="text"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
+              onValueChange={setTitle}
+              className="w-full mt-1"
               placeholder="e.g., Acquaintance Party"
             />
           </div>
 
           <div>
             <label className="text-sm font-medium">Amount</label>
-            <input
+            <Input
+              aria-label="Payment amount"
               type="number"
               min={0}
               step="0.01"
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
+              onValueChange={setAmount}
+              className="w-full mt-1"
               placeholder="Enter amount"
             />
           </div>
 
           <div>
             <label className="text-sm font-medium">Date</label>
-            <input
+            <Input
+              aria-label="Payment date"
               type="date"
               value={paymentDate}
-              onChange={(e) => setPaymentDate(e.target.value)}
-              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
+              onValueChange={setPaymentDate}
+              className="w-full mt-1"
             />
           </div>
 
           <div>
             <label className="text-sm font-medium">Year Level</label>
-            <select
-              value={yearLevel}
-              onChange={(e) => setYearLevel(e.target.value)}
-              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
+            <Select
+              aria-label="Payment year level"
+              selectedKeys={new Set([yearLevel])}
+              onSelectionChange={(keys) => {
+                if (keys === "all") return;
+                const selected = Array.from(keys)[0];
+                if (typeof selected === "string") {
+                  setYearLevel(selected);
+                }
+              }}
+              disallowEmptySelection
+              className="w-full mt-1"
+              items={paymentYearSelectItems}
             >
-              <option value="All Years">All Years</option>
-              {yearOptions.map((yearName) => (
-                <option key={yearName} value={yearName}>
-                  {yearName}
-                </option>
-              ))}
-            </select>
+              {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+            </Select>
           </div>
 
           <div>
             <label className="text-sm font-medium">Course</label>
-            <select
-              value={course}
-              onChange={(e) => setCourse(e.target.value)}
-              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
+            <Select
+              aria-label="Payment course"
+              selectedKeys={new Set([course])}
+              onSelectionChange={(keys) => {
+                if (keys === "all") return;
+                const selected = Array.from(keys)[0];
+                if (typeof selected === "string") {
+                  setCourse(selected);
+                }
+              }}
+              disallowEmptySelection
+              className="w-full mt-1"
+              items={paymentCourseSelectItems}
             >
-              <option value="All Courses">All Courses</option>
-              {courseOptions.map((courseName) => (
-                <option key={courseName} value={courseName}>
-                  {courseName}
-                </option>
-              ))}
-            </select>
+              {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+            </Select>
           </div>
 
           <div>
             <label className="text-sm font-medium">Details</label>
-            <textarea
+            <Textarea
+              aria-label="Payment details"
               value={details}
-              onChange={(e) => setDetails(e.target.value)}
-              className="w-full h-28 mt-1 px-4 py-3 border rounded-lg shadow-sm"
+              onValueChange={setDetails}
+              minRows={4}
+              className="w-full mt-1"
               placeholder="Additional notes..."
-            ></textarea>
+            />
           </div>
 
           <p className="text-xs text-campus-text-secondary">
@@ -722,13 +759,14 @@ export default function PaymentDashboard() {
               : "This payment will be assigned to students matching the selected course/year."}
           </p>
 
-          <button
-            onClick={handleSavePayment}
-            disabled={savingPayment || studentsLoading}
-            className="w-full px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
+          <Button
+            color="primary"
+            onPress={handleSavePayment}
+            isDisabled={savingPayment || studentsLoading}
+            className="w-full"
           >
             {savingPayment ? "Saving..." : "Save Payment"}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -797,24 +835,28 @@ export default function PaymentDashboard() {
                   <div className="flex flex-col items-start sm:items-end gap-2">
                     <span className={`px-3 py-1 rounded-full text-xs ${statusClass}`}>{statusLabel}</span>
 
-                    <button
-                      onClick={() => setExpandedPayment(expandedPayment === p.id ? null : p.id)}
-                      className="px-4 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg hover:bg-gray-300 transition"
+                    <Button
+                      size="sm"
+                      variant="flat"
+                      onPress={() => setExpandedPayment(expandedPayment === p.id ? null : p.id)}
+                      className="px-4 text-xs"
                     >
                       {expandedPayment === p.id ? "Hide Info" : "Info"}
-                    </button>
+                    </Button>
                   </div>
                 </div>
 
                 {expandedPayment === p.id && (
                   <div className="mt-4 border-t pt-3">
                     <div className="flex justify-start sm:justify-end mb-3">
-                      <button
-                        onClick={() => exportCsv(p)}
-                        className="px-4 py-2 bg-primary-100 hover:bg-primary-200 text-primary-700 font-semibold rounded-lg shadow"
+                      <Button
+                        variant="flat"
+                        color="primary"
+                        onPress={() => exportCsv(p)}
+                        className="px-4 font-semibold"
                       >
                         Export Report
-                      </button>
+                      </Button>
                     </div>
 
                     <div className="flex flex-wrap gap-2 sm:gap-4 mb-4">
@@ -830,39 +872,54 @@ export default function PaymentDashboard() {
                     <h4 className="font-semibold text-campus-text-primary mb-2">Students</h4>
 
                     <div className="mb-3 grid grid-cols-1 md:grid-cols-4 gap-2">
-                      <input
+                      <Input
+                        aria-label="Search students in payment"
                         type="text"
                         placeholder="Search students..."
                         value={studentSearchText}
-                        onChange={(e) => setStudentSearchText(e.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg text-sm md:col-span-2"
+                        onValueChange={setStudentSearchText}
+                        className="w-full md:col-span-2"
                       />
 
-                      <select
-                        value={studentYearFilter}
-                        onChange={(e) => setStudentYearFilter(e.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg text-sm"
+                      <Select
+                        aria-label="Filter students by year"
+                        selectedKeys={new Set([studentYearFilter || "__all_years__"])}
+                        onSelectionChange={(keys) => {
+                          if (keys === "all") return;
+                          const selected = Array.from(keys)[0];
+                          if (typeof selected === "string") {
+                            setStudentYearFilter(selected === "__all_years__" ? "" : selected);
+                          }
+                        }}
+                        disallowEmptySelection
+                        className="w-full"
+                        items={[
+                          { key: "__all_years__", label: "All Years" },
+                          ...studentYearOptions.map((yearName) => ({ key: yearName, label: yearName })),
+                        ] satisfies SelectOption[]}
                       >
-                        <option value="">All Years</option>
-                        {studentYearOptions.map((yearName) => (
-                          <option key={yearName} value={yearName}>
-                            {yearName}
-                          </option>
-                        ))}
-                      </select>
+                        {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                      </Select>
 
-                      <select
-                        value={studentCourseFilter}
-                        onChange={(e) => setStudentCourseFilter(e.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg text-sm"
+                      <Select
+                        aria-label="Filter students by course"
+                        selectedKeys={new Set([studentCourseFilter || "__all_courses__"])}
+                        onSelectionChange={(keys) => {
+                          if (keys === "all") return;
+                          const selected = Array.from(keys)[0];
+                          if (typeof selected === "string") {
+                            setStudentCourseFilter(selected === "__all_courses__" ? "" : selected);
+                          }
+                        }}
+                        disallowEmptySelection
+                        className="w-full"
+                        items={[
+                          { key: "__all_courses__", label: "All Courses" },
+                          ...studentCourseOptions.map((courseName) => ({ key: courseName, label: courseName })),
+                        ] satisfies SelectOption[]}
                       >
-                        <option value="">All Courses</option>
-                        {studentCourseOptions.map((courseName) => (
-                          <option key={courseName} value={courseName}>
-                            {courseName}
-                          </option>
-                        ))}
-                      </select>
+                        {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                      </Select>
                     </div>
 
                     <div className="mb-3 flex justify-start sm:justify-end">
@@ -934,13 +991,15 @@ export default function PaymentDashboard() {
                                   </td>
 
                                   <td className="p-2">
-                                    <button
-                                      onClick={() => toggleStudentStatus(p.id, student)}
-                                      disabled={updatingStatusKey === actionKey}
-                                      className="px-3 py-1 bg-primary-500 hover:bg-primary-600 text-white rounded text-xs disabled:opacity-60"
+                                    <Button
+                                      size="sm"
+                                      color="primary"
+                                      onPress={() => toggleStudentStatus(p.id, student)}
+                                      isDisabled={updatingStatusKey === actionKey}
+                                      className="px-3 text-xs"
                                     >
                                       {updatingStatusKey === actionKey ? "Saving..." : nextStatusLabel}
-                                    </button>
+                                    </Button>
                                   </td>
                                 </tr>
                               );

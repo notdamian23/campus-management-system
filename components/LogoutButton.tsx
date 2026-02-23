@@ -2,6 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
+import { Button } from "@heroui/button";
+import { LogOut } from "lucide-react";
 import { auth } from "@/lib/firebase";
 
 function clearCampusCookies() {
@@ -10,7 +12,11 @@ function clearCampusCookies() {
     document.cookie = "campus_must_change=; Path=/; Max-Age=0";
 }
 
-export default function LogoutButton() {
+type LogoutButtonProps = {
+    className?: string;
+};
+
+export default function LogoutButton({ className }: LogoutButtonProps) {
     const router = useRouter();
 
     const handleLogout = async () => {
@@ -23,11 +29,14 @@ export default function LogoutButton() {
     };
 
     return (
-        <button
-            onClick={handleLogout}
-            className="px-4 py-2 rounded-lg bg-red-600 text-white font-semibold hover:bg-red-700 transition"
+        <Button
+            color="danger"
+            variant="flat"
+            onPress={handleLogout}
+            startContent={<LogOut size={16} />}
+            className={className}
         >
             Logout
-        </button>
+        </Button>
     );
 }

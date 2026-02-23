@@ -29,9 +29,10 @@ import { Button } from "@heroui/button";
 import { DatePicker } from "@heroui/date-picker";
 import { TimeInput } from "@heroui/date-input";
 import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
-import { Input } from "@heroui/input";
+import { Input, Textarea } from "@heroui/input";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
+import { Select, SelectItem } from "@heroui/select";
 import { Switch } from "@heroui/switch";
 import { Tab, Tabs } from "@heroui/tabs";
 import { addToast } from "@heroui/toast";
@@ -2461,8 +2462,8 @@ export default function EventDashboard() {
       <div className="bg-white border rounded-xl shadow-sm p-3 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <Button
-            color="primary"
-            className="text-sm font-semibold"
+            className="text-sm font-semibold text-white"
+            style={{ backgroundColor: "#006FEE" }}
             onPress={() =>
               setShowNotificationForm((v) => {
                 const next = !v;
@@ -2481,8 +2482,8 @@ export default function EventDashboard() {
           </Button>
 
           <Button
-            color="primary"
-            className="text-sm font-semibold"
+            className="text-sm font-semibold text-white"
+            style={{ backgroundColor: "#7b0000" }}
             onPress={() =>
               setShowAddEventForm((v) => {
                 const next = !v;
@@ -2547,12 +2548,22 @@ export default function EventDashboard() {
           
           <div>
             <label className="text-sm font-medium">Title</label>
-            <input value={title} onChange={(e) => setTitle(e.target.value)} className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm" />
+            <Input
+              aria-label="Event title"
+              value={title}
+              onValueChange={setTitle}
+              className="w-full mt-1"
+            />
           </div>
 
           <div>
             <label className="text-sm font-medium">Location</label>
-            <input value={location} onChange={(e) => setLocation(e.target.value)} className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm" />
+            <Input
+              aria-label="Event location"
+              value={location}
+              onValueChange={setLocation}
+              className="w-full mt-1"
+            />
           </div>
 
           <div>
@@ -2642,32 +2653,36 @@ export default function EventDashboard() {
                                 {isAllYearsExplicit && selectedEventYearLevels.length === 0 ? (
                                   <span className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                     <span className="font-medium">All Years</span>
-                                    <button
-                                      type="button"
-                                      className="text-campus-text-secondary hover:text-campus-text-primary"
-                                      onClick={() => {
+                                    <Button
+                                      isIconOnly
+                                      size="sm"
+                                      variant="light"
+                                      className="h-5 min-w-5 text-campus-text-secondary"
+                                      onPress={() => {
                                         setIsAllYearsExplicit(false);
                                       }}
                                       aria-label="Remove All Years"
                                     >
                                       x
-                                    </button>
+                                    </Button>
                                   </span>
                                 ) : (
                                   selectedEventYearLevels.map((item) => (
                                     <span key={item} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                       <span className="font-medium">{item}</span>
-                                      <button
-                                        type="button"
-                                        className="text-campus-text-secondary hover:text-campus-text-primary"
-                                        onClick={() => {
+                                      <Button
+                                        isIconOnly
+                                        size="sm"
+                                        variant="light"
+                                        className="h-5 min-w-5 text-campus-text-secondary"
+                                        onPress={() => {
                                           setIsAllYearsExplicit(false);
                                           setSelectedEventYearLevels((prev) => prev.filter((x) => x !== item));
                                         }}
                                         aria-label={`Remove ${item}`}
                                       >
                                         x
-                                      </button>
+                                      </Button>
                                     </span>
                                   ))
                                 )}
@@ -2676,18 +2691,17 @@ export default function EventDashboard() {
                           )}
 
                           <div ref={eventYearPickerRef} className="mt-2 space-y-2">
-                            <input
+                            <Input
                               value={eventYearSearch}
-                              onChange={(e) => {
-                                setEventYearSearch(e.target.value);
+                              onValueChange={(value) => {
+                                setEventYearSearch(value);
                                 setShowEventYearDropdown(true);
                               }}
                               onFocus={() => setShowEventYearDropdown(true)}
-                              disabled={isPreReg}
+                              isDisabled={isPreReg}
                               placeholder="Search year level"
-                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
-                                isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
-                              }`}
+                              size="sm"
+                              className="w-full"
                             />
 
                             {!isPreReg && showEventYearDropdown && (
@@ -2701,10 +2715,11 @@ export default function EventDashboard() {
                                 ) : (
                                   <>
                                     {showAllYearsOption && (
-                                      <button
-                                        type="button"
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                        onClick={() => {
+                                      <Button
+                                        size="sm"
+                                        variant="light"
+                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                        onPress={() => {
                                           setSelectedEventYearLevels([]);
                                           setIsAllYearsExplicit(true);
                                           setEventYearSearch("");
@@ -2712,15 +2727,16 @@ export default function EventDashboard() {
                                         }}
                                       >
                                         <div className="text-sm font-medium text-campus-text-primary">All Years</div>
-                                      </button>
+                                      </Button>
                                     )}
 
                                     {filteredEventYearOptions.map((item) => (
-                                      <button
+                                      <Button
                                         key={item}
-                                        type="button"
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                        onClick={() => {
+                                        size="sm"
+                                        variant="light"
+                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                        onPress={() => {
                                           setIsAllYearsExplicit(false);
                                           setSelectedEventYearLevels((prev) => (prev.includes(item) ? prev : [...prev, item]));
                                           setEventYearSearch("");
@@ -2728,7 +2744,7 @@ export default function EventDashboard() {
                                         }}
                                       >
                                         <div className="text-sm font-medium text-campus-text-primary">{item}</div>
-                                      </button>
+                                      </Button>
                                     ))}
                                   </>
                                 )}
@@ -2746,32 +2762,36 @@ export default function EventDashboard() {
                                 {isAllCoursesExplicit && selectedEventCourses.length === 0 ? (
                                   <span className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                     <span className="font-medium">All Courses</span>
-                                    <button
-                                      type="button"
-                                      className="text-campus-text-secondary hover:text-campus-text-primary"
-                                      onClick={() => {
+                                    <Button
+                                      isIconOnly
+                                      size="sm"
+                                      variant="light"
+                                      className="h-5 min-w-5 text-campus-text-secondary"
+                                      onPress={() => {
                                         setIsAllCoursesExplicit(false);
                                       }}
                                       aria-label="Remove All Courses"
                                     >
                                       x
-                                    </button>
+                                    </Button>
                                   </span>
                                 ) : (
                                   selectedEventCourses.map((item) => (
                                     <span key={item} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                       <span className="font-medium">{item}</span>
-                                      <button
-                                        type="button"
-                                        className="text-campus-text-secondary hover:text-campus-text-primary"
-                                        onClick={() => {
+                                      <Button
+                                        isIconOnly
+                                        size="sm"
+                                        variant="light"
+                                        className="h-5 min-w-5 text-campus-text-secondary"
+                                        onPress={() => {
                                           setIsAllCoursesExplicit(false);
                                           setSelectedEventCourses((prev) => prev.filter((x) => x !== item));
                                         }}
                                         aria-label={`Remove ${item}`}
                                       >
                                         x
-                                      </button>
+                                      </Button>
                                     </span>
                                   ))
                                 )}
@@ -2780,18 +2800,17 @@ export default function EventDashboard() {
                           )}
 
                           <div ref={eventCoursePickerRef} className="mt-2 space-y-2">
-                            <input
+                            <Input
                               value={eventCourseSearch}
-                              onChange={(e) => {
-                                setEventCourseSearch(e.target.value);
+                              onValueChange={(value) => {
+                                setEventCourseSearch(value);
                                 setShowEventCourseDropdown(true);
                               }}
                               onFocus={() => setShowEventCourseDropdown(true)}
-                              disabled={isPreReg}
+                              isDisabled={isPreReg}
                               placeholder="Search course"
-                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
-                                isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
-                              }`}
+                              size="sm"
+                              className="w-full"
                             />
 
                             {!isPreReg && showEventCourseDropdown && (
@@ -2805,10 +2824,11 @@ export default function EventDashboard() {
                                 ) : (
                                   <>
                                     {showAllCoursesOption && (
-                                      <button
-                                        type="button"
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                        onClick={() => {
+                                      <Button
+                                        size="sm"
+                                        variant="light"
+                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                        onPress={() => {
                                           setSelectedEventCourses([]);
                                           setIsAllCoursesExplicit(true);
                                           setEventCourseSearch("");
@@ -2816,15 +2836,16 @@ export default function EventDashboard() {
                                         }}
                                       >
                                         <div className="text-sm font-medium text-campus-text-primary">All Courses</div>
-                                      </button>
+                                      </Button>
                                     )}
 
                                     {filteredEventCourseOptions.map((item) => (
-                                      <button
+                                      <Button
                                         key={item}
-                                        type="button"
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                        onClick={() => {
+                                        size="sm"
+                                        variant="light"
+                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                        onPress={() => {
                                           setIsAllCoursesExplicit(false);
                                           setSelectedEventCourses((prev) => (prev.includes(item) ? prev : [...prev, item]));
                                           setEventCourseSearch("");
@@ -2832,7 +2853,7 @@ export default function EventDashboard() {
                                         }}
                                       >
                                         <div className="text-sm font-medium text-campus-text-primary">{item}</div>
-                                      </button>
+                                      </Button>
                                     ))}
                                   </>
                                 )}
@@ -2851,16 +2872,18 @@ export default function EventDashboard() {
                                   <span key={student.uid} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                     <span className="font-medium">{student.studentName}</span>
                                     <span className="text-campus-text-secondary">({student.schoolId})</span>
-                                    <button
-                                      type="button"
-                                      className="text-campus-text-secondary hover:text-campus-text-primary"
-                                      onClick={() => {
+                                    <Button
+                                      isIconOnly
+                                      size="sm"
+                                      variant="light"
+                                      className="h-5 min-w-5 text-campus-text-secondary"
+                                      onPress={() => {
                                         setSelectedEventStudents((prev) => prev.filter((x) => x.uid !== student.uid));
                                       }}
                                       aria-label={`Remove ${student.studentName}`}
                                     >
                                       x
-                                    </button>
+                                    </Button>
                                   </span>
                                 ))}
                               </div>
@@ -2868,16 +2891,17 @@ export default function EventDashboard() {
                           )}
 
                           <div ref={eventStudentPickerRef} className="mt-2 space-y-2">
-                            <input
+                            <Input
                               value={eventSearchName}
-                              onChange={(e) => {
-                                setEventSearchName(e.target.value);
+                              onValueChange={(value) => {
+                                setEventSearchName(value);
                                 setShowEventStudentDropdown(true);
                               }}
                               onFocus={() => setShowEventStudentDropdown(true)}
-                              disabled={isPreReg}
+                              isDisabled={isPreReg}
                               placeholder="Search by name"
-                              className={`w-full px-3 py-2 border rounded-lg text-sm ${isPreReg ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""}`}
+                              size="sm"
+                              className="w-full"
                             />
 
                             {!isPreReg && showEventStudentDropdown && (
@@ -2888,11 +2912,12 @@ export default function EventDashboard() {
                                   <p className="px-4 py-2 text-sm text-campus-text-secondary">No matching students.</p>
                                 ) : (
                                   filteredEventStudentOptions.map((student) => (
-                                    <button
+                                    <Button
                                       key={student.uid}
-                                      type="button"
-                                      className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                      onClick={() => {
+                                      size="sm"
+                                      variant="light"
+                                      className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                      onPress={() => {
                                         setSelectedEventStudents((prev) =>
                                           prev.some((x) => x.uid === student.uid) ? prev : [...prev, student]
                                         );
@@ -2904,7 +2929,7 @@ export default function EventDashboard() {
                                       <div className="text-xs text-campus-text-secondary">
                                         {student.schoolId} | {student.course || "Unassigned"} | {student.year || "Unassigned"}
                                       </div>
-                                    </button>
+                                    </Button>
                                   ))
                                 )}
                               </div>
@@ -2952,7 +2977,13 @@ export default function EventDashboard() {
 
           <div>
             <label className="text-sm font-medium">Details</label>
-            <textarea value={details} onChange={(e) => setDetails(e.target.value)} className="w-full h-28 mt-1 px-4 py-3 border rounded-lg shadow-sm" />
+            <Textarea
+              aria-label="Event details"
+              value={details}
+              onValueChange={setDetails}
+              minRows={4}
+              className="w-full mt-1"
+            />
           </div>
 
           {isPreReg && (
@@ -2989,13 +3020,14 @@ export default function EventDashboard() {
           {saveError && <p className="text-red-600 text-sm">{saveError}</p>}
           {saveMsg && <p className="text-green-600 text-sm">{saveMsg}</p>}
 
-          <button
-            onClick={handleSaveEvent}
-            disabled={saving || roleLoading || !isECUser || registrantsRequiredMissing}
-            className="w-full px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
+          <Button
+            color="primary"
+            onPress={handleSaveEvent}
+            isDisabled={saving || roleLoading || !isECUser || registrantsRequiredMissing}
+            className="w-full"
           >
             {roleLoading ? "Checking role..." : saving ? (isEditingEvent ? "Updating..." : "Saving...") : isEditingEvent ? "Update Event" : "Save"}
-          </button>
+          </Button>
 
           {!roleLoading && !isECUser && (
             <p className="text-xs text-campus-text-secondary">
@@ -3012,7 +3044,13 @@ export default function EventDashboard() {
 
           <div>
             <label className="text-sm font-medium">Notification Title</label>
-            <input value={notifTitle} onChange={(e) => setNotifTitle(e.target.value)} type="text" className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm" />
+            <Input
+              aria-label="Notification title"
+              value={notifTitle}
+              onValueChange={setNotifTitle}
+              type="text"
+              className="w-full mt-1"
+            />
           </div>
 
           <div>
@@ -3085,34 +3123,38 @@ export default function EventDashboard() {
                                 {isAllNotifYearsExplicit && selectedNotifYearLevels.length === 0 ? (
                                   <span className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                     <span className="font-medium">All Years</span>
-                                    <button
-                                      type="button"
-                                      className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
-                                      disabled={isEditingNotification}
-                                      onClick={() => {
+                                    <Button
+                                      isIconOnly
+                                      size="sm"
+                                      variant="light"
+                                      className="h-5 min-w-5 text-campus-text-secondary"
+                                      isDisabled={isEditingNotification}
+                                      onPress={() => {
                                         setIsAllNotifYearsExplicit(false);
                                       }}
                                       aria-label="Remove All Years"
                                     >
                                       x
-                                    </button>
+                                    </Button>
                                   </span>
                                 ) : (
                                   selectedNotifYearLevels.map((item) => (
                                     <span key={item} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                       <span className="font-medium">{item}</span>
-                                      <button
-                                        type="button"
-                                        className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
-                                        disabled={isEditingNotification}
-                                        onClick={() => {
+                                      <Button
+                                        isIconOnly
+                                        size="sm"
+                                        variant="light"
+                                        className="h-5 min-w-5 text-campus-text-secondary"
+                                        isDisabled={isEditingNotification}
+                                        onPress={() => {
                                           setIsAllNotifYearsExplicit(false);
                                           setSelectedNotifYearLevels((prev) => prev.filter((entry) => entry !== item));
                                         }}
                                         aria-label={`Remove ${item}`}
                                       >
                                         x
-                                      </button>
+                                      </Button>
                                     </span>
                                   ))
                                 )}
@@ -3121,18 +3163,17 @@ export default function EventDashboard() {
                           )}
 
                           <div ref={notifYearPickerRef} className="mt-2 space-y-2">
-                            <input
+                            <Input
                               value={notifYearSearch}
-                              onChange={(e) => {
-                                setNotifYearSearch(e.target.value);
+                              onValueChange={(value) => {
+                                setNotifYearSearch(value);
                                 setShowNotifYearDropdown(true);
                               }}
                               onFocus={() => setShowNotifYearDropdown(true)}
-                              disabled={isEditingNotification}
+                              isDisabled={isEditingNotification}
                               placeholder="Search year level"
-                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
-                                isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
-                              }`}
+                              size="sm"
+                              className="w-full"
                             />
 
                             {!isEditingNotification && showNotifYearDropdown && (
@@ -3146,10 +3187,11 @@ export default function EventDashboard() {
                                 ) : (
                                   <>
                                     {showNotifAllYearsOption && (
-                                      <button
-                                        type="button"
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                        onClick={() => {
+                                      <Button
+                                        size="sm"
+                                        variant="light"
+                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                        onPress={() => {
                                           setSelectedNotifYearLevels([]);
                                           setIsAllNotifYearsExplicit(true);
                                           setNotifYearSearch("");
@@ -3157,15 +3199,16 @@ export default function EventDashboard() {
                                         }}
                                       >
                                         <div className="text-sm font-medium text-campus-text-primary">All Years</div>
-                                      </button>
+                                      </Button>
                                     )}
 
                                     {filteredNotifYearOptions.map((item) => (
-                                      <button
+                                      <Button
                                         key={item}
-                                        type="button"
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                        onClick={() => {
+                                        size="sm"
+                                        variant="light"
+                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                        onPress={() => {
                                           setIsAllNotifYearsExplicit(false);
                                           setSelectedNotifYearLevels((prev) => (prev.includes(item) ? prev : [...prev, item]));
                                           setNotifYearSearch("");
@@ -3173,7 +3216,7 @@ export default function EventDashboard() {
                                         }}
                                       >
                                         <div className="text-sm font-medium text-campus-text-primary">{item}</div>
-                                      </button>
+                                      </Button>
                                     ))}
                                   </>
                                 )}
@@ -3191,34 +3234,38 @@ export default function EventDashboard() {
                                 {isAllNotifCoursesExplicit && selectedNotifCourses.length === 0 ? (
                                   <span className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                     <span className="font-medium">All Courses</span>
-                                    <button
-                                      type="button"
-                                      className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
-                                      disabled={isEditingNotification}
-                                      onClick={() => {
+                                    <Button
+                                      isIconOnly
+                                      size="sm"
+                                      variant="light"
+                                      className="h-5 min-w-5 text-campus-text-secondary"
+                                      isDisabled={isEditingNotification}
+                                      onPress={() => {
                                         setIsAllNotifCoursesExplicit(false);
                                       }}
                                       aria-label="Remove All Courses"
                                     >
                                       x
-                                    </button>
+                                    </Button>
                                   </span>
                                 ) : (
                                   selectedNotifCourses.map((item) => (
                                     <span key={item} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                       <span className="font-medium">{item}</span>
-                                      <button
-                                        type="button"
-                                        className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
-                                        disabled={isEditingNotification}
-                                        onClick={() => {
+                                      <Button
+                                        isIconOnly
+                                        size="sm"
+                                        variant="light"
+                                        className="h-5 min-w-5 text-campus-text-secondary"
+                                        isDisabled={isEditingNotification}
+                                        onPress={() => {
                                           setIsAllNotifCoursesExplicit(false);
                                           setSelectedNotifCourses((prev) => prev.filter((entry) => entry !== item));
                                         }}
                                         aria-label={`Remove ${item}`}
                                       >
                                         x
-                                      </button>
+                                      </Button>
                                     </span>
                                   ))
                                 )}
@@ -3227,18 +3274,17 @@ export default function EventDashboard() {
                           )}
 
                           <div ref={notifCoursePickerRef} className="mt-2 space-y-2">
-                            <input
+                            <Input
                               value={notifCourseSearch}
-                              onChange={(e) => {
-                                setNotifCourseSearch(e.target.value);
+                              onValueChange={(value) => {
+                                setNotifCourseSearch(value);
                                 setShowNotifCourseDropdown(true);
                               }}
                               onFocus={() => setShowNotifCourseDropdown(true)}
-                              disabled={isEditingNotification}
+                              isDisabled={isEditingNotification}
                               placeholder="Search course"
-                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
-                                isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
-                              }`}
+                              size="sm"
+                              className="w-full"
                             />
 
                             {!isEditingNotification && showNotifCourseDropdown && (
@@ -3252,10 +3298,11 @@ export default function EventDashboard() {
                                 ) : (
                                   <>
                                     {showNotifAllCoursesOption && (
-                                      <button
-                                        type="button"
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                        onClick={() => {
+                                      <Button
+                                        size="sm"
+                                        variant="light"
+                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                        onPress={() => {
                                           setSelectedNotifCourses([]);
                                           setIsAllNotifCoursesExplicit(true);
                                           setNotifCourseSearch("");
@@ -3263,15 +3310,16 @@ export default function EventDashboard() {
                                         }}
                                       >
                                         <div className="text-sm font-medium text-campus-text-primary">All Courses</div>
-                                      </button>
+                                      </Button>
                                     )}
 
                                     {filteredNotifCourseOptions.map((item) => (
-                                      <button
+                                      <Button
                                         key={item}
-                                        type="button"
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                        onClick={() => {
+                                        size="sm"
+                                        variant="light"
+                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                        onPress={() => {
                                           setIsAllNotifCoursesExplicit(false);
                                           setSelectedNotifCourses((prev) => (prev.includes(item) ? prev : [...prev, item]));
                                           setNotifCourseSearch("");
@@ -3279,7 +3327,7 @@ export default function EventDashboard() {
                                         }}
                                       >
                                         <div className="text-sm font-medium text-campus-text-primary">{item}</div>
-                                      </button>
+                                      </Button>
                                     ))}
                                   </>
                                 )}
@@ -3298,17 +3346,19 @@ export default function EventDashboard() {
                                   <span key={student.uid} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
                                     <span className="font-medium">{student.studentName}</span>
                                     <span className="text-campus-text-secondary">({student.schoolId})</span>
-                                    <button
-                                      type="button"
-                                      className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
-                                      disabled={isEditingNotification}
-                                      onClick={() => {
+                                    <Button
+                                      isIconOnly
+                                      size="sm"
+                                      variant="light"
+                                      className="h-5 min-w-5 text-campus-text-secondary"
+                                      isDisabled={isEditingNotification}
+                                      onPress={() => {
                                         setSelectedNotifStudents((prev) => prev.filter((entry) => entry.uid !== student.uid));
                                       }}
                                       aria-label={`Remove ${student.studentName}`}
                                     >
                                       x
-                                    </button>
+                                    </Button>
                                   </span>
                                 ))}
                               </div>
@@ -3316,18 +3366,17 @@ export default function EventDashboard() {
                           )}
 
                           <div ref={studentPickerRef} className="mt-2 space-y-2">
-                            <input
+                            <Input
                               value={notifSearchName}
-                              onChange={(e) => {
-                                setNotifSearchName(e.target.value);
+                              onValueChange={(value) => {
+                                setNotifSearchName(value);
                                 setShowStudentDropdown(true);
                               }}
                               onFocus={() => setShowStudentDropdown(true)}
-                              disabled={isEditingNotification}
+                              isDisabled={isEditingNotification}
                               placeholder="Search by name"
-                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
-                                isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
-                              }`}
+                              size="sm"
+                              className="w-full"
                             />
 
                             {!isEditingNotification && showStudentDropdown && (
@@ -3338,11 +3387,12 @@ export default function EventDashboard() {
                                   <p className="px-4 py-2 text-sm text-campus-text-secondary">No matching students.</p>
                                 ) : (
                                   filteredStudentOptions.map((student) => (
-                                    <button
+                                    <Button
                                       key={student.uid}
-                                      type="button"
-                                      className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                                      onClick={() => {
+                                      size="sm"
+                                      variant="light"
+                                      className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                      onPress={() => {
                                         setSelectedNotifStudents((prev) =>
                                           prev.some((entry) => entry.uid === student.uid) ? prev : [...prev, student]
                                         );
@@ -3355,7 +3405,7 @@ export default function EventDashboard() {
                                       <div className="text-xs text-campus-text-secondary">
                                         {student.schoolId} | {student.course || "Unassigned"} | {student.year || "Unassigned"}
                                       </div>
-                                    </button>
+                                    </Button>
                                   ))
                                 )}
                               </div>
@@ -3404,21 +3454,27 @@ export default function EventDashboard() {
 
           <div>
             <label className="text-sm font-medium">Message</label>
-            <textarea value={notifMessage} onChange={(e) => setNotifMessage(e.target.value)} className="w-full h-28 mt-1 px-4 py-3 border rounded-lg shadow-sm" />
+            <Textarea
+              aria-label="Notification message"
+              value={notifMessage}
+              onValueChange={setNotifMessage}
+              minRows={4}
+              className="w-full mt-1"
+            />
           </div>
 
           {studentsError && <p className="text-red-600 text-sm">{studentsError}</p>}
           {notifError && <p className="text-red-600 text-sm">{notifError}</p>}
           {notifMsg && <p className="text-green-600 text-sm">{notifMsg}</p>}
 
-          <button
-            type="button"
-            onClick={handleSendNotification}
-            disabled={sendingNotif || roleLoading || !isECUser || notifRecipientsRequiredMissing}
-            className="w-full sm:w-auto px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
+          <Button
+            color="primary"
+            onPress={handleSendNotification}
+            isDisabled={sendingNotif || roleLoading || !isECUser || notifRecipientsRequiredMissing}
+            className="w-full sm:w-auto"
           >
             {sendingNotif ? (isEditingNotification ? "Updating..." : "Sending...") : isEditingNotification ? "Update Notification" : "Send Notification"}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -3446,29 +3502,49 @@ export default function EventDashboard() {
           >
             <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                <input
+                <Input
                   type="text"
                   placeholder="Search events..."
                   value={searchText}
-                  onChange={(e) => setSearchText(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                  onValueChange={setSearchText}
+                  size="sm"
+                  className="w-full"
                 />
 
-                <select
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value as any)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                <Select
+                  aria-label="Filter events by status"
+                  selectedKeys={new Set([statusFilter])}
+                  onSelectionChange={(keys) => {
+                    if (keys === "all") return;
+                    const selected = Array.from(keys)[0];
+                    if (
+                      selected === "all" ||
+                      selected === "upcoming" ||
+                      selected === "ongoing" ||
+                      selected === "completed"
+                    ) {
+                      setStatusFilter(selected);
+                    }
+                  }}
+                  disallowEmptySelection
+                  size="sm"
+                  className="w-full"
                 >
-                  <option value="all">All Status</option>
-                  <option value="upcoming">Upcoming</option>
-                  <option value="ongoing">Ongoing</option>
-                  <option value="completed">Completed</option>
-                </select>
+                  <SelectItem key="all">All Status</SelectItem>
+                  <SelectItem key="upcoming">Upcoming</SelectItem>
+                  <SelectItem key="ongoing">Ongoing</SelectItem>
+                  <SelectItem key="completed">Completed</SelectItem>
+                </Select>
 
-                <div className="flex items-center gap-2 px-3 py-2 border rounded-lg bg-white text-sm">
-                  <FiCalendar />
-                  <input type="date" value={eventDateFilter} onChange={(e) => setEventDateFilter(e.target.value)} className="outline-none w-full" />
-                </div>
+                <Input
+                  aria-label="Filter events by date"
+                  type="date"
+                  value={eventDateFilter}
+                  onValueChange={setEventDateFilter}
+                  startContent={<FiCalendar className="text-campus-text-secondary" />}
+                  size="sm"
+                  className="w-full"
+                />
               </div>
 
               <div className="flex items-center">
@@ -3510,6 +3586,14 @@ export default function EventDashboard() {
               const liveStatus = computeStatus(ev);
               const hasSlots = ev.isPreReg && typeof ev.preRegSlots === "number";
               const registrations = eventRegistrations[ev.id];
+              const isEventExpanded = expandedEventId === ev.id;
+              const toggleEventDetails = () => {
+                setExpandedEventId((prev) => {
+                  const next = prev === ev.id ? null : ev.id;
+                  if (next) setEventFilesTab("images");
+                  return next;
+                });
+              };
               const used = hasSlots
                 ? registrations
                   ? registrations.length
@@ -3531,11 +3615,7 @@ export default function EventDashboard() {
                 <div
                   key={ev.id}
                   className="border rounded-lg p-3 sm:p-4 shadow-sm hover:bg-gray-50 transition cursor-pointer"
-                  onClick={() => {
-                    const nextExpanded = expandedEventId === ev.id ? null : ev.id;
-                    setExpandedEventId(nextExpanded);
-                    if (nextExpanded) setEventFilesTab("images");
-                  }}
+                  onClick={toggleEventDetails}
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
@@ -3548,19 +3628,24 @@ export default function EventDashboard() {
                     </div>
 
                     <div className="flex w-full sm:w-auto flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        className="flex-1 sm:flex-none px-4 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg"
-                        onClick={(e) => e.stopPropagation()}
+                      <Button
+                        size="sm"
+                        variant="solid"
+                        className="flex-1 sm:flex-none min-w-[94px] px-4 text-xs font-semibold text-white"
+                        style={{ backgroundColor: "#A1A1AA", borderColor: "#A1A1AA" }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleEventDetails();
+                        }}
                       >
-                        Info ▼
-                      </button>
+                        {isEventExpanded ? "Hide Info" : "Info"}
+                      </Button>
                       {liveStatus === "completed" ? (
                         <Button
                           size="sm"
                           color="danger"
-                          variant="flat"
-                          className="flex-1 sm:flex-none min-w-0 px-4 text-xs"
+                          variant="solid"
+                          className="flex-1 sm:flex-none min-w-[94px] px-4 text-xs font-semibold"
                           onClick={(e) => {
                             e.stopPropagation();
                             requestDeleteCompletedEvent(ev);
@@ -3571,9 +3656,15 @@ export default function EventDashboard() {
                       ) : (
                         <Button
                           size="sm"
-                          color={liveStatus === "upcoming" ? "primary" : "default"}
-                          variant={liveStatus === "upcoming" ? "solid" : "flat"}
-                          className="flex-1 sm:flex-none min-w-0 px-4 text-xs"
+                          variant={liveStatus === "upcoming" ? "solid" : "bordered"}
+                          className={`flex-1 sm:flex-none min-w-[94px] px-4 text-xs font-semibold ${
+                            liveStatus === "upcoming" ? "text-white" : ""
+                          }`}
+                          style={
+                            liveStatus === "upcoming"
+                              ? { backgroundColor: "#F5A524", borderColor: "#F5A524" }
+                              : undefined
+                          }
                           onClick={(e) => {
                             e.stopPropagation();
                             if (liveStatus !== "upcoming") return;
@@ -3598,23 +3689,24 @@ export default function EventDashboard() {
                     <span>📍 {ev.location || "—"}</span>
                   </div>
 
-                  {expandedEventId === ev.id && (
+                  {isEventExpanded && (
                     <div className="mt-4 p-4 border rounded-lg bg-gray-50 space-y-3" onClick={(e) => e.stopPropagation()}>
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm text-campus-text-primary">
                           <b>Pre-Registrations:</b> {registrations ? registrations.length : used}
                         </p>
-                        <button
-                          type="button"
+                        <Button
+                          size="sm"
+                          color="primary"
                           onClick={(e) => {
                             e.stopPropagation();
                             void exportEventAttendanceCSV(ev);
                           }}
-                          disabled={exportingEventId === ev.id}
-                          className="px-3 py-1.5 text-xs rounded-lg bg-primary-500 text-white hover:bg-primary-600 disabled:opacity-60"
+                          isDisabled={exportingEventId === ev.id}
+                          className="px-3 text-xs"
                         >
                           {exportingEventId === ev.id ? "Exporting..." : "Export Attendance CSV"}
-                        </button>
+                        </Button>
                       </div>
 
                       <p className="text-sm text-campus-text-primary">
@@ -3687,7 +3779,7 @@ export default function EventDashboard() {
                             >
                               <div className="text-sm font-semibold">Upload Images</div>
                               <div className="text-xs text-gray-500">Auto-compressed before upload (max 10MB final size)</div>
-                              <input
+                              <Input
                                 type="file"
                                 multiple
                                 accept="image/*"
@@ -3702,7 +3794,7 @@ export default function EventDashboard() {
                             >
                               <div className="text-sm font-semibold">Upload Documents</div>
                               <div className="text-xs text-gray-500">PDF/DOC/DOCX (max 10MB each)</div>
-                              <input
+                              <Input
                                 type="file"
                                 multiple
                                 accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -3909,33 +4001,43 @@ export default function EventDashboard() {
           >
             <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                <input
+                <Input
                   type="text"
                   placeholder="Search notifications..."
                   value={notificationSearchText}
-                  onChange={(e) => setNotificationSearchText(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                  onValueChange={setNotificationSearchText}
+                  size="sm"
+                  className="w-full"
                 />
 
-                <select
-                  value={notificationStatusFilter}
-                  onChange={(e) => setNotificationStatusFilter(e.target.value as any)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                <Select
+                  aria-label="Filter notifications by status"
+                  selectedKeys={new Set([notificationStatusFilter])}
+                  onSelectionChange={(keys) => {
+                    if (keys === "all") return;
+                    const selected = Array.from(keys)[0];
+                    if (selected === "all" || selected === "scheduled" || selected === "sent") {
+                      setNotificationStatusFilter(selected);
+                    }
+                  }}
+                  disallowEmptySelection
+                  size="sm"
+                  className="w-full"
                 >
-                  <option value="all">All Status</option>
-                  <option value="scheduled">Scheduled</option>
-                  <option value="sent">Sent</option>
-                </select>
+                  <SelectItem key="all">All Status</SelectItem>
+                  <SelectItem key="scheduled">Scheduled</SelectItem>
+                  <SelectItem key="sent">Sent</SelectItem>
+                </Select>
 
-                <div className="flex items-center gap-2 px-3 py-2 border rounded-lg bg-white text-sm">
-                  <FiCalendar />
-                  <input
-                    type="date"
-                    value={notificationDateFilter}
-                    onChange={(e) => setNotificationDateFilter(e.target.value)}
-                    className="outline-none w-full"
-                  />
-                </div>
+                <Input
+                  aria-label="Filter notifications by date"
+                  type="date"
+                  value={notificationDateFilter}
+                  onValueChange={setNotificationDateFilter}
+                  startContent={<FiCalendar className="text-campus-text-secondary" />}
+                  size="sm"
+                  className="w-full"
+                />
               </div>
 
               <div className="flex items-center">
@@ -3972,14 +4074,15 @@ export default function EventDashboard() {
                 <div className="space-y-3">
                   {paginatedNotifications.map((item) => {
                     const isExpanded = expandedNotificationId === item.dispatchId;
+                    const toggleNotificationDetails = () => {
+                      setExpandedNotificationId((prev) => (prev === item.dispatchId ? null : item.dispatchId));
+                    };
 
                     return (
                       <div
                         key={item.dispatchId}
                         className="border rounded-lg p-3 sm:p-4 shadow-sm hover:bg-gray-50 transition cursor-pointer"
-                        onClick={() => {
-                          setExpandedNotificationId((prev) => (prev === item.dispatchId ? null : item.dispatchId));
-                        }}
+                        onClick={toggleNotificationDetails}
                       >
                         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                           <div className="flex flex-wrap items-center gap-3">
@@ -3989,32 +4092,38 @@ export default function EventDashboard() {
 
                           <div className="flex items-center gap-2">
                             <p className="text-xs text-campus-text-secondary">Created: {formatDateTime(item.createdAt)}</p>
-                            <button
-                              type="button"
-                              className="px-3 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg hover:bg-gray-300 transition"
+                            <Button
+                              size="sm"
+                              variant="solid"
+                              className="min-w-[94px] px-3 text-xs font-semibold text-white"
+                              style={{ backgroundColor: "#A1A1AA", borderColor: "#A1A1AA" }}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setExpandedNotificationId((prev) => (prev === item.dispatchId ? null : item.dispatchId));
+                                toggleNotificationDetails();
                               }}
                             >
                               {isExpanded ? "Hide Info" : "Info"}
-                            </button>
-                            <button
-                              type="button"
-                              className={`px-3 py-1 text-xs rounded-lg transition ${
-                                item.status === "scheduled"
-                                  ? "bg-primary-500 text-white hover:bg-primary-600"
-                                  : "bg-gray-200 text-campus-text-secondary cursor-not-allowed"
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant={item.status === "scheduled" ? "solid" : "bordered"}
+                              className={`min-w-[94px] px-3 text-xs font-semibold ${
+                                item.status === "scheduled" ? "text-white" : ""
                               }`}
+                              style={
+                                item.status === "scheduled"
+                                  ? { backgroundColor: "#F5A524", borderColor: "#F5A524" }
+                                  : undefined
+                              }
                               onClick={(e) => {
                                 e.stopPropagation();
                                 if (item.status !== "scheduled") return;
                                 void handleStartEditScheduledNotification(item);
                               }}
-                              disabled={item.status !== "scheduled"}
+                              isDisabled={item.status !== "scheduled"}
                             >
                               {item.status === "scheduled" ? "Edit" : "Edit (later)"}
-                            </button>
+                            </Button>
                           </div>
                         </div>
 
@@ -4240,16 +4349,15 @@ export default function EventDashboard() {
               </ModalBody>
 
               <ModalFooter>
-                <button
-                  type="button"
-                  className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-100"
-                  onClick={() => {
+                <Button
+                  variant="bordered"
+                  onPress={() => {
                     onClose();
                     closeViewAllFilesModal();
                   }}
                 >
                   Close
-                </button>
+                </Button>
               </ModalFooter>
             </>
           )}

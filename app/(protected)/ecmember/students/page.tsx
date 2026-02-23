@@ -5,8 +5,10 @@ import { FiChevronDown, FiPlus } from "react-icons/fi";
 import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
 import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
+import { Input } from "@heroui/input";
 import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
+import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { collection, doc, getDoc, getDocs, orderBy, query } from "firebase/firestore";
@@ -81,11 +83,14 @@ type AttendanceDocData = {
   attendanceStatus?: string;
 };
 
-type Role = "admin" | "ec" | "teacher" | "student";
-
 type Notice = {
   type: "ok" | "err";
   msg: string;
+};
+
+type SelectOption = {
+  key: string;
+  label: string;
 };
 
 type RemoteStudent = {
@@ -109,7 +114,9 @@ const DEFAULT_COURSES = [
 ];
 
 const DEFAULT_YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "5th Year"];
-const STUDENTS_PER_PAGE = 25;
+const STUDENTS_PER_PAGE_DESKTOP = 10;
+const STUDENTS_PER_PAGE_PHONE = 5;
+const PHONE_BREAKPOINT_PX = 768;
 const STATUS_ITEMS_PER_PAGE = 4;
 
 function initialsFromName(name: string) {
@@ -350,11 +357,11 @@ export default function ECStudentLookup() {
   const [courseFilter, setCourseFilter] = useState<string>("");
   const [yearFilter, setYearFilter] = useState<string>("");
   const [studentPage, setStudentPage] = useState(1);
+  const [studentsPerPage, setStudentsPerPage] = useState<number>(STUDENTS_PER_PAGE_DESKTOP);
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [newSchoolId, setNewSchoolId] = useState("");
   const [newStudentName, setNewStudentName] = useState("");
-  const [newRole] = useState<Role>("student");
   const [newCourse, setNewCourse] = useState("");
   const [newYear, setNewYear] = useState("");
   const [newEmail, setNewEmail] = useState("");
@@ -401,6 +408,18 @@ export default function ECStudentLookup() {
     void loadStudents();
   }, [loadStudents]);
 
+  useEffect(() => {
+    const syncStudentsPerPage = () => {
+      setStudentsPerPage(
+        window.innerWidth < PHONE_BREAKPOINT_PX ? STUDENTS_PER_PAGE_PHONE : STUDENTS_PER_PAGE_DESKTOP
+      );
+    };
+
+    syncStudentsPerPage();
+    window.addEventListener("resize", syncStudentsPerPage);
+    return () => window.removeEventListener("resize", syncStudentsPerPage);
+  }, []);
+
   const courseOptions = useMemo(() => {
     const set = new Set(DEFAULT_COURSES);
     students.forEach((s) => {
@@ -416,6 +435,38 @@ export default function ECStudentLookup() {
     });
     return Array.from(set);
   }, [students]);
+
+  const courseFilterItems = useMemo<SelectOption[]>(
+    () => [
+      { key: "__all_courses__", label: "All Courses" },
+      ...courseOptions.map((courseName) => ({ key: courseName, label: courseName })),
+    ],
+    [courseOptions]
+  );
+
+  const yearFilterItems = useMemo<SelectOption[]>(
+    () => [
+      { key: "__all_years__", label: "All Years" },
+      ...yearOptions.map((yearName) => ({ key: yearName, label: yearName })),
+    ],
+    [yearOptions]
+  );
+
+  const addCourseItems = useMemo<SelectOption[]>(
+    () => [
+      { key: "__select_course__", label: "Select course" },
+      ...DEFAULT_COURSES.map((courseName) => ({ key: courseName, label: courseName })),
+    ],
+    []
+  );
+
+  const addYearItems = useMemo<SelectOption[]>(
+    () => [
+      { key: "__select_year__", label: "Select year" },
+      ...DEFAULT_YEARS.map((yearName) => ({ key: yearName, label: yearName })),
+    ],
+    []
+  );
 
   const filtered = useMemo(() => {
     const search = queryText.trim().toLowerCase();
@@ -435,14 +486,14 @@ export default function ECStudentLookup() {
   }, [students, queryText, courseFilter, yearFilter]);
 
   const studentTotalPages = useMemo(
-    () => Math.max(1, Math.ceil(filtered.length / STUDENTS_PER_PAGE)),
-    [filtered.length]
+    () => Math.max(1, Math.ceil(filtered.length / studentsPerPage)),
+    [filtered.length, studentsPerPage]
   );
 
   const paginatedStudents = useMemo(() => {
-    const start = (studentPage - 1) * STUDENTS_PER_PAGE;
-    return filtered.slice(start, start + STUDENTS_PER_PAGE);
-  }, [filtered, studentPage]);
+    const start = (studentPage - 1) * studentsPerPage;
+    return filtered.slice(start, start + studentsPerPage);
+  }, [filtered, studentPage, studentsPerPage]);
 
   const attendedEvents = useMemo(
     () =>
@@ -797,59 +848,67 @@ export default function ECStudentLookup() {
       </div>
 
       <div className="flex flex-col sm:flex-row sm:flex-wrap gap-3 sm:gap-4 items-stretch sm:items-center">
-        <input
+        <Input
+          aria-label="Search students"
           type="text"
           placeholder="Search student name, student ID, or email..."
           value={queryText}
-          onChange={(e) => setQueryText(e.target.value)}
-          className="w-full sm:flex-1 sm:min-w-[220px] px-4 py-3 border rounded-lg shadow-sm"
+          onValueChange={setQueryText}
+          className="w-full sm:flex-1 sm:min-w-[220px]"
         />
 
-        <select
-          value={courseFilter}
-          onChange={(e) => setCourseFilter(e.target.value)}
-          className="w-full sm:w-auto px-4 py-3 border rounded-lg shadow-sm sm:min-w-[220px]"
+        <Select
+          aria-label="Filter by course"
+          selectedKeys={new Set([courseFilter || "__all_courses__"])}
+          onSelectionChange={(keys) => {
+            if (keys === "all") return;
+            const selected = Array.from(keys)[0];
+            if (typeof selected === "string") {
+              setCourseFilter(selected === "__all_courses__" ? "" : selected);
+            }
+          }}
+          disallowEmptySelection
+          className="w-full sm:w-auto sm:min-w-[220px]"
+          items={courseFilterItems}
         >
-          <option value="">All Courses</option>
-          {courseOptions.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
+          {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+        </Select>
 
-        <select
-          value={yearFilter}
-          onChange={(e) => setYearFilter(e.target.value)}
-          className="w-full sm:w-auto px-4 py-3 border rounded-lg shadow-sm sm:min-w-[170px]"
+        <Select
+          aria-label="Filter by year"
+          selectedKeys={new Set([yearFilter || "__all_years__"])}
+          onSelectionChange={(keys) => {
+            if (keys === "all") return;
+            const selected = Array.from(keys)[0];
+            if (typeof selected === "string") {
+              setYearFilter(selected === "__all_years__" ? "" : selected);
+            }
+          }}
+          disallowEmptySelection
+          className="w-full sm:w-auto sm:min-w-[170px]"
+          items={yearFilterItems}
         >
-          <option value="">All Years</option>
-          {yearOptions.map((y) => (
-            <option key={y} value={y}>
-              {y}
-            </option>
-          ))}
-        </select>
+          {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+        </Select>
 
-        <button
-          type="button"
-          onClick={clearFilters}
-          className="w-full sm:w-auto px-4 py-3 rounded-lg border bg-white hover:bg-gray-50 text-sm font-medium"
+        <Button
+          variant="bordered"
+          onPress={clearFilters}
+          className="w-full sm:w-auto px-4"
         >
           Clear Filters
-        </button>
+        </Button>
 
-        <button
-          type="button"
-          onClick={() => setShowAddForm((prev) => !prev)}
+        <Button
+          onPress={() => setShowAddForm((prev) => !prev)}
           className={[
-            "w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-medium text-white",
+            "w-full sm:w-auto flex items-center justify-center gap-2 px-4 text-sm font-medium text-white",
             showAddForm ? "bg-gray-600 hover:bg-gray-700" : "bg-[#7b0000] hover:opacity-95",
           ].join(" ")}
         >
           <FiPlus size={16} />
           {showAddForm ? "Cancel Add Student" : "Add Student"}
-        </button>
+        </Button>
       </div>
 
       {notice && (
@@ -869,101 +928,174 @@ export default function ECStudentLookup() {
         <div className="bg-white rounded-lg shadow border p-5 space-y-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Add Student Account</h2>
-            <p className="text-sm text-gray-600 mt-1">
-              Role is fixed to <span className="font-semibold">{newRole}</span>. EC can add students only.
-            </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
             <div>
               <label className="text-xs font-semibold text-gray-600">School ID *</label>
-              <input
+              <Input
+                aria-label="New student school ID"
                 value={newSchoolId}
-                onChange={(e) => setNewSchoolId(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+                onValueChange={setNewSchoolId}
+                className="mt-1 w-full"
                 placeholder="e.g. 23209455"
               />
             </div>
 
             <div>
               <label className="text-xs font-semibold text-gray-600">Student Name *</label>
-              <input
+              <Input
+                aria-label="New student name"
                 value={newStudentName}
-                onChange={(e) => setNewStudentName(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+                onValueChange={setNewStudentName}
+                className="mt-1 w-full"
                 placeholder="e.g. Juan Dela Cruz"
               />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-600">Role</label>
-              <input
-                value={newRole}
-                readOnly
-                className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700"
-              />
-            </div>
-
-            <div>
               <label className="text-xs font-semibold text-gray-600">Course *</label>
-              <select
-                value={newCourse}
-                onChange={(e) => setNewCourse(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+              <Select
+                aria-label="New student course"
+                selectedKeys={new Set([newCourse || "__select_course__"])}
+                onSelectionChange={(keys) => {
+                  if (keys === "all") return;
+                  const selected = Array.from(keys)[0];
+                  if (typeof selected === "string") {
+                    setNewCourse(selected === "__select_course__" ? "" : selected);
+                  }
+                }}
+                disallowEmptySelection
+                className="mt-1 w-full"
+                items={addCourseItems}
               >
-                <option value="">Select course</option>
-                {DEFAULT_COURSES.map((courseName) => (
-                  <option key={courseName} value={courseName}>
-                    {courseName}
-                  </option>
-                ))}
-              </select>
+                {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+              </Select>
             </div>
 
             <div>
               <label className="text-xs font-semibold text-gray-600">Year *</label>
-              <select
-                value={newYear}
-                onChange={(e) => setNewYear(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+              <Select
+                aria-label="New student year"
+                selectedKeys={new Set([newYear || "__select_year__"])}
+                onSelectionChange={(keys) => {
+                  if (keys === "all") return;
+                  const selected = Array.from(keys)[0];
+                  if (typeof selected === "string") {
+                    setNewYear(selected === "__select_year__" ? "" : selected);
+                  }
+                }}
+                disallowEmptySelection
+                className="mt-1 w-full"
+                items={addYearItems}
               >
-                <option value="">Select year</option>
-                {DEFAULT_YEARS.map((yearName) => (
-                  <option key={yearName} value={yearName}>
-                    {yearName}
-                  </option>
-                ))}
-              </select>
+                {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+              </Select>
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label className="text-xs font-semibold text-gray-600">Email (optional)</label>
-              <input
+              <Input
+                aria-label="New student email"
                 value={newEmail}
-                onChange={(e) => setNewEmail(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
+                onValueChange={setNewEmail}
+                className="mt-1 w-full"
                 placeholder="optional@email.com"
               />
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={createStudentAccount}
-            disabled={creating}
+          <Button
+            onPress={createStudentAccount}
+            isDisabled={creating}
             className={[
-              "inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold",
+              "inline-flex items-center justify-center rounded-lg px-4 text-sm font-semibold",
               creating ? "bg-gray-300 text-gray-700" : "bg-[#7b0000] text-white hover:opacity-95",
             ].join(" ")}
           >
             {creating ? "Creating..." : "Create Student"}
-          </button>
+          </Button>
         </div>
       )}
 
-      <div className="bg-white rounded-lg shadow border overflow-x-auto">
+      <div className="space-y-3 md:hidden">
+        {loading && (
+          <Card shadow="sm" className="border">
+            <CardBody className="p-4 text-center text-sm text-gray-500">
+              Loading students...
+            </CardBody>
+          </Card>
+        )}
+
+        {!loading && loadError && (
+          <Card shadow="sm" className="border border-red-200 bg-red-50">
+            <CardBody className="p-4 text-center text-sm text-red-700">
+              {loadError}
+            </CardBody>
+          </Card>
+        )}
+
+        {!loading &&
+          !loadError &&
+          paginatedStudents.map((student) => (
+            <Card key={student.uid} shadow="sm" className="border">
+              <CardBody className="p-4 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs text-campus-text-secondary">Student ID</p>
+                    <p className="text-sm font-semibold text-campus-text-primary break-all">{student.id}</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="flat"
+                    onPress={() => openStudentStatusModal(student)}
+                    className="px-4 text-xs shrink-0"
+                    aria-label={`Open status for ${student.name}`}
+                  >
+                    Info
+                  </Button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs text-campus-text-secondary">Name</p>
+                    <p className="text-sm text-campus-text-primary truncate">{student.name}</p>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs text-campus-text-secondary">Year Level</p>
+                    <p className="text-sm text-campus-text-primary">{student.year}</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <span className="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-700">{student.course}</span>
+                  <span
+                    className={[
+                      "px-3 py-1 text-xs rounded-full",
+                      student.status.toLowerCase() === "active"
+                        ? "bg-green-100 text-green-700"
+                        : "bg-gray-200 text-gray-700",
+                    ].join(" ")}
+                  >
+                    {student.status}
+                  </span>
+                </div>
+              </CardBody>
+            </Card>
+          ))}
+
+        {!loading && !loadError && filtered.length === 0 && (
+          <Card shadow="sm" className="border">
+            <CardBody className="p-4 text-center text-sm text-gray-500">
+              No students found.
+            </CardBody>
+          </Card>
+        )}
+      </div>
+
+      <div className="hidden md:block bg-white rounded-lg shadow border overflow-x-auto">
         <table className="w-full min-w-[760px] text-left">
           <thead>
             <tr className="border-b bg-gray-50 text-sm text-campus-text-secondary">
@@ -1016,14 +1148,15 @@ export default function ECStudentLookup() {
                     </span>
                   </td>
                   <td className="p-3 text-right">
-                    <button
-                      type="button"
-                      onClick={() => openStudentStatusModal(student)}
-                      className="px-4 py-1 bg-gray-200 text-campus-text-primary text-xs rounded-lg hover:bg-gray-300 transition"
+                    <Button
+                      size="sm"
+                      variant="flat"
+                      onPress={() => openStudentStatusModal(student)}
+                      className="px-4 text-xs"
                       aria-label={`Open status for ${student.name}`}
                     >
                       Info
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -1039,7 +1172,7 @@ export default function ECStudentLookup() {
         </table>
       </div>
 
-      {!loading && !loadError && filtered.length > STUDENTS_PER_PAGE && (
+      {!loading && !loadError && filtered.length > studentsPerPage && (
         <div className="flex justify-center">
           <Pagination
             showControls
@@ -1113,12 +1246,13 @@ export default function ECStudentLookup() {
                 >
                   <Tab key="attended" title="Events Attended">
                     <div className="space-y-3 pt-2">
-                      <input
+                      <Input
+                        aria-label="Search attended events"
                         type="text"
                         value={attendedSearch}
-                        onChange={(e) => setAttendedSearch(e.target.value)}
+                        onValueChange={setAttendedSearch}
                         placeholder="Search attended events..."
-                        className="w-full px-3 py-2 border rounded-lg text-sm"
+                        className="w-full"
                       />
 
                       {statusLoading ? (
@@ -1157,12 +1291,13 @@ export default function ECStudentLookup() {
 
                   <Tab key="missed" title="Events Missed">
                     <div className="space-y-3 pt-2">
-                      <input
+                      <Input
+                        aria-label="Search missed events"
                         type="text"
                         value={missedSearch}
-                        onChange={(e) => setMissedSearch(e.target.value)}
+                        onValueChange={setMissedSearch}
                         placeholder="Search missed events..."
-                        className="w-full px-3 py-2 border rounded-lg text-sm"
+                        className="w-full"
                       />
 
                       {statusLoading ? (
@@ -1202,12 +1337,13 @@ export default function ECStudentLookup() {
                   <Tab key="payments" title="Payments">
                     <div className="space-y-3 pt-2">
                       <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-                        <input
+                        <Input
+                          aria-label="Search payments"
                           type="text"
                           value={paymentsSearch}
-                          onChange={(e) => setPaymentsSearch(e.target.value)}
+                          onValueChange={setPaymentsSearch}
                           placeholder="Search payments..."
-                          className="w-full px-3 py-2 border rounded-lg text-sm"
+                          className="w-full"
                         />
 
                         <Dropdown placement="bottom-end">
@@ -1284,13 +1420,13 @@ export default function ECStudentLookup() {
                 </Tabs>
 
                 <div className="flex justify-end">
-                  <button
-                    type="button"
-                    onClick={onClose}
-                    className="px-4 py-2 rounded-lg border bg-white hover:bg-gray-50 text-sm font-medium"
+                  <Button
+                    variant="bordered"
+                    onPress={onClose}
+                    className="px-4"
                   >
                     Close
-                  </button>
+                  </Button>
                 </div>
               </ModalBody>
             </>

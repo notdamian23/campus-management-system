@@ -84,7 +84,16 @@ export default function ECLayout({ children }: Props) {
     return (
         <div className="min-h-[100dvh] bg-[#f2f2f2]">
             <div className="flex flex-col lg:flex-row">
-                <Sidebar navItems={ecNavItems} enableMobileDrawer titleSize="sm" logoSize={80} />
+                <Sidebar
+                    navItems={ecNavItems}
+                    enableMobileDrawer
+                    titleSize="sm"
+                    logoSize={80}
+                    showLogout
+                    showStudentAccountSwitch
+                    studentAccountHref="/student"
+                    studentAccountLabel="Student Account"
+                />
 
                 <main className="flex-1 min-w-0 p-3 sm:p-6 lg:p-10">
                     {children}

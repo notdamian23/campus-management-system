@@ -53,6 +53,8 @@
     "@heroui/toast": "2.0.20",
     "@heroui/tooltip": "2.2.27",
     "@heroui/user": "2.2.25",
+    "@mdi/js": "^7.4.47",
+    "@mdi/react": "^1.6.1",
     "@react-aria/ssr": "3.9.10",
     "@react-aria/visually-hidden": "3.8.29",
     "@supabase/supabase-js": "^2.95.3",
