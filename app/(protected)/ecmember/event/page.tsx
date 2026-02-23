@@ -10,12 +10,14 @@ import {
   collectionGroup,
   collection,
   deleteDoc,
+  DocumentData,
   doc,
   getDoc,
   getDocs,
   limit,
   onSnapshot,
   orderBy,
+  QueryDocumentSnapshot,
   query,
   setDoc,
   serverTimestamp,
@@ -115,6 +117,10 @@ type PendingDeleteFile = {
   fileDocId: string;
   path: string;
   fileName: string;
+};
+type PendingDeleteEvent = {
+  id: string;
+  title: string;
 };
 
 type NotificationSummary = {
@@ -503,17 +509,23 @@ export default function EventDashboard() {
   const [eventDateFilter, setEventDateFilter] = useState("");
   const [eventSortMode, setEventSortMode] = useState<EventSortMode>("latest_to_oldest");
   const [eventPage, setEventPage] = useState(1);
-  const [recipientType, setRecipientType] = useState<"all" | "course" | "year" | "student">("all");
 
   const [notifTitle, setNotifTitle] = useState("");
   const [notifDate, setNotifDate] = useState<string>(() => isoDateToday());
   const [notifDateValue, setNotifDateValue] = useState<any>(() => toCalendarDate(isoDateToday()));
   const [notifMessage, setNotifMessage] = useState("");
-  const [notifCourse, setNotifCourse] = useState("Computer Engineering");
-  const [notifYear, setNotifYear] = useState("1st Year");
   const [notifSearchName, setNotifSearchName] = useState("");
   const [notifSearchId, setNotifSearchId] = useState("");
   const [selectedNotifStudents, setSelectedNotifStudents] = useState<StudentLookup[]>([]);
+  const [notifYearSearch, setNotifYearSearch] = useState("");
+  const [selectedNotifYearLevels, setSelectedNotifYearLevels] = useState<string[]>([]);
+  const [showNotifYearDropdown, setShowNotifYearDropdown] = useState(false);
+  const [isAllNotifYearsExplicit, setIsAllNotifYearsExplicit] = useState(false);
+  const [notifCourseSearch, setNotifCourseSearch] = useState("");
+  const [selectedNotifCourses, setSelectedNotifCourses] = useState<string[]>([]);
+  const [showNotifCourseDropdown, setShowNotifCourseDropdown] = useState(false);
+  const [isAllNotifCoursesExplicit, setIsAllNotifCoursesExplicit] = useState(false);
+  const [notifRegistrantsModalOpen, setNotifRegistrantsModalOpen] = useState(false);
   const [notifScheduled24, setNotifScheduled24] = useState<string>(() => now24h());
   const [notifScheduledValue, setNotifScheduledValue] = useState<Time | null>(() => toTimeValue(now24h()));
   const [editingNotificationDispatchId, setEditingNotificationDispatchId] = useState<string | null>(null);
@@ -525,6 +537,8 @@ export default function EventDashboard() {
   const [studentOptions, setStudentOptions] = useState<StudentLookup[]>([]);
   const [showStudentDropdown, setShowStudentDropdown] = useState(false);
   const studentPickerRef = useRef<HTMLDivElement | null>(null);
+  const notifYearPickerRef = useRef<HTMLDivElement | null>(null);
+  const notifCoursePickerRef = useRef<HTMLDivElement | null>(null);
   const [eventSearchName, setEventSearchName] = useState("");
   const [selectedEventStudents, setSelectedEventStudents] = useState<StudentLookup[]>([]);
   const [showEventStudentDropdown, setShowEventStudentDropdown] = useState(false);
@@ -600,6 +614,8 @@ export default function EventDashboard() {
   const [documentModalSearch, setDocumentModalSearch] = useState("");
   const [pendingDeleteFile, setPendingDeleteFile] = useState<PendingDeleteFile | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [pendingDeleteEvent, setPendingDeleteEvent] = useState<PendingDeleteEvent | null>(null);
+  const [deleteEventSubmitting, setDeleteEventSubmitting] = useState(false);
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string>("");
   const [uploadMsg, setUploadMsg] = useState<string>("");
@@ -680,15 +696,19 @@ export default function EventDashboard() {
   }, [showNotificationForm, showAddEventForm, isECUser, studentOptions.length, loadStudentsForNotifications]);
 
   useEffect(() => {
-    if (recipientType !== "student" && !showAddEventForm) return;
+    if (!showNotificationForm && !showAddEventForm) return;
 
     const onDocMouseDown = (event: MouseEvent) => {
       const target = event.target as Node;
       if (studentPickerRef.current?.contains(target)) return;
+      if (notifYearPickerRef.current?.contains(target)) return;
+      if (notifCoursePickerRef.current?.contains(target)) return;
       if (eventStudentPickerRef.current?.contains(target)) return;
       if (eventYearPickerRef.current?.contains(target)) return;
       if (eventCoursePickerRef.current?.contains(target)) return;
       setShowStudentDropdown(false);
+      setShowNotifYearDropdown(false);
+      setShowNotifCourseDropdown(false);
       setShowEventStudentDropdown(false);
       setShowEventYearDropdown(false);
       setShowEventCourseDropdown(false);
@@ -696,7 +716,7 @@ export default function EventDashboard() {
 
     document.addEventListener("mousedown", onDocMouseDown);
     return () => document.removeEventListener("mousedown", onDocMouseDown);
-  }, [recipientType, showAddEventForm]);
+  }, [showAddEventForm, showNotificationForm]);
 
   const mapNotificationSummaryRows = useCallback(
     (docs: Array<{ id: string; data: () => any }>): NotificationSummary[] => {
@@ -947,6 +967,14 @@ export default function EventDashboard() {
     () => new Set(selectedNotifStudents.map((student) => student.uid)),
     [selectedNotifStudents]
   );
+  const selectedNotifYearLevelsSet = useMemo(
+    () => new Set(selectedNotifYearLevels),
+    [selectedNotifYearLevels]
+  );
+  const selectedNotifCoursesSet = useMemo(
+    () => new Set(selectedNotifCourses),
+    [selectedNotifCourses]
+  );
   const selectedEventStudentIds = useMemo(
     () => new Set(selectedEventStudents.map((student) => student.uid)),
     [selectedEventStudents]
@@ -961,8 +989,6 @@ export default function EventDashboard() {
   );
 
   const filteredStudentOptions = useMemo(() => {
-    if (recipientType !== "student") return [];
-
     const nameQuery = notifSearchName.trim().toLowerCase();
     const idQuery = notifSearchId.trim().toLowerCase();
 
@@ -974,7 +1000,33 @@ export default function EventDashboard() {
         return matchesName && matchesId;
       })
       .slice(0, 20);
-  }, [recipientType, notifSearchName, notifSearchId, studentOptions, selectedNotifStudentIds]);
+  }, [notifSearchName, notifSearchId, studentOptions, selectedNotifStudentIds]);
+
+  const filteredNotifYearOptions = useMemo(() => {
+    const query = notifYearSearch.trim().toLowerCase();
+    return EVENT_YEAR_LEVEL_CHOICES.filter((item) => {
+      if (selectedNotifYearLevelsSet.has(item)) return false;
+      if (!query) return true;
+      return item.toLowerCase().includes(query);
+    }).slice(0, 20);
+  }, [notifYearSearch, selectedNotifYearLevelsSet]);
+
+  const filteredNotifCourseOptions = useMemo(() => {
+    const query = notifCourseSearch.trim().toLowerCase();
+    return EVENT_COURSE_CHOICES.filter((item) => {
+      if (selectedNotifCoursesSet.has(item)) return false;
+      if (!query) return true;
+      return item.toLowerCase().includes(query);
+    }).slice(0, 20);
+  }, [notifCourseSearch, selectedNotifCoursesSet]);
+  const showNotifAllYearsOption = useMemo(() => {
+    const query = notifYearSearch.trim().toLowerCase();
+    return !query || "all years".includes(query);
+  }, [notifYearSearch]);
+  const showNotifAllCoursesOption = useMemo(() => {
+    const query = notifCourseSearch.trim().toLowerCase();
+    return !query || "all courses".includes(query);
+  }, [notifCourseSearch]);
 
   const filteredEventStudentOptions = useMemo(() => {
     const query = eventSearchName.trim().toLowerCase();
@@ -1133,8 +1185,29 @@ export default function EventDashboard() {
   const isEditingEvent = Boolean(editingEventId);
   const isEditingNotification = Boolean(editingNotificationDispatchId);
   const hasSpecificTarget = selectedEventStudents.length > 0;
-  const eventYearLevelLabel = selectedEventYearLevels.length > 0 ? selectedEventYearLevels.join(", ") : "All Years";
-  const eventCourseLabel = selectedEventCourses.length > 0 ? selectedEventCourses.join(", ") : "All Courses";
+  const eventYearLevelLabel = isAllYearsExplicit
+    ? "All Years"
+    : selectedEventYearLevels.length > 0
+      ? selectedEventYearLevels.join(", ")
+      : "";
+  const eventCourseLabel = isAllCoursesExplicit
+    ? "All Courses"
+    : selectedEventCourses.length > 0
+      ? selectedEventCourses.join(", ")
+      : "";
+  const registrantsRequiredMissing = !isPreReg && !hasSpecificTarget && !isEditingEvent;
+  const notifHasSpecificTarget = selectedNotifStudents.length > 0;
+  const notifYearLevelLabel = isAllNotifYearsExplicit
+    ? "All Years"
+    : selectedNotifYearLevels.length > 0
+      ? selectedNotifYearLevels.join(", ")
+      : "";
+  const notifCourseLabel = isAllNotifCoursesExplicit
+    ? "All Courses"
+    : selectedNotifCourses.length > 0
+      ? selectedNotifCourses.join(", ")
+      : "";
+  const notifRecipientsRequiredMissing = !isEditingNotification && !notifHasSpecificTarget;
   const viewAllModalImages = useMemo(() => {
     if (!viewAllFilesModal.eventId) return [];
     return eventImages[viewAllFilesModal.eventId] ?? [];
@@ -1206,9 +1279,18 @@ export default function EventDashboard() {
   };
 
   const notifTargetLabel = (item: NotificationSummary) => {
-    if (item.recipientType === "course") return `Course: ${item.course || "-"}`;
-    if (item.recipientType === "year") return `Year: ${item.yearLevel || "-"}`;
-    if (item.recipientType === "student") return `Students: ${item.targetStudent || "-"}`;
+    const pieces: string[] = [];
+    if (String(item.targetStudent ?? "").trim()) {
+      pieces.push(`Students: ${item.targetStudent}`);
+    }
+    if (String(item.yearLevel ?? "").trim() && String(item.yearLevel).trim() !== "All Years") {
+      pieces.push(`Year: ${item.yearLevel}`);
+    }
+    if (String(item.course ?? "").trim() && String(item.course).trim() !== "All Courses") {
+      pieces.push(`Course: ${item.course}`);
+    }
+
+    if (pieces.length > 0) return pieces.join(" | ");
     return "All Students";
   };
 
@@ -1466,6 +1548,161 @@ export default function EventDashboard() {
     }
   }
 
+  async function deleteDocsInChunks(docs: QueryDocumentSnapshot<DocumentData>[]) {
+    if (docs.length === 0) return;
+
+    const chunkSize = 400;
+    for (let i = 0; i < docs.length; i += chunkSize) {
+      const chunk = docs.slice(i, i + chunkSize);
+      const batch = writeBatch(db);
+      chunk.forEach((snap) => {
+        batch.delete(snap.ref);
+      });
+      await batch.commit();
+    }
+  }
+
+  async function deleteCompletedEventById(eventId: string) {
+    const [imagesSnap, docsSnap, attendanceSnap, registrationsSnap] = await Promise.all([
+      getDocs(collection(db, "events", eventId, "images")),
+      getDocs(collection(db, "events", eventId, "docs")),
+      getDocs(collection(db, "events", eventId, "attendance")),
+      getDocs(collection(db, "events", eventId, "registrations")),
+    ]);
+
+    const storagePaths = [...imagesSnap.docs, ...docsSnap.docs]
+      .map((snap) => String(snap.data()?.path ?? "").trim())
+      .filter(Boolean);
+
+    const storageDeletionResults = await Promise.allSettled(
+      storagePaths.map(async (path) => {
+        try {
+          await deleteObject(ref(storage, path));
+        } catch (error: any) {
+          const code = String(error?.code ?? "");
+          if (code !== "storage/object-not-found") {
+            throw error;
+          }
+        }
+      })
+    );
+
+    const storageDeleteFailed = storageDeletionResults.some((result) => result.status === "rejected");
+    if (storageDeleteFailed) {
+      console.warn("[EC Events] Some event files could not be removed from storage.", { eventId });
+    }
+
+    await deleteDocsInChunks([...imagesSnap.docs, ...docsSnap.docs, ...attendanceSnap.docs, ...registrationsSnap.docs]);
+    await deleteDoc(doc(db, "events", eventId));
+  }
+
+  function requestDeleteCompletedEvent(eventToDelete: EventDoc) {
+    if (roleLoading) {
+      addToast({
+        title: "Please wait",
+        description: "Role check is still in progress.",
+        color: "warning",
+        timeout: 4500,
+      });
+      return;
+    }
+
+    if (!isECUser) {
+      addToast({
+        title: "Access denied",
+        description: "Only EC members can delete events.",
+        color: "danger",
+        timeout: 5000,
+      });
+      return;
+    }
+
+    if (computeStatus(eventToDelete) !== "completed") {
+      addToast({
+        title: "Delete unavailable",
+        description: "Only completed events can be deleted.",
+        color: "warning",
+        timeout: 5000,
+      });
+      return;
+    }
+
+    setPendingDeleteEvent({
+      id: eventToDelete.id,
+      title: String(eventToDelete.title ?? "Event"),
+    });
+  }
+
+  async function confirmDeleteCompletedEvent() {
+    if (!pendingDeleteEvent) return;
+
+    setDeleteEventSubmitting(true);
+
+    try {
+      const eventToDelete = events.find((ev) => ev.id === pendingDeleteEvent.id);
+      if (!eventToDelete) {
+        throw new Error("The event no longer exists.");
+      }
+
+      if (computeStatus(eventToDelete) !== "completed") {
+        throw new Error("Only completed events can be deleted.");
+      }
+
+      await deleteCompletedEventById(eventToDelete.id);
+
+      if (expandedEventId === eventToDelete.id) {
+        setExpandedEventId(null);
+      }
+
+      if (editingEventId === eventToDelete.id) {
+        setEditingEventId(null);
+        setShowAddEventForm(false);
+        resetEventComposer();
+      }
+
+      if (viewAllFilesModal.eventId === eventToDelete.id) {
+        closeViewAllFilesModal();
+      }
+
+      setEventImages((prev) => {
+        if (!(eventToDelete.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[eventToDelete.id];
+        return next;
+      });
+      setEventDocs((prev) => {
+        if (!(eventToDelete.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[eventToDelete.id];
+        return next;
+      });
+      setEventRegistrations((prev) => {
+        if (!(eventToDelete.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[eventToDelete.id];
+        return next;
+      });
+
+      setPendingDeleteEvent(null);
+      addToast({
+        title: "Event deleted",
+        description: `${eventToDelete.title} was removed.`,
+        color: "success",
+        timeout: 3500,
+      });
+    } catch (error: any) {
+      const message = error?.message || "Failed to delete event.";
+      addToast({
+        title: "Delete failed",
+        description: message,
+        color: "danger",
+        timeout: 5500,
+      });
+    } finally {
+      setDeleteEventSubmitting(false);
+    }
+  }
+
   const resetNotificationComposer = useCallback(() => {
     setNotifTitle("");
     const nextNotifDate = isoDateToday();
@@ -1476,12 +1713,18 @@ export default function EventDashboard() {
     setNotifSearchName("");
     setNotifSearchId("");
     setSelectedNotifStudents([]);
+    setNotifYearSearch("");
+    setSelectedNotifYearLevels([]);
+    setShowNotifYearDropdown(false);
+    setIsAllNotifYearsExplicit(false);
+    setNotifCourseSearch("");
+    setSelectedNotifCourses([]);
+    setShowNotifCourseDropdown(false);
+    setIsAllNotifCoursesExplicit(false);
+    setNotifRegistrantsModalOpen(false);
     setShowStudentDropdown(false);
     setNotifScheduled24(nextNotifTime);
     setNotifScheduledValue(toTimeValue(nextNotifTime));
-    setRecipientType("all");
-    setNotifCourse("Computer Engineering");
-    setNotifYear("1st Year");
     setEditingNotificationDispatchId(null);
   }, []);
 
@@ -1519,11 +1762,14 @@ export default function EventDashboard() {
       return;
     }
 
-    let parsedSelectedStudents: StudentLookup[] = [];
-    if (item.recipientType === "student") {
-      const allStudents = studentOptions.length > 0 ? studentOptions : await loadStudentsForNotifications();
-      parsedSelectedStudents = parseTargetStudents(item.targetStudent, allStudents);
-    }
+    const allStudents = studentOptions.length > 0 ? studentOptions : await loadStudentsForNotifications();
+    const parsedSelectedStudents = parseTargetStudents(item.targetStudent, allStudents);
+    const legacyYears = splitCommaValues(item.yearLevel);
+    const legacyCourses = splitCommaValues(item.course);
+    const parsedYears = legacyYears.filter((entry) => EVENT_YEAR_LEVEL_CHOICES.includes(entry));
+    const parsedCourses = legacyCourses.filter((entry) => EVENT_COURSE_CHOICES.includes(entry));
+    const allYearsExplicit = parsedYears.length === 0 && legacyYears.some((entry) => entry.toLowerCase() === "all years");
+    const allCoursesExplicit = parsedCourses.length === 0 && legacyCourses.some((entry) => entry.toLowerCase() === "all courses");
 
     const nextDate = /^\d{4}-\d{2}-\d{2}$/.test(String(item.date ?? "")) ? String(item.date) : isoDateToday();
     const scheduledMinutes = parseTime12ToMinutes(item.scheduledTime);
@@ -1536,13 +1782,19 @@ export default function EventDashboard() {
     setNotifMessage(String(item.message ?? ""));
     setNotifScheduled24(nextScheduled24);
     setNotifScheduledValue(toTimeValue(nextScheduled24));
-    setRecipientType(item.recipientType);
-    setNotifCourse(String(item.course ?? "") || "Computer Engineering");
-    setNotifYear(String(item.yearLevel ?? "") || "1st Year");
     setSelectedNotifStudents(parsedSelectedStudents);
+    setSelectedNotifYearLevels(parsedYears);
+    setIsAllNotifYearsExplicit(allYearsExplicit);
+    setSelectedNotifCourses(parsedCourses);
+    setIsAllNotifCoursesExplicit(allCoursesExplicit);
+    setNotifYearSearch("");
+    setNotifCourseSearch("");
     setNotifSearchName("");
     setNotifSearchId("");
     setShowStudentDropdown(false);
+    setShowNotifYearDropdown(false);
+    setShowNotifCourseDropdown(false);
+    setNotifRegistrantsModalOpen(false);
 
     setShowAddEventForm(false);
     setShowNotificationForm(true);
@@ -1560,6 +1812,21 @@ export default function EventDashboard() {
     const title = notifTitle.trim();
     const message = notifMessage.trim();
     const scheduledTime = format12h(notifScheduled24);
+    const selectedLabel = selectedNotifStudents.map((student) => `${student.studentName} (${student.schoolId})`).join("; ");
+    const hasSpecificRecipients = selectedNotifStudents.length > 0;
+    const yearLevelValue = isAllNotifYearsExplicit ? "All Years" : selectedNotifYearLevels.join(", ");
+    const courseValue = isAllNotifCoursesExplicit ? "All Courses" : selectedNotifCourses.join(", ");
+    const derivedRecipientType: NotificationSummary["recipientType"] = hasSpecificRecipients
+      ? "student"
+      : selectedNotifCourses.length > 0
+        ? "course"
+        : selectedNotifYearLevels.length > 0
+          ? "year"
+          : "all";
+
+    if (!editingNotificationDispatchId && !hasSpecificRecipients) {
+      return setNotifError("Choose at least one registrant before sending a notification.");
+    }
 
     if (editingNotificationDispatchId) {
       if (!currentUser?.uid) return setNotifError("Session not ready. Please sign in again.");
@@ -1570,22 +1837,28 @@ export default function EventDashboard() {
         return setNotifError("Only scheduled notifications can be edited.");
       }
 
-      const selectedLabel =
-        recipientType === "student"
-          ? selectedNotifStudents.length > 0
-            ? selectedNotifStudents.map((student) => `${student.studentName} (${student.schoolId})`).join("; ")
-            : existing.targetStudent
-          : "";
+      const payloadTargetStudent = selectedNotifStudents.length > 0 ? selectedLabel : String(existing.targetStudent ?? "");
+      const payloadCourse = courseValue || String(existing.course ?? "");
+      const payloadYearLevel = yearLevelValue || String(existing.yearLevel ?? "");
+      const payloadRecipientType: NotificationSummary["recipientType"] = payloadTargetStudent
+        ? "student"
+        : payloadCourse && payloadCourse !== "All Courses"
+          ? "course"
+          : payloadYearLevel && payloadYearLevel !== "All Years"
+            ? "year"
+            : existing.recipientType;
 
       const payload = {
         title,
         message,
         date: notifDate,
         scheduledTime,
-        recipientType,
-        course: recipientType === "course" ? notifCourse : "",
-        yearLevel: recipientType === "year" ? notifYear : "",
-        targetStudent: recipientType === "student" ? selectedLabel : "",
+        recipientType: payloadRecipientType,
+        course: payloadCourse,
+        yearLevel: payloadYearLevel,
+        targetStudent: payloadTargetStudent,
+        courses: selectedNotifCourses,
+        yearLevels: selectedNotifYearLevels,
         status: computeNotificationStatus(notifDate, scheduledTime),
         updatedAt: serverTimestamp(),
       };
@@ -1654,10 +1927,10 @@ export default function EventDashboard() {
                     message,
                     date: notifDate,
                     scheduledTime,
-                    recipientType,
-                    course: recipientType === "course" ? notifCourse : "",
-                    yearLevel: recipientType === "year" ? notifYear : "",
-                    targetStudent: recipientType === "student" ? selectedLabel : "",
+                    recipientType: payloadRecipientType,
+                    course: payloadCourse,
+                    yearLevel: payloadYearLevel,
+                    targetStudent: payloadTargetStudent,
                     status: computeNotificationStatus(notifDate, scheduledTime),
                   }
                 : item
@@ -1699,32 +1972,21 @@ export default function EventDashboard() {
     }
     if (students.length === 0) return setNotifError("No student records found.");
 
-    let recipients: StudentLookup[] = [];
-
-    if (recipientType === "all") {
-      recipients = students;
-    } else if (recipientType === "course") {
-      recipients = students.filter((s) => s.course === notifCourse);
-    } else if (recipientType === "year") {
-      recipients = students.filter((s) => s.year === notifYear);
-    } else {
-      if (selectedNotifStudents.length === 0) {
-        return setNotifError("Choose at least one student from the dropdown list.");
-      }
-      recipients = selectedNotifStudents;
-    }
+    const selectedStudentIdSet = new Set(selectedNotifStudents.map((student) => student.uid));
+    const recipients = students.filter((student) => {
+      const yearMatch =
+        selectedNotifYearLevels.length === 0 || selectedNotifYearLevels.includes(String(student.year ?? "").trim());
+      const courseMatch =
+        selectedNotifCourses.length === 0 || selectedNotifCourses.includes(String(student.course ?? "").trim());
+      const studentMatch = selectedStudentIdSet.size === 0 || selectedStudentIdSet.has(student.uid);
+      return yearMatch && courseMatch && studentMatch;
+    });
 
     if (recipients.length === 0) {
-      if (recipientType === "course") return setNotifError(`No students found in ${notifCourse}.`);
-      if (recipientType === "year") return setNotifError(`No students found in ${notifYear}.`);
-      return setNotifError("No recipients found.");
+      return setNotifError("No recipients found for the selected registrant filters.");
     }
 
     const dispatchId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const selectedLabel =
-      recipientType === "student"
-        ? recipients.map((student) => `${student.studentName} (${student.schoolId})`).join("; ")
-        : "";
 
     try {
       setSendingNotif(true);
@@ -1743,10 +2005,12 @@ export default function EventDashboard() {
             scheduledTime,
             type: "announcement",
             dispatchId,
-            recipientType,
-            course: recipientType === "course" ? notifCourse : "",
-            yearLevel: recipientType === "year" ? notifYear : "",
-            targetStudent: recipientType === "student" ? selectedLabel : "",
+            recipientType: derivedRecipientType,
+            course: courseValue,
+            yearLevel: yearLevelValue,
+            targetStudent: selectedLabel,
+            courses: selectedNotifCourses,
+            yearLevels: selectedNotifYearLevels,
             studentUid: student.uid,
             studentName: student.studentName,
             schoolId: student.schoolId,
@@ -1767,10 +2031,12 @@ export default function EventDashboard() {
           scheduledTime,
           type: "announcement",
           dispatchId,
-          recipientType,
-          course: recipientType === "course" ? notifCourse : "",
-          yearLevel: recipientType === "year" ? notifYear : "",
-          targetStudent: recipientType === "student" ? selectedLabel : "",
+          recipientType: derivedRecipientType,
+          course: courseValue,
+          yearLevel: yearLevelValue,
+          targetStudent: selectedLabel,
+          courses: selectedNotifCourses,
+          yearLevels: selectedNotifYearLevels,
           recipientCount: recipients.length,
           createdByUid: currentUser.uid,
           createdAt: serverTimestamp(),
@@ -1786,10 +2052,10 @@ export default function EventDashboard() {
         message,
         date: notifDate,
         scheduledTime,
-        recipientType,
-        course: recipientType === "course" ? notifCourse : "",
-        yearLevel: recipientType === "year" ? notifYear : "",
-        targetStudent: recipientType === "student" ? selectedLabel : "",
+        recipientType: derivedRecipientType,
+        course: courseValue,
+        yearLevel: yearLevelValue,
+        targetStudent: selectedLabel,
         createdAt: optimisticCreatedAt,
         recipientCount: recipients.length,
         status: computeNotificationStatus(notifDate, scheduledTime),
@@ -1960,6 +2226,9 @@ export default function EventDashboard() {
     if (isPreReg && (Number.isNaN(preRegSlots) || preRegSlots < 0)) {
       return setSaveError("Pre-reg slots must be at least 0.");
     }
+    if (!isPreReg && selectedEventStudents.length === 0 && !editingEventId) {
+      return setSaveError("Choose at least one registrant before creating an event.");
+    }
 
     const eventBeingEdited = editingEventId ? events.find((ev) => ev.id === editingEventId) ?? null : null;
     if (editingEventId && !eventBeingEdited) {
@@ -1977,8 +2246,12 @@ export default function EventDashboard() {
         .join("; ");
       const startTime = format12h(eventScheduled24);
       const endTime = format12h(eventEnd24);
-      const yearLevelValue = selectedEventYearLevels.length > 0 ? selectedEventYearLevels.join(", ") : "All Years";
-      const courseValue = selectedEventCourses.length > 0 ? selectedEventCourses.join(", ") : "All Courses";
+      const yearLevelValue = isAllYearsExplicit ? "All Years" : selectedEventYearLevels.join(", ");
+      const courseValue = isAllCoursesExplicit ? "All Courses" : selectedEventCourses.join(", ");
+      const liveRegistrationCount = editingEventId ? eventRegistrations[editingEventId]?.length : undefined;
+      const fallbackRegistrationCount = typeof eventBeingEdited?.preRegCount === "number" ? Math.max(0, Math.trunc(eventBeingEdited.preRegCount)) : 0;
+      const preRegCount = isPreReg ? liveRegistrationCount ?? fallbackRegistrationCount : 0;
+      const preRegRemaining = isPreReg && typeof slots === "number" ? Math.max(0, slots - preRegCount) : 0;
       const savePayload = {
         title: title.trim(),
         location: location.trim(),
@@ -1992,6 +2265,11 @@ export default function EventDashboard() {
         courses: isPreReg ? [] : selectedEventCourses,
         targetStudent: isPreReg ? "" : studentTarget,
         details: details.trim(),
+        isPreReg,
+        withPayment,
+        preRegSlots: slots,
+        preRegCount,
+        preRegRemaining,
       };
 
       if (editingEventId) {
@@ -2007,11 +2285,6 @@ export default function EventDashboard() {
       } else {
         await addDoc(collection(db, "events"), {
           ...savePayload,
-          isPreReg,
-          withPayment,
-          preRegSlots: slots,
-          preRegCount: 0,
-          preRegRemaining: isPreReg ? slots : 0,
           createdBy: currentUser ? currentUser.uid : null,
           createdAt: serverTimestamp(),
           status: "upcoming",
@@ -2242,7 +2515,6 @@ export default function EventDashboard() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Switch
                 isSelected={isPreReg}
-                isDisabled={isEditingEvent}
                 onValueChange={(checked) => {
                   setIsPreReg(checked);
                   if (checked) {
@@ -2266,7 +2538,6 @@ export default function EventDashboard() {
 
               <Switch
                 isSelected={withPayment}
-                isDisabled={isEditingEvent}
                 onValueChange={(checked) => setWithPayment(checked)}
               >
                 With Payment
@@ -2669,9 +2940,14 @@ export default function EventDashboard() {
                 Current filters: Year Level - {eventYearLevelLabel}; Course - {eventCourseLabel}.
               </p>
             )}
-            <p className="text-xs text-campus-text-secondary">
-              Choose one or more specific students if needed. You can still set Year Level and Course filters.
-            </p>
+            {!isPreReg && !hasSpecificTarget && !isEditingEvent && (
+              <p className="text-xs text-red-600">Choose at least one registrant to create this event.</p>
+            )}
+            {!isPreReg && (
+              <p className="text-xs text-campus-text-secondary">
+                Choose one or more specific students. You can still set Year Level and Course filters.
+              </p>
+            )}
           </div>
 
           <div>
@@ -2688,7 +2964,6 @@ export default function EventDashboard() {
                 min={0}
                 step={1}
                 value={String(preRegSlots)}
-                isDisabled={isEditingEvent}
                 onValueChange={(value) => {
                   const parsed = Number(value);
                   if (Number.isNaN(parsed)) {
@@ -2707,7 +2982,7 @@ export default function EventDashboard() {
 
           {isEditingEvent && (
             <p className="text-xs text-campus-text-secondary">
-              Editing is limited to title, location, date, start/end time, registrants, and details for upcoming events.
+              You can edit all fields for upcoming events, including pre-registration and payment settings.
             </p>
           )}
 
@@ -2716,7 +2991,7 @@ export default function EventDashboard() {
 
           <button
             onClick={handleSaveEvent}
-            disabled={saving || roleLoading || !isECUser}
+            disabled={saving || roleLoading || !isECUser || registrantsRequiredMissing}
             className="w-full px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
           >
             {roleLoading ? "Checking role..." : saving ? (isEditingEvent ? "Updating..." : "Saving...") : isEditingEvent ? "Update Event" : "Save"}
@@ -2768,152 +3043,358 @@ export default function EventDashboard() {
             />
           </div>
 
-          <div>
-            <label className="text-sm font-medium">Send To</label>
-            <select
-              className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
-              value={recipientType}
-              disabled={isEditingNotification}
-              onChange={(e) => {
-                setRecipientType(e.target.value as any);
-                setNotifSearchName("");
-                setNotifSearchId("");
-                setSelectedNotifStudents([]);
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Registrants</label>
+            <Button
+              variant="bordered"
+              className="w-full justify-between"
+              onPress={() => {
                 setShowStudentDropdown(false);
+                setShowNotifYearDropdown(false);
+                setShowNotifCourseDropdown(false);
+                setNotifRegistrantsModalOpen(true);
               }}
             >
-              <option value="all">All Students</option>
-              <option value="course">By Course</option>
-              <option value="year">By Year Level</option>
-              <option value="student">Specific Student (ID/Name)</option>
-            </select>
-          </div>
+              Registrants
+            </Button>
+            <Modal
+              isOpen={notifRegistrantsModalOpen}
+              onOpenChange={(open) => {
+                setNotifRegistrantsModalOpen(open);
+                if (!open) {
+                  setShowStudentDropdown(false);
+                  setShowNotifYearDropdown(false);
+                  setShowNotifCourseDropdown(false);
+                }
+              }}
+              size="2xl"
+              scrollBehavior="inside"
+            >
+              <ModalContent>
+                {(onClose) => (
+                  <>
+                    <ModalHeader>Registrants</ModalHeader>
+                    <ModalBody>
+                      <div className="space-y-3">
+                        <div>
+                          <label className="text-xs font-medium text-campus-text-secondary">Year Level</label>
 
-          {recipientType === "course" && (
-            <div>
-              <label className="text-sm font-medium">Select Course</label>
-              <select
-                value={notifCourse}
-                disabled={isEditingNotification}
-                onChange={(e) => setNotifCourse(e.target.value)}
-                className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
-              >
-                <option>Computer Engineering</option>
-                <option>Mechanical Engineering</option>
-                <option>Electrical Engineering</option>
-                <option>Electronics Engineering</option>
-                <option>Industrial Engineering</option>
-              </select>
-            </div>
-          )}
+                          {(isAllNotifYearsExplicit || selectedNotifYearLevels.length > 0) && (
+                            <div className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isEditingNotification ? "bg-gray-100" : "bg-white"}`}>
+                              <div className="flex flex-wrap gap-2">
+                                {isAllNotifYearsExplicit && selectedNotifYearLevels.length === 0 ? (
+                                  <span className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                    <span className="font-medium">All Years</span>
+                                    <button
+                                      type="button"
+                                      className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
+                                      disabled={isEditingNotification}
+                                      onClick={() => {
+                                        setIsAllNotifYearsExplicit(false);
+                                      }}
+                                      aria-label="Remove All Years"
+                                    >
+                                      x
+                                    </button>
+                                  </span>
+                                ) : (
+                                  selectedNotifYearLevels.map((item) => (
+                                    <span key={item} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                      <span className="font-medium">{item}</span>
+                                      <button
+                                        type="button"
+                                        className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
+                                        disabled={isEditingNotification}
+                                        onClick={() => {
+                                          setIsAllNotifYearsExplicit(false);
+                                          setSelectedNotifYearLevels((prev) => prev.filter((entry) => entry !== item));
+                                        }}
+                                        aria-label={`Remove ${item}`}
+                                      >
+                                        x
+                                      </button>
+                                    </span>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          )}
 
-          {recipientType === "year" && (
-            <div>
-              <label className="text-sm font-medium">Select Year Level</label>
-              <select
-                value={notifYear}
-                disabled={isEditingNotification}
-                onChange={(e) => setNotifYear(e.target.value)}
-                className="w-full mt-1 px-4 py-3 border rounded-lg shadow-sm"
-              >
-                <option>1st Year</option>
-                <option>2nd Year</option>
-                <option>3rd Year</option>
-                <option>4th Year</option>
-              </select>
-            </div>
-          )}
+                          <div ref={notifYearPickerRef} className="mt-2 space-y-2">
+                            <input
+                              value={notifYearSearch}
+                              onChange={(e) => {
+                                setNotifYearSearch(e.target.value);
+                                setShowNotifYearDropdown(true);
+                              }}
+                              onFocus={() => setShowNotifYearDropdown(true)}
+                              disabled={isEditingNotification}
+                              placeholder="Search year level"
+                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
+                                isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
+                              }`}
+                            />
 
-          {recipientType === "student" && (
-            <div>
-              <label className="text-sm font-medium">To *</label>
+                            {!isEditingNotification && showNotifYearDropdown && (
+                              <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
+                                {!showNotifAllYearsOption && filteredNotifYearOptions.length === 0 ? (
+                                  <p className="px-4 py-2 text-sm text-campus-text-secondary">
+                                    {selectedNotifYearLevels.length === EVENT_YEAR_LEVEL_CHOICES.length
+                                      ? "All year levels selected."
+                                      : "No matching year levels."}
+                                  </p>
+                                ) : (
+                                  <>
+                                    {showNotifAllYearsOption && (
+                                      <button
+                                        type="button"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                        onClick={() => {
+                                          setSelectedNotifYearLevels([]);
+                                          setIsAllNotifYearsExplicit(true);
+                                          setNotifYearSearch("");
+                                          setShowNotifYearDropdown(true);
+                                        }}
+                                      >
+                                        <div className="text-sm font-medium text-campus-text-primary">All Years</div>
+                                      </button>
+                                    )}
 
-              <div className="mt-1 rounded-lg border px-3 py-2 shadow-sm min-h-[52px]">
-                <div className="flex flex-wrap gap-2">
-                  {selectedNotifStudents.length === 0 ? (
-                    <span className="text-sm text-campus-text-secondary">No student selected yet.</span>
-                  ) : (
-                    selectedNotifStudents.map((student) => (
-                      <span key={student.uid} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
-                        <span className="font-medium">{student.studentName}</span>
-                        <span className="text-campus-text-secondary">({student.schoolId})</span>
-                        <button
-                          type="button"
-                          className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
-                          disabled={isEditingNotification}
-                          onClick={() => {
-                            setSelectedNotifStudents((prev) => prev.filter((x) => x.uid !== student.uid));
-                          }}
-                          aria-label={`Remove ${student.studentName}`}
-                        >
-                          x
-                        </button>
-                      </span>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div ref={studentPickerRef} className="mt-2 space-y-2">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  <input
-                    value={notifSearchName}
-                    onChange={(e) => {
-                      setNotifSearchName(e.target.value);
-                      setShowStudentDropdown(true);
-                    }}
-                    onFocus={() => setShowStudentDropdown(true)}
-                    disabled={isEditingNotification}
-                    placeholder="Search by name"
-                    className={`w-full px-4 py-3 border rounded-lg shadow-sm ${isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""}`}
-                  />
-
-                  <input
-                    value={notifSearchId}
-                    onChange={(e) => {
-                      setNotifSearchId(e.target.value);
-                      setShowStudentDropdown(true);
-                    }}
-                    onFocus={() => setShowStudentDropdown(true)}
-                    disabled={isEditingNotification}
-                    placeholder="Search by ID number"
-                    className={`w-full px-4 py-3 border rounded-lg shadow-sm ${isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""}`}
-                  />
-                </div>
-
-                {!isEditingNotification && showStudentDropdown && (
-                  <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
-                    {studentsLoading ? (
-                      <p className="px-4 py-2 text-sm text-campus-text-secondary">Loading students...</p>
-                    ) : filteredStudentOptions.length === 0 ? (
-                      <p className="px-4 py-2 text-sm text-campus-text-secondary">No matching students.</p>
-                    ) : (
-                      filteredStudentOptions.map((student) => (
-                        <button
-                          key={student.uid}
-                          type="button"
-                          className="w-full text-left px-4 py-2 hover:bg-gray-100"
-                          onClick={() => {
-                            setSelectedNotifStudents((prev) =>
-                              prev.some((x) => x.uid === student.uid) ? prev : [...prev, student]
-                            );
-                            setNotifSearchName("");
-                            setNotifSearchId("");
-                            setShowStudentDropdown(true);
-                          }}
-                        >
-                          <div className="text-sm font-medium text-campus-text-primary">{student.studentName}</div>
-                          <div className="text-xs text-campus-text-secondary">
-                            {student.schoolId} | {student.course || "Unassigned"} | {student.year || "Unassigned"}
+                                    {filteredNotifYearOptions.map((item) => (
+                                      <button
+                                        key={item}
+                                        type="button"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                        onClick={() => {
+                                          setIsAllNotifYearsExplicit(false);
+                                          setSelectedNotifYearLevels((prev) => (prev.includes(item) ? prev : [...prev, item]));
+                                          setNotifYearSearch("");
+                                          setShowNotifYearDropdown(true);
+                                        }}
+                                      >
+                                        <div className="text-sm font-medium text-campus-text-primary">{item}</div>
+                                      </button>
+                                    ))}
+                                  </>
+                                )}
+                              </div>
+                            )}
                           </div>
-                        </button>
-                      ))
-                    )}
-                  </div>
+                        </div>
+
+                        <div>
+                          <label className="text-xs font-medium text-campus-text-secondary">Course</label>
+
+                          {(isAllNotifCoursesExplicit || selectedNotifCourses.length > 0) && (
+                            <div className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isEditingNotification ? "bg-gray-100" : "bg-white"}`}>
+                              <div className="flex flex-wrap gap-2">
+                                {isAllNotifCoursesExplicit && selectedNotifCourses.length === 0 ? (
+                                  <span className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                    <span className="font-medium">All Courses</span>
+                                    <button
+                                      type="button"
+                                      className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
+                                      disabled={isEditingNotification}
+                                      onClick={() => {
+                                        setIsAllNotifCoursesExplicit(false);
+                                      }}
+                                      aria-label="Remove All Courses"
+                                    >
+                                      x
+                                    </button>
+                                  </span>
+                                ) : (
+                                  selectedNotifCourses.map((item) => (
+                                    <span key={item} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                      <span className="font-medium">{item}</span>
+                                      <button
+                                        type="button"
+                                        className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
+                                        disabled={isEditingNotification}
+                                        onClick={() => {
+                                          setIsAllNotifCoursesExplicit(false);
+                                          setSelectedNotifCourses((prev) => prev.filter((entry) => entry !== item));
+                                        }}
+                                        aria-label={`Remove ${item}`}
+                                      >
+                                        x
+                                      </button>
+                                    </span>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          <div ref={notifCoursePickerRef} className="mt-2 space-y-2">
+                            <input
+                              value={notifCourseSearch}
+                              onChange={(e) => {
+                                setNotifCourseSearch(e.target.value);
+                                setShowNotifCourseDropdown(true);
+                              }}
+                              onFocus={() => setShowNotifCourseDropdown(true)}
+                              disabled={isEditingNotification}
+                              placeholder="Search course"
+                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
+                                isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
+                              }`}
+                            />
+
+                            {!isEditingNotification && showNotifCourseDropdown && (
+                              <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
+                                {!showNotifAllCoursesOption && filteredNotifCourseOptions.length === 0 ? (
+                                  <p className="px-4 py-2 text-sm text-campus-text-secondary">
+                                    {selectedNotifCourses.length === EVENT_COURSE_CHOICES.length
+                                      ? "All courses selected."
+                                      : "No matching courses."}
+                                  </p>
+                                ) : (
+                                  <>
+                                    {showNotifAllCoursesOption && (
+                                      <button
+                                        type="button"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                        onClick={() => {
+                                          setSelectedNotifCourses([]);
+                                          setIsAllNotifCoursesExplicit(true);
+                                          setNotifCourseSearch("");
+                                          setShowNotifCourseDropdown(true);
+                                        }}
+                                      >
+                                        <div className="text-sm font-medium text-campus-text-primary">All Courses</div>
+                                      </button>
+                                    )}
+
+                                    {filteredNotifCourseOptions.map((item) => (
+                                      <button
+                                        key={item}
+                                        type="button"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                        onClick={() => {
+                                          setIsAllNotifCoursesExplicit(false);
+                                          setSelectedNotifCourses((prev) => (prev.includes(item) ? prev : [...prev, item]));
+                                          setNotifCourseSearch("");
+                                          setShowNotifCourseDropdown(true);
+                                        }}
+                                      >
+                                        <div className="text-sm font-medium text-campus-text-primary">{item}</div>
+                                      </button>
+                                    ))}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-xs font-medium text-campus-text-secondary">To *</label>
+
+                          {selectedNotifStudents.length > 0 && (
+                            <div className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isEditingNotification ? "bg-gray-100" : "bg-white"}`}>
+                              <div className="flex flex-wrap gap-2">
+                                {selectedNotifStudents.map((student) => (
+                                  <span key={student.uid} className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white">
+                                    <span className="font-medium">{student.studentName}</span>
+                                    <span className="text-campus-text-secondary">({student.schoolId})</span>
+                                    <button
+                                      type="button"
+                                      className={`text-campus-text-secondary ${isEditingNotification ? "cursor-not-allowed opacity-50" : "hover:text-campus-text-primary"}`}
+                                      disabled={isEditingNotification}
+                                      onClick={() => {
+                                        setSelectedNotifStudents((prev) => prev.filter((entry) => entry.uid !== student.uid));
+                                      }}
+                                      aria-label={`Remove ${student.studentName}`}
+                                    >
+                                      x
+                                    </button>
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <div ref={studentPickerRef} className="mt-2 space-y-2">
+                            <input
+                              value={notifSearchName}
+                              onChange={(e) => {
+                                setNotifSearchName(e.target.value);
+                                setShowStudentDropdown(true);
+                              }}
+                              onFocus={() => setShowStudentDropdown(true)}
+                              disabled={isEditingNotification}
+                              placeholder="Search by name"
+                              className={`w-full px-3 py-2 border rounded-lg text-sm ${
+                                isEditingNotification ? "bg-gray-100 text-campus-text-secondary cursor-not-allowed" : ""
+                              }`}
+                            />
+
+                            {!isEditingNotification && showStudentDropdown && (
+                              <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
+                                {studentsLoading ? (
+                                  <p className="px-4 py-2 text-sm text-campus-text-secondary">Loading students...</p>
+                                ) : filteredStudentOptions.length === 0 ? (
+                                  <p className="px-4 py-2 text-sm text-campus-text-secondary">No matching students.</p>
+                                ) : (
+                                  filteredStudentOptions.map((student) => (
+                                    <button
+                                      key={student.uid}
+                                      type="button"
+                                      className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                                      onClick={() => {
+                                        setSelectedNotifStudents((prev) =>
+                                          prev.some((entry) => entry.uid === student.uid) ? prev : [...prev, student]
+                                        );
+                                        setNotifSearchName("");
+                                        setNotifSearchId("");
+                                        setShowStudentDropdown(true);
+                                      }}
+                                    >
+                                      <div className="text-sm font-medium text-campus-text-primary">{student.studentName}</div>
+                                      <div className="text-xs text-campus-text-secondary">
+                                        {student.schoolId} | {student.course || "Unassigned"} | {student.year || "Unassigned"}
+                                      </div>
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </ModalBody>
+                    <ModalFooter>
+                      <Button
+                        variant="light"
+                        onPress={() => {
+                          setShowStudentDropdown(false);
+                          setShowNotifYearDropdown(false);
+                          setShowNotifCourseDropdown(false);
+                          onClose();
+                        }}
+                      >
+                        Done
+                      </Button>
+                    </ModalFooter>
+                  </>
                 )}
-              </div>
-            </div>
-          )}
+              </ModalContent>
+            </Modal>
+
+            {notifHasSpecificTarget && (
+              <p className="text-xs text-campus-text-secondary">Year Level and Course are optional when targeting specific students.</p>
+            )}
+            <p className="text-xs text-campus-text-secondary">
+              Current filters: Year Level - {notifYearLevelLabel}; Course - {notifCourseLabel}.
+            </p>
+            {!isEditingNotification && !notifHasSpecificTarget && (
+              <p className="text-xs text-red-600">Choose at least one registrant to send this notification.</p>
+            )}
+            <p className="text-xs text-campus-text-secondary">
+              Choose one or more specific students. You can still set Year Level and Course filters.
+            </p>
+          </div>
 
           {isEditingNotification && (
             <p className="text-xs text-campus-text-secondary">
@@ -2933,7 +3414,7 @@ export default function EventDashboard() {
           <button
             type="button"
             onClick={handleSendNotification}
-            disabled={sendingNotif || roleLoading || !isECUser}
+            disabled={sendingNotif || roleLoading || !isECUser || notifRecipientsRequiredMissing}
             className="w-full sm:w-auto px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-60"
           >
             {sendingNotif ? (isEditingNotification ? "Updating..." : "Sending...") : isEditingNotification ? "Update Notification" : "Send Notification"}
@@ -3074,22 +3555,35 @@ export default function EventDashboard() {
                       >
                         Info ▼
                       </button>
-                      <button
-                        type="button"
-                        className={`flex-1 sm:flex-none px-4 py-1 text-xs rounded-lg ${
-                          liveStatus === "upcoming"
-                            ? "bg-primary-500 text-white"
-                            : "bg-gray-200 text-campus-text-secondary cursor-not-allowed"
-                        }`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (liveStatus !== "upcoming") return;
-                          void handleStartEditUpcomingEvent(ev);
-                        }}
-                        disabled={liveStatus !== "upcoming"}
-                      >
-                        {liveStatus === "upcoming" ? "Edit" : "Edit (later)"}
-                      </button>
+                      {liveStatus === "completed" ? (
+                        <Button
+                          size="sm"
+                          color="danger"
+                          variant="flat"
+                          className="flex-1 sm:flex-none min-w-0 px-4 text-xs"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            requestDeleteCompletedEvent(ev);
+                          }}
+                        >
+                          Delete
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          color={liveStatus === "upcoming" ? "primary" : "default"}
+                          variant={liveStatus === "upcoming" ? "solid" : "flat"}
+                          className="flex-1 sm:flex-none min-w-0 px-4 text-xs"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (liveStatus !== "upcoming") return;
+                            void handleStartEditUpcomingEvent(ev);
+                          }}
+                          isDisabled={liveStatus !== "upcoming"}
+                        >
+                          {liveStatus === "upcoming" ? "Edit" : "Edit (later)"}
+                        </Button>
+                      )}
                     </div>
                   </div>
 
@@ -3798,6 +4292,51 @@ export default function EventDashboard() {
                     void confirmDeleteEventFile();
                   }}
                   isLoading={deleteSubmitting}
+                >
+                  Delete
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      <Modal
+        isOpen={Boolean(pendingDeleteEvent)}
+        onOpenChange={(open) => {
+          if (!open && !deleteEventSubmitting) {
+            setPendingDeleteEvent(null);
+          }
+        }}
+        size="md"
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>Delete Event</ModalHeader>
+              <ModalBody className="space-y-2">
+                <p className="text-base text-campus-text-primary">Are you sure you want to delete this event?</p>
+                {pendingDeleteEvent?.title && (
+                  <p className="text-sm text-campus-text-secondary break-all">{pendingDeleteEvent.title}</p>
+                )}
+              </ModalBody>
+              <ModalFooter className="justify-between">
+                <Button
+                  variant="bordered"
+                  onPress={() => {
+                    setPendingDeleteEvent(null);
+                    onClose();
+                  }}
+                  isDisabled={deleteEventSubmitting}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  color="danger"
+                  onPress={() => {
+                    void confirmDeleteCompletedEvent();
+                  }}
+                  isLoading={deleteEventSubmitting}
                 >
                   Delete
                 </Button>
