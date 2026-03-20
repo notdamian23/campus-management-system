@@ -1,0 +1,106 @@
+rules_version = "2";
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profilePath() {
+      return /databases/$(database)/documents/profiles/$(request.auth.uid);
+    }
+
+    function role() {
+      return signedIn() && exists(profilePath())
+        ? get(profilePath()).data.role
+        : "";
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return signedIn() && role() == "admin";
+    }
+
+    function isEC() {
+      return signedIn() && role() == "ec";
+    }
+
+    function isAdminOrEC() {
+      return isAdmin() || isEC();
+    }
+
+    // Profiles
+    match /profiles/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow create: if isAdmin();
+      allow update: if isSelf(uid) || isAdmin();
+      allow delete: if isAdmin();
+
+      // EC member personal documents
+      match /documents/{docId} {
+        allow read: if isSelf(uid) || isAdmin();
+        allow create, update, delete: if (isSelf(uid) && isEC()) || isAdmin();
+      }
+
+      // Student notifications written by EC/Admin
+      match /notifications/{notificationId} {
+        allow read: if isSelf(uid) || isAdminOrEC();
+        allow create, update, delete: if isAdminOrEC();
+      }
+    }
+
+    // Admin logs (written by Admin SDK / Cloud Functions)
+    match /logs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Events
+    match /events/{eventId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdminOrEC();
+
+      match /registrations/{uid} {
+        allow read: if isAdminOrEC() ||
+          isSelf(uid) ||
+          (signedIn() && resource.data.uid == request.auth.uid);
+        allow create: if isSelf(uid) &&
+          request.resource.data.uid == request.auth.uid;
+        allow update: if isSelf(uid) &&
+          request.resource.data.uid == request.auth.uid;
+        allow delete: if isAdminOrEC() || isSelf(uid);
+      }
+
+      match /{subcollection}/{docId} {
+        allow read: if signedIn();
+        allow create, update, delete: if isAdminOrEC();
+      }
+    }
+
+    // Payments
+    match /payments/{paymentId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdminOrEC();
+
+      match /students/{studentUid} {
+        allow read: if isAdminOrEC() ||
+          isSelf(studentUid) ||
+          (signedIn() && resource.data.uid == request.auth.uid);
+        allow create, update, delete: if isAdminOrEC();
+      }
+    }
+
+    // Shared EC document library (1 GB shared pool handled by app logic)
+    match /ecDocuments/{docId} {
+      allow read: if isAdminOrEC();
+      allow create, update, delete: if isAdminOrEC();
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

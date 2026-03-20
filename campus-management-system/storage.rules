@@ -1,0 +1,48 @@
+rules_version = "2";
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profilePath() {
+      return /databases/(default)/documents/profiles/$(request.auth.uid);
+    }
+
+    function role() {
+      return signedIn() && firestore.exists(profilePath())
+        ? firestore.get(profilePath()).data.role
+        : "";
+    }
+
+    function isAdmin() {
+      return signedIn() && role() == "admin";
+    }
+
+    function isEC() {
+      return signedIn() && role() == "ec";
+    }
+
+    function isAdminOrEC() {
+      return isAdmin() || isEC();
+    }
+
+    // Shared EC document storage:
+    // ec-documents/shared/{docId}/{fileName}
+    match /ec-documents/shared/{docId}/{fileName} {
+      allow read, write: if isAdminOrEC();
+    }
+
+    // Event file storage:
+    // events/{eventId}/{kind}/{fileId}
+    match /events/{eventId}/{kind}/{fileId} {
+      allow read: if signedIn();
+      allow write: if isAdminOrEC();
+    }
+
+    // Deny everything else by default.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
