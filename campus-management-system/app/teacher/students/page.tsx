@@ -1,209 +1,572 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
-import { CampusInput, CampusBadge } from "@/components/heroui";
+import { Chip } from "@heroui/chip";
+import { Input } from "@heroui/input";
+import {
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalHeader,
+} from "@heroui/modal";
+import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
+import { Tab, Tabs } from "@heroui/tabs";
+import { useTeacherPortal } from "@/components/teacher/TeacherPortalProvider";
 
-export default function StudentsPage() {
-    const [showDetails, setShowDetails] = useState(false);
+const STUDENTS_PER_PAGE = 8;
 
-    return (
-        <div className="w-full p-10 bg-gray-50 min-h-screen">
+type SelectOption = {
+  key: string;
+  label: string;
+};
 
-            {/* HEADER CARD */}
-            <Card shadow="lg" className="mb-10">
-                <CardBody className="p-8">
-                    <h1 className="text-4xl font-extrabold text-primary-900">
-                        Engineering Student Management System
-                    </h1>
-                </CardBody>
+type StudentTabKey = "tracked" | "present" | "absent";
+
+function formatEventDate(date: Date | null, fallback: string) {
+  if (!date) return fallback || "Date TBA";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function statusChipClass(status: "Present" | "Absent") {
+  return status === "Present"
+    ? "bg-emerald-100 text-emerald-700"
+    : "bg-red-100 text-red-700";
+}
+
+export default function TeacherStudentsPage() {
+  const { events, students, loading, error } = useTeacherPortal();
+
+  const [searchText, setSearchText] = useState("");
+  const [courseFilter, setCourseFilter] = useState("");
+  const [yearFilter, setYearFilter] = useState("");
+  const [page, setPage] = useState(1);
+  const [selectedStudentId, setSelectedStudentId] = useState<string | null>(
+    null
+  );
+  const [selectedTab, setSelectedTab] = useState<StudentTabKey>("tracked");
+
+  const courseOptions = useMemo<SelectOption[]>(
+    () => [
+      { key: "__all_courses__", label: "All Courses" },
+      ...Array.from(
+        new Set(
+          students
+            .map((student) => student.course)
+            .filter((course) => course && course !== "Unassigned")
+        )
+      )
+        .sort((a, b) => a.localeCompare(b))
+        .map((course) => ({ key: course, label: course })),
+    ],
+    [students]
+  );
+
+  const yearOptions = useMemo<SelectOption[]>(
+    () => [
+      { key: "__all_years__", label: "All Years" },
+      ...Array.from(
+        new Set(
+          students
+            .map((student) => student.year)
+            .filter((year) => year && year !== "Unassigned")
+        )
+      )
+        .sort((a, b) => a.localeCompare(b))
+        .map((year) => ({ key: year, label: year })),
+    ],
+    [students]
+  );
+
+  const filteredStudents = useMemo(() => {
+    const search = searchText.trim().toLowerCase();
+
+    return students.filter((student) => {
+      const matchesSearch =
+        !search ||
+        student.studentName.toLowerCase().includes(search) ||
+        student.schoolId.toLowerCase().includes(search) ||
+        student.course.toLowerCase().includes(search);
+      const matchesCourse = courseFilter ? student.course === courseFilter : true;
+      const matchesYear = yearFilter ? student.year === yearFilter : true;
+      return matchesSearch && matchesCourse && matchesYear;
+    });
+  }, [courseFilter, searchText, students, yearFilter]);
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredStudents.length / STUDENTS_PER_PAGE)
+  );
+
+  const paginatedStudents = useMemo(() => {
+    const start = (page - 1) * STUDENTS_PER_PAGE;
+    return filteredStudents.slice(start, start + STUDENTS_PER_PAGE);
+  }, [filteredStudents, page]);
+
+  const selectedStudent = useMemo(
+    () => students.find((student) => student.uid === selectedStudentId) ?? null,
+    [selectedStudentId, students]
+  );
+
+  const eventMap = useMemo(
+    () => new Map(events.map((event) => [event.id, event])),
+    [events]
+  );
+
+  const selectedStudentRegistered = useMemo(() => {
+    if (!selectedStudent) return [];
+    const rows = selectedStudent.trackedEventIds
+      .map((eventId) => eventMap.get(eventId))
+      .filter((event): event is (typeof events)[number] => Boolean(event));
+
+    return rows.sort((a, b) => {
+      const aMs = a.eventDate?.getTime() ?? a.createdAtMs;
+      const bMs = b.eventDate?.getTime() ?? b.createdAtMs;
+      return bMs - aMs;
+    });
+  }, [eventMap, selectedStudent]);
+
+  const selectedStudentAttendance = useMemo(() => {
+    if (!selectedStudent) return [];
+    return selectedStudent.attendanceRecords
+      .map((record) => {
+        const event = eventMap.get(record.eventId);
+        if (!event) return null;
+        return {
+          event,
+          status: record.status,
+          updatedAtMs: record.updatedAtMs,
+        };
+      })
+      .filter(
+        (
+          item
+        ): item is {
+          event: (typeof selectedStudentRegistered)[number];
+          status: "Present" | "Absent" | "Recorded";
+          updatedAtMs: number;
+        } => Boolean(item)
+      )
+      .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+  }, [eventMap, selectedStudent]);
+
+  const selectedStudentPresent = selectedStudentAttendance.filter(
+    (item) => item.status === "Present"
+  );
+  const selectedStudentAbsent = selectedStudentAttendance.filter(
+    (item) => item.status === "Absent"
+  );
+
+  const totalMissed = students.reduce(
+    (sum, student) => sum + student.absentCount,
+    0
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [courseFilter, searchText, yearFilter]);
+
+  useEffect(() => {
+    setPage((prev) => Math.min(prev, totalPages));
+  }, [totalPages]);
+
+  useEffect(() => {
+    if (!selectedStudent) {
+      setSelectedTab("tracked");
+    }
+  }, [selectedStudent]);
+
+  return (
+    <div className="space-y-5 sm:space-y-6">
+      <Card shadow="sm">
+        <CardBody className="space-y-2 p-5 sm:p-6">
+          <h1 className="text-2xl font-bold text-primary-900 sm:text-3xl">
+            Student Activity Monitor
+          </h1>
+          <p className="text-sm text-campus-text-secondary">
+            Teachers can review the students that appear in teacher-visible
+            attendance records, along with their recent event activity.
+          </p>
+          {error && <p className="text-sm text-red-600">{error}</p>}
+        </CardBody>
+      </Card>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Tracked Students"
+          value={loading ? "-" : String(students.length)}
+          tone="text-blue-700"
+        />
+        <StatCard
+          label="Courses Seen"
+          value={
+            loading
+              ? "-"
+              : String(
+                  new Set(
+                    students
+                      .map((student) => student.course)
+                      .filter((course) => course && course !== "Unassigned")
+                  ).size
+                )
+          }
+          tone="text-emerald-700"
+        />
+        <StatCard
+          label="Attendance Records"
+          value={
+            loading
+              ? "-"
+              : String(
+                  students.reduce(
+                    (sum, student) => sum + student.recordedCount,
+                    0
+                  )
+                )
+          }
+          tone="text-amber-700"
+        />
+        <StatCard
+          label="Missed Records"
+          value={loading ? "-" : String(totalMissed)}
+          tone="text-red-700"
+        />
+      </div>
+
+      <Card shadow="sm">
+        <CardBody className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
+          <Input
+            aria-label="Search students"
+            value={searchText}
+            onValueChange={setSearchText}
+            placeholder="Search by name, ID, or course..."
+          />
+
+          <Select
+            aria-label="Filter by course"
+            disallowEmptySelection
+            items={courseOptions}
+            selectedKeys={new Set([courseFilter || "__all_courses__"])}
+            onSelectionChange={(keys) => {
+              if (keys === "all") return;
+              const selected = Array.from(keys)[0];
+              if (typeof selected === "string") {
+                setCourseFilter(
+                  selected === "__all_courses__" ? "" : selected
+                );
+              }
+            }}
+          >
+            {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+          </Select>
+
+          <Select
+            aria-label="Filter by year"
+            disallowEmptySelection
+            items={yearOptions}
+            selectedKeys={new Set([yearFilter || "__all_years__"])}
+            onSelectionChange={(keys) => {
+              if (keys === "all") return;
+              const selected = Array.from(keys)[0];
+              if (typeof selected === "string") {
+                setYearFilter(selected === "__all_years__" ? "" : selected);
+              }
+            }}
+          >
+            {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+          </Select>
+
+          <div className="flex items-center justify-between rounded-xl border border-dashed border-border px-4 py-3 text-sm text-campus-text-secondary">
+            <span>Visible results</span>
+            <span className="font-semibold text-campus-text-primary">
+              {loading ? "-" : filteredStudents.length}
+            </span>
+          </div>
+        </CardBody>
+      </Card>
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        {loading ? (
+          <Card shadow="sm" className="xl:col-span-2">
+            <CardBody className="p-6 text-sm text-campus-text-secondary">
+              Loading student records...
+            </CardBody>
+          </Card>
+        ) : paginatedStudents.length === 0 ? (
+          <Card shadow="sm" className="xl:col-span-2">
+            <CardBody className="p-6 text-sm text-campus-text-secondary">
+              No students match the current filters.
+            </CardBody>
+          </Card>
+        ) : (
+          paginatedStudents.map((student) => (
+            <Card key={student.uid} shadow="sm">
+              <CardBody className="space-y-4 p-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h2 className="text-lg font-semibold text-campus-text-primary">
+                      {student.studentName}
+                    </h2>
+                    <p className="text-sm text-campus-text-secondary">
+                      {student.schoolId}
+                    </p>
+                  </div>
+
+                  <Button
+                    color="primary"
+                    variant="flat"
+                    size="sm"
+                    onPress={() => setSelectedStudentId(student.uid)}
+                  >
+                    Open
+                  </Button>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Chip size="sm" className="bg-blue-100 text-blue-700">
+                    {student.course}
+                  </Chip>
+                  <Chip size="sm" className="bg-slate-100 text-slate-700">
+                    {student.year}
+                  </Chip>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <MiniStat label="Tracked" value={student.trackedEventIds.length} />
+                  <MiniStat label="Present" value={student.presentCount} />
+                  <MiniStat label="Missed" value={student.absentCount} />
+                </div>
+              </CardBody>
             </Card>
+          ))
+        )}
+      </div>
 
-            {/* STATS */}
-            <div className="grid grid-cols-6 gap-4 mb-10">
-                {[
-                    ["1", "Total Students"],
-                    ["0", "Mechanical"],
-                    ["0", "Electrical"],
-                    ["0", "Electronics"],
-                    ["1", "Computer"],
-                    ["0", "Industrial"],
-                ].map(([value, label], idx) => (
-                    <Card key={idx} shadow="sm">
-                        <CardBody className="flex flex-col text-center">
-                            <span className="text-4xl font-bold text-campus-text-primary">{value}</span>
-                            <span className="text-sm text-campus-text-secondary mt-1">{label}</span>
-                        </CardBody>
-                    </Card>
-                ))}
-            </div>
-
-            {/* FILTERS */}
-            <div className="flex items-center gap-3 mb-8">
-                <CampusInput
-                    placeholder="Search student name..."
-                    className="w-[300px]"
-                />
-
-                <Select size="sm" label="Course" className="w-[200px]">
-                    <SelectItem key="all">All Courses</SelectItem>
-                </Select>
-
-                <Select size="sm" label="Year" className="w-[200px]">
-                    <SelectItem key="all">All Years</SelectItem>
-                </Select>
-            </div>
-
-            {/* STUDENT TABLE */}
-            <Card shadow="lg">
-
-                <table className="w-full">
-                    <thead className="bg-gray-100 border-b">
-                    <tr>
-                        {[
-                            "Student ID",
-                            "Name",
-                            "Course",
-                            "Year Level",
-                            "Status",
-
-                        ].map((th, idx) => (
-                            <th
-                                key={idx}
-                                className="p-4 text-left text-gray-700 font-semibold text-sm"
-                            >
-                                {th}
-                            </th>
-                        ))}
-                    </tr>
-                    </thead>
-
-                    <tbody className="divide-y divide-gray-100">
-
-                    {/* STUDENT ROW */}
-                    <tr className="hover:bg-gray-50 transition">
-
-                        <td className="p-4 text-gray-700">23209455</td>
-                        <td className="p-4 text-gray-700">Rhodel B. Badiango</td>
-
-                        <td className="p-4 align-middle">
-                                <span className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-sm">
-                                    Computer Engineering
-                                </span>
-                        </td>
-
-                        <td className="p-4 text-gray-700">2nd Year</td>
-
-                        <td className="p-4">
-                                <CampusBadge status="active">Active</CampusBadge>
-                        </td>
-
-                        {/* ACTIONS */}
-                        <td className="p-4 align-middle">
-                            <div className="relative flex justify-end items-center">
-
-                                <button
-                                    onClick={() => setShowDetails(!showDetails)}
-                                    className="px-4 py-2 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium shadow-sm flex items-center gap-2"
-                                >
-
-                                    <span className="material-icons text-sm">expand_more</span>
-                                </button>
-
-                            </div>
-                        </td>
-                    </tr>
-
-                    {/* EXPANDED STUDENT RECORD OVERVIEW */}
-                    {showDetails && (
-                        <tr className="bg-transparent">
-                            <td colSpan={7} className="p-0">
-                                <div className="px-6 pt-3 pb-10 bg-gray-50 border-t">
-
-                                    <div className="bg-white rounded-2xl shadow-md border p-6">
-
-                                        {/* HEADER */}
-                                        <div className="flex items-center gap-3 mb-4">
-                                            <div className="w-10 h-10 bg-primary-500 rounded-full flex items-center justify-center text-white font-bold">
-                                                SR
-                                            </div>
-                                            <h2 className="text-xl font-bold text-campus-text-primary">
-                                                Student Record Overview
-                                            </h2>
-                                        </div>
-
-                                        {/* EVENTS ATTENDED */}
-                                        <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                                            <span className="material-icons text-base">check_circle</span>
-                                            EVENTS ATTENDED
-                                        </h3>
-
-                                        <div className="grid grid-cols-2 gap-4 mb-6">
-                                            <div className="border rounded-xl p-4 shadow-sm">
-                                                <h4 className="font-bold text-campus-text-primary mb-1">
-                                                    Graduation Orientation
-                                                </h4>
-                                                <div className="text-sm text-gray-600">
-                                                    March 15, 2024 | 9:00 AM – 5:00 PM <br />
-                                                    Fab Lab <br />
-                                                </div>
-                                            </div>
-
-                                            <div className="border rounded-xl p-4 shadow-sm">
-                                                <h4 className="font-bold text-campus-text-primary mb-1">
-                                                    Programming Tutorial
-                                                </h4>
-                                                <div className="text-sm text-gray-600">
-                                                    Feb 28, 2024 | 1:00 PM – 6:00 PM <br />
-                                                    CBE 901<br />
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        {/* EVENTS MISSED */}
-                                        <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                                            <span className="material-icons text-base">cancel</span>
-                                            EVENTS MISSED
-                                        </h3>
-
-                                        <div className="border rounded-xl p-4 shadow-sm bg-red-50 mb-6">
-                                            <h4 className="font-bold text-campus-text-primary mb-1">
-                                                General Assembly
-                                            </h4>
-                                            <div className="text-sm text-gray-600">
-                                                Jan 15, 2024 | 8:00 AM – 12:00 PM <br />
-                                                Maritime AVR <br />
-                                            </div>
-                                        </div>
-
-                                        {/* PAYMENT STATUS */}
-                                        <div className="space-y-3">
-                                            <div className="flex justify-between items-center bg-green-50 border border-green-200 rounded-xl p-4">
-                                                <span className="font-semibold text-gray-700">
-                                                    Acquaintance Fee
-                                                </span>
-                                                <CampusBadge status="paid">PAID</CampusBadge>
-                                            </div>
-
-                                            <div className="flex justify-between items-center bg-red-50 border border-red-200 rounded-xl p-4">
-                                                <span className="font-semibold text-gray-700">
-                                                    Engineering Merch
-                                                </span>
-                                                <CampusBadge status="unpaid">UNPAID</CampusBadge>
-                                            </div>
-                                        </div>
-
-                                    </div>
-
-                                </div>
-                            </td>
-                        </tr>
-                    )}
-
-                    </tbody>
-                </table>
-            </Card>
+      {!loading && filteredStudents.length > STUDENTS_PER_PAGE && (
+        <div className="flex justify-center">
+          <Pagination
+            showControls
+            page={page}
+            total={totalPages}
+            onChange={(nextPage) => setPage(nextPage)}
+          />
         </div>
-    );
+      )}
+
+      <Modal
+        isOpen={Boolean(selectedStudent)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedStudentId(null);
+            setSelectedTab("tracked");
+          }
+        }}
+        size="4xl"
+        scrollBehavior="inside"
+      >
+        <ModalContent>
+          {() => (
+            <>
+              <ModalHeader className="flex flex-col gap-1">
+                <span className="text-xl font-semibold text-campus-text-primary">
+                  {selectedStudent?.studentName || "Student details"}
+                </span>
+                <span className="text-sm font-normal text-campus-text-secondary">
+                  {selectedStudent?.schoolId || "-"} | {selectedStudent?.course || "-"} |{" "}
+                  {selectedStudent?.year || "-"}
+                </span>
+              </ModalHeader>
+
+              <ModalBody className="space-y-5 pb-6">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <MiniCard
+                    label="Tracked Events"
+                    value={selectedStudent?.trackedEventIds.length ?? 0}
+                    tone="text-blue-700"
+                  />
+                  <MiniCard
+                    label="Present"
+                    value={selectedStudent?.presentCount ?? 0}
+                    tone="text-emerald-700"
+                  />
+                  <MiniCard
+                    label="Missed"
+                    value={selectedStudent?.absentCount ?? 0}
+                    tone="text-red-700"
+                  />
+                </div>
+
+                <Tabs
+                  aria-label="Student detail tabs"
+                  selectedKey={selectedTab}
+                  onSelectionChange={(key) =>
+                    setSelectedTab(String(key) as StudentTabKey)
+                  }
+                  fullWidth
+                  classNames={{
+                    tabList: "w-full grid grid-cols-3",
+                    tab: "w-full min-w-0 px-2",
+                    tabContent: "truncate text-xs sm:text-sm",
+                  }}
+                >
+                  <Tab key="tracked" title="Tracked">
+                    <div className="space-y-3 pt-2">
+                      {selectedStudentRegistered.length === 0 ? (
+                        <p className="text-sm text-campus-text-secondary">
+                          No teacher-visible event activity found for this student yet.
+                        </p>
+                      ) : (
+                        selectedStudentRegistered.map((event) => (
+                          <Card key={event.id} shadow="none" className="border">
+                            <CardBody className="space-y-1 p-4">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="font-semibold text-campus-text-primary">
+                                  {event.title}
+                                </p>
+                                <Chip size="sm" className="bg-blue-100 text-blue-700">
+                                  Tracked
+                                </Chip>
+                              </div>
+                              <p className="text-sm text-campus-text-secondary">
+                                {formatEventDate(event.eventDate, event.date)}
+                              </p>
+                              <p className="text-xs text-campus-text-secondary">
+                                {event.location}
+                              </p>
+                            </CardBody>
+                          </Card>
+                        ))
+                      )}
+                    </div>
+                  </Tab>
+
+                  <Tab key="present" title="Present">
+                    <div className="space-y-3 pt-2">
+                      {selectedStudentPresent.length === 0 ? (
+                        <p className="text-sm text-campus-text-secondary">
+                          No present attendance records found.
+                        </p>
+                      ) : (
+                        selectedStudentPresent.map((item) => (
+                          <AttendanceCard
+                            key={`${item.event.id}-present`}
+                            title={item.event.title}
+                            date={formatEventDate(item.event.eventDate, item.event.date)}
+                            location={item.event.location}
+                            status="Present"
+                          />
+                        ))
+                      )}
+                    </div>
+                  </Tab>
+
+                  <Tab key="absent" title="Missed">
+                    <div className="space-y-3 pt-2">
+                      {selectedStudentAbsent.length === 0 ? (
+                        <p className="text-sm text-campus-text-secondary">
+                          No missed attendance records found.
+                        </p>
+                      ) : (
+                        selectedStudentAbsent.map((item) => (
+                          <AttendanceCard
+                            key={`${item.event.id}-absent`}
+                            title={item.event.title}
+                            date={formatEventDate(item.event.eventDate, item.event.date)}
+                            location={item.event.location}
+                            status="Absent"
+                          />
+                        ))
+                      )}
+                    </div>
+                  </Tab>
+                </Tabs>
+              </ModalBody>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone: string;
+}) {
+  return (
+    <Card shadow="sm">
+      <CardBody className="p-5">
+        <p className="text-sm text-campus-text-secondary">{label}</p>
+        <h2 className={`mt-2 text-3xl font-bold ${tone}`}>{value}</h2>
+      </CardBody>
+    </Card>
+  );
+}
+
+function MiniStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-2xl border bg-white px-3 py-4 text-center">
+      <p className="text-2xl font-bold text-campus-text-primary">{value}</p>
+      <p className="text-xs text-campus-text-secondary">{label}</p>
+    </div>
+  );
+}
+
+function MiniCard({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: string;
+}) {
+  return (
+    <Card shadow="none" className="border">
+      <CardBody className="p-4">
+        <p className="text-sm text-campus-text-secondary">{label}</p>
+        <p className={`mt-2 text-2xl font-bold ${tone}`}>{value}</p>
+      </CardBody>
+    </Card>
+  );
+}
+
+function AttendanceCard({
+  title,
+  date,
+  location,
+  status,
+}: {
+  title: string;
+  date: string;
+  location: string;
+  status: "Present" | "Absent";
+}) {
+  return (
+    <Card shadow="none" className="border">
+      <CardBody className="space-y-1 p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="font-semibold text-campus-text-primary">{title}</p>
+          <Chip size="sm" className={statusChipClass(status)}>
+            {status}
+          </Chip>
+        </div>
+        <p className="text-sm text-campus-text-secondary">{date}</p>
+        <p className="text-xs text-campus-text-secondary">{location}</p>
+      </CardBody>
+    </Card>
+  );
 }

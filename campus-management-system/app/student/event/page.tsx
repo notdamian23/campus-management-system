@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Card, CardBody } from "@heroui/card";
+import { Button } from "@heroui/button";
+import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Select, SelectItem } from "@heroui/select";
 import { CampusBadge, CampusButton } from "@/components/heroui";
 import {
@@ -107,6 +108,15 @@ export default function StudentEvents() {
     [eventOnlyItems, statusFilter]
   );
 
+  const eventCounts = useMemo(
+    () => ({
+      upcoming: eventOnlyItems.filter((item) => item.status === "Upcoming" || item.status === "Pre-registration").length,
+      attended: eventOnlyItems.filter((item) => item.status === "Attended").length,
+      missed: eventOnlyItems.filter((item) => item.status === "Missed").length,
+    }),
+    [eventOnlyItems]
+  );
+
   const groupedEvents = useMemo<EventGroup[]>(() => {
     const map = new Map<string, EventGroup>();
 
@@ -172,39 +182,57 @@ export default function StudentEvents() {
 
   return (
     <div className="space-y-4 sm:space-y-6 text-campus-text-primary">
-      <h1 className="text-2xl sm:text-3xl font-bold mb-4 sm:mb-6 text-primary-900">
-        Events
-      </h1>
+      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#bb2020] to-[#f19b4c] text-white">
+        <CardBody className="space-y-4 p-5 sm:p-6">
+          <div>
+            <h1 className="text-2xl font-black sm:text-3xl">Events</h1>
+            <p className="text-sm text-white/80 sm:text-base">Browse your timeline, open details, and register when pre-registration is available.</p>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Upcoming</p><h2 className="mt-2 text-3xl font-black text-white">{eventCounts.upcoming}</h2></CardBody></Card>
+            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Attended</p><h2 className="mt-2 text-3xl font-black text-white">{eventCounts.attended}</h2></CardBody></Card>
+            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Missed</p><h2 className="mt-2 text-3xl font-black text-white">{eventCounts.missed}</h2></CardBody></Card>
+          </div>
+        </CardBody>
+      </Card>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
-        <Select
-          aria-label="Sort events"
-          label="Sort"
-          size="sm"
-          selectedKeys={[sortMode]}
-          onChange={(e) => setSortMode(e.target.value as EventSortMode)}
-          disallowEmptySelection
-          className="w-full"
-        >
-          <SelectItem key="oldest_to_latest">Oldest to Latest</SelectItem>
-          <SelectItem key="latest_to_oldest">Latest to Oldest</SelectItem>
-        </Select>
+      <Card shadow="sm" className="border">
+        <CardHeader className="px-5 pt-5">
+          <div>
+            <h2 className="text-lg font-semibold text-campus-text-primary">Filters</h2>
+            <p className="text-sm text-campus-text-secondary">Sort the timeline and narrow it by event status.</p>
+          </div>
+        </CardHeader>
+        <CardBody className="grid grid-cols-1 gap-3 p-5 pt-3 sm:grid-cols-2">
+          <Select
+            aria-label="Sort events"
+            label="Sort"
+            size="sm"
+            selectedKeys={[sortMode]}
+            onChange={(e) => setSortMode(e.target.value as EventSortMode)}
+            disallowEmptySelection
+            className="w-full"
+          >
+            <SelectItem key="oldest_to_latest">Oldest to Latest</SelectItem>
+            <SelectItem key="latest_to_oldest">Latest to Oldest</SelectItem>
+          </Select>
 
-        <Select
-          aria-label="Filter events by status"
-          label="Status"
-          size="sm"
-          selectedKeys={[statusFilter]}
-          onChange={(e) => setStatusFilter(e.target.value as EventStatusFilter)}
-          disallowEmptySelection
-          className="w-full"
-        >
-          <SelectItem key="all">All</SelectItem>
-          <SelectItem key="upcoming">Upcoming</SelectItem>
-          <SelectItem key="attended">Attended</SelectItem>
-          <SelectItem key="missed">Missed</SelectItem>
-        </Select>
-      </div>
+          <Select
+            aria-label="Filter events by status"
+            label="Status"
+            size="sm"
+            selectedKeys={[statusFilter]}
+            onChange={(e) => setStatusFilter(e.target.value as EventStatusFilter)}
+            disallowEmptySelection
+            className="w-full"
+          >
+            <SelectItem key="all">All</SelectItem>
+            <SelectItem key="upcoming">Upcoming</SelectItem>
+            <SelectItem key="attended">Attended</SelectItem>
+            <SelectItem key="missed">Missed</SelectItem>
+          </Select>
+        </CardBody>
+      </Card>
 
       {error && (
         <div className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
@@ -273,14 +301,17 @@ export default function StudentEvents() {
                           <div className="flex items-center gap-2 shrink-0">
                             {eventStatusChip(item.status)}
 
-                            <button
-                              className="p-1 rounded-full hover:bg-gray-200 transition"
-                              onClick={() => toggleOpen(item.id)}
+                            <Button
+                              isIconOnly
+                              size="sm"
+                              variant="light"
+                              className="bg-white/60 text-campus-text-secondary"
+                              onPress={() => toggleOpen(item.id)}
                             >
                               <span className="material-icons text-campus-text-secondary text-lg">
                                 {open ? "expand_less" : "expand_more"}
                               </span>
-                            </button>
+                            </Button>
                           </div>
                         </div>
 

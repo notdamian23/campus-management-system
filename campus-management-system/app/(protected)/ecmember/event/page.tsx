@@ -26,6 +26,8 @@ import {
 } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { Button } from "@heroui/button";
+import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Chip } from "@heroui/chip";
 import { DatePicker } from "@heroui/date-picker";
 import { TimeInput } from "@heroui/date-input";
 import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
@@ -492,10 +494,12 @@ async function compressImageForUpload(file: File, maxBytes: number) {
 
 function StatMini({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-lg border bg-white px-2 py-2 text-center">
-      <div className="text-base font-bold leading-none">{value}</div>
-      <div className="text-[11px] text-campus-text-secondary mt-1 leading-none">{label}</div>
-    </div>
+    <Card shadow="none" className="border bg-white/10 backdrop-blur">
+      <CardBody className="p-4 text-center">
+        <div className="text-2xl font-black leading-none text-white">{value}</div>
+        <div className="mt-2 text-xs font-medium uppercase tracking-wide text-white/70">{label}</div>
+      </CardBody>
+    </Card>
   );
 }
 
@@ -2439,27 +2443,37 @@ export default function EventDashboard() {
 
   return (
     <div className="px-3 py-4 sm:p-6 space-y-4 sm:space-y-6">
-      {/* HEADER */}
-      <div className="bg-white sm:bg-transparent border sm:border-0 rounded-xl sm:rounded-none shadow-sm sm:shadow-none p-4 sm:p-0">
-        <h1 className="text-lg sm:text-2xl font-bold text-primary-900 leading-tight">Campus Event Management System</h1>
-        <p className="text-campus-text-secondary text-xs sm:text-sm mt-1">
-          Organize, manage, and track all campus events in one centralized dashboard.
-        </p>
-      </div>
+      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b81f1f] to-[#f09b4c] text-white">
+        <CardBody className="space-y-4 p-5 sm:p-8">
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">EC Events</p>
+            <h1 className="text-2xl font-black leading-tight sm:text-4xl">Campus Event Management System</h1>
+            <p className="max-w-2xl text-sm text-white/80 sm:text-base">
+              Organize, manage, and track campus events with a layout that still works comfortably on a phone screen.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Chip variant="flat" className="bg-white/15 text-white">{summary.total} events tracked</Chip>
+            <Chip variant="flat" className="bg-white/15 text-white">{totalParticipants} participants</Chip>
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+            <StatMini label="Total" value={summary.total} />
+            <StatMini label="Upcoming" value={summary.upcoming} />
+            <StatMini label="Ongoing" value={summary.ongoing} />
+            <StatMini label="Completed" value={summary.completed} />
+            <StatMini label="Participants" value={totalParticipants} />
+          </div>
+        </CardBody>
+      </Card>
 
-      {/* SUMMARY */}
-      <div className="bg-white border rounded-xl shadow-sm p-3">
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          <StatMini label="Total" value={summary.total} />
-          <StatMini label="Upcoming" value={summary.upcoming} />
-          <StatMini label="Ongoing" value={summary.ongoing} />
-          <StatMini label="Completed" value={summary.completed} />
-          <StatMini label="Participants" value={totalParticipants} />
-        </div>
-      </div>
-
-      {/* ACTIONS */}
-      <div className="bg-white border rounded-xl shadow-sm p-3 space-y-3">
+      <Card shadow="sm" className="border">
+        <CardHeader className="px-5 pt-5">
+          <div>
+            <h2 className="text-lg font-semibold text-campus-text-primary">Quick Actions</h2>
+            <p className="text-sm text-campus-text-secondary">Create events and notifications without losing context.</p>
+          </div>
+        </CardHeader>
+        <CardBody className="p-4 pt-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <Button
             className="text-sm font-semibold text-white"
@@ -2505,7 +2519,8 @@ export default function EventDashboard() {
             Create Event
           </Button>
         </div>
-      </div>
+        </CardBody>
+      </Card>
 
       {/* ADD EVENT FORM */}
       {showAddEventForm && (
@@ -3733,29 +3748,23 @@ export default function EventDashboard() {
                       {ev.isPreReg && registrations && registrations.length > 0 && (
                         <div className="space-y-2">
                           <p className="text-sm font-semibold text-campus-text-primary">Registered Students</p>
-                          <div className="overflow-x-auto rounded-lg border bg-white">
-                            <table className="w-full text-xs sm:text-sm">
-                              <thead className="bg-gray-100 text-campus-text-secondary">
-                                <tr>
-                                  <th className="p-2 text-left">School ID</th>
-                                  <th className="p-2 text-left">Name</th>
-                                  <th className="p-2 text-left">Course</th>
-                                  <th className="p-2 text-left">Year</th>
-                                  <th className="p-2 text-left">Registered At</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {registrations.map((reg) => (
-                                  <tr key={reg.id} className="border-t">
-                                    <td className="p-2">{reg.schoolId || "-"}</td>
-                                    <td className="p-2">{reg.studentName || reg.uid}</td>
-                                    <td className="p-2">{reg.course || "-"}</td>
-                                    <td className="p-2">{reg.year || "-"}</td>
-                                    <td className="p-2">{formatDateTime(reg.createdAt)}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
+                          <div className="grid grid-cols-1 gap-3 rounded-lg border bg-white p-3 lg:grid-cols-2">
+                            {registrations.map((reg) => (
+                              <Card key={reg.id} shadow="none" className="border bg-gray-50">
+                                <CardBody className="space-y-3 p-4 text-sm">
+                                  <div>
+                                    <p className="text-xs text-campus-text-secondary">School ID</p>
+                                    <p className="font-semibold text-campus-text-primary">{reg.schoolId || "-"}</p>
+                                  </div>
+                                  <div className="grid grid-cols-2 gap-3">
+                                    <div><p className="text-xs text-campus-text-secondary">Name</p><p className="text-campus-text-primary">{reg.studentName || reg.uid}</p></div>
+                                    <div><p className="text-xs text-campus-text-secondary">Course</p><p className="text-campus-text-primary">{reg.course || "-"}</p></div>
+                                    <div><p className="text-xs text-campus-text-secondary">Year</p><p className="text-campus-text-primary">{reg.year || "-"}</p></div>
+                                    <div><p className="text-xs text-campus-text-secondary">Registered At</p><p className="text-campus-text-primary">{formatDateTime(reg.createdAt)}</p></div>
+                                  </div>
+                                </CardBody>
+                              </Card>
+                            ))}
                           </div>
                         </div>
                       )}

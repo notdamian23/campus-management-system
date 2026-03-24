@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FiChevronDown, FiPlus } from "react-icons/fi";
 import { Button } from "@heroui/button";
-import { Card, CardBody } from "@heroui/card";
+import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Chip } from "@heroui/chip";
 import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
 import { Input } from "@heroui/input";
 import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
@@ -832,84 +833,98 @@ export default function ECStudentLookup() {
 
   return (
     <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
-      <Card shadow="sm">
-        <CardBody className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 px-4 sm:px-6 py-4">
-          <h1 className="text-xl font-bold text-primary-900">Engineering Student Management System</h1>
+      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b71f1f] to-[#f09a4a] text-white">
+        <CardBody className="space-y-4 p-5 sm:p-8">
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">EC Students</p>
+            <h1 className="text-3xl font-black sm:text-4xl">Engineering Student Management System</h1>
+            <p className="max-w-2xl text-sm text-white/80 sm:text-base">Search the roster, filter by program or year, and open each student profile without losing mobile usability.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Chip variant="flat" className="bg-white/15 text-white">{students.length} students loaded</Chip>
+            <Chip variant="flat" className="bg-white/15 text-white">{filtered.length} matching current filters</Chip>
+          </div>
         </CardBody>
       </Card>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         {summaryCards.map((item) => (
-          <div key={item.label} className="bg-white rounded-lg shadow p-4 text-center border">
-            <div className="text-2xl font-bold">{item.count}</div>
-            <p className="text-sm text-campus-text-secondary">{item.label}</p>
-          </div>
+          <Card key={item.label} shadow="sm" className="border">
+            <CardBody className="p-4 text-center">
+              <div className="text-2xl font-black text-campus-text-primary">{item.count}</div>
+              <p className="text-sm text-campus-text-secondary">{item.label}</p>
+            </CardBody>
+          </Card>
         ))}
       </div>
 
-      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-3 sm:gap-4 items-stretch sm:items-center">
-        <Input
-          aria-label="Search students"
-          type="text"
-          placeholder="Search student name, student ID, or email..."
-          value={queryText}
-          onValueChange={setQueryText}
-          className="w-full sm:flex-1 sm:min-w-[220px]"
-        />
+      <Card shadow="sm" className="border">
+        <CardHeader className="px-5 pt-5">
+          <div>
+            <h2 className="text-lg font-semibold text-campus-text-primary">Roster Filters</h2>
+            <p className="text-sm text-campus-text-secondary">Built to stay readable on both desktop and phone screens.</p>
+          </div>
+        </CardHeader>
+        <CardBody className="grid grid-cols-1 gap-3 p-5 pt-3 xl:grid-cols-[minmax(0,1.3fr)_220px_180px_auto_auto] xl:items-end">
+          <Input
+            aria-label="Search students"
+            type="text"
+            placeholder="Search student name, student ID, or email..."
+            value={queryText}
+            onValueChange={setQueryText}
+            className="w-full"
+          />
 
-        <Select
-          aria-label="Filter by course"
-          selectedKeys={new Set([courseFilter || "__all_courses__"])}
-          onSelectionChange={(keys) => {
-            if (keys === "all") return;
-            const selected = Array.from(keys)[0];
-            if (typeof selected === "string") {
-              setCourseFilter(selected === "__all_courses__" ? "" : selected);
-            }
-          }}
-          disallowEmptySelection
-          className="w-full sm:w-auto sm:min-w-[220px]"
-          items={courseFilterItems}
-        >
-          {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
-        </Select>
+          <Select
+            aria-label="Filter by course"
+            selectedKeys={new Set([courseFilter || "__all_courses__"])}
+            onSelectionChange={(keys) => {
+              if (keys === "all") return;
+              const selected = Array.from(keys)[0];
+              if (typeof selected === "string") {
+                setCourseFilter(selected === "__all_courses__" ? "" : selected);
+              }
+            }}
+            disallowEmptySelection
+            className="w-full"
+            items={courseFilterItems}
+          >
+            {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+          </Select>
 
-        <Select
-          aria-label="Filter by year"
-          selectedKeys={new Set([yearFilter || "__all_years__"])}
-          onSelectionChange={(keys) => {
-            if (keys === "all") return;
-            const selected = Array.from(keys)[0];
-            if (typeof selected === "string") {
-              setYearFilter(selected === "__all_years__" ? "" : selected);
-            }
-          }}
-          disallowEmptySelection
-          className="w-full sm:w-auto sm:min-w-[170px]"
-          items={yearFilterItems}
-        >
-          {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
-        </Select>
+          <Select
+            aria-label="Filter by year"
+            selectedKeys={new Set([yearFilter || "__all_years__"])}
+            onSelectionChange={(keys) => {
+              if (keys === "all") return;
+              const selected = Array.from(keys)[0];
+              if (typeof selected === "string") {
+                setYearFilter(selected === "__all_years__" ? "" : selected);
+              }
+            }}
+            disallowEmptySelection
+            className="w-full"
+            items={yearFilterItems}
+          >
+            {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+          </Select>
 
-        <Button
-          variant="bordered"
-          onPress={clearFilters}
-          className="w-full sm:w-auto px-4"
-        >
-          Clear Filters
-        </Button>
+          <Button variant="bordered" onPress={clearFilters} className="w-full xl:w-auto">
+            Clear Filters
+          </Button>
 
-        <Button
-          onPress={() => setShowAddForm((prev) => !prev)}
-          className={[
-            "w-full sm:w-auto flex items-center justify-center gap-2 px-4 text-sm font-medium text-white",
-            showAddForm ? "bg-gray-600 hover:bg-gray-700" : "bg-[#7b0000] hover:opacity-95",
-          ].join(" ")}
-        >
-          <FiPlus size={16} />
-          {showAddForm ? "Cancel Add Student" : "Add Student"}
-        </Button>
-      </div>
+          <Button
+            onPress={() => setShowAddForm((prev) => !prev)}
+            className={[
+              "w-full justify-center gap-2 text-sm font-medium text-white xl:w-auto",
+              showAddForm ? "bg-gray-600 hover:bg-gray-700" : "bg-[#7b0000] hover:opacity-95",
+            ].join(" ")}
+          >
+            <FiPlus size={16} />
+            {showAddForm ? "Cancel Add Student" : "Add Student"}
+          </Button>
+        </CardBody>
+      </Card>
 
       {notice && (
         <div
@@ -1070,17 +1085,10 @@ export default function ECStudentLookup() {
                 </div>
 
                 <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <span className="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-700">{student.course}</span>
-                  <span
-                    className={[
-                      "px-3 py-1 text-xs rounded-full",
-                      student.status.toLowerCase() === "active"
-                        ? "bg-green-100 text-green-700"
-                        : "bg-gray-200 text-gray-700",
-                    ].join(" ")}
-                  >
+                  <Chip color="primary" variant="flat" className="max-w-full truncate">{student.course}</Chip>
+                  <Chip color={student.status.toLowerCase() === "active" ? "success" : "default"} variant="flat">
                     {student.status}
-                  </span>
+                  </Chip>
                 </div>
               </CardBody>
             </Card>

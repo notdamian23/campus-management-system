@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Card, CardBody } from "@heroui/card";
+import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
+import { Tab, Tabs } from "@heroui/tabs";
 import { CampusBadge } from "@/components/heroui";
 import { useStudentPortal } from "@/components/student/StudentPortalProvider";
 
@@ -160,19 +161,17 @@ export default function StudentStatus() {
 
   return (
     <div className="space-y-6 sm:space-y-8">
-      <div className="flex items-center gap-3">
-        <div className="w-12 h-12 flex items-center justify-center rounded-full bg-primary-500 text-white font-bold">
-          {avatarLabel}
-        </div>
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-campus-text-primary">
-            Student Status
-          </h1>
-          <p className="text-sm text-campus-text-secondary">
-            Overview of your attendance and payments
-          </p>
-        </div>
-      </div>
+      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b71f1f] to-[#f09a4a] text-white">
+        <CardBody className="flex flex-col gap-4 p-5 sm:p-6 sm:flex-row sm:items-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/15 text-lg font-bold">
+            {avatarLabel}
+          </div>
+          <div>
+            <h1 className="text-2xl font-black sm:text-3xl">Student Status</h1>
+            <p className="text-sm text-white/80 sm:text-base">Overview of your attendance and payment standing.</p>
+          </div>
+        </CardBody>
+      </Card>
 
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
@@ -180,21 +179,37 @@ export default function StudentStatus() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-3 bg-white border rounded-xl p-4 shadow-sm">
-        {statusTabs.map((btn) => (
-          <button
-            key={btn.value}
-            onClick={() => setFilter(btn.value)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
-              filter === btn.value
-                ? "bg-primary-500 text-white"
-                : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-            }`}
-          >
-            {btn.label}
-          </button>
-        ))}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <Card shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-campus-text-secondary">Attended</p><h2 className="mt-2 text-3xl font-black text-emerald-600">{attendedEvents.length}</h2></CardBody></Card>
+        <Card shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-campus-text-secondary">Missed</p><h2 className="mt-2 text-3xl font-black text-rose-600">{missedEvents.length}</h2></CardBody></Card>
+        <Card shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-campus-text-secondary">Payments</p><h2 className="mt-2 text-3xl font-black text-amber-600">{payments.length}</h2></CardBody></Card>
       </div>
+
+      <Card shadow="sm" className="border">
+        <CardHeader className="px-5 pt-5">
+          <div>
+            <h2 className="text-lg font-semibold text-campus-text-primary">Status Views</h2>
+            <p className="text-sm text-campus-text-secondary">Switch between attendance history and payment records.</p>
+          </div>
+        </CardHeader>
+        <CardBody className="p-4 pt-2">
+          <Tabs
+            selectedKey={filter}
+            onSelectionChange={(key) => setFilter(String(key) as "attended" | "missed" | "payments")}
+            fullWidth
+            classNames={{
+              tabList: "grid w-full grid-cols-1 gap-2 rounded-2xl bg-gray-100 p-1 sm:grid-cols-3",
+              cursor: "bg-primary-500",
+              tab: "h-11",
+              tabContent: "text-sm font-semibold group-data-[selected=true]:text-white",
+            }}
+          >
+            {statusTabs.map((item) => (
+              <Tab key={item.value} title={item.label} />
+            ))}
+          </Tabs>
+        </CardBody>
+      </Card>
 
       {filter === "attended" && (
         <div>

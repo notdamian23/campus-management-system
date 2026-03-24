@@ -16,6 +16,8 @@ import {
 } from "firebase/firestore";
 import { app, auth, db } from "@/lib/firebase";
 import { Button } from "@heroui/button";
+import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Chip } from "@heroui/chip";
 import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
 import { Input, Textarea } from "@heroui/input";
 import { Select, SelectItem } from "@heroui/select";
@@ -389,6 +391,12 @@ export default function PaymentDashboard() {
     [studentStatusSortMode]
   );
 
+  const dashboardCounts = useMemo(() => {
+    const pending = payments.filter((payment) => payment.totalStudents > 0 && payment.unpaidCount > 0).length;
+    const completed = payments.filter((payment) => payment.totalStudents > 0 && payment.unpaidCount === 0).length;
+    return { total: payments.length, pending, completed };
+  }, [payments]);
+
   function resetForm() {
     setTitle("");
     setAmount("");
@@ -578,10 +586,20 @@ export default function PaymentDashboard() {
 
   return (
     <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
-      <div className="bg-white p-4 sm:p-6 shadow rounded-xl border">
-        <h1 className="text-xl sm:text-2xl font-bold text-primary-900">Campus Payment Management</h1>
-        <p className="text-campus-text-secondary text-sm mt-1">Track, verify, and manage student payments.</p>
-      </div>
+      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b61f1f] to-[#f09a4a] text-white">
+        <CardBody className="space-y-4 p-5 sm:p-8">
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">EC Payments</p>
+            <h1 className="text-3xl font-black sm:text-4xl">Campus Payment Management</h1>
+            <p className="max-w-2xl text-sm text-white/80 sm:text-base">Track, verify, and manage student payments with a layout that stays usable on smaller screens.</p>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Total Payments</p><h2 className="mt-2 text-3xl font-black text-white">{dashboardCounts.total}</h2></CardBody></Card>
+            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Pending</p><h2 className="mt-2 text-3xl font-black text-white">{dashboardCounts.pending}</h2></CardBody></Card>
+            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Completed</p><h2 className="mt-2 text-3xl font-black text-white">{dashboardCounts.completed}</h2></CardBody></Card>
+          </div>
+        </CardBody>
+      </Card>
 
       {notice && (
         <div
@@ -596,62 +614,57 @@ export default function PaymentDashboard() {
         </div>
       )}
 
-      <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 sm:gap-4">
-        <Input
-          aria-label="Search payments"
-          type="text"
-          placeholder="Search by title, reference, course, or year..."
-          value={queryText}
-          onValueChange={setQueryText}
-          className="w-full lg:flex-1 lg:min-w-[260px]"
-        />
+      <Card shadow="sm" className="border">
+        <CardBody className="grid grid-cols-1 gap-4 p-5 xl:grid-cols-[minmax(0,1fr)_190px_auto] xl:items-end">
+          <Input
+            aria-label="Search payments"
+            type="text"
+            placeholder="Search by title, reference, course, or year..."
+            value={queryText}
+            onValueChange={setQueryText}
+            className="w-full"
+          />
 
-        <Input
-          aria-label="Filter by date"
-          type="date"
-          value={dateFilter}
-          onValueChange={setDateFilter}
-          startContent={<FiCalendar />}
-          className="w-full sm:w-auto"
-        />
+          <Input
+            aria-label="Filter by date"
+            type="date"
+            value={dateFilter}
+            onValueChange={setDateFilter}
+            startContent={<FiCalendar />}
+            className="w-full"
+          />
 
-        <Button
-          onPress={() => setShowAddPaymentForm(true)}
-          className="w-full sm:w-auto text-white px-4"
-          style={{ backgroundColor: "#7b0000" }}
-        >
-          + Add Payment
-        </Button>
-      </div>
+          <div className="flex flex-col gap-3 sm:flex-row xl:justify-end">
+            <Dropdown placement="bottom-start">
+              <DropdownTrigger>
+                <Button variant="bordered" className="justify-between font-medium">
+                  <span>Sort: {paymentSortLabel}</span>
+                  <FiChevronDown className="ml-1" />
+                </Button>
+              </DropdownTrigger>
+              <DropdownMenu
+                aria-label="Sort payments"
+                disallowEmptySelection
+                selectionMode="single"
+                selectedKeys={new Set([paymentSortMode])}
+                onAction={(key) => setPaymentSortMode(String(key) as SortMode)}
+              >
+                <DropdownItem key="latest_to_oldest">Date, new to old</DropdownItem>
+                <DropdownItem key="oldest_to_latest">Date, old to new</DropdownItem>
+                <DropdownItem key="alphabetical">Alphabetically, A-Z</DropdownItem>
+              </DropdownMenu>
+            </Dropdown>
 
-      <div className="flex items-center">
-        <Dropdown placement="bottom-start">
-          <DropdownTrigger>
-            <Button
-              variant="light"
-              className="h-auto min-w-0 px-0 text-sm font-medium text-campus-text-primary data-[hover=true]:bg-transparent"
-            >
-              <span className="text-campus-text-secondary mr-1">Sort by:</span>
-              <span>{paymentSortLabel}</span>
-              <FiChevronDown className="ml-1" />
+            <Button onPress={() => setShowAddPaymentForm(true)} className="text-white" style={{ backgroundColor: "#7b0000" }}>
+              + Add Payment
             </Button>
-          </DropdownTrigger>
-          <DropdownMenu
-            aria-label="Sort payments"
-            disallowEmptySelection
-            selectionMode="single"
-            selectedKeys={new Set([paymentSortMode])}
-            onAction={(key) => setPaymentSortMode(String(key) as SortMode)}
-          >
-            <DropdownItem key="latest_to_oldest">Date, new to old</DropdownItem>
-            <DropdownItem key="oldest_to_latest">Date, old to new</DropdownItem>
-            <DropdownItem key="alphabetical">Alphabetically, A-Z</DropdownItem>
-          </DropdownMenu>
-        </Dropdown>
-      </div>
+          </div>
+        </CardBody>
+      </Card>
 
       {showAddPaymentForm && (
-        <div className="bg-white p-4 sm:p-6 border rounded-xl shadow space-y-4 animate-slideDown">
+        <Card shadow="sm" className="border animate-slideDown">
+          <CardBody className="space-y-4 p-4 sm:p-6">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
             <h2 className="text-xl font-semibold text-primary-900">Add New Payment</h2>
 
@@ -767,11 +780,18 @@ export default function PaymentDashboard() {
           >
             {savingPayment ? "Saving..." : "Save Payment"}
           </Button>
-        </div>
+          </CardBody>
+        </Card>
       )}
 
-      <div className="bg-white border shadow rounded-lg p-4 sm:p-6">
-        <h3 className="text-lg font-semibold mb-4">Payment List</h3>
+      <Card shadow="sm" className="border">
+        <CardHeader className="px-5 pt-5">
+          <div>
+            <h3 className="text-lg font-semibold text-campus-text-primary">Payment List</h3>
+            <p className="text-sm text-campus-text-secondary">Each payment card expands into responsive student assignments.</p>
+          </div>
+        </CardHeader>
+        <CardBody className="p-4 sm:p-6 pt-3">
 
         {paymentsLoading ? (
           <p className="text-sm text-campus-text-secondary">Loading payments...</p>
@@ -819,13 +839,14 @@ export default function PaymentDashboard() {
               });
 
             return (
-              <div key={p.id} className="border rounded-lg p-3 sm:p-4 shadow-sm hover:bg-gray-50 transition mb-4">
-                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 sm:gap-4">
+              <Card key={p.id} shadow="sm" className="mb-4 border">
+                <CardBody className="space-y-4 p-4 sm:p-5">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <h4 className="font-semibold text-campus-text-primary">{p.title}</h4>
                     <p className="text-sm text-campus-text-secondary">Reference: {p.ref}</p>
 
-                    <div className="flex gap-4 items-center mt-2 text-sm text-campus-text-secondary flex-wrap">
+                    <div className="mt-2 flex flex-wrap items-center gap-4 text-sm text-campus-text-secondary">
                       <span>Date: {formatDate(p.date)}</span>
                       <span>Amount: {formatCurrency(p.amount)}</span>
                       <span>Target: {p.totalStudents} student(s)</span>
@@ -833,7 +854,7 @@ export default function PaymentDashboard() {
                   </div>
 
                   <div className="flex flex-col items-start sm:items-end gap-2">
-                    <span className={`px-3 py-1 rounded-full text-xs ${statusClass}`}>{statusLabel}</span>
+                    <Chip className={statusClass}>{statusLabel}</Chip>
 
                     <Button
                       size="sm"
@@ -860,13 +881,13 @@ export default function PaymentDashboard() {
                     </div>
 
                     <div className="flex flex-wrap gap-2 sm:gap-4 mb-4">
-                      <span className="px-4 py-1 bg-green-100 text-green-700 rounded-full font-semibold text-sm">
+                      <Chip color="success" variant="flat" className="font-semibold">
                         Paid: {paid}
-                      </span>
+                      </Chip>
 
-                      <span className="px-4 py-1 bg-red-100 text-red-700 rounded-full font-semibold text-sm">
+                      <Chip color="danger" variant="flat" className="font-semibold">
                         Unpaid: {unpaid}
-                      </span>
+                      </Chip>
                     </div>
 
                     <h4 className="font-semibold text-campus-text-primary mb-2">Students</h4>
@@ -1017,11 +1038,13 @@ export default function PaymentDashboard() {
                     )}
                   </div>
                 )}
-              </div>
+                </CardBody>
+              </Card>
             );
           })
         )}
-      </div>
+        </CardBody>
+      </Card>
     </div>
   );
 }

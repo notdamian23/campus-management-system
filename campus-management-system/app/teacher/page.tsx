@@ -1,125 +1,253 @@
+"use client";
+
+import Link from "next/link";
 import { Card, CardBody, CardHeader } from "@heroui/card";
-import { CampusBadge } from "@/components/heroui";
+import { Chip } from "@heroui/chip";
+import { useTeacherPortal } from "@/components/teacher/TeacherPortalProvider";
+
+function lifecycleChipClass(lifecycle: string) {
+  if (lifecycle === "ongoing") {
+    return "bg-amber-100 text-amber-700";
+  }
+  if (lifecycle === "completed") {
+    return "bg-emerald-100 text-emerald-700";
+  }
+  return "bg-blue-100 text-blue-700";
+}
+
+function formatEventDate(date: Date | null, fallback: string) {
+  if (!date) return fallback || "Date TBA";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 export default function TeacherDashboard() {
-    return (
-        <div className="min-h-screen bg-[#f2f2f2] px-10 py-8">
+  const { profile, events, files, students, loading, error } =
+    useTeacherPortal();
 
-            {/* HEADER */}
-            <div className="flex justify-between items-center">
-                <div>
-                    <h1 className="text-5xl font-extrabold text-primary-900 drop-shadow-sm">
-                        Welcome back!
-                    </h1>
-                    <p className="text-campus-text-secondary text-lg mt-1">
-                        Here's what's happening today.
-                    </p>
-                </div>
+  const activeEvents = events.filter((event) => event.lifecycle !== "completed");
+  const ongoingEvents = events.filter((event) => event.lifecycle === "ongoing");
+  const totalAttendanceRecords = students.reduce(
+    (sum, student) => sum + student.recordedCount,
+    0
+  );
+  const recentEvents = [...events]
+    .sort((a, b) => {
+      const now = Date.now();
+      const aMs = a.eventDate?.getTime() ?? a.createdAtMs;
+      const bMs = b.eventDate?.getTime() ?? b.createdAtMs;
+      const aBucket = aMs >= now ? 0 : 1;
+      const bBucket = bMs >= now ? 0 : 1;
 
-                {/* PROFILE */}
-                <div className="flex flex-col items-center">
-                    <div className="w-14 h-14 bg-primary-500 hover:bg-red-900 transition text-white rounded-full flex items-center justify-center shadow-lg cursor-pointer">
-                        <span className="material-icons text-3xl">person</span>
-                    </div>
-                    <p className="text-xs mt-1 text-campus-text-secondary font-medium">Teacher</p>
-                </div>
+      if (aBucket !== bBucket) return aBucket - bBucket;
+      return aBucket === 0 ? aMs - bMs : bMs - aMs;
+    })
+    .slice(0, 4);
+
+  const attentionStudents = [...students]
+    .filter((student) => student.absentCount > 0)
+    .sort((a, b) => {
+      if (b.absentCount !== a.absentCount) {
+        return b.absentCount - a.absentCount;
+      }
+      return b.lastActivityMs - a.lastActivityMs;
+    })
+    .slice(0, 4);
+
+  return (
+    <div className="space-y-5 sm:space-y-8">
+      <div className="flex flex-col gap-4 rounded-3xl bg-gradient-to-br from-primary-600 via-primary-500 to-primary-700 px-5 py-6 text-white shadow-lg sm:px-7 sm:py-8">
+        <div className="space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-white/75">
+            Teacher Portal
+          </p>
+          <h1 className="text-2xl font-bold sm:text-3xl">
+            Welcome back{profile?.teacherName ? `, ${profile.teacherName}` : ""}.
+          </h1>
+          <p className="max-w-2xl text-sm text-white/85">
+            You are now looking at live campus activity: events, participants,
+            and shared event files in one mobile-friendly workspace.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm">
+          <Chip className="border border-white/20 bg-white/10 text-white">
+            ID: {profile?.schoolId || "-"}
+          </Chip>
+          <Chip className="border border-white/20 bg-white/10 text-white">
+            {ongoingEvents.length} event{ongoingEvents.length === 1 ? "" : "s"}{" "}
+            live now
+          </Chip>
+        </div>
+      </div>
+
+      {error && (
+        <Card shadow="sm" className="border border-red-200 bg-red-50">
+          <CardBody className="text-sm text-red-700">{error}</CardBody>
+        </Card>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard
+          label="Active Events"
+          value={loading ? "-" : String(activeEvents.length)}
+          tone="text-blue-700"
+        />
+        <MetricCard
+          label="Tracked Students"
+          value={loading ? "-" : String(students.length)}
+          tone="text-emerald-700"
+        />
+        <MetricCard
+          label="Attendance Records"
+          value={loading ? "-" : String(totalAttendanceRecords)}
+          tone="text-amber-700"
+        />
+        <MetricCard
+          label="Event Files"
+          value={loading ? "-" : String(files.length)}
+          tone="text-fuchsia-700"
+        />
+      </div>
+
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
+        <Card shadow="sm">
+          <CardHeader className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-campus-text-primary">
+                Event Snapshot
+              </h2>
+              <p className="text-sm text-campus-text-secondary">
+                Upcoming and recent events pulled from the live event board.
+              </p>
             </div>
 
-            {/* EVENTS OVERVIEW */}
-            <section className="mt-10 flex justify-center">
-                <Card className="w-full max-w-7xl" shadow="lg">
-                    <CardHeader className="flex flex-wrap items-center justify-between gap-4 px-10 py-6">
-                        <div>
-                            <h2 className="text-3xl font-bold text-primary-900">
-                                Events Overview
-                            </h2>
-                            <p className="text-sm text-campus-text-secondary mt-1">
-                                Quick glance at your upcoming and recent activities.
-                            </p>
-                        </div>
+            <Link
+              href="/teacher/events"
+              className="text-sm font-medium text-primary-700 hover:underline"
+            >
+              Open events
+            </Link>
+          </CardHeader>
 
-                        {/* FILTERS / VIEW ALL */}
-                        <div className="flex items-center gap-3">
-                            <div className="flex gap-2 text-xs font-semibold">
-                                <button className="px-3 py-1 rounded-full bg-primary-500 text-white">
-                                    All
-                                </button>
-                                <button className="px-3 py-1 rounded-full bg-blue-50 text-blue-600">
-                                    Upcoming
-                                </button>
-                                <button className="px-3 py-1 rounded-full bg-green-50 text-green-700">
-                                    Completed
-                                </button>
-                            </div>
-                            <button className="text-xs font-semibold text-primary-900 hover:underline ml-2">
-                                View All
-                            </button>
-                        </div>
-                    </CardHeader>
+          <CardBody className="space-y-3">
+            {loading ? (
+              <p className="text-sm text-campus-text-secondary">
+                Loading event overview...
+              </p>
+            ) : recentEvents.length === 0 ? (
+              <p className="text-sm text-campus-text-secondary">
+                No events have been posted yet.
+              </p>
+            ) : (
+              recentEvents.map((event) => (
+                <Card key={event.id} shadow="none" className="border">
+                  <CardBody className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-semibold text-campus-text-primary">
+                          {event.title}
+                        </h3>
+                        <Chip
+                          size="sm"
+                          className={lifecycleChipClass(event.lifecycle)}
+                        >
+                          {event.lifecycle}
+                        </Chip>
+                      </div>
+                      <p className="text-sm text-campus-text-secondary">
+                        {formatEventDate(event.eventDate, event.date)}
+                      </p>
+                      <p className="text-xs text-campus-text-secondary">
+                        {event.location} | {event.attendanceCount} attendance
+                        {" "}records | {event.documentCount + event.imageCount} files
+                      </p>
+                    </div>
 
-                    <CardBody className="px-10 py-6">
-                        {/* EVENT LIST */}
-                        <div className="space-y-4">
-                            {[
-                                {
-                                    title: "Computer Engineering Orientation",
-                                    datetime: "Tomorrow • 9:00 AM",
-                                    location: "ECE Lecture Hall",
-                                    status: "upcoming",
-                                    dot: "bg-blue-600",
-                                    type: "Orientation",
-                                },
-                                {
-                                    title: "C# Programming Tutorial",
-                                    datetime: "Yesterday • 2:00 PM",
-                                    location: "CBE 901",
-                                    status: "completed",
-                                    dot: "bg-green-600",
-                                    type: "Tutorial",
-                                },
-                                {
-                                    title: "Acquaintance Party",
-                                    datetime: "Next Monday • 8:00 AM",
-                                    location: "Engineering AVR",
-                                    status: "upcoming",
-                                    dot: "bg-yellow-500",
-                                    type: "Student Activity",
-                                },
-                            ].map((event, index) => (
-                                <Card key={index} shadow="sm" isPressable>
-                                    <CardBody className="flex flex-row justify-between items-center">
-                                        {/* LEFT SIDE: TITLE + DETAILS */}
-                                        <div className="flex gap-4">
-                                            <div className={`w-3 h-3 mt-2 rounded-full ${event.dot}`} />
-                                            <div>
-                                                <div className="flex items-center gap-2">
-                                                    <h3 className="font-semibold text-lg">
-                                                        {event.title}
-                                                    </h3>
-                                                    <span className="px-2 py-0.5 text-[10px] rounded-full bg-gray-100 text-campus-text-secondary uppercase tracking-wide">
-                                                        {event.type}
-                                                    </span>
-                                                </div>
-                                                <p className="text-sm text-campus-text-secondary mt-1">
-                                                    {event.datetime}
-                                                </p>
-                                                <p className="text-xs text-gray-400 mt-0.5">
-                                                    {event.location}
-                                                </p>
-                                            </div>
-                                        </div>
-
-                                        {/* RIGHT: STATUS BADGE */}
-                                        <CampusBadge status={event.status as "upcoming" | "completed"}>
-                                            {event.status.charAt(0).toUpperCase() + event.status.slice(1)}
-                                        </CampusBadge>
-                                    </CardBody>
-                                </Card>
-                            ))}
-                        </div>
-                    </CardBody>
+                    <Link
+                      href="/teacher/events"
+                      className="inline-flex items-center justify-center rounded-xl bg-primary-100 px-4 py-2 text-sm font-medium text-primary-700 transition hover:bg-primary-200"
+                    >
+                      Review
+                    </Link>
+                  </CardBody>
                 </Card>
-            </section>
-        </div>
-    );
+              ))
+            )}
+          </CardBody>
+        </Card>
+
+        <Card shadow="sm">
+          <CardHeader className="flex flex-col items-start gap-2">
+            <h2 className="text-lg font-semibold text-campus-text-primary">
+              Students Needing Attention
+            </h2>
+            <p className="text-sm text-campus-text-secondary">
+              Based on event attendance records currently visible to teachers.
+            </p>
+          </CardHeader>
+
+          <CardBody className="space-y-3">
+            {loading ? (
+              <p className="text-sm text-campus-text-secondary">
+                Loading student activity...
+              </p>
+            ) : attentionStudents.length === 0 ? (
+              <p className="text-sm text-campus-text-secondary">
+                No missed attendance records yet.
+              </p>
+            ) : (
+              attentionStudents.map((student) => (
+                <Card key={student.uid} shadow="none" className="border">
+                  <CardBody className="space-y-2 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-semibold text-campus-text-primary">
+                          {student.studentName}
+                        </p>
+                        <p className="text-xs text-campus-text-secondary">
+                          {student.schoolId} | {student.course}
+                        </p>
+                      </div>
+                      <Chip className="bg-red-100 text-red-700">
+                        {student.absentCount} missed
+                      </Chip>
+                    </div>
+                    <p className="text-xs text-campus-text-secondary">
+                      {student.presentCount} present | {student.recordedCount}{" "}
+                      total attendance records
+                    </p>
+                  </CardBody>
+                </Card>
+              ))
+            )}
+          </CardBody>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone: string;
+}) {
+  return (
+    <Card shadow="sm">
+      <CardBody className="p-5">
+        <p className="text-sm text-campus-text-secondary">{label}</p>
+        <h2 className={`mt-2 text-3xl font-bold ${tone}`}>{value}</h2>
+      </CardBody>
+    </Card>
+  );
 }

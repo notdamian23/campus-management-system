@@ -22,8 +22,13 @@ import {
     uploadBytesResumable,
 } from "firebase/storage";
 import { Button } from "@heroui/button";
+import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Chip } from "@heroui/chip";
 import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
+import { Input } from "@heroui/input";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/modal";
+import { Progress } from "@heroui/progress";
+import { Select, SelectItem } from "@heroui/select";
 import { addToast } from "@heroui/toast";
 import { auth, db, storage } from "@/lib/firebase";
 
@@ -700,299 +705,194 @@ export default function DocumentsPage() {
     };
 
     return (
-        <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
-            <div className="bg-white p-4 sm:p-6 rounded-xl shadow border">
-                <h1 className="text-2xl font-bold text-primary-900">Manage and Access Documents</h1>
-                <p className="text-campus-text-secondary text-sm mt-1">
-                    Upload, organize, and review documents. Everything stored securely in one place.
-                </p>
-                {documentsError && <p className="text-sm text-red-600 mt-2">{documentsError}</p>}
+        <div className="space-y-5 p-3 sm:p-6">
+            <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b72020] to-[#f39b52] text-white">
+                <CardBody className="space-y-4 p-5 sm:p-8">
+                    <div className="space-y-2">
+                        <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">EC Documents</p>
+                        <h1 className="text-3xl font-black sm:text-4xl">Manage and Access Documents</h1>
+                        <p className="max-w-2xl text-sm text-white/80 sm:text-base">
+                            Upload, organize, and review shared EC files from one place.
+                        </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                        <Chip variant="flat" className="bg-white/15 text-white">{documents.length} files</Chip>
+                        <Chip variant="flat" className="bg-white/15 text-white">{recentUploads} recent uploads</Chip>
+                        <Chip variant="flat" className="bg-white/15 text-white">{totalStorageMB.toFixed(2)} MB used</Chip>
+                    </div>
+                    {documentsError ? <p className="text-sm text-white">{documentsError}</p> : null}
+                </CardBody>
+            </Card>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <Card shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-campus-text-secondary">Total Documents</p><h2 className="mt-2 text-3xl font-black text-blue-600">{documents.length}</h2></CardBody></Card>
+                <Card shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-campus-text-secondary">Recent Uploads</p><h2 className="mt-2 text-3xl font-black text-emerald-600">{recentUploads}</h2></CardBody></Card>
+                <Card shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-campus-text-secondary">Storage Used</p><h2 className="mt-2 text-3xl font-black text-amber-600">{totalStorageMB.toFixed(2)} MB</h2></CardBody></Card>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
-                <div className="bg-white border shadow rounded-xl p-4 sm:p-5">
-                    <p className="text-campus-text-secondary text-sm">Total Documents</p>
-                    <h2 className="text-3xl font-bold text-blue-600 mt-2">{documents.length}</h2>
-                </div>
+            <Card shadow="sm" className="border">
+                <CardBody className="grid grid-cols-1 gap-4 p-5 xl:grid-cols-[minmax(0,1.3fr)_200px_200px_180px] xl:items-end">
+                    <Input aria-label="Search documents" label="Search" value={search} onValueChange={setSearch} placeholder="Document name or keyword" />
+                    <Select aria-label="Filter by type" label="Type" selectedKeys={[typeFilter]} onSelectionChange={(keys) => { const selected = Array.from(keys as Set<string>)[0]; if (typeof selected === "string") setTypeFilter(selected as DocType | "All Types"); }} disallowEmptySelection>
+                        <SelectItem key="All Types">All Types</SelectItem>
+                        <SelectItem key="PDF">PDF</SelectItem>
+                        <SelectItem key="Images">Images</SelectItem>
+                        <SelectItem key="Word Files">Word Files</SelectItem>
+                        <SelectItem key="Spreadsheets">Spreadsheets</SelectItem>
+                    </Select>
+                    <Select aria-label="Filter by category" label="Category" selectedKeys={[categoryFilter]} onSelectionChange={(keys) => { const selected = Array.from(keys as Set<string>)[0]; if (typeof selected === "string") setCategoryFilter(selected as DocCategory | "All Categories"); }} disallowEmptySelection>
+                        <SelectItem key="All Categories">All Categories</SelectItem>
+                        <SelectItem key="Events">Events</SelectItem>
+                        <SelectItem key="Payments">Payments</SelectItem>
+                        <SelectItem key="Clearance">Clearance</SelectItem>
+                        <SelectItem key="General">General</SelectItem>
+                    </Select>
+                    <div className="space-y-2">
+                        <input ref={fileInputRef} type="file" className="hidden" multiple accept={ACCEPTED_FILE_TYPES} onChange={handleFilesSelected} />
+                        <Button className="w-full bg-[#7b0000] font-semibold text-white" onPress={handleUploadClick} isDisabled={uploading || !activeUid}>
+                            {uploading ? "Uploading..." : "Upload Document"}
+                        </Button>
+                    </div>
+                </CardBody>
+            </Card>
 
-                <div className="bg-white border shadow rounded-xl p-4 sm:p-5">
-                    <p className="text-campus-text-secondary text-sm">Recent Uploads</p>
-                    <h2 className="text-3xl font-bold text-green-600 mt-2">{recentUploads}</h2>
-                </div>
-
-                <div className="bg-white border shadow rounded-xl p-4 sm:p-5">
-                    <p className="text-campus-text-secondary text-sm">Storage Used</p>
-                    <h2 className="text-3xl font-bold text-orange-600 mt-2">{totalStorageMB.toFixed(2)} MB</h2>
-                </div>
-            </div>
-
-            <div className="flex flex-col md:flex-row items-stretch md:items-center gap-3 sm:gap-4 bg-white p-4 border shadow rounded-xl">
-                <input
-                    type="text"
-                    placeholder="Search documents..."
-                    className="w-full md:flex-1 px-4 py-2 border rounded-lg shadow-sm"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                />
-
-                <select
-                    className="w-full md:w-auto px-3 py-2 border rounded-lg shadow-sm"
-                    value={typeFilter}
-                    onChange={(e) => setTypeFilter(e.target.value as DocType | "All Types")}
-                >
-                    <option>All Types</option>
-                    <option>PDF</option>
-                    <option>Images</option>
-                    <option>Word Files</option>
-                    <option>Spreadsheets</option>
-                </select>
-
-                <select
-                    className="w-full md:w-auto px-3 py-2 border rounded-lg shadow-sm"
-                    value={categoryFilter}
-                    onChange={(e) => setCategoryFilter(e.target.value as DocCategory | "All Categories")}
-                >
-                    <option>All Categories</option>
-                    <option>Events</option>
-                    <option>Payments</option>
-                    <option>Clearance</option>
-                    <option>General</option>
-                </select>
-
-                <input
-                    ref={fileInputRef}
-                    type="file"
-                    className="hidden"
-                    multiple
-                    accept={ACCEPTED_FILE_TYPES}
-                    onChange={handleFilesSelected}
-                />
-
-                <button
-                    type="button"
-                    className="w-full md:w-auto px-4 py-2 bg-primary-600 text-white rounded-lg shadow hover:bg-primary-700 transition disabled:opacity-60"
-                    onClick={handleUploadClick}
-                    disabled={uploading || !activeUid}
-                >
-                    {uploading ? "Uploading..." : "Upload Document"}
-                </button>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-                <div className="bg-white border shadow rounded-xl p-4 sm:p-6">
-                    <h2 className="font-semibold text-gray-700">Document Library</h2>
-                    <div className="mt-2 mb-3 flex items-center">
-                        <Dropdown placement="bottom-start">
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                <Card shadow="sm" className="border">
+                    <CardHeader className="flex items-center justify-between px-5 pt-5">
+                        <div>
+                            <h2 className="font-semibold text-gray-800">Document Library</h2>
+                            <p className="text-sm text-campus-text-secondary">Browse and sort the shared file set.</p>
+                        </div>
+                        <Dropdown placement="bottom-end">
                             <DropdownTrigger>
-                                <Button
-                                    variant="light"
-                                    className="h-auto min-w-0 px-0 text-sm font-medium text-campus-text-primary data-[hover=true]:bg-transparent"
-                                >
-                                    <span className="text-campus-text-secondary mr-1">Sort by:</span>
+                                <Button variant="light" className="h-auto min-w-0 px-0 text-sm font-medium text-campus-text-primary data-[hover=true]:bg-transparent">
+                                    <span className="mr-1 text-campus-text-secondary">Sort:</span>
                                     <span>{documentSortLabel}</span>
                                     <FiChevronDown className="ml-1" />
                                 </Button>
                             </DropdownTrigger>
-                            <DropdownMenu
-                                aria-label="Sort documents"
-                                disallowEmptySelection
-                                selectionMode="single"
-                                selectedKeys={new Set([documentSortMode])}
-                                onAction={(key) => setDocumentSortMode(String(key) as SortMode)}
-                            >
+                            <DropdownMenu aria-label="Sort documents" disallowEmptySelection selectionMode="single" selectedKeys={new Set([documentSortMode])} onAction={(key) => setDocumentSortMode(String(key) as SortMode)}>
                                 <DropdownItem key="latest_to_oldest">Date, new to old</DropdownItem>
                                 <DropdownItem key="oldest_to_latest">Date, old to new</DropdownItem>
                                 <DropdownItem key="alphabetical">Alphabetically, A-Z</DropdownItem>
                             </DropdownMenu>
                         </Dropdown>
-                    </div>
-
-                    {documentsLoading ? (
-                        <div className="border border-dashed rounded-lg h-72 flex items-center justify-center text-campus-text-secondary">
-                            Loading documents...
-                        </div>
-                    ) : sortedFilteredDocuments.length === 0 ? (
-                        <div className="border border-dashed rounded-lg h-72 flex items-center justify-center text-campus-text-secondary">
-                            No matching documents found.
-                        </div>
-                    ) : (
-                        <div className="border rounded-lg h-72 overflow-y-auto">
-                            {sortedFilteredDocuments.map((docItem) => (
-                                <button
-                                    key={docItem.id}
-                                    type="button"
-                                    className={`w-full text-left p-3 border-b last:border-b-0 hover:bg-gray-50 transition ${selectedDocId === docItem.id ? "bg-blue-50" : ""}`}
-                                    onClick={() => setSelectedDocId(docItem.id)}
-                                >
-                                    <p className="font-medium text-gray-800 truncate">{docItem.name}</p>
-                                    <p className="text-xs text-campus-text-secondary mt-1">
-                                        {docItem.type} | {docItem.category} | {formatMB(docItem.sizeBytes)} MB | {docItem.uploadedAt || "-"}
-                                    </p>
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </div>
-
-                <div className="bg-white border shadow rounded-xl p-4 sm:p-6">
-                    <h2 className="font-semibold text-gray-700 mb-3">Document Details</h2>
-
-                    {selectedDocument ? (
-                        <div className="border rounded-lg h-72 p-4 flex flex-col">
-                            <div className="min-h-0 flex-1 overflow-y-auto space-y-3 pr-1">
-                                <div>
-                                    <p className="text-xs text-campus-text-secondary">Name</p>
-                                    <p className="font-medium text-gray-900 break-words">{selectedDocument.name}</p>
-                                </div>
-
-                                <div>
-                                    <p className="text-xs text-campus-text-secondary">Type</p>
-                                    <p className="text-gray-900 text-sm">{selectedDocument.type}</p>
-                                </div>
-
-                                <div>
-                                    <p className="text-xs text-campus-text-secondary">Category</p>
-                                    <p className="text-gray-900 text-sm">{selectedDocument.category}</p>
-                                </div>
-
-                                <div>
-                                    <p className="text-xs text-campus-text-secondary">Uploaded At</p>
-                                    <p className="text-gray-900 text-sm">{selectedDocument.uploadedAt || "-"}</p>
-                                </div>
-
-                                <div>
-                                    <p className="text-xs text-campus-text-secondary">Size</p>
-                                    <p className="text-gray-900 text-sm">{formatMB(selectedDocument.sizeBytes)} MB</p>
-                                </div>
+                    </CardHeader>
+                    <CardBody className="p-5 pt-3">
+                        {documentsLoading ? (
+                            <div className="flex h-80 items-center justify-center rounded-2xl border border-dashed text-campus-text-secondary">Loading documents...</div>
+                        ) : sortedFilteredDocuments.length === 0 ? (
+                            <div className="flex h-80 items-center justify-center rounded-2xl border border-dashed text-campus-text-secondary">No matching documents found.</div>
+                        ) : (
+                            <div className="h-80 overflow-y-auto rounded-2xl border">
+                                {sortedFilteredDocuments.map((docItem) => (
+                                    <Button
+                                        key={docItem.id}
+                                        variant="light"
+                                        className={`h-auto w-full justify-start rounded-none border-b border-gray-200 px-4 py-3 text-left last:border-b-0 ${selectedDocId === docItem.id ? "bg-blue-50" : ""}`}
+                                        onPress={() => setSelectedDocId(docItem.id)}
+                                    >
+                                        <div className="min-w-0">
+                                            <p className="truncate font-medium text-gray-800">{docItem.name}</p>
+                                            <p className="mt-1 text-xs text-campus-text-secondary">
+                                                {docItem.type} | {docItem.category} | {formatMB(docItem.sizeBytes)} MB | {docItem.uploadedAt || "-"}
+                                            </p>
+                                        </div>
+                                    </Button>
+                                ))}
                             </div>
+                        )}
+                    </CardBody>
+                </Card>
 
-                            <Button
-                                color="warning"
-                                className="mt-3 w-full shrink-0"
-                                onPress={() => {
-                                    handleDownload(selectedDocument);
-                                }}
-                                isDisabled={!selectedDocument.downloadUrl}
-                            >
-                                Download Document
-                            </Button>
-                            <Button
-                                color="danger"
-                                className="mt-2 w-full shrink-0"
-                                onPress={() => {
-                                    setPendingDeleteDocument(selectedDocument);
-                                }}
-                                isDisabled={deleteSubmitting}
-                            >
-                                Delete Document
-                            </Button>
+                <Card shadow="sm" className="border">
+                    <CardHeader className="px-5 pt-5">
+                        <div>
+                            <h2 className="font-semibold text-gray-800">Document Details</h2>
+                            <p className="text-sm text-campus-text-secondary">Preview file metadata and actions.</p>
                         </div>
-                    ) : (
-                        <div className="border border-dashed rounded-lg h-72 flex flex-col items-center justify-center text-campus-text-secondary">
-                            <span className="text-4xl">Document</span>
-                            <p>Select a document to view details</p>
-                        </div>
-                    )}
-                </div>
+                    </CardHeader>
+                    <CardBody className="p-5 pt-3">
+                        {selectedDocument ? (
+                            <div className="flex h-80 flex-col rounded-2xl border p-4">
+                                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+                                    <div>
+                                        <p className="text-xs text-campus-text-secondary">Name</p>
+                                        <p className="break-words font-medium text-gray-900">{selectedDocument.name}</p>
+                                    </div>
+                                    <div className="flex flex-wrap gap-2">
+                                        <Chip color="primary" variant="flat">{selectedDocument.type}</Chip>
+                                        <Chip variant="bordered">{selectedDocument.category}</Chip>
+                                    </div>
+                                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                        <div><p className="text-xs text-campus-text-secondary">Uploaded At</p><p className="text-sm text-gray-900">{selectedDocument.uploadedAt || "-"}</p></div>
+                                        <div><p className="text-xs text-campus-text-secondary">Size</p><p className="text-sm text-gray-900">{formatMB(selectedDocument.sizeBytes)} MB</p></div>
+                                    </div>
+                                </div>
+                                <Button color="warning" className="mt-3 w-full" onPress={() => handleDownload(selectedDocument)} isDisabled={!selectedDocument.downloadUrl}>Download Document</Button>
+                                <Button color="danger" className="mt-2 w-full" onPress={() => setPendingDeleteDocument(selectedDocument)} isDisabled={deleteSubmitting}>Delete Document</Button>
+                            </div>
+                        ) : (
+                            <div className="flex h-80 flex-col items-center justify-center rounded-2xl border border-dashed text-campus-text-secondary">
+                                <span className="text-4xl">Document</span>
+                                <p>Select a document to view details</p>
+                            </div>
+                        )}
+                    </CardBody>
+                </Card>
             </div>
 
-            <div className="bg-white border shadow rounded-xl p-4 sm:p-6">
-                <h2 className="font-semibold text-gray-700 mb-3">Storage Analytics</h2>
-
-                <div className="w-full bg-gray-200 rounded-full h-3">
-                    <div className="bg-blue-600 h-3 rounded-full" style={{ width: `${storagePercent.toFixed(2)}%` }} />
-                </div>
-
-                <p className="text-campus-text-secondary text-sm mt-2">
-                    {totalStorageMB.toFixed(2)} MB of 1024 MB (1 GB) shared EC storage used
-                </p>
-            </div>
-
-            {isCategoryModalOpen ? (
-                <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
-                    <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
-                        <h3 className="text-lg font-semibold text-gray-900">Select document category</h3>
-                        <p className="text-sm text-campus-text-secondary">
-                            Choose one category for {pendingFiles.length} selected file{pendingFiles.length === 1 ? "" : "s"}.
-                        </p>
-
-                        <select
-                            value={uploadCategory}
-                            onChange={(e) => setUploadCategory(e.target.value as DocCategory)}
-                            className="w-full px-3 py-2 border rounded-lg shadow-sm"
-                            disabled={uploading}
-                        >
-                            <option>Events</option>
-                            <option>Payments</option>
-                            <option>Clearance</option>
-                            <option>General</option>
-                        </select>
-
-                        {uploadError && <p className="text-sm text-red-600">{uploadError}</p>}
-
-                        <div className="flex justify-end gap-3 pt-2">
-                            <button
-                                type="button"
-                                onClick={handleCancelUpload}
-                                className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition disabled:opacity-60"
-                                disabled={uploading}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    void handleConfirmUpload();
-                                }}
-                                className="px-4 py-2 rounded-lg bg-primary-600 text-white hover:bg-primary-700 transition disabled:opacity-60"
-                                disabled={uploading}
-                            >
-                                {uploading ? "Uploading..." : "Confirm Upload"}
-                            </button>
-                        </div>
+            <Card shadow="sm" className="border">
+                <CardHeader className="px-5 pt-5">
+                    <div>
+                        <h2 className="font-semibold text-gray-800">Storage Analytics</h2>
+                        <p className="text-sm text-campus-text-secondary">Shared EC storage across all uploaded documents.</p>
                     </div>
-                </div>
-            ) : null}
+                </CardHeader>
+                <CardBody className="space-y-3 p-5 pt-3">
+                    <Progress aria-label="Storage usage" value={storagePercent} color="primary" className="max-w-full" />
+                    <p className="text-sm text-campus-text-secondary">{totalStorageMB.toFixed(2)} MB of 1024 MB (1 GB) shared EC storage used</p>
+                </CardBody>
+            </Card>
 
-            <Modal
-                isOpen={Boolean(pendingDeleteDocument)}
-                onOpenChange={(open) => {
-                    if (!open && !deleteSubmitting) {
-                        setPendingDeleteDocument(null);
-                    }
-                }}
-                size="md"
-            >
+            <Modal isOpen={isCategoryModalOpen} onOpenChange={(open) => { if (!open && !uploading) handleCancelUpload(); }} size="md">
+                <ModalContent>
+                    {() => (
+                        <>
+                            <ModalHeader>Select document category</ModalHeader>
+                            <ModalBody className="space-y-4">
+                                <p className="text-sm text-campus-text-secondary">
+                                    Choose one category for {pendingFiles.length} selected file{pendingFiles.length === 1 ? "" : "s"}.
+                                </p>
+                                <Select aria-label="Upload category" label="Category" selectedKeys={[uploadCategory]} onSelectionChange={(keys) => { const selected = Array.from(keys as Set<string>)[0]; if (typeof selected === "string") setUploadCategory(selected as DocCategory); }} disallowEmptySelection isDisabled={uploading}>
+                                    <SelectItem key="Events">Events</SelectItem>
+                                    <SelectItem key="Payments">Payments</SelectItem>
+                                    <SelectItem key="Clearance">Clearance</SelectItem>
+                                    <SelectItem key="General">General</SelectItem>
+                                </Select>
+                                {uploadError ? <p className="text-sm text-red-600">{uploadError}</p> : null}
+                            </ModalBody>
+                            <ModalFooter>
+                                <Button variant="bordered" onPress={handleCancelUpload} isDisabled={uploading}>Cancel</Button>
+                                <Button className="bg-[#7b0000] font-semibold text-white" onPress={() => { void handleConfirmUpload(); }} isLoading={uploading}>Confirm Upload</Button>
+                            </ModalFooter>
+                        </>
+                    )}
+                </ModalContent>
+            </Modal>
+
+            <Modal isOpen={Boolean(pendingDeleteDocument)} onOpenChange={(open) => { if (!open && !deleteSubmitting) setPendingDeleteDocument(null); }} size="md">
                 <ModalContent>
                     {(onClose) => (
                         <>
                             <ModalHeader>Delete File</ModalHeader>
                             <ModalBody className="space-y-2">
                                 <p className="text-base text-campus-text-primary">Are you sure you want to delete this file?</p>
-                                {pendingDeleteDocument?.name ? (
-                                    <p className="text-sm text-campus-text-secondary break-all">{pendingDeleteDocument.name}</p>
-                                ) : null}
+                                {pendingDeleteDocument?.name ? <p className="break-all text-sm text-campus-text-secondary">{pendingDeleteDocument.name}</p> : null}
                             </ModalBody>
                             <ModalFooter className="justify-between">
-                                <Button
-                                    variant="bordered"
-                                    onPress={() => {
-                                        setPendingDeleteDocument(null);
-                                        onClose();
-                                    }}
-                                    isDisabled={deleteSubmitting}
-                                >
-                                    Cancel
-                                </Button>
-                                <Button
-                                    color="danger"
-                                    onPress={() => {
-                                        void confirmDeleteDocument();
-                                    }}
-                                    isLoading={deleteSubmitting}
-                                >
-                                    Delete
-                                </Button>
+                                <Button variant="bordered" onPress={() => { setPendingDeleteDocument(null); onClose(); }} isDisabled={deleteSubmitting}>Cancel</Button>
+                                <Button color="danger" onPress={() => { void confirmDeleteDocument(); }} isLoading={deleteSubmitting}>Delete</Button>
                             </ModalFooter>
                         </>
                     )}

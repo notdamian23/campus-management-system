@@ -2,250 +2,142 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Button } from "@heroui/button";
+import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Chip } from "@heroui/chip";
+import { Input } from "@heroui/input";
+import { Select, SelectItem } from "@heroui/select";
+import { Tab, Tabs } from "@heroui/tabs";
 import LogoutButton from "@/components/LogoutButton";
-import { app } from "@/lib/firebase"; // you must export `app` from your firebase.ts
+import { app, auth, db } from "@/lib/firebase";
+import { collection, doc, getDoc, limit, onSnapshot, orderBy, query, updateDoc } from "firebase/firestore";
+import { getFunctions, httpsCallable } from "firebase/functions";
 
-import { auth, db } from "@/lib/firebase";
-import {
-  collection,
-  doc,
-  getDoc,
-  limit,
-  onSnapshot,
-  orderBy,
-  query,
-  updateDoc,
-  where,
-} from "firebase/firestore";
-import { httpsCallable, getFunctions } from "firebase/functions";
-
-type Role = "admin" | "ec" | "teacher" | "student";
-
-type Profile = {
-  id: string; // uid
-  schoolId?: string;
-  email?: string;
-  role: Role;
-  mustChangePassword?: boolean;
-  createdAt?: any;
-};
-
-type LogItem = {
-  id: string;
-  action?: string;
-  actorUid?: string;
-  actorSchoolId?: string;
-  targetUid?: string;
-  targetSchoolId?: string;
-  createdAt?: any;
-  meta?: any;
-};
-
-type EventItem = {
-  id: string;
-  title?: string;
-  dateStart?: any;
-  dateEnd?: any;
-};
+const roleOptions = ["student", "teacher", "ec", "admin"] as const;
+type Role = (typeof roleOptions)[number];
+type AdminTab = "overview" | "users" | "logs" | "exports";
+type Profile = { id: string; schoolId?: string; email?: string; role: Role };
+type LogItem = { id: string; action?: string; actorUid?: string; actorSchoolId?: string; targetUid?: string; targetSchoolId?: string; createdAt?: unknown };
+type EventItem = { id: string; title?: string };
+type Notice = { type: "ok" | "err"; msg: string };
 
 const roleCards = [
-  { role: "Admin", summary: "Full access to platform configuration and monitoring.", route: "/admin" },
-  { role: "EC Member", summary: "Manages events, payments, and student engineering activities.", route: "/ecmember" },
-  { role: "Teacher", summary: "Handles class-related views, student monitoring, and events.", route: "/teacher" },
-  { role: "Student", summary: "Tracks status, notifications, and event participation.", route: "/student" },
+  { role: "Admin", summary: "Full platform control and monitoring.", route: "/admin" },
+  { role: "EC Member", summary: "Runs student operations, events, payments, and docs.", route: "/ecmember" },
+  { role: "Teacher", summary: "Reviews attendance, activity, and classroom-facing data.", route: "/teacher" },
+  { role: "Student", summary: "Tracks events, payments, and notifications.", route: "/student" },
 ];
 
-function fmtTS(ts: any) {
+function fmtTS(ts: unknown) {
   try {
-    if (!ts) return "—";
-    const d = ts?.toDate?.() ? ts.toDate() : new Date(ts);
+    if (!ts) return "-";
+    const maybe = ts as { toDate?: () => Date };
+    const d = typeof maybe.toDate === "function" ? maybe.toDate() : new Date(ts as string | number | Date);
     return d.toLocaleString();
   } catch {
-    return "—";
+    return "-";
   }
 }
 
-function badge(role: Role) {
-  const base = "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold border";
-  switch (role) {
-    case "admin":
-      return `${base} bg-red-50 text-[#7b0000] border-red-200`;
-    case "ec":
-      return `${base} bg-amber-50 text-amber-800 border-amber-200`;
-    case "teacher":
-      return `${base} bg-blue-50 text-blue-800 border-blue-200`;
-    case "student":
-      return `${base} bg-emerald-50 text-emerald-800 border-emerald-200`;
-    default:
-      return `${base} bg-gray-50 text-gray-700 border-gray-200`;
+function toErrorMessage(error: unknown, fallback: string) {
+  if (typeof error === "object" && error !== null) {
+    const maybe = error as { code?: string; message?: string };
+    if (maybe.code && maybe.message) return `${maybe.code}: ${maybe.message}`;
+    if (maybe.message) return maybe.message;
   }
+  return fallback;
+}
+
+function formatRole(role: Role) {
+  return role === "ec" ? "EC Member" : `${role.charAt(0).toUpperCase()}${role.slice(1)}`;
+}
+
+function roleColor(role: Role): "danger" | "warning" | "primary" | "success" {
+  if (role === "admin") return "danger";
+  if (role === "ec") return "warning";
+  if (role === "teacher") return "primary";
+  return "success";
 }
 
 export default function AdminDashboardPage() {
   const router = useRouter();
   const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
-
-  // Tabs
-  const [tab, setTab] = useState<"overview" | "users" | "logs" | "exports">("overview");
-
-  // Guard / auth state
+  const [tab, setTab] = useState<AdminTab>("overview");
   const [checking, setChecking] = useState(true);
   const [adminUid, setAdminUid] = useState<string | null>(null);
-
-  // Users
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [userSearch, setUserSearch] = useState("");
   const [savingRoleUid, setSavingRoleUid] = useState<string | null>(null);
-
-  // Create user
   const [newSchoolId, setNewSchoolId] = useState("");
   const [newRole, setNewRole] = useState<Role>("student");
   const [newEmail, setNewEmail] = useState("");
   const [creating, setCreating] = useState(false);
-
-  // Delete user
   const [deletingUid, setDeletingUid] = useState<string | null>(null);
-
-  // Logs
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [logsLoading, setLogsLoading] = useState(true);
-
-  // Exports
   const [events, setEvents] = useState<EventItem[]>([]);
   const [eventId, setEventId] = useState("");
   const [exporting, setExporting] = useState(false);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
-
-  // Toast-ish feedback
-  const [notice, setNotice] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const showOk = (msg: string) => setNotice({ type: "ok", msg });
   const showErr = (msg: string) => setNotice({ type: "err", msg });
 
-  //Error fedback
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
-
-  // ---------------------------
-  // Admin guard: must be admin
-  // ---------------------------
   useEffect(() => {
     const unsub = auth.onAuthStateChanged(async (user) => {
       try {
         setChecking(true);
-
-        if (!user) {
-          router.replace("/login");
-          return;
-        }
-
-        const pRef = doc(db, "profiles", user.uid);
-        const pSnap = await getDoc(pRef);
-
-        if (!pSnap.exists()) {
-          router.replace("/login");
-          return;
-        }
-
-        const role = (pSnap.data()?.role ?? "") as Role;
-        if (role !== "admin") {
-          router.replace("/login");
-          return;
-        }
-
+        if (!user) return router.replace("/login");
+        const snap = await getDoc(doc(db, "profiles", user.uid));
+        if (!snap.exists() || snap.data()?.role !== "admin") return router.replace("/login");
         setAdminUid(user.uid);
-      } catch (e) {
+      } catch {
         router.replace("/login");
       } finally {
         setChecking(false);
       }
     });
-
     return () => unsub();
   }, [router]);
 
-  // ---------------------------
-  // Live users (profiles)
-  // ---------------------------
   useEffect(() => {
     if (!adminUid) return;
-
-    // If your profiles count is big later, switch to pagination.
-    const qy = query(collection(db, "profiles"), orderBy("role", "asc"), limit(500));
-    const unsub = onSnapshot(
-      qy,
-      (snap) => {
-        const rows: Profile[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        }));
-        setProfiles(rows);
-      },
-      () => showErr("Failed to load profiles.")
-    );
-
-    return () => unsub();
+    return onSnapshot(query(collection(db, "profiles"), orderBy("role", "asc"), limit(500)), (snap) => {
+      setProfiles(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Profile, "id">) })));
+    }, () => showErr("Failed to load profiles."));
   }, [adminUid]);
 
-  // ---------------------------
-  // Live logs (read-only)
-  // ---------------------------
   useEffect(() => {
     if (!adminUid) return;
-
     setLogsLoading(true);
-    const qy = query(collection(db, "logs"), orderBy("createdAt", "desc"), limit(50));
-    const unsub = onSnapshot(
-      qy,
-      (snap) => {
-        const rows: LogItem[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        }));
-        setLogs(rows);
-        setLogsLoading(false);
-      },
-      () => {
-        setLogsLoading(false);
-        showErr("Failed to load logs.");
-      }
-    );
-
-    return () => unsub();
+    return onSnapshot(query(collection(db, "logs"), orderBy("createdAt", "desc"), limit(50)), (snap) => {
+      setLogs(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<LogItem, "id">) })));
+      setLogsLoading(false);
+    }, () => {
+      setLogsLoading(false);
+      showErr("Failed to load logs.");
+    });
   }, [adminUid]);
 
-  // ---------------------------
-  // Events for export dropdown
-  // ---------------------------
   useEffect(() => {
     if (!adminUid) return;
-
-    const qy = query(collection(db, "events"), orderBy("dateStart", "desc"), limit(200));
-    const unsub = onSnapshot(
-      qy,
-      (snap) => {
-        const rows: EventItem[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-        setEvents(rows);
-        if (!eventId && rows.length) setEventId(rows[0].id);
-      },
-      () => showErr("Failed to load events.")
-    );
-
-    return () => unsub();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return onSnapshot(query(collection(db, "events"), orderBy("dateStart", "desc"), limit(200)), (snap) => {
+      const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<EventItem, "id">) }));
+      setEvents(rows);
+      setEventId((prev) => (prev && rows.some((event) => event.id === prev) ? prev : rows[0]?.id || ""));
+    }, () => showErr("Failed to load events."));
   }, [adminUid]);
 
   const filteredProfiles = useMemo(() => {
     const s = userSearch.trim().toLowerCase();
     if (!s) return profiles;
-    return profiles.filter((p) => {
-      const a = (p.schoolId ?? "").toLowerCase();
-      const b = (p.email ?? "").toLowerCase();
-      const c = (p.role ?? "").toLowerCase();
-      const d = (p.id ?? "").toLowerCase();
-      return a.includes(s) || b.includes(s) || c.includes(s) || d.includes(s);
-    });
+    return profiles.filter((p) => [p.schoolId, p.email, p.role, p.id].join(" ").toLowerCase().includes(s));
   }, [profiles, userSearch]);
+
+  const roleCounts = useMemo(() => profiles.reduce((acc, profile) => {
+    acc[profile.role] += 1;
+    return acc;
+  }, { admin: 0, ec: 0, teacher: 0, student: 0 } as Record<Role, number>), [profiles]);
 
   async function updateRole(uid: string, role: Role) {
     try {
@@ -259,61 +151,31 @@ export default function AdminDashboardPage() {
     }
   }
 
-  // IMPORTANT: Auth user creation/deletion must be done on server (Cloud Function Admin SDK)
   async function createAccount() {
-    const schoolId = newSchoolId.trim();
-    const email = newEmail.trim();
-
-    if (!schoolId) return showErr("School ID is required.");
-    if (!["admin", "ec", "teacher", "student"].includes(newRole)) return showErr("Invalid role.");
-
+    if (!newSchoolId.trim()) return showErr("School ID is required.");
     setCreating(true);
-    setExportUrl(null);
-
     try {
-      // Callable function name suggestion: adminCreateUser
-      // Server should:
-      // - create auth user (email optional)
-      // - set default password = schoolId (or your choice)
-      // - create /profiles/{uid} with { schoolId, role, mustChangePassword:true, email }
-      const fn = httpsCallable(functions, "adminCreateUser");
-      const res: any = await fn({ schoolId, role: newRole, email: email || null });
-
-      showOk(`Account created. UID: ${res?.data?.uid ?? "—"}`);
-
+      const fn = httpsCallable<{ schoolId: string; role: Role; email: string | null }, { uid?: string }>(functions, "adminCreateUser");
+      const res = await fn({ schoolId: newSchoolId.trim(), role: newRole, email: newEmail.trim() || null });
+      showOk(`Account created. UID: ${res?.data?.uid ?? "-"}`);
       setNewSchoolId("");
       setNewEmail("");
       setNewRole("student");
       setTab("users");
-    } catch (e: any) {
-  console.error("adminCreateUser error:", e);
-
-  const msg =
-    e?.code ? `${e.code}: ${e.message}` :
-    e?.message || "Failed to create account.";
-
-  showErr(msg);
-} finally {
-  setCreating(false);
-}
+    } catch (error: unknown) {
+      showErr(toErrorMessage(error, "Failed to create account."));
+    } finally {
+      setCreating(false);
+    }
   }
 
   async function removeAccount(uid: string) {
-    if (!uid) return;
     setDeletingUid(uid);
-
     try {
-      // Callable function name suggestion: adminDeleteUser
-      // Server should:
-      // - delete auth user
-      // - delete /profiles/{uid}
-      // - optionally delete related subcollections safely
-      const fn = httpsCallable(functions, "adminDeleteUser");
-      await fn({ uid });
-
+      await httpsCallable<{ uid: string }, unknown>(functions, "adminDeleteUser")({ uid });
       showOk("Account removed.");
-    } catch (e: any) {
-      showErr(e?.message || "Failed to remove account.");
+    } catch (error: unknown) {
+      showErr(toErrorMessage(error, "Failed to remove account."));
     } finally {
       setDeletingUid(null);
     }
@@ -323,412 +185,82 @@ export default function AdminDashboardPage() {
     if (!eventId) return showErr("Select an event first.");
     setExporting(true);
     setExportUrl(null);
-
     try {
-      // Callable function name suggestion: adminExportAttendance
-      // Server should:
-      // - read attendance records for eventId
-      // - generate CSV
-      // - upload to Storage
-      // - return a signed download URL (or a Storage path)
-      const fn = httpsCallable(functions, "adminExportAttendance");
-      const res: any = await fn({ eventId });
-
+      const res = await httpsCallable<{ eventId: string }, { downloadUrl?: string }>(functions, "adminExportAttendance")({ eventId });
       const url = res?.data?.downloadUrl;
-      if (!url) {
-        showErr("Export finished but no download URL returned.");
-      } else {
-        setExportUrl(url);
-        showOk("Export ready.");
-      }
-    } catch (e: any) {
-      showErr(e?.message || "Failed to export attendance.");
+      if (!url) return showErr("Export finished but no download URL returned.");
+      setExportUrl(url);
+      showOk("Export ready.");
+    } catch (error: unknown) {
+      showErr(toErrorMessage(error, "Failed to export attendance."));
     } finally {
       setExporting(false);
     }
   }
 
   if (checking) {
-    return (
-      <div className="min-h-screen bg-[#f2f2f2] p-6 sm:p-8 lg:p-10">
-        <div className="bg-white border shadow-sm rounded-2xl p-6">
-          <p className="text-sm text-gray-600">Checking admin access…</p>
-        </div>
-      </div>
-    );
+    return <div className="min-h-screen bg-[#f2f2f2] p-3 sm:p-6 lg:p-10"><Card shadow="sm" className="border"><CardBody className="p-6 text-sm text-gray-600">Checking admin access...</CardBody></Card></div>;
   }
 
   return (
-    <div className="min-h-screen bg-[#f2f2f2] p-6 sm:p-8 lg:p-10 space-y-6">
-      {/* Header */}
-      <section className="bg-white border shadow-sm rounded-2xl p-6 sm:p-8">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <p className="text-sm font-semibold text-[#7b0000] uppercase tracking-wide">Admin Dashboard</p>
-            <h1 className="text-3xl sm:text-4xl font-black text-gray-900 mt-1">Campus Management Control Center</h1>
-            <p className="text-gray-600 mt-3 max-w-2xl">
-              Supervise users, roles, logs, and exports. Account creation/removal & exports are handled by Cloud Functions
-              for security.
-            </p>
-          </div>
-
-          <div className="shrink-0 flex items-center gap-3">
-            <LogoutButton />
-          </div>
-        </div>
-
-        {/* Tabs */}
-        <div className="mt-6 flex flex-wrap gap-2">
-          {[
-            { key: "overview", label: "Overview" },
-            { key: "users", label: "Users & Roles" },
-            { key: "logs", label: "Logs" },
-            { key: "exports", label: "Exports" },
-          ].map((t) => {
-            const active = tab === (t.key as any);
-            return (
-              <button
-                key={t.key}
-                onClick={() => setTab(t.key as any)}
-                className={[
-                  "px-4 py-2 rounded-xl text-sm font-semibold border transition",
-                  active
-                    ? "bg-[#7b0000] text-white border-[#7b0000]"
-                    : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50",
-                ].join(" ")}
-              >
-                {t.label}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Notice */}
-        {notice && (
-          <div
-            className={[
-              "mt-4 rounded-xl border px-4 py-3 text-sm font-medium",
-              notice.type === "ok"
-                ? "bg-emerald-50 border-emerald-200 text-emerald-900"
-                : "bg-red-50 border-red-200 text-red-900",
-            ].join(" ")}
-          >
-            {notice.msg}
-          </div>
-        )}
-      </section>
-
-      {/* OVERVIEW */}
-      {tab === "overview" && (
-        <>
-          <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-            {roleCards.map((item) => (
-              <article key={item.role} className="bg-white border rounded-xl p-5 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Role</p>
-                <h2 className="text-xl font-bold text-[#7b0000] mt-1">{item.role}</h2>
-                <p className="text-sm text-gray-600 mt-3 min-h-16">{item.summary}</p>
-                <p className="text-xs text-gray-500 mt-3">Default route: {item.route}</p>
-              </article>
-            ))}
-          </section>
-
-          <section className="bg-white border rounded-2xl p-6 shadow-sm">
-            <h2 className="text-xl font-bold text-gray-900">Quick Actions</h2>
-            <p className="text-sm text-gray-600 mt-1">Common admin actions to start with.</p>
-
-            <div className="mt-5 grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <article className="border rounded-xl p-5 bg-gray-50">
-                <h3 className="font-semibold text-gray-800">User & Role Management</h3>
-                <p className="text-sm text-gray-600 mt-2">Create accounts, change roles, remove accounts.</p>
-                <button
-                  onClick={() => setTab("users")}
-                  className="mt-4 inline-flex rounded-xl bg-[#7b0000] text-white px-4 py-2 text-sm font-semibold"
-                >
-                  Open Users
-                </button>
-              </article>
-
-              <article className="border rounded-xl p-5 bg-gray-50">
-                <h3 className="font-semibold text-gray-800">System Activity</h3>
-                <p className="text-sm text-gray-600 mt-2">Review recent log entries (access, admin actions).</p>
-                <button
-                  onClick={() => setTab("logs")}
-                  className="mt-4 inline-flex rounded-xl bg-white border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-100"
-                >
-                  View Logs
-                </button>
-              </article>
-
-              <article className="border rounded-xl p-5 bg-gray-50">
-                <h3 className="font-semibold text-gray-800">Attendance Exports</h3>
-                <p className="text-sm text-gray-600 mt-2">Generate CSV exports for event attendance records.</p>
-                <button
-                  onClick={() => setTab("exports")}
-                  className="mt-4 inline-flex rounded-xl bg-white border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-100"
-                >
-                  Export Attendance
-                </button>
-              </article>
-            </div>
-          </section>
-        </>
-      )}
-
-      {/* USERS */}
-      {tab === "users" && (
-        <section className="bg-white border rounded-2xl p-6 shadow-sm space-y-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h2 className="text-xl font-bold text-gray-900">Users & Roles</h2>
-              <p className="text-sm text-gray-600 mt-1">
-                Create accounts via Cloud Function. Roles are stored in <span className="font-semibold">/profiles</span>.
-              </p>
-            </div>
-
-            <div className="w-full sm:w-[320px]">
-              <label className="text-xs font-semibold text-gray-600">Search</label>
-              <input
-                value={userSearch}
-                onChange={(e) => setUserSearch(e.target.value)}
-                placeholder="Search schoolId, email, role, uid…"
-                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
-              />
-            </div>
-          </div>
-
-          {/* Create account */}
-          <div className="border rounded-2xl p-5 bg-gray-50">
-            <h3 className="font-semibold text-gray-900">Create Account</h3>
-            <p className="text-sm text-gray-600 mt-1">
-              Recommended: default password = School ID, then force change password on first login.
-            </p>
-
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-3">
-              <div className="md:col-span-1">
-                <label className="text-xs font-semibold text-gray-600">School ID *</label>
-                <input
-                  value={newSchoolId}
-                  onChange={(e) => setNewSchoolId(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
-                  placeholder="e.g. 23209455"
-                />
+    <div className="min-h-screen bg-[#f2f2f2] p-3 sm:p-6 lg:p-10">
+      <div className="mx-auto max-w-7xl space-y-5">
+        <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#991515] to-[#ef6b4a] text-white">
+          <CardBody className="flex flex-col gap-5 p-5 sm:p-8 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">Admin Dashboard</p>
+                <h1 className="text-3xl font-black sm:text-4xl">Campus Management Control Center</h1>
+                <p className="max-w-2xl text-sm text-white/80 sm:text-base">Supervise users, logs, and exports from one mobile-friendly control room.</p>
               </div>
-
-              <div className="md:col-span-1">
-                <label className="text-xs font-semibold text-gray-600">Role</label>
-                <select
-                  value={newRole}
-                  onChange={(e) => setNewRole(e.target.value as Role)}
-                  className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
-                >
-                  <option value="student">student</option>
-                  <option value="teacher">teacher</option>
-                  <option value="ec">ec</option>
-                  <option value="admin">admin</option>
-                </select>
-              </div>
-
-              <div className="md:col-span-2">
-                <label className="text-xs font-semibold text-gray-600">Email (optional)</label>
-                <input
-                  value={newEmail}
-                  onChange={(e) => setNewEmail(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
-                  placeholder="optional@email.com"
-                />
+              <div className="flex flex-wrap gap-2">
+                <Chip variant="flat" className="bg-white/15 text-white">{profiles.length} accounts</Chip>
+                <Chip variant="flat" className="bg-white/15 text-white">{logs.length} logs</Chip>
+                <Chip variant="flat" className="bg-white/15 text-white">{events.length} events</Chip>
               </div>
             </div>
+            <div className="flex items-center gap-3"><Button variant="flat" className="bg-white/15 font-semibold text-white data-[hover=true]:bg-white/25" onPress={() => setTab("users")}>Manage users</Button><LogoutButton className="bg-white text-[#7b0000] data-[hover=true]:bg-white/90" /></div>
+          </CardBody>
+        </Card>
 
-            <button
-              onClick={createAccount}
-              disabled={creating}
-              className={[
-                "mt-4 inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold",
-                creating ? "bg-gray-300 text-gray-700" : "bg-[#7b0000] text-white hover:opacity-95",
-              ].join(" ")}
-            >
-              {creating ? "Creating…" : "Create Account"}
-            </button>
+        {notice && <Card shadow="sm" className={notice.type === "ok" ? "border border-emerald-200 bg-emerald-50" : "border border-red-200 bg-red-50"}><CardBody className={notice.type === "ok" ? "p-4 text-sm font-medium text-emerald-900" : "p-4 text-sm font-medium text-red-900"}>{notice.msg}</CardBody></Card>}
 
-
-          </div>
-
-          {/* Users table */}
-          <div className="overflow-x-auto border rounded-2xl">
-            <table className="min-w-full text-sm">
-              <thead className="bg-gray-50">
-                <tr className="text-left text-gray-600">
-                  <th className="px-4 py-3 font-semibold">School ID</th>
-                  <th className="px-4 py-3 font-semibold">Email</th>
-                  <th className="px-4 py-3 font-semibold">UID</th>
-                  <th className="px-4 py-3 font-semibold">Role</th>
-                  <th className="px-4 py-3 font-semibold">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredProfiles.map((p) => (
-                  <tr key={p.id} className="border-t">
-                    <td className="px-4 py-3 font-medium text-gray-900">{p.schoolId ?? "—"}</td>
-                    <td className="px-4 py-3 text-gray-700">{p.email ?? "—"}</td>
-                    <td className="px-4 py-3 text-gray-500">{p.id}</td>
-                    <td className="px-4 py-3">
-                      <span className={badge(p.role)}>{p.role}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-2 items-center">
-                        <select
-                          value={p.role}
-                          disabled={savingRoleUid === p.id}
-                          onChange={(e) => updateRole(p.id, e.target.value as Role)}
-                          className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold outline-none"
-                        >
-                          <option value="student">student</option>
-                          <option value="teacher">teacher</option>
-                          <option value="ec">ec</option>
-                          <option value="admin">admin</option>
-                        </select>
-
-                        <button
-                          onClick={() => removeAccount(p.id)}
-                          disabled={deletingUid === p.id}
-                          className={[
-                            "rounded-xl px-3 py-2 text-xs font-semibold border",
-                            deletingUid === p.id
-                              ? "bg-gray-100 text-gray-500 border-gray-200"
-                              : "bg-white text-red-700 border-red-200 hover:bg-red-50",
-                          ].join(" ")}
-                        >
-                          {deletingUid === p.id ? "Removing…" : "Remove"}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
+        <Tabs selectedKey={tab} onSelectionChange={(key) => setTab(String(key) as AdminTab)} fullWidth classNames={{ tabList: "grid w-full grid-cols-2 rounded-2xl bg-white p-1 shadow-sm sm:grid-cols-4", cursor: "bg-[#7b0000]", tab: "h-11", tabContent: "text-sm font-semibold group-data-[selected=true]:text-white", panel: "pt-5" }}>
+          <Tab key="overview" title="Overview">
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                {[{ label: "Accounts", value: profiles.length, tone: "text-[#7b0000]" }, { label: "Logs", value: logs.length, tone: "text-amber-700" }, { label: "Events", value: events.length, tone: "text-blue-700" }, { label: "Admins", value: roleCounts.admin, tone: "text-emerald-700" }].map((item) => (
+                  <Card key={item.label} shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-gray-500">{item.label}</p><h2 className={`mt-2 text-3xl font-black ${item.tone}`}>{item.value}</h2></CardBody></Card>
                 ))}
-
-                {!filteredProfiles.length && (
-                  <tr>
-                    <td colSpan={5} className="px-4 py-8 text-center text-gray-600">
-                      No users found.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          
-        </section>
-      )}
-
-      {/* LOGS */}
-      {tab === "logs" && (
-        <section className="bg-white border rounded-2xl p-6 shadow-sm space-y-4">
-          <div>
-            <h2 className="text-xl font-bold text-gray-900">System Logs</h2>
-            <p className="text-sm text-gray-600 mt-1">Recent activity entries (recommended: server-written only).</p>
-          </div>
-
-          {logsLoading ? (
-            <div className="text-sm text-gray-600">Loading logs…</div>
-          ) : (
-            <div className="overflow-x-auto border rounded-2xl">
-              <table className="min-w-full text-sm">
-                <thead className="bg-gray-50">
-                  <tr className="text-left text-gray-600">
-                    <th className="px-4 py-3 font-semibold">Time</th>
-                    <th className="px-4 py-3 font-semibold">Action</th>
-                    <th className="px-4 py-3 font-semibold">Actor</th>
-                    <th className="px-4 py-3 font-semibold">Target</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {logs.map((l) => (
-                    <tr key={l.id} className="border-t">
-                      <td className="px-4 py-3 text-gray-700">{fmtTS(l.createdAt)}</td>
-                      <td className="px-4 py-3 font-medium text-gray-900">{l.action ?? "—"}</td>
-                      <td className="px-4 py-3 text-gray-700">
-                        {l.actorSchoolId ?? "—"}
-                        <div className="text-xs text-gray-500">{l.actorUid ?? ""}</div>
-                      </td>
-                      <td className="px-4 py-3 text-gray-700">
-                        {l.targetSchoolId ?? "—"}
-                        <div className="text-xs text-gray-500">{l.targetUid ?? ""}</div>
-                      </td>
-                    </tr>
-                  ))}
-
-                  {!logs.length && (
-                    <tr>
-                      <td colSpan={4} className="px-4 py-8 text-center text-gray-600">
-                        No logs yet.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+              </div>
+              <Card shadow="sm" className="border"><CardHeader className="px-5 pt-5"><div><h2 className="text-xl font-bold text-gray-900">Quick actions</h2><p className="text-sm text-gray-600">Start with the tasks admins usually handle first.</p></div></CardHeader><CardBody className="grid gap-4 p-5 md:grid-cols-3">{[{ title: "Users", text: "Create accounts and change roles.", action: "Open users", onPress: () => setTab("users") }, { title: "Logs", text: "Review recent system activity.", action: "View logs", onPress: () => setTab("logs") }, { title: "Exports", text: "Generate attendance CSV files.", action: "Export data", onPress: () => setTab("exports") }].map((item) => <Card key={item.title} shadow="none" className="border bg-gray-50"><CardBody className="space-y-3 p-4"><div><h3 className="font-semibold text-gray-900">{item.title}</h3><p className="mt-1 text-sm text-gray-600">{item.text}</p></div><Button className="bg-[#7b0000] font-semibold text-white" onPress={item.onPress}>{item.action}</Button></CardBody></Card>)}</CardBody></Card>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">{roleCards.map((item) => <Card key={item.role} shadow="sm" className="border"><CardBody className="space-y-3 p-5"><div><p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Role</p><h3 className="mt-1 text-xl font-bold text-gray-900">{item.role}</h3></div><p className="min-h-16 text-sm text-gray-600">{item.summary}</p><Chip variant="bordered" className="w-fit text-xs text-gray-700">{item.route}</Chip></CardBody></Card>)}</div>
             </div>
-          )}
-        </section>
-      )}
+          </Tab>
 
-      {/* EXPORTS */}
-      {tab === "exports" && (
-        <section className="bg-white border rounded-2xl p-6 shadow-sm space-y-5">
-          <div>
-            <h2 className="text-xl font-bold text-gray-900">Export Attendance</h2>
-            <p className="text-sm text-gray-600 mt-1">Select an event and generate a CSV file (server-generated).</p>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="md:col-span-2">
-              <label className="text-xs font-semibold text-gray-600">Event</label>
-              <select
-                value={eventId}
-                onChange={(e) => setEventId(e.target.value)}
-                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7b0000]/20"
-              >
-                {events.map((ev) => (
-                  <option key={ev.id} value={ev.id}>
-                    {ev.title ?? ev.id}
-                  </option>
-                ))}
-              </select>
+          <Tab key="users" title="Users & Roles">
+            <div className="space-y-5">
+              <Card shadow="sm" className="border"><CardBody className="flex flex-col gap-4 p-5 lg:flex-row lg:items-end lg:justify-between"><div><h2 className="text-xl font-bold text-gray-900">Users and roles</h2><p className="text-sm text-gray-600">Search profiles, create accounts, and adjust access levels.</p></div><div className="w-full lg:max-w-md"><Input label="Search profiles" value={userSearch} onValueChange={setUserSearch} placeholder="School ID, email, role, or UID" /></div></CardBody></Card>
+              <Card shadow="sm" className="border"><CardHeader className="px-5 pt-5"><div><h3 className="text-lg font-bold text-gray-900">Create account</h3><p className="text-sm text-gray-600">Auth creation stays on the server for security.</p></div></CardHeader><CardBody className="space-y-4 p-5"><div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4"><Input label="School ID" value={newSchoolId} onValueChange={setNewSchoolId} placeholder="e.g. 23209455" isRequired /><Select label="Role" selectedKeys={[newRole]} onSelectionChange={(keys) => { const selected = Array.from(keys as Set<React.Key>)[0]; if (typeof selected === "string") setNewRole(selected as Role); }} disallowEmptySelection>{roleOptions.map((role) => <SelectItem key={role}>{formatRole(role)}</SelectItem>)}</Select><Input label="Email" type="email" value={newEmail} onValueChange={setNewEmail} placeholder="optional@email.com" className="md:col-span-2" /></div><Button className="w-full bg-[#7b0000] font-semibold text-white sm:w-auto" onPress={createAccount} isLoading={creating}>Create account</Button></CardBody></Card>
+              <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">{filteredProfiles.map((profile) => <Card key={profile.id} shadow="sm" className="border"><CardBody className="space-y-4 p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="text-lg font-semibold text-gray-900">{profile.schoolId || "No school ID"}</h3><Chip color={roleColor(profile.role)} variant="flat" className="font-semibold">{formatRole(profile.role)}</Chip></div><p className="mt-2 break-all text-sm text-gray-600">{profile.email || "No email on file"}</p><p className="mt-1 break-all text-xs text-gray-500">UID: {profile.id}</p></div></div><div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,220px)_auto] sm:items-end"><Select label="Role assignment" selectedKeys={[profile.role]} onSelectionChange={(keys) => { const selected = Array.from(keys as Set<React.Key>)[0]; if (typeof selected === "string") void updateRole(profile.id, selected as Role); }} disallowEmptySelection isDisabled={savingRoleUid === profile.id}>{roleOptions.map((role) => <SelectItem key={role}>{formatRole(role)}</SelectItem>)}</Select><Button color="danger" variant="flat" onPress={() => removeAccount(profile.id)} isLoading={deletingUid === profile.id}>Remove account</Button></div></CardBody></Card>)}{!filteredProfiles.length && <Card shadow="sm" className="border xl:col-span-2"><CardBody className="p-8 text-center text-sm text-gray-500">No users found.</CardBody></Card>}</div>
             </div>
+          </Tab>
 
-            <div className="md:col-span-1 flex items-end">
-              <button
-                onClick={exportAttendance}
-                disabled={exporting || !eventId}
-                className={[
-                  "w-full inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold",
-                  exporting ? "bg-gray-300 text-gray-700" : "bg-[#7b0000] text-white hover:opacity-95",
-                ].join(" ")}
-              >
-                {exporting ? "Exporting…" : "Generate Export"}
-              </button>
+          <Tab key="logs" title="Logs">
+            <div className="space-y-4">
+              <Card shadow="sm" className="border"><CardBody className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-xl font-bold text-gray-900">System logs</h2><p className="text-sm text-gray-600">Recent activity entries written for audit and support.</p></div><Chip color="primary" variant="flat" className="w-fit font-semibold">{logs.length} entries</Chip></CardBody></Card>
+              {logsLoading ? <Card shadow="sm" className="border"><CardBody className="p-6 text-sm text-gray-600">Loading logs...</CardBody></Card> : !logs.length ? <Card shadow="sm" className="border"><CardBody className="p-8 text-center text-sm text-gray-500">No logs yet.</CardBody></Card> : <div className="space-y-3">{logs.map((log) => <Card key={log.id} shadow="sm" className="border"><CardBody className="space-y-4 p-5"><div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"><div><p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Action</p><h3 className="text-lg font-semibold text-gray-900">{log.action || "-"}</h3></div><Chip variant="bordered" className="w-fit text-xs text-gray-600">{fmtTS(log.createdAt)}</Chip></div><div className="grid gap-4 md:grid-cols-2"><div className="rounded-2xl border bg-gray-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Actor</p><p className="mt-2 text-sm font-medium text-gray-900">{log.actorSchoolId || "-"}</p><p className="mt-1 break-all text-xs text-gray-500">{log.actorUid || "-"}</p></div><div className="rounded-2xl border bg-gray-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Target</p><p className="mt-2 text-sm font-medium text-gray-900">{log.targetSchoolId || "-"}</p><p className="mt-1 break-all text-xs text-gray-500">{log.targetUid || "-"}</p></div></div></CardBody></Card>)}</div>}
             </div>
-          </div>
+          </Tab>
 
-          {exportUrl && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-              <p className="text-sm font-semibold text-emerald-900">Export ready</p>
-              <p className="text-sm text-emerald-900 mt-1 break-all">{exportUrl}</p>
-              <a
-                href={exportUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-3 inline-flex rounded-xl bg-white border border-emerald-200 px-4 py-2 text-sm font-semibold text-emerald-900 hover:bg-emerald-100"
-              >
-                Download CSV
-              </a>
+          <Tab key="exports" title="Exports">
+            <div className="space-y-5">
+              <Card shadow="sm" className="border"><CardHeader className="px-5 pt-5"><div><h2 className="text-xl font-bold text-gray-900">Attendance exports</h2><p className="text-sm text-gray-600">Generate CSV files from event attendance using Cloud Functions.</p></div></CardHeader><CardBody className="space-y-4 p-5"><div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_220px]"><Select label="Event" selectedKeys={eventId ? [eventId] : []} onSelectionChange={(keys) => { const selected = Array.from(keys as Set<React.Key>)[0]; if (typeof selected === "string") setEventId(selected); }} disallowEmptySelection={events.length > 0} isDisabled={!events.length}>{events.map((ev) => <SelectItem key={ev.id}>{ev.title || ev.id}</SelectItem>)}</Select><Button className="bg-[#7b0000] font-semibold text-white" onPress={exportAttendance} isLoading={exporting} isDisabled={!eventId}>Generate export</Button></div><div className="grid grid-cols-1 gap-4 md:grid-cols-3"><Card shadow="none" className="border bg-gray-50"><CardBody className="p-4"><p className="text-sm text-gray-500">Selected Event</p><p className="mt-2 font-semibold text-gray-900">{events.find((ev) => ev.id === eventId)?.title || eventId || "None selected"}</p></CardBody></Card><Card shadow="none" className="border bg-gray-50"><CardBody className="p-4"><p className="text-sm text-gray-500">Available Exports</p><p className="mt-2 text-2xl font-black text-blue-700">{events.length}</p></CardBody></Card><Card shadow="none" className="border bg-gray-50"><CardBody className="p-4"><p className="text-sm text-gray-500">Delivery</p><p className="mt-2 text-sm font-medium text-gray-900">Signed URL download</p></CardBody></Card></div></CardBody></Card>
+              {exportUrl && <Card shadow="sm" className="border border-emerald-200 bg-emerald-50"><CardBody className="space-y-4 p-5"><div><p className="text-sm font-semibold text-emerald-900">Export ready</p><p className="mt-1 break-all text-sm text-emerald-900">{exportUrl}</p></div><div className="flex flex-col gap-3 sm:flex-row"><Button className="bg-white font-semibold text-emerald-900" onPress={() => window.open(exportUrl, "_blank", "noopener,noreferrer")}>Download CSV</Button><Button variant="flat" className="font-semibold text-emerald-900" onPress={() => navigator.clipboard.writeText(exportUrl)}>Copy link</Button></div></CardBody></Card>}
             </div>
-          )}
-
-          <div className="text-xs text-gray-500">
-            If you want “Export by date range” or “Export all events”, the export function can accept extra parameters.
-          </div>
-        </section>
-      )}
+          </Tab>
+        </Tabs>
+      </div>
     </div>
   );
 }
