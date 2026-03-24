@@ -171,7 +171,7 @@ export default function StudentEvents() {
   }
 
   return (
-      <div className="space-y-4 sm:space-y-6 text-campus-text-primary">
+    <div className="space-y-4 sm:space-y-6 text-campus-text-primary">
       <h1 className="text-2xl sm:text-3xl font-bold mb-4 sm:mb-6 text-primary-900">
         Events
       </h1>
@@ -324,6 +324,6 @@ export default function StudentEvents() {
           ))}
         </div>
       )}
-      </div>
+    </div>
   );
 }
