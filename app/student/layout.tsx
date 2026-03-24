@@ -77,6 +77,7 @@ function StudentLayoutShell({ children }: { children: ReactNode }) {
           enableMobileDrawer
           titleSize="sm"
           logoSize={80}
+          showLogout
           showStudentAccountSwitch={canSwitchToEc}
           studentAccountHref="/ecmember"
           studentAccountLabel="EC Account"
