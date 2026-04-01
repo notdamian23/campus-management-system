@@ -57,7 +57,7 @@ export const adminCreateUser = functions
           mustChangePassword: true,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         },
-        { merge: true }
+        {merge: true}
       );
 
       // optional: log
@@ -69,7 +69,7 @@ export const adminCreateUser = functions
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      return { uid };
+      return {uid};
     } catch (err: any) {
       // common error: email already exists
       if (err?.code === "auth/email-already-exists") {
