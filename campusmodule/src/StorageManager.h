@@ -12,6 +12,18 @@ class StorageManager {
 
   EventInfo loadPairedEvent() const;
   bool savePairedEvent(const EventInfo &event);
+  bool savePairedEventContext(const EventInfo &event,
+                              const std::vector<StudentInfo> &students,
+                              const std::vector<String> &recordedStudentIds);
+  bool loadPairedEventContext(EventInfo &event,
+                              std::vector<StudentInfo> &students,
+                              std::vector<String> &recordedStudentIds) const;
+  bool isStudentAuthorizedForEvent(const String &eventId,
+                                   const String &studentUid) const;
+  bool isRemoteAttendanceRecorded(const String &eventId,
+                                  const String &studentUid) const;
+  bool markRemoteAttendanceRecorded(const String &eventId,
+                                    const String &studentUid);
 
   uint64_t getLastKnownEpoch() const;
   void setLastKnownEpoch(uint64_t epoch);
@@ -37,6 +49,9 @@ class StorageManager {
   bool writePendingStudents(const std::vector<StudentInfo> &students) const;
   bool writeFingerprintMappings(const std::vector<StudentInfo> &students) const;
   bool writeAttendanceRecords(const std::vector<AttendanceRecord> &records) const;
+  bool writePairedEventContext(const EventInfo &event,
+                               const std::vector<StudentInfo> &students,
+                               const std::vector<String> &recordedStudentIds) const;
   bool backupAttendanceToSd(const AttendanceRecord &record);
 
   mutable Preferences prefs_;

@@ -31,6 +31,9 @@ EventInfo g_pairedEvent;
 bool g_attendanceMode = false;
 int g_menuIndex = 0;
 std::vector<StudentInfo> g_cachedPendingStudents;
+std::vector<StudentInfo> g_cachedPairedStudents;
+std::vector<String> g_remoteRecordedStudentIds;
+uint32_t g_lastAutoSyncAttemptAt = 0;
 
 constexpr const char *kMenuItems[] = {
     "Pair Event",
@@ -73,6 +76,7 @@ bool connectForOnlineTask(const String &line1) {
 }
 
 void disconnectAfterOnlineTask() {
+  g_backend.clearSession();
   g_wifi.disconnect();
 }
 
@@ -81,23 +85,68 @@ void renderMenu() {
                      static_cast<int>(kMenuItemCount));
 }
 
-bool confirmLatestEvent(const EventInfo &event) {
+void cachePairedEventContext(const EventInfo &event,
+                             const std::vector<StudentInfo> &students,
+                             const std::vector<String> &recordedStudentIds) {
+  g_pairedEvent = event;
+  g_cachedPairedStudents = students;
+  g_remoteRecordedStudentIds = recordedStudentIds;
+  g_storage.savePairedEventContext(event, students, recordedStudentIds);
+}
+
+void loadStoredPairedEventContext() {
+  EventInfo event;
+  std::vector<StudentInfo> students;
+  std::vector<String> recordedStudentIds;
+  if (g_storage.loadPairedEventContext(event, students, recordedStudentIds)) {
+    g_pairedEvent = event;
+    g_cachedPairedStudents = students;
+    g_remoteRecordedStudentIds = recordedStudentIds;
+    return;
+  }
+
+  g_pairedEvent = g_storage.loadPairedEvent();
+  g_cachedPairedStudents.clear();
+  g_remoteRecordedStudentIds.clear();
+}
+
+String eventSubtitle(const EventInfo &event) {
+  String line2 = event.date;
+  if (!event.scheduledTime.isEmpty()) {
+    if (!line2.isEmpty()) {
+      line2 += " ";
+    }
+    line2 += event.scheduledTime;
+  }
+  if (line2.isEmpty()) {
+    line2 = event.location;
+  }
+  return line2;
+}
+
+bool chooseEventFromList(const std::vector<EventInfo> &events, int &selectedIndex) {
   while (true) {
-    const bool showPrompt = ((millis() / 1500UL) % 2UL) == 1UL;
+    const bool showPrompt = ((millis() / 1600UL) % 2UL) == 1UL;
     if (showPrompt) {
-      g_display.show("Pair latest evt?", "SEL pair BACK");
+      g_display.show("Select event", "UP/DN SEL BK");
     } else {
-      String line2 = event.date;
-      if (line2.isEmpty()) {
-        line2 = event.scheduledTime;
-      }
-      if (line2.isEmpty()) {
-        line2 = event.location;
-      }
-      g_display.show(event.title, line2);
+      const EventInfo &event = events[selectedIndex];
+      g_display.show(event.title, eventSubtitle(event));
     }
 
     const ButtonAction action = g_buttons.poll();
+    if (action == ButtonAction::Up) {
+      selectedIndex = (selectedIndex == 0)
+                          ? static_cast<int>(events.size()) - 1
+                          : selectedIndex - 1;
+      delay(120);
+      continue;
+    }
+    if (action == ButtonAction::Down) {
+      selectedIndex = (selectedIndex + 1) % static_cast<int>(events.size());
+      delay(120);
+      continue;
+    }
     if (action == ButtonAction::Select) {
       delay(120);
       return true;
@@ -110,32 +159,163 @@ bool confirmLatestEvent(const EventInfo &event) {
   }
 }
 
+bool refreshPairedEventContext(String &error) {
+  if (!g_pairedEvent.isValid()) {
+    error = "No paired event";
+    return false;
+  }
+
+  EventInfo event;
+  std::vector<StudentInfo> students;
+  std::vector<String> recordedStudentIds;
+  if (!g_backend.fetchPairedEventContext(event, students, recordedStudentIds,
+                                         error)) {
+    return false;
+  }
+
+  cachePairedEventContext(event, students, recordedStudentIds);
+  return true;
+}
+
+bool syncPendingWork(bool silent, size_t &enrollmentUploads,
+                     size_t &attendanceUploads, size_t &duplicates,
+                     String &error) {
+  enrollmentUploads = 0;
+  attendanceUploads = 0;
+  duplicates = 0;
+
+  std::vector<StudentInfo> pendingEnrollments = g_storage.loadUnsyncedEnrollments();
+  for (auto &student : pendingEnrollments) {
+    String itemError;
+    if (g_backend.submitEnrollment(student, itemError)) {
+      g_storage.markEnrollmentSynced(student.studentUid);
+      ++enrollmentUploads;
+    } else if (error.isEmpty()) {
+      error = itemError;
+    }
+    delay(60);
+  }
+
+  while (true) {
+    std::vector<AttendanceRecord> batch;
+    for (const auto &record : g_storage.loadAttendanceRecords()) {
+      if (!record.synced) {
+        batch.push_back(record);
+      }
+      if (batch.size() >= CampusConfig::kSyncBatchSize) {
+        break;
+      }
+    }
+
+    if (batch.empty()) {
+      break;
+    }
+
+    if (!silent) {
+      g_display.showSyncProgress(attendanceUploads + 1,
+                                 attendanceUploads + batch.size());
+    }
+
+    std::vector<SyncItemResult> results;
+    String batchError;
+    if (!g_backend.syncAttendance(batch, results, batchError)) {
+      error = batchError;
+      return false;
+    }
+
+    g_storage.applySyncResults(results);
+    for (const auto &result : results) {
+      if (result.status == "uploaded") {
+        ++attendanceUploads;
+      } else if (result.status == "duplicate") {
+        ++duplicates;
+      }
+    }
+    delay(90);
+  }
+
+  if (g_pairedEvent.isValid()) {
+    String contextError;
+    refreshPairedEventContext(contextError);
+  }
+
+  return true;
+}
+
+bool syncSingleRecordIfConnected(const AttendanceRecord &record, String &statusLabel) {
+  if (!g_wifi.isConnected()) {
+    return false;
+  }
+
+  std::vector<AttendanceRecord> batch = {record};
+  std::vector<SyncItemResult> results;
+  String error;
+  if (!g_backend.syncAttendance(batch, results, error)) {
+    return false;
+  }
+
+  g_storage.applySyncResults(results);
+  for (const auto &result : results) {
+    if (result.recordId != record.recordId) {
+      continue;
+    }
+    if (result.status == "uploaded") {
+      String contextError;
+      refreshPairedEventContext(contextError);
+      statusLabel = "Attendance Synced";
+      return true;
+    }
+    if (result.status == "duplicate") {
+      String contextError;
+      refreshPairedEventContext(contextError);
+      statusLabel = "Already Synced";
+      return true;
+    }
+  }
+  return false;
+}
+
 void runPairEvent() {
   if (!connectForOnlineTask("Pair Event")) {
     return;
   }
 
-  EventInfo latestEvent;
+  std::vector<EventInfo> events;
   String error;
-  if (!g_backend.fetchLatestEvent(latestEvent, error)) {
+  if (!g_backend.fetchAvailableEvents(events, error)) {
     showMessage("Pair Failed", trim16(error), 1800);
     g_feedback.error();
     disconnectAfterOnlineTask();
     return;
   }
 
-  const bool confirmed = confirmLatestEvent(latestEvent);
+  if (events.empty()) {
+    showMessage("No Events", "Create online evt", 1400);
+    disconnectAfterOnlineTask();
+    return;
+  }
+
+  int selectedIndex = 0;
+  const bool confirmed = chooseEventFromList(events, selectedIndex);
   if (!confirmed) {
     showMessage("Pair Cancelled", "No changes made", 1200);
     disconnectAfterOnlineTask();
     return;
   }
 
-  g_storage.savePairedEvent(latestEvent);
-  g_pairedEvent = latestEvent;
-  g_backend.confirmPairing(latestEvent, error);
+  EventInfo pairedEvent;
+  std::vector<StudentInfo> students;
+  std::vector<String> recordedStudentIds;
+  if (!g_backend.pairEvent(events[selectedIndex].eventId, pairedEvent, students,
+                           recordedStudentIds, error)) {
+    showMessage("Pair Failed", trim16(error), 1800);
+    g_feedback.error();
+    disconnectAfterOnlineTask();
+    return;
+  }
 
-  showMessage("Event Paired", trim16(latestEvent.title), 1500);
+  cachePairedEventContext(pairedEvent, students, recordedStudentIds);
+  showMessage("Event Paired", trim16(pairedEvent.title), 1500);
   g_feedback.success();
   disconnectAfterOnlineTask();
 }
@@ -226,7 +406,23 @@ void runEnrollStudent() {
 
       student.templateId = templateId;
       student.enrollmentSynced = false;
+      student.fingerprintStatus = "enrolled";
+      student.fingerprintDeviceId = g_storage.deviceId();
       g_storage.upsertFingerprintMapping(student);
+
+      for (auto &pairedStudent : g_cachedPairedStudents) {
+        if (pairedStudent.studentUid == student.studentUid) {
+          pairedStudent.templateId = templateId;
+          pairedStudent.fingerprintStatus = "enrolled";
+          pairedStudent.fingerprintDeviceId = g_storage.deviceId();
+          pairedStudent.queueId = student.queueId;
+          break;
+        }
+      }
+      if (g_pairedEvent.isValid()) {
+        g_storage.savePairedEventContext(g_pairedEvent, g_cachedPairedStudents,
+                                         g_remoteRecordedStudentIds);
+      }
 
       if (g_backend.submitEnrollment(student, enrollError)) {
         g_storage.markEnrollmentSynced(student.studentUid);
@@ -252,7 +448,46 @@ void runEnrollStudent() {
   disconnectAfterOnlineTask();
 }
 
+void maybeAutoSync(bool keepWifiConnected) {
+  if (!g_wifi.hasCredentials()) {
+    return;
+  }
+
+  if ((millis() - g_lastAutoSyncAttemptAt) < CampusConfig::kAutoSyncIntervalMs) {
+    return;
+  }
+
+  const bool hasPendingAttendance = g_storage.unsyncedAttendanceCount() > 0;
+  const bool hasPendingEnrollments =
+      !g_storage.loadUnsyncedEnrollments().empty();
+  if (!hasPendingAttendance && !hasPendingEnrollments) {
+    return;
+  }
+
+  g_lastAutoSyncAttemptAt = millis();
+
+  String error;
+  if (!g_wifi.isConnected() &&
+      !g_wifi.connect(error, CampusConfig::kWifiTimeoutMs)) {
+    return;
+  }
+
+  g_time.syncWithNetwork(error);
+
+  size_t enrollmentUploads = 0;
+  size_t attendanceUploads = 0;
+  size_t duplicates = 0;
+  String syncError;
+  syncPendingWork(true, enrollmentUploads, attendanceUploads, duplicates,
+                  syncError);
+
+  if (!keepWifiConnected) {
+    disconnectAfterOnlineTask();
+  }
+}
+
 void enterAttendanceMode() {
+  loadStoredPairedEventContext();
   if (!g_pairedEvent.isValid()) {
     showMessage("No Event", "Pair event first", 1500);
     g_feedback.error();
@@ -266,6 +501,13 @@ void enterAttendanceMode() {
   }
 
   g_attendanceMode = true;
+  if (g_wifi.hasCredentials()) {
+    String error;
+    if (g_wifi.connect(error, CampusConfig::kWifiTimeoutMs)) {
+      g_time.syncWithNetwork(error);
+      refreshPairedEventContext(error);
+    }
+  }
   g_display.showAttendancePrompt(g_pairedEvent, g_storage.unsyncedAttendanceCount());
 }
 
@@ -273,10 +515,13 @@ void handleAttendanceLoop() {
   const ButtonAction action = g_buttons.poll();
   if (action == ButtonAction::Back) {
     g_attendanceMode = false;
+    disconnectAfterOnlineTask();
     renderMenu();
     delay(120);
     return;
   }
+
+  maybeAutoSync(true);
 
   static uint32_t lastPollAt = 0;
   if ((millis() - lastPollAt) < CampusConfig::kAttendancePollMs) {
@@ -314,13 +559,24 @@ void handleAttendanceLoop() {
     return;
   }
 
+  if (!g_storage.isStudentAuthorizedForEvent(g_pairedEvent.eventId,
+                                             student.studentUid)) {
+    showMessage("Not In Roster", "See operator", 1400);
+    g_feedback.warning();
+    g_fingerprint.waitForFingerRemoval();
+    g_display.showAttendancePrompt(g_pairedEvent, g_storage.unsyncedAttendanceCount());
+    return;
+  }
+
   AttendanceRecord record;
   String message;
   const AttendanceOutcome outcome = g_attendance.recordAttendance(
       g_pairedEvent, student, match.templateId, record, message);
 
   if (outcome == AttendanceOutcome::Recorded) {
-    showMessage(student.studentName, "Attendance Saved", 1300);
+    String statusLine = "Saved Offline";
+    syncSingleRecordIfConnected(record, statusLine);
+    showMessage(student.studentName, statusLine, 1300);
     g_feedback.success();
   } else if (outcome == AttendanceOutcome::Duplicate) {
     showMessage(student.studentName, "Already Recorded", 1300);
@@ -342,60 +598,26 @@ void runSyncRecords() {
   size_t enrollmentUploads = 0;
   size_t attendanceUploads = 0;
   size_t duplicates = 0;
-
-  std::vector<StudentInfo> pendingEnrollments = g_storage.loadUnsyncedEnrollments();
-  for (auto &student : pendingEnrollments) {
-    String error;
-    if (g_backend.submitEnrollment(student, error)) {
-      g_storage.markEnrollmentSynced(student.studentUid);
-      ++enrollmentUploads;
-    }
-    delay(80);
-  }
-
-  while (true) {
-    std::vector<AttendanceRecord> batch;
-    for (const auto &record : g_storage.loadAttendanceRecords()) {
-      if (!record.synced) {
-        batch.push_back(record);
-      }
-      if (batch.size() >= CampusConfig::kSyncBatchSize) {
-        break;
-      }
-    }
-
-    if (batch.empty()) {
-      break;
-    }
-
-    g_display.showSyncProgress(attendanceUploads + 1,
-                               attendanceUploads + batch.size());
-
-    std::vector<SyncItemResult> results;
-    String error;
-    if (!g_backend.syncAttendance(batch, results, error)) {
-      showMessage("Sync Partial", trim16(error), 1600);
-      g_feedback.warning();
-      break;
-    }
-
-    g_storage.applySyncResults(results);
-    for (const auto &result : results) {
-      if (result.status == "uploaded") {
-        ++attendanceUploads;
-      } else if (result.status == "duplicate") {
-        ++duplicates;
-      }
-    }
-    delay(120);
+  String error;
+  if (!syncPendingWork(false, enrollmentUploads, attendanceUploads, duplicates,
+                       error)) {
+    showMessage("Sync Partial", trim16(error), 1600);
+    g_feedback.warning();
+    disconnectAfterOnlineTask();
+    return;
   }
 
   String line2 = "A:" + String(attendanceUploads) + " D:" + String(duplicates);
   if (enrollmentUploads > 0) {
     line2 = "E:" + String(enrollmentUploads) + " " + line2;
   }
-  showMessage("Sync Complete", line2, 1800);
-  g_feedback.success();
+  if (!error.isEmpty()) {
+    showMessage("Sync Partial", trim16(error), 1800);
+    g_feedback.warning();
+  } else {
+    showMessage("Sync Complete", line2, 1800);
+    g_feedback.success();
+  }
   disconnectAfterOnlineTask();
 }
 
@@ -450,7 +672,7 @@ void setup() {
     showMessage("Scanner Error", trim16(fingerprintError), 1500);
   }
 
-  g_pairedEvent = g_storage.loadPairedEvent();
+  loadStoredPairedEventContext();
   renderMenu();
 }
 
@@ -460,6 +682,8 @@ void loop() {
     delay(15);
     return;
   }
+
+  maybeAutoSync(false);
 
   const ButtonAction action = g_buttons.poll();
   if (action == ButtonAction::Up) {
@@ -493,7 +717,7 @@ void loop() {
         break;
     }
     if (!g_attendanceMode) {
-      g_pairedEvent = g_storage.loadPairedEvent();
+      loadStoredPairedEventContext();
       renderMenu();
     }
   }

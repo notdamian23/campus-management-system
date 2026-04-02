@@ -13,19 +13,24 @@ namespace {
 constexpr char kPendingStudentsPath[] = "/pending_students.json";
 constexpr char kFingerprintMapPath[] = "/fingerprint_map.json";
 constexpr char kAttendancePath[] = "/attendance_records.json";
+constexpr char kPairedEventContextPath[] = "/paired_event_context.json";
 constexpr char kTempPath[] = "/campus_tmp.json";
 constexpr char kSdAuditPath[] = "/attendance_audit.csv";
 
 constexpr size_t kPendingDocSize = 16384;
 constexpr size_t kFingerprintDocSize = 16384;
 constexpr size_t kAttendanceDocSize = 65536;
+constexpr size_t kPairedEventContextDocSize = 65536;
 
 void studentToJson(JsonObject object, const StudentInfo &student) {
   object["studentUid"] = student.studentUid;
   object["schoolId"] = student.schoolId;
   object["studentName"] = student.studentName;
   object["course"] = student.course;
-  object["year"] = student.year;
+  object["yearLevel"] = student.yearLevel;
+  object["queueId"] = student.queueId;
+  object["fingerprintStatus"] = student.fingerprintStatus;
+  object["fingerprintDeviceId"] = student.fingerprintDeviceId;
   object["templateId"] = student.templateId;
   object["enrollmentSynced"] = student.enrollmentSynced;
 }
@@ -36,7 +41,10 @@ StudentInfo studentFromJson(JsonObjectConst object) {
   student.schoolId = String(object["schoolId"] | "");
   student.studentName = String(object["studentName"] | "");
   student.course = String(object["course"] | "");
-  student.year = String(object["year"] | "");
+  student.yearLevel = String(object["yearLevel"] | object["year"] | "");
+  student.queueId = String(object["queueId"] | "");
+  student.fingerprintStatus = String(object["fingerprintStatus"] | "");
+  student.fingerprintDeviceId = String(object["fingerprintDeviceId"] | "");
   student.templateId = object["templateId"] | -1;
   student.enrollmentSynced = object["enrollmentSynced"] | false;
   return student;
@@ -50,12 +58,13 @@ void attendanceToJson(JsonObject object, const AttendanceRecord &record) {
   object["schoolId"] = record.schoolId;
   object["studentName"] = record.studentName;
   object["course"] = record.course;
-  object["year"] = record.year;
+  object["yearLevel"] = record.yearLevel;
   object["templateId"] = record.templateId;
   object["deviceId"] = record.deviceId;
   object["capturedAtEpoch"] = record.capturedAtEpoch;
   object["capturedAtIso"] = record.capturedAtIso;
   object["timeSource"] = record.timeSource;
+  object["source"] = record.source;
   object["synced"] = record.synced;
   object["remoteDuplicate"] = record.remoteDuplicate;
   object["syncError"] = record.syncError;
@@ -71,7 +80,7 @@ AttendanceRecord attendanceFromJson(JsonObjectConst object) {
   record.schoolId = String(object["schoolId"] | "");
   record.studentName = String(object["studentName"] | "");
   record.course = String(object["course"] | "");
-  record.year = String(object["year"] | "");
+  record.yearLevel = String(object["yearLevel"] | object["year"] | "");
   record.templateId = object["templateId"] | -1;
   record.deviceId = String(object["deviceId"] | "");
   record.capturedAtEpoch = object["capturedAtEpoch"].isNull()
@@ -79,6 +88,7 @@ AttendanceRecord attendanceFromJson(JsonObjectConst object) {
                                : object["capturedAtEpoch"].as<uint64_t>();
   record.capturedAtIso = String(object["capturedAtIso"] | "");
   record.timeSource = String(object["timeSource"] | "unknown");
+  record.source = String(object["source"] | "portable-device");
   record.synced = object["synced"] | false;
   record.remoteDuplicate = object["remoteDuplicate"] | false;
   record.syncError = String(object["syncError"] | "");
@@ -134,6 +144,28 @@ String csvEscape(const String &value) {
   output.replace("\"", "\"\"");
   return "\"" + output + "\"";
 }
+
+void eventToJson(JsonObject object, const EventInfo &event) {
+  object["eventId"] = event.eventId;
+  object["title"] = event.title;
+  object["date"] = event.date;
+  object["scheduledTime"] = event.scheduledTime;
+  object["location"] = event.location;
+  object["status"] = event.status;
+  object["requiresRegistration"] = event.requiresRegistration;
+}
+
+EventInfo eventFromJson(JsonObjectConst object) {
+  EventInfo event;
+  event.eventId = String(object["eventId"] | "");
+  event.title = String(object["title"] | "");
+  event.date = String(object["date"] | "");
+  event.scheduledTime = String(object["scheduledTime"] | "");
+  event.location = String(object["location"] | "");
+  event.status = String(object["status"] | "");
+  event.requiresRegistration = object["requiresRegistration"] | false;
+  return event;
+}
 }  // namespace
 
 bool StorageManager::begin() {
@@ -175,6 +207,129 @@ bool StorageManager::savePairedEvent(const EventInfo &event) {
   prefs_.putString("pair_loc", event.location);
   prefs_.putString("pair_stat", event.status);
   return true;
+}
+
+bool StorageManager::savePairedEventContext(
+    const EventInfo &event, const std::vector<StudentInfo> &students,
+    const std::vector<String> &recordedStudentIds) {
+  if (!savePairedEvent(event) || !littleFsReady_) {
+    return false;
+  }
+
+  return writePairedEventContext(event, students, recordedStudentIds);
+}
+
+bool StorageManager::loadPairedEventContext(
+    EventInfo &event, std::vector<StudentInfo> &students,
+    std::vector<String> &recordedStudentIds) const {
+  event = loadPairedEvent();
+  students.clear();
+  recordedStudentIds.clear();
+
+  if (!littleFsReady_) {
+    return event.isValid();
+  }
+
+  DynamicJsonDocument doc(kPairedEventContextDocSize);
+  if (!LittleFS.exists(kPairedEventContextPath)) {
+    return event.isValid();
+  }
+
+  File file = LittleFS.open(kPairedEventContextPath, FILE_READ);
+  if (!file) {
+    return event.isValid();
+  }
+
+  const DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  if (error) {
+    return event.isValid();
+  }
+
+  JsonObject eventObject = doc["event"];
+  if (!eventObject.isNull()) {
+    event = eventFromJson(eventObject);
+  }
+
+  JsonArray studentArray = doc["students"].as<JsonArray>();
+  for (JsonObjectConst item : studentArray) {
+    const StudentInfo student = studentFromJson(item);
+    if (student.isValid()) {
+      students.push_back(student);
+    }
+  }
+
+  JsonArray recordedArray = doc["recordedStudentIds"].as<JsonArray>();
+  for (JsonVariantConst item : recordedArray) {
+    const char *rawStudentUid = item.as<const char *>();
+    const String studentUid = rawStudentUid != nullptr ? String(rawStudentUid) : String("");
+    if (!studentUid.isEmpty()) {
+      recordedStudentIds.push_back(studentUid);
+    }
+  }
+
+  return event.isValid();
+}
+
+bool StorageManager::isStudentAuthorizedForEvent(const String &eventId,
+                                                 const String &studentUid) const {
+  EventInfo pairedEvent;
+  std::vector<StudentInfo> students;
+  std::vector<String> recordedStudentIds;
+  loadPairedEventContext(pairedEvent, students, recordedStudentIds);
+
+  if (!pairedEvent.isValid() || pairedEvent.eventId != eventId || students.empty()) {
+    return true;
+  }
+
+  for (const auto &student : students) {
+    if (student.studentUid == studentUid) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool StorageManager::isRemoteAttendanceRecorded(const String &eventId,
+                                                const String &studentUid) const {
+  EventInfo pairedEvent;
+  std::vector<StudentInfo> students;
+  std::vector<String> recordedStudentIds;
+  loadPairedEventContext(pairedEvent, students, recordedStudentIds);
+
+  if (!pairedEvent.isValid() || pairedEvent.eventId != eventId) {
+    return false;
+  }
+
+  for (const auto &recordedUid : recordedStudentIds) {
+    if (recordedUid == studentUid) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool StorageManager::markRemoteAttendanceRecorded(const String &eventId,
+                                                  const String &studentUid) {
+  EventInfo pairedEvent;
+  std::vector<StudentInfo> students;
+  std::vector<String> recordedStudentIds;
+  if (!loadPairedEventContext(pairedEvent, students, recordedStudentIds)) {
+    return false;
+  }
+
+  if (pairedEvent.eventId != eventId) {
+    return false;
+  }
+
+  for (const auto &recordedUid : recordedStudentIds) {
+    if (recordedUid == studentUid) {
+      return true;
+    }
+  }
+
+  recordedStudentIds.push_back(studentUid);
+  return writePairedEventContext(pairedEvent, students, recordedStudentIds);
 }
 
 uint64_t StorageManager::getLastKnownEpoch() const {
@@ -389,6 +544,7 @@ bool StorageManager::applySyncResults(const std::vector<SyncItemResult> &results
         record.synced = true;
         record.remoteDuplicate = result.status == "duplicate";
         record.syncError = result.message;
+        markRemoteAttendanceRecorded(record.eventId, record.studentUid);
       } else {
         record.synced = false;
         record.syncError = result.message;
@@ -435,6 +591,27 @@ bool StorageManager::writeAttendanceRecords(
   return saveDocument(LittleFS, kAttendancePath, kTempPath, doc);
 }
 
+bool StorageManager::writePairedEventContext(
+    const EventInfo &event, const std::vector<StudentInfo> &students,
+    const std::vector<String> &recordedStudentIds) const {
+  DynamicJsonDocument doc(kPairedEventContextDocSize);
+  JsonObject eventObject = doc.createNestedObject("event");
+  eventToJson(eventObject, event);
+
+  JsonArray studentArray = doc.createNestedArray("students");
+  for (const auto &student : students) {
+    JsonObject object = studentArray.createNestedObject();
+    studentToJson(object, student);
+  }
+
+  JsonArray recordedArray = doc.createNestedArray("recordedStudentIds");
+  for (const auto &studentUid : recordedStudentIds) {
+    recordedArray.add(studentUid);
+  }
+
+  return saveDocument(LittleFS, kPairedEventContextPath, kTempPath, doc);
+}
+
 bool StorageManager::backupAttendanceToSd(const AttendanceRecord &record) {
   if (!sdReady_) {
     return false;
@@ -449,7 +626,7 @@ bool StorageManager::backupAttendanceToSd(const AttendanceRecord &record) {
   if (!exists) {
     file.println(
         "recordId,eventId,eventTitle,studentUid,schoolId,studentName,course,year,"
-        "templateId,deviceId,capturedAtEpoch,capturedAtIso,timeSource");
+        "templateId,deviceId,capturedAtEpoch,capturedAtIso,timeSource,source");
   }
 
   file.print(csvEscape(record.recordId));
@@ -466,7 +643,7 @@ bool StorageManager::backupAttendanceToSd(const AttendanceRecord &record) {
   file.print(",");
   file.print(csvEscape(record.course));
   file.print(",");
-  file.print(csvEscape(record.year));
+  file.print(csvEscape(record.yearLevel));
   file.print(",");
   file.print(record.templateId);
   file.print(",");
@@ -476,7 +653,9 @@ bool StorageManager::backupAttendanceToSd(const AttendanceRecord &record) {
   file.print(",");
   file.print(csvEscape(record.capturedAtIso));
   file.print(",");
-  file.println(csvEscape(record.timeSource));
+  file.print(csvEscape(record.timeSource));
+  file.print(",");
+  file.println(csvEscape(record.source));
   file.close();
   return true;
 }

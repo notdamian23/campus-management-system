@@ -19,6 +19,11 @@ AttendanceOutcome AttendanceManager::recordAttendance(
     return AttendanceOutcome::Duplicate;
   }
 
+  if (storage_.isRemoteAttendanceRecorded(event.eventId, student.studentUid)) {
+    message = "Already synced";
+    return AttendanceOutcome::Duplicate;
+  }
+
   const TimeSnapshot timestamp = clock_.now();
   record.recordId = nextRecordId(timestamp.epoch);
   record.eventId = event.eventId;
@@ -27,12 +32,13 @@ AttendanceOutcome AttendanceManager::recordAttendance(
   record.schoolId = student.schoolId;
   record.studentName = student.studentName;
   record.course = student.course;
-  record.year = student.year;
+  record.yearLevel = student.yearLevel;
   record.templateId = templateId;
   record.deviceId = storage_.deviceId();
   record.capturedAtEpoch = timestamp.epoch;
   record.capturedAtIso = timestamp.iso8601;
   record.timeSource = timestamp.source;
+  record.source = "portable-device";
   record.synced = false;
   record.remoteDuplicate = false;
   record.syncError = "";

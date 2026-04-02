@@ -9,6 +9,7 @@ struct EventInfo {
   String scheduledTime;
   String location;
   String status;
+  bool requiresRegistration = false;
 
   bool isValid() const {
     return !eventId.isEmpty();
@@ -20,7 +21,10 @@ struct StudentInfo {
   String schoolId;
   String studentName;
   String course;
-  String year;
+  String yearLevel;
+  String queueId;
+  String fingerprintStatus;
+  String fingerprintDeviceId;
   int templateId = -1;
   bool enrollmentSynced = false;
 
@@ -44,12 +48,13 @@ struct AttendanceRecord {
   String schoolId;
   String studentName;
   String course;
-  String year;
+  String yearLevel;
   int templateId = -1;
   String deviceId;
   uint64_t capturedAtEpoch = 0;
   String capturedAtIso;
   String timeSource = "unknown";
+  String source = "portable-device";
   bool synced = false;
   bool remoteDuplicate = false;
   String syncError;

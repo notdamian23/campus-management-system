@@ -23,6 +23,10 @@ service cloud.firestore {
       return signedIn() && role() == "admin";
     }
 
+    function isTeacher() {
+      return signedIn() && role() == "teacher";
+    }
+
     function isEC() {
       return signedIn() && role() == "ec";
     }
@@ -96,6 +100,35 @@ service cloud.firestore {
     match /ecDocuments/{docId} {
       allow read: if isAdminOrEC();
       allow create, update, delete: if isAdminOrEC();
+    }
+
+    // Student directory projection for portable device enrollment + sync.
+    match /students/{studentId} {
+      allow read: if isAdminOrEC() || isTeacher() || isSelf(studentId);
+      allow create, update, delete: if isAdminOrEC();
+    }
+
+    // Physical device secrets and session state.
+    match /devices/{deviceId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Device pairing state that can be shown on EC dashboards.
+    match /devicePairings/{deviceId} {
+      allow read: if isAdminOrEC();
+      allow create, update, delete: if isAdminOrEC();
+    }
+
+    // Enrollment tasks prepared on the website, consumed by the device through Cloud Functions.
+    match /enrollmentQueue/{queueId} {
+      allow read: if isAdminOrEC();
+      allow create, update, delete: if isAdminOrEC();
+    }
+
+    // Sync logs are written by Admin SDK functions for auditability.
+    match /syncLogs/{logId} {
+      allow read: if isAdminOrEC();
+      allow write: if false;
     }
 
     // Deny everything else by default.

@@ -17,50 +17,140 @@ String buildUrl(const String &path) {
   }
   return base + "/" + path;
 }
-}  // namespace
 
-bool BackendClient::fetchLatestEvent(EventInfo &event, String &error) {
-  DynamicJsonDocument response(4096);
-  if (!requestJson("GET", "/campusDeviceLatestEvent", nullptr, response, error)) {
-    return false;
-  }
+void applyDeviceSecretHeaders(HTTPClient &http) {
+  http.addHeader("X-Device-Id", CampusConfig::kDeviceId);
+  http.addHeader("X-Device-Secret", CampusConfig::kDeviceSecret);
+}
 
-  JsonObject object = response["event"];
-  if (object.isNull()) {
-    error = "No event found";
-    return false;
-  }
-
+void eventFromJson(JsonObjectConst object, EventInfo &event) {
   event.eventId = String(object["eventId"] | object["id"] | "");
   event.title = String(object["title"] | "");
   event.date = String(object["date"] | "");
   event.scheduledTime = String(object["scheduledTime"] | "");
   event.location = String(object["location"] | "");
   event.status = String(object["status"] | "");
-  return event.isValid();
+  event.requiresRegistration = object["requiresRegistration"] | false;
 }
 
-bool BackendClient::confirmPairing(const EventInfo &event, String &error) {
-  DynamicJsonDocument payload(512);
-  payload["eventId"] = event.eventId;
-  payload["title"] = event.title;
-  payload["date"] = event.date;
-  payload["scheduledTime"] = event.scheduledTime;
-  payload["location"] = event.location;
+StudentInfo studentFromJson(JsonObjectConst object) {
+  StudentInfo student;
+  student.studentUid =
+      String(object["studentId"] | object["studentUid"] | object["uid"] | "");
+  student.schoolId = String(object["schoolId"] | "");
+  student.studentName = String(object["studentName"] | object["name"] | "");
+  student.course = String(object["course"] | "");
+  student.yearLevel = String(object["yearLevel"] | object["year"] | "");
+  student.queueId = String(object["queueId"] | "");
+  student.fingerprintStatus = String(object["fingerprintStatus"] | "");
+  student.fingerprintDeviceId = String(object["fingerprintDeviceId"] | "");
+  student.templateId =
+      object["fingerprintTemplateId"] | object["templateId"] | -1;
+  return student;
+}
+
+bool parseApiErrorPayload(const String &payload, String &error) {
+  DynamicJsonDocument doc(1024);
+  if (deserializeJson(doc, payload) != DeserializationError::Ok) {
+    return false;
+  }
+
+  const String errorText = String(doc["error"] | "");
+  if (!errorText.isEmpty()) {
+    error = errorText;
+    return true;
+  }
+  return false;
+}
+}  // namespace
+
+bool BackendClient::fetchAvailableEvents(std::vector<EventInfo> &events,
+                                         String &error) {
+  DynamicJsonDocument response(16384);
+  if (!requestJson("GET",
+                   String("/campusDeviceListEvents?limit=") +
+                       String(CampusConfig::kEventListLimit),
+                   nullptr, response, error)) {
+    return false;
+  }
+
+  events.clear();
+  JsonArray array = response["events"].as<JsonArray>();
+  if (array.isNull()) {
+    return true;
+  }
+
+  for (JsonObjectConst item : array) {
+    EventInfo event;
+    eventFromJson(item, event);
+    if (event.isValid()) {
+      events.push_back(event);
+    }
+  }
+
+  return true;
+}
+
+bool BackendClient::fetchLatestEvent(EventInfo &event, String &error) {
+  std::vector<EventInfo> events;
+  if (!fetchAvailableEvents(events, error)) {
+    return false;
+  }
+  if (events.empty()) {
+    error = "No event found";
+    return false;
+  }
+  event = events.front();
+  return true;
+}
+
+bool BackendClient::pairEvent(const String &eventId, EventInfo &event,
+                              std::vector<StudentInfo> &students,
+                              std::vector<String> &recordedStudentIds,
+                              String &error) {
+  DynamicJsonDocument payload(256);
+  payload["eventId"] = eventId;
 
   String body;
   serializeJson(payload, body);
 
-  DynamicJsonDocument response(1024);
-  return requestJson("POST", "/campusDeviceConfirmPairing", &body, response, error);
+  DynamicJsonDocument response(32768);
+  if (!requestJson("POST", "/campusDevicePairEvent", &body, response, error)) {
+    return false;
+  }
+
+  return parseEventContextResponse(response, event, students, recordedStudentIds,
+                                   error);
+}
+
+bool BackendClient::confirmPairing(const EventInfo &event, String &error) {
+  EventInfo pairedEvent;
+  std::vector<StudentInfo> students;
+  std::vector<String> recordedStudentIds;
+  return pairEvent(event.eventId, pairedEvent, students, recordedStudentIds,
+                   error);
+}
+
+bool BackendClient::fetchPairedEventContext(
+    EventInfo &event, std::vector<StudentInfo> &students,
+    std::vector<String> &recordedStudentIds, String &error) {
+  DynamicJsonDocument response(32768);
+  if (!requestJson("GET", "/campusDevicePairedEventContext", nullptr, response,
+                   error)) {
+    return false;
+  }
+
+  return parseEventContextResponse(response, event, students, recordedStudentIds,
+                                   error);
 }
 
 bool BackendClient::fetchPendingEnrollments(std::vector<StudentInfo> &students,
                                             String &error) {
-  const String path = String("/campusDevicePendingEnrollments?limit=") +
-                      String(CampusConfig::kPendingEnrollmentLimit);
-  DynamicJsonDocument response(8192);
-  if (!requestJson("GET", path, nullptr, response, error)) {
+  DynamicJsonDocument response(16384);
+  if (!requestJson("GET",
+                   String("/campusDevicePendingEnrollments?limit=") +
+                       String(CampusConfig::kPendingEnrollmentLimit),
+                   nullptr, response, error)) {
     return false;
   }
 
@@ -70,13 +160,8 @@ bool BackendClient::fetchPendingEnrollments(std::vector<StudentInfo> &students,
     return true;
   }
 
-  for (JsonObject item : array) {
-    StudentInfo student;
-    student.studentUid = String(item["studentUid"] | item["uid"] | "");
-    student.schoolId = String(item["schoolId"] | "");
-    student.studentName = String(item["studentName"] | item["name"] | "");
-    student.course = String(item["course"] | "");
-    student.year = String(item["year"] | "");
+  for (JsonObjectConst item : array) {
+    StudentInfo student = studentFromJson(item);
     if (student.isValid()) {
       students.push_back(student);
     }
@@ -85,48 +170,53 @@ bool BackendClient::fetchPendingEnrollments(std::vector<StudentInfo> &students,
 }
 
 bool BackendClient::submitEnrollment(const StudentInfo &student, String &error) {
-  DynamicJsonDocument payload(512);
-  payload["studentUid"] = student.studentUid;
+  DynamicJsonDocument payload(768);
+  payload["studentId"] = student.studentUid;
   payload["schoolId"] = student.schoolId;
   payload["studentName"] = student.studentName;
   payload["course"] = student.course;
-  payload["year"] = student.year;
-  payload["templateId"] = student.templateId;
+  payload["yearLevel"] = student.yearLevel;
+  payload["queueId"] = student.queueId;
+  payload["fingerprintTemplateId"] = student.templateId;
 
   String body;
   serializeJson(payload, body);
 
   DynamicJsonDocument response(1024);
-  return requestJson("POST", "/campusDeviceSubmitEnrollment", &body, response, error);
+  return requestJson("POST", "/campusDeviceSubmitEnrollment", &body, response,
+                     error);
 }
 
 bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
                                    std::vector<SyncItemResult> &results,
                                    String &error) {
-  DynamicJsonDocument payload(16384);
+  DynamicJsonDocument payload(24576);
   JsonArray array = payload.createNestedArray("records");
   for (const auto &record : records) {
     JsonObject object = array.createNestedObject();
     object["recordId"] = record.recordId;
     object["eventId"] = record.eventId;
     object["eventTitle"] = record.eventTitle;
+    object["studentId"] = record.studentUid;
     object["studentUid"] = record.studentUid;
     object["schoolId"] = record.schoolId;
     object["studentName"] = record.studentName;
     object["course"] = record.course;
-    object["year"] = record.year;
-    object["templateId"] = record.templateId;
+    object["yearLevel"] = record.yearLevel;
+    object["fingerprintTemplateId"] = record.templateId;
     object["deviceId"] = record.deviceId;
-    object["capturedAtEpoch"] = record.capturedAtEpoch;
-    object["capturedAtIso"] = record.capturedAtIso;
+    object["timestampEpoch"] = record.capturedAtEpoch;
+    object["timestampIso"] = record.capturedAtIso;
     object["timeSource"] = record.timeSource;
+    object["source"] = record.source;
   }
 
   String body;
   serializeJson(payload, body);
 
   DynamicJsonDocument response(16384);
-  if (!requestJson("POST", "/campusDeviceSyncAttendance", &body, response, error)) {
+  if (!requestJson("POST", "/campusDeviceSyncAttendance", &body, response,
+                   error)) {
     return false;
   }
 
@@ -136,7 +226,7 @@ bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
     return true;
   }
 
-  for (JsonObject item : resultArray) {
+  for (JsonObjectConst item : resultArray) {
     SyncItemResult result;
     result.recordId = String(item["recordId"] | "");
     result.status = String(item["status"] | "");
@@ -148,9 +238,71 @@ bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
   return true;
 }
 
+void BackendClient::clearSession() {
+  sessionToken_ = "";
+}
+
+bool BackendClient::ensureSession(String &error) {
+  if (!sessionToken_.isEmpty()) {
+    return true;
+  }
+  return requestSession(error);
+}
+
+bool BackendClient::requestSession(String &error) {
+  DynamicJsonDocument response(2048);
+  String body = "{}";
+  if (!requestJson("POST", "/campusDeviceCreateSession", &body, response, error,
+                   false)) {
+    return false;
+  }
+
+  sessionToken_ = String(response["sessionToken"] | "");
+  if (sessionToken_.isEmpty()) {
+    error = "Session token missing";
+    return false;
+  }
+  return true;
+}
+
+bool BackendClient::parseEventContextResponse(
+    DynamicJsonDocument &response, EventInfo &event,
+    std::vector<StudentInfo> &students, std::vector<String> &recordedStudentIds,
+    String &error) {
+  JsonObject eventObject = response["event"];
+  if (eventObject.isNull()) {
+    error = "Event payload missing";
+    return false;
+  }
+
+  eventFromJson(eventObject, event);
+  students.clear();
+  recordedStudentIds.clear();
+
+  JsonArray studentArray = response["students"].as<JsonArray>();
+  for (JsonObjectConst item : studentArray) {
+    StudentInfo student = studentFromJson(item);
+    if (student.isValid()) {
+      students.push_back(student);
+    }
+  }
+
+  JsonArray recordedArray = response["roster"]["recordedStudentIds"].as<JsonArray>();
+  for (JsonVariantConst item : recordedArray) {
+    const char *rawStudentUid = item.as<const char *>();
+    const String studentUid = rawStudentUid != nullptr ? String(rawStudentUid) : String("");
+    if (!studentUid.isEmpty()) {
+      recordedStudentIds.push_back(studentUid);
+    }
+  }
+
+  return event.isValid();
+}
+
 bool BackendClient::requestJson(const char *method, const String &path,
-                                const String *body, DynamicJsonDocument &response,
-                                String &error) {
+                                const String *body,
+                                DynamicJsonDocument &response, String &error,
+                                bool allowRetry) {
   if (WiFi.status() != WL_CONNECTED) {
     error = "Wi-Fi not connected";
     return false;
@@ -158,6 +310,11 @@ bool BackendClient::requestJson(const char *method, const String &path,
 
   if (String(CampusConfig::kApiBaseUrl).indexOf("your-project") >= 0) {
     error = "Set API base URL";
+    return false;
+  }
+
+  const bool isSessionRequest = path == "/campusDeviceCreateSession";
+  if (!isSessionRequest && !ensureSession(error)) {
     return false;
   }
 
@@ -173,15 +330,20 @@ bool BackendClient::requestJson(const char *method, const String &path,
 
   http.setTimeout(CampusConfig::kHttpTimeoutMs);
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-Device-Id", CampusConfig::kDeviceId);
-  http.addHeader("X-Device-Secret", CampusConfig::kDeviceSecret);
+
+  if (isSessionRequest) {
+    applyDeviceSecretHeaders(http);
+  } else if (!sessionToken_.isEmpty()) {
+    http.addHeader("Authorization", "Bearer " + sessionToken_);
+  } else {
+    applyDeviceSecretHeaders(http);
+  }
 
   int statusCode = -1;
   if (String(method) == "GET") {
     statusCode = http.GET();
   } else if (String(method) == "POST") {
-    const String payloadToSend = body != nullptr ? *body : String("");
-    statusCode = http.POST(payloadToSend);
+    statusCode = http.POST(body != nullptr ? *body : String("{}"));
   } else {
     error = "HTTP method unsupported";
     http.end();
@@ -191,8 +353,20 @@ bool BackendClient::requestJson(const char *method, const String &path,
   const String payload = http.getString();
   http.end();
 
+  if ((statusCode == 401 || statusCode == 403) && !isSessionRequest &&
+      allowRetry) {
+    clearSession();
+    if (!ensureSession(error)) {
+      return false;
+    }
+    return requestJson(method, path, body, response, error, false);
+  }
+
   if (statusCode < 200 || statusCode >= 300) {
-    error = "HTTP " + String(statusCode) + " " + payload;
+    if (!parseApiErrorPayload(payload, error)) {
+      error = payload.isEmpty() ? ("HTTP " + String(statusCode))
+                                : ("HTTP " + String(statusCode) + " " + payload);
+    }
     return false;
   }
 

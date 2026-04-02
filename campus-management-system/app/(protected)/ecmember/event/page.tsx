@@ -1190,6 +1190,10 @@ export default function EventDashboard() {
   const isEditingEvent = Boolean(editingEventId);
   const isEditingNotification = Boolean(editingNotificationDispatchId);
   const hasSpecificTarget = selectedEventStudents.length > 0;
+  const hasEventYearFilter = isAllYearsExplicit || selectedEventYearLevels.length > 0;
+  const hasEventCourseFilter = isAllCoursesExplicit || selectedEventCourses.length > 0;
+  const hasEventRegistrantSelection =
+    hasSpecificTarget || hasEventYearFilter || hasEventCourseFilter;
   const eventYearLevelLabel = isAllYearsExplicit
     ? "All Years"
     : selectedEventYearLevels.length > 0
@@ -1200,7 +1204,8 @@ export default function EventDashboard() {
     : selectedEventCourses.length > 0
       ? selectedEventCourses.join(", ")
       : "";
-  const registrantsRequiredMissing = !isPreReg && !hasSpecificTarget && !isEditingEvent;
+  const registrantsRequiredMissing =
+    !isPreReg && !hasEventRegistrantSelection && !isEditingEvent;
   const notifHasSpecificTarget = selectedNotifStudents.length > 0;
   const notifYearLevelLabel = isAllNotifYearsExplicit
     ? "All Years"
@@ -2231,8 +2236,8 @@ export default function EventDashboard() {
     if (isPreReg && (Number.isNaN(preRegSlots) || preRegSlots < 0)) {
       return setSaveError("Pre-reg slots must be at least 0.");
     }
-    if (!isPreReg && selectedEventStudents.length === 0 && !editingEventId) {
-      return setSaveError("Choose at least one registrant before creating an event.");
+    if (!isPreReg && !hasEventRegistrantSelection && !editingEventId) {
+      return setSaveError("Choose at least one registrant filter or student before creating an event.");
     }
 
     const eventBeingEdited = editingEventId ? events.find((ev) => ev.id === editingEventId) ?? null : null;
@@ -2980,12 +2985,12 @@ export default function EventDashboard() {
                 Current filters: Year Level - {eventYearLevelLabel}; Course - {eventCourseLabel}.
               </p>
             )}
-            {!isPreReg && !hasSpecificTarget && !isEditingEvent && (
-              <p className="text-xs text-red-600">Choose at least one registrant to create this event.</p>
+            {!isPreReg && !hasEventRegistrantSelection && !isEditingEvent && (
+              <p className="text-xs text-red-600">Choose at least one registrant filter or student to create this event.</p>
             )}
             {!isPreReg && (
               <p className="text-xs text-campus-text-secondary">
-                Choose one or more specific students. You can still set Year Level and Course filters.
+                Choose specific students, Year Level filters, Course filters, or a combination of them.
               </p>
             )}
           </div>
