@@ -28,10 +28,12 @@ BackendClient g_backend;
 AttendanceManager g_attendance(g_storage, g_time);
 
 EventInfo g_pairedEvent;
+EnrollmentSessionInfo g_currentEnrollmentSession;
 bool g_attendanceMode = false;
 int g_menuIndex = 0;
 std::vector<StudentInfo> g_cachedPendingStudents;
 std::vector<StudentInfo> g_cachedPairedStudents;
+std::vector<EnrollmentSessionInfo> g_cachedEnrollmentSessions;
 std::vector<String> g_remoteRecordedStudentIds;
 uint32_t g_lastAutoSyncAttemptAt = 0;
 
@@ -110,6 +112,11 @@ void loadStoredPairedEventContext() {
   g_remoteRecordedStudentIds.clear();
 }
 
+void loadStoredEnrollmentSession() {
+  g_currentEnrollmentSession = g_storage.loadCurrentEnrollmentSession();
+  g_cachedPendingStudents = g_storage.loadPendingStudents();
+}
+
 String eventSubtitle(const EventInfo &event) {
   String line2 = event.date;
   if (!event.scheduledTime.isEmpty()) {
@@ -126,13 +133,9 @@ String eventSubtitle(const EventInfo &event) {
 
 bool chooseEventFromList(const std::vector<EventInfo> &events, int &selectedIndex) {
   while (true) {
-    const bool showPrompt = ((millis() / 1600UL) % 2UL) == 1UL;
-    if (showPrompt) {
-      g_display.show("Select event", "UP/DN SEL BK");
-    } else {
-      const EventInfo &event = events[selectedIndex];
-      g_display.show(event.title, eventSubtitle(event));
-    }
+    const EventInfo &event = events[selectedIndex];
+    g_display.showLines("Select Event", trim16(event.title),
+                        trim16(eventSubtitle(event)), "UP/DN SEL BK");
 
     const ButtonAction action = g_buttons.poll();
     if (action == ButtonAction::Up) {
@@ -144,6 +147,37 @@ bool chooseEventFromList(const std::vector<EventInfo> &events, int &selectedInde
     }
     if (action == ButtonAction::Down) {
       selectedIndex = (selectedIndex + 1) % static_cast<int>(events.size());
+      delay(120);
+      continue;
+    }
+    if (action == ButtonAction::Select) {
+      delay(120);
+      return true;
+    }
+    if (action == ButtonAction::Back) {
+      delay(120);
+      return false;
+    }
+    delay(30);
+  }
+}
+
+bool chooseEnrollmentSessionFromList(
+    const std::vector<EnrollmentSessionInfo> &sessions, int &selectedIndex) {
+  while (true) {
+    g_display.showEnrollmentSession(sessions[selectedIndex], selectedIndex,
+                                    static_cast<int>(sessions.size()));
+
+    const ButtonAction action = g_buttons.poll();
+    if (action == ButtonAction::Up) {
+      selectedIndex = (selectedIndex == 0)
+                          ? static_cast<int>(sessions.size()) - 1
+                          : selectedIndex - 1;
+      delay(120);
+      continue;
+    }
+    if (action == ButtonAction::Down) {
+      selectedIndex = (selectedIndex + 1) % static_cast<int>(sessions.size());
       delay(120);
       continue;
     }
@@ -339,37 +373,76 @@ void runEnrollStudent() {
     return;
   }
 
-  if (!connectForOnlineTask("Enroll Student")) {
-    return;
-  }
+  loadStoredEnrollmentSession();
 
-  String error;
-  std::vector<StudentInfo> students;
-  if (!g_backend.fetchPendingEnrollments(students, error)) {
-    showMessage("Fetch Failed", trim16(error), 1500);
-    g_feedback.error();
+  bool downloadedFreshSession = false;
+  if (connectForOnlineTask("Enroll Student")) {
+    String error;
+    if (!g_backend.fetchEnrollmentSessions(g_cachedEnrollmentSessions, error)) {
+      if (!g_currentEnrollmentSession.isValid() || g_cachedPendingStudents.empty()) {
+        showMessage("Fetch Failed", trim16(error), 1500);
+        g_feedback.error();
+        disconnectAfterOnlineTask();
+        return;
+      }
+    } else if (!g_cachedEnrollmentSessions.empty()) {
+      int selectedIndex = 0;
+      const bool confirmed =
+          chooseEnrollmentSessionFromList(g_cachedEnrollmentSessions, selectedIndex);
+      if (!confirmed) {
+        showMessage("Enroll Cancel", "No session picked", 1200);
+        disconnectAfterOnlineTask();
+        return;
+      }
+
+      EnrollmentSessionInfo session;
+      if (!g_backend.pairEnrollmentSession(
+              g_cachedEnrollmentSessions[selectedIndex].sessionId, session,
+              error)) {
+        showMessage("Pair Failed", trim16(error), 1500);
+        g_feedback.error();
+        disconnectAfterOnlineTask();
+        return;
+      }
+
+      std::vector<StudentInfo> downloadedStudents;
+      if (!g_backend.downloadEnrollmentSession(session.sessionId, session,
+                                               downloadedStudents, error)) {
+        showMessage("Queue Failed", trim16(error), 1500);
+        g_feedback.error();
+        disconnectAfterOnlineTask();
+        return;
+      }
+
+      g_currentEnrollmentSession = session;
+      g_cachedPendingStudents = downloadedStudents;
+      g_storage.saveCurrentEnrollmentSession(session);
+      g_storage.savePendingStudents(downloadedStudents);
+      downloadedFreshSession = true;
+    }
     disconnectAfterOnlineTask();
+  } else if (!g_currentEnrollmentSession.isValid() || g_cachedPendingStudents.empty()) {
     return;
   }
 
-  g_storage.savePendingStudents(students);
-  g_cachedPendingStudents = students;
+  if (!g_currentEnrollmentSession.isValid()) {
+    showMessage("No Session", "Create online sess", 1400);
+    return;
+  }
 
   if (g_cachedPendingStudents.empty()) {
-    showMessage("No Pending FP", "Website is clear", 1400);
-    disconnectAfterOnlineTask();
+    showMessage("Queue Empty", "Nothing to enroll", 1400);
     return;
+  }
+
+  if (downloadedFreshSession) {
+    showMessage("Session Ready", trim16(g_currentEnrollmentSession.sessionId), 1200);
   }
 
   int index = 0;
   while (true) {
-    const bool showPrompt = ((millis() / 1700UL) % 2UL) == 1UL;
-    if (showPrompt) {
-      g_display.show("SEL enroll", "UP/DN BK exit");
-    } else {
-      g_display.showStudent(g_cachedPendingStudents[index], index,
-                            static_cast<int>(g_cachedPendingStudents.size()));
-    }
+    g_display.showStudent(g_cachedPendingStudents[index], index,
+                          static_cast<int>(g_cachedPendingStudents.size()));
 
     const ButtonAction action = g_buttons.poll();
     if (action == ButtonAction::Up) {
@@ -386,6 +459,12 @@ void runEnrollStudent() {
       delay(120);
 
       StudentInfo student = g_cachedPendingStudents[index];
+      if (student.templateId > 0 || student.enrollmentStatus == "enrolled" ||
+          student.syncStatus == "synced") {
+        showMessage("Already Enrolled", student.schoolId, 1200);
+        continue;
+      }
+
       const int templateId = g_storage.nextFreeTemplateId(
           CampusConfig::kFingerprintFirstTemplateId,
           CampusConfig::kFingerprintLastTemplateId);
@@ -404,10 +483,18 @@ void runEnrollStudent() {
         continue;
       }
 
+      TimeSnapshot snapshot = g_time.now();
+      student.sessionId = g_currentEnrollmentSession.sessionId;
       student.templateId = templateId;
       student.enrollmentSynced = false;
       student.fingerprintStatus = "enrolled";
       student.fingerprintDeviceId = g_storage.deviceId();
+      student.enrollmentStatus = "enrolled";
+      student.syncStatus = "pending";
+      student.remarks = "";
+      student.enrolledAtIso = snapshot.iso8601;
+      g_cachedPendingStudents[index] = student;
+      g_storage.savePendingStudents(g_cachedPendingStudents);
       g_storage.upsertFingerprintMapping(student);
 
       for (auto &pairedStudent : g_cachedPairedStudents) {
@@ -424,28 +511,12 @@ void runEnrollStudent() {
                                          g_remoteRecordedStudentIds);
       }
 
-      if (g_backend.submitEnrollment(student, enrollError)) {
-        g_storage.markEnrollmentSynced(student.studentUid);
-        showMessage("Enroll Success", student.schoolId, 1500);
-      } else {
-        showMessage("Local Saved", "Sync later", 1500);
-      }
-
-      removePendingStudent(student.studentUid);
+      showMessage("Saved Offline", student.schoolId, 1200);
       g_feedback.success();
-
-      if (g_cachedPendingStudents.empty()) {
-        showMessage("Queue Empty", "All done", 1200);
-        break;
-      }
-
-      index = 0;
     }
 
     delay(30);
   }
-
-  disconnectAfterOnlineTask();
 }
 
 void maybeAutoSync(bool keepWifiConnected) {

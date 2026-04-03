@@ -22,6 +22,7 @@ import {
 import { auth, db } from "@/lib/firebase";
 
 type LifecycleStatus = "upcoming" | "ongoing" | "completed";
+export type StudentAccountStatus = "Active" | "Inactive";
 
 export type StudentEventStatus =
   | "Upcoming"
@@ -43,6 +44,7 @@ export type StudentProfile = {
   studentName: string;
   course: string;
   year: string;
+  accountStatus: StudentAccountStatus;
 };
 
 export type StudentPayment = {
@@ -97,6 +99,7 @@ type StudentPortalContextValue = {
   loadingPayments: boolean;
   error: string | null;
   markNotificationRead: (notificationId: string) => void;
+  markAllNotificationsRead: () => void;
   registerForEvent: (eventId: string) => Promise<{ ok: boolean; msg: string }>;
 };
 
@@ -164,6 +167,11 @@ type ProfileDocData = {
   name?: string;
   course?: string;
   year?: string;
+  status?: string;
+};
+
+type StudentProjectionDocData = {
+  status?: string;
 };
 
 const StudentPortalContext = createContext<StudentPortalContextValue | null>(
@@ -201,6 +209,10 @@ function normalizeYear(raw: unknown) {
   if (value === "5" || lowered === "5th year") return "5th Year";
 
   return value;
+}
+
+function normalizeStudentAccountStatus(raw: unknown): StudentAccountStatus {
+  return normalizeText(raw) === "inactive" ? "Inactive" : "Active";
 }
 
 function parseDateOnly(input: string): Date | null {
@@ -403,14 +415,21 @@ export function StudentPortalProvider({
       }
 
       try {
-        const snap = await getDoc(doc(db, "profiles", user.uid));
-        if (!snap.exists()) {
+        const [profileSnap, studentSnap] = await Promise.all([
+          getDoc(doc(db, "profiles", user.uid)),
+          getDoc(doc(db, "students", user.uid)),
+        ]);
+
+        if (!profileSnap.exists()) {
           setProfile(null);
           setLoadingProfile(false);
           return;
         }
 
-        const data = snap.data() as ProfileDocData;
+        const data = profileSnap.data() as ProfileDocData;
+        const studentData = studentSnap.exists()
+          ? (studentSnap.data() as StudentProjectionDocData)
+          : null;
         setProfile({
           uid: user.uid,
           schoolId: String(data.schoolId ?? "").trim(),
@@ -421,6 +440,9 @@ export function StudentPortalProvider({
             user.uid,
           course: String(data.course ?? "").trim() || "Unassigned",
           year: normalizeYear(data.year),
+          accountStatus: normalizeStudentAccountStatus(
+            studentData?.status ?? data.status
+          ),
         });
       } catch (e: unknown) {
         setProfile(null);
@@ -968,11 +990,32 @@ export function StudentPortalProvider({
     );
   }, []);
 
+  const markAllNotificationsRead = useCallback(() => {
+    if (notifications.length === 0) return;
+
+    setReadNotificationIds((prev) => {
+      const next = new Set(prev);
+      notifications.forEach((item) => {
+        if (item.id) next.add(item.id);
+      });
+      const merged = Array.from(next);
+      return merged.length === prev.length ? prev : merged;
+    });
+  }, [notifications]);
+
   const registerForEvent = useCallback(
     async (eventId: string) => {
       if (!profile?.uid) {
         return { ok: false, msg: "You need to be logged in first." };
       }
+
+      if (profile.accountStatus === "Inactive") {
+        return {
+          ok: false,
+          msg: "Approach ec member to make account active.",
+        };
+      }
+
       const uid = profile.uid;
 
       try {
@@ -984,6 +1027,7 @@ export function StudentPortalProvider({
             studentName: profile.studentName,
             course: profile.course,
             year: profile.year,
+            accountStatus: profile.accountStatus,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           },
@@ -1025,6 +1069,7 @@ export function StudentPortalProvider({
       loadingPayments,
       error,
       markNotificationRead,
+      markAllNotificationsRead,
       registerForEvent,
     }),
     [
@@ -1040,6 +1085,7 @@ export function StudentPortalProvider({
       loadingPayments,
       error,
       markNotificationRead,
+      markAllNotificationsRead,
       registerForEvent,
     ]
   );

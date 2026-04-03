@@ -921,23 +921,47 @@ export default function EventDashboard() {
     const unsubs = preRegEventIds.map((eventId) =>
       onSnapshot(
         collection(db, "events", eventId, "registrations"),
-        (snap) => {
-          const rows: RegistrationDoc[] = snap.docs
-            .map((d) => {
-              const data = d.data() as Partial<RegistrationDoc>;
-              return {
-                id: d.id,
-                uid: String(data.uid ?? d.id),
-                schoolId: String(data.schoolId ?? ""),
-                studentName: String(data.studentName ?? ""),
-                course: String(data.course ?? ""),
-                year: String(data.year ?? ""),
-                createdAt: data.createdAt,
-              };
-            })
-            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+        async (snap) => {
+          try {
+            const rows: RegistrationDoc[] = snap.docs
+              .map((d) => {
+                const data = d.data() as Partial<RegistrationDoc>;
+                return {
+                  id: d.id,
+                  uid: String(data.uid ?? d.id),
+                  schoolId: String(data.schoolId ?? ""),
+                  studentName: String(data.studentName ?? ""),
+                  course: String(data.course ?? ""),
+                  year: String(data.year ?? ""),
+                  createdAt: data.createdAt,
+                };
+              })
+              .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
 
-          setEventRegistrations((prev) => ({ ...prev, [eventId]: rows }));
+            const activeRows = await Promise.all(
+              rows.map(async (row) => {
+                const [profileSnap, studentSnap] = await Promise.all([
+                  getDoc(doc(db, "profiles", row.uid)),
+                  getDoc(doc(db, "students", row.uid)),
+                ]);
+
+                const profileStatus = String(profileSnap.data()?.status ?? "").trim().toLowerCase();
+                const studentStatus = String(studentSnap.data()?.status ?? "").trim().toLowerCase();
+                if (profileStatus === "inactive" || studentStatus === "inactive") {
+                  return null;
+                }
+
+                return row;
+              })
+            );
+
+            setEventRegistrations((prev) => ({
+              ...prev,
+              [eventId]: activeRows.filter((row): row is RegistrationDoc => Boolean(row)),
+            }));
+          } catch {
+            setEventRegistrations((prev) => ({ ...prev, [eventId]: [] }));
+          }
         },
         () => {
           setEventRegistrations((prev) => ({ ...prev, [eventId]: [] }));

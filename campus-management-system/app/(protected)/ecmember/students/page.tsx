@@ -12,8 +12,12 @@ import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
 import { getFunctions, httpsCallable } from "firebase/functions";
-import { collection, doc, getDoc, getDocs, orderBy, query } from "firebase/firestore";
+import { collection, collectionGroup, deleteDoc, doc, getDoc, getDocs, orderBy, query, serverTimestamp, setDoc, where } from "firebase/firestore";
+import { FingerprintEnrollmentManager } from "@/components/ecmember/FingerprintEnrollmentManager";
 import { app, db } from "@/lib/firebase";
+
+type StudentAccountStatus = "Active" | "Inactive";
+type StudentFingerprintStatus = "Active" | "Inactive";
 
 type Student = {
   uid: string;
@@ -21,7 +25,8 @@ type Student = {
   name: string;
   course: string;
   year: string;
-  status: string;
+  status: StudentAccountStatus;
+  fingerprintStatus: StudentFingerprintStatus;
   email?: string;
   createdAt?: unknown;
 };
@@ -104,6 +109,20 @@ type RemoteStudent = {
   status?: string;
   email?: string;
   createdAtMs?: number | null;
+};
+
+type StudentDirectoryProjection = {
+  uid?: string;
+  studentId?: string;
+  schoolId?: string;
+  studentName?: string;
+  course?: string;
+  year?: string;
+  yearLevel?: string;
+  status?: string;
+  fingerprintStatus?: string;
+  fingerprintTemplateId?: number | string;
+  templateId?: number | string;
 };
 
 const DEFAULT_COURSES = [
@@ -307,13 +326,31 @@ function normalizeCourse(raw: unknown) {
   return value || "Unassigned";
 }
 
+function normalizeStudentAccountStatus(raw: unknown): StudentAccountStatus {
+  return normalizeText(raw) === "inactive" ? "Inactive" : "Active";
+}
+
+function toPositiveNumber(raw: unknown) {
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function getFingerprintStatus(raw: StudentDirectoryProjection | null | undefined): StudentFingerprintStatus {
+  const fingerprintState = normalizeText(raw?.fingerprintStatus);
+  const templateId = toPositiveNumber(raw?.fingerprintTemplateId ?? raw?.templateId);
+
+  return fingerprintState === "enrolled" || fingerprintState === "active" || templateId > 0
+    ? "Active"
+    : "Inactive";
+}
+
 function mapRemoteStudent(data: RemoteStudent): Student {
   const uid = String(data.uid ?? "").trim();
   const schoolId = String(data.schoolId ?? "").trim() || uid;
   const studentName = String(data.studentName ?? "").trim();
   const fallbackName = String(data.name ?? "").trim();
   const name = studentName || fallbackName || schoolId;
-  const status = String(data.status ?? "").trim() || "Active";
+  const status = normalizeStudentAccountStatus(data.status);
 
   return {
     uid,
@@ -322,8 +359,19 @@ function mapRemoteStudent(data: RemoteStudent): Student {
     course: normalizeCourse(data.course),
     year: normalizeYear(data.year),
     status,
+    fingerprintStatus: "Inactive",
     email: String(data.email ?? "").trim() || undefined,
     createdAt: typeof data.createdAtMs === "number" ? data.createdAtMs : undefined,
+  };
+}
+
+function mergeStudentProjection(student: Student, projection?: StudentDirectoryProjection) {
+  if (!projection) return student;
+
+  return {
+    ...student,
+    status: normalizeStudentAccountStatus(projection.status ?? student.status),
+    fingerprintStatus: getFingerprintStatus(projection),
   };
 }
 
@@ -374,6 +422,8 @@ export default function ECStudentLookup() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [statusModalOpen, setStatusModalOpen] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
+  const [updatingStudentUid, setUpdatingStudentUid] = useState<string | null>(null);
+  const [statusNotice, setStatusNotice] = useState<Notice | null>(null);
   const [statusTab, setStatusTab] = useState<StudentStatusTab>("attended");
   const [attendedSearch, setAttendedSearch] = useState("");
   const [missedSearch, setMissedSearch] = useState("");
@@ -394,7 +444,22 @@ export default function ECStudentLookup() {
     try {
       const fn = httpsCallable<{ limit: number }, { students?: RemoteStudent[] }>(functions, "ecListStudents");
       const res = await fn({ limit: 2000 });
-      const rows = (res.data?.students ?? []).map(mapRemoteStudent);
+
+      const projectionByUid = new Map<string, StudentDirectoryProjection>();
+      try {
+        const projectionSnap = await getDocs(collection(db, "students"));
+        projectionSnap.docs.forEach((snapshot) => {
+          projectionByUid.set(snapshot.id, snapshot.data() as StudentDirectoryProjection);
+        });
+      } catch {
+        // Student status controls should still load even if the portable projection is unavailable.
+      }
+
+      const rows = (res.data?.students ?? []).map((remoteStudent) => {
+        const student = mapRemoteStudent(remoteStudent);
+        return mergeStudentProjection(student, projectionByUid.get(student.uid));
+      });
+
       rows.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
       setStudents(rows);
     } catch (error: unknown) {
@@ -598,6 +663,56 @@ export default function ECStudentLookup() {
     return sortedStatusPayments.slice(start, start + STATUS_ITEMS_PER_PAGE);
   }, [sortedStatusPayments, paymentsPage]);
 
+  const selectedStudentUid = selectedStudent?.uid ?? "";
+  const selectedStudentId = selectedStudent?.id ?? "";
+  const selectedStudentName = selectedStudent?.name ?? "";
+  const selectedStudentCourse = selectedStudent?.course ?? "";
+  const selectedStudentYear = selectedStudent?.year ?? "";
+  const selectedStudentStatus = selectedStudent?.status ?? "Active";
+
+  const updateStudentState = useCallback(
+    (studentUid: string, patch: Partial<Pick<Student, "status" | "fingerprintStatus">>) => {
+      setStudents((prev) => {
+        let changed = false;
+        const next = prev.map((student) => {
+          if (student.uid !== studentUid) return student;
+
+          const nextStatus = patch.status ?? student.status;
+          const nextFingerprintStatus = patch.fingerprintStatus ?? student.fingerprintStatus;
+          if (nextStatus === student.status && nextFingerprintStatus === student.fingerprintStatus) {
+            return student;
+          }
+
+          changed = true;
+          return {
+            ...student,
+            status: nextStatus,
+            fingerprintStatus: nextFingerprintStatus,
+          };
+        });
+
+        return changed ? next : prev;
+      });
+
+      setSelectedStudent((prev) => {
+        if (!prev || prev.uid !== studentUid) return prev;
+
+        const nextStatus = patch.status ?? prev.status;
+        const nextFingerprintStatus = patch.fingerprintStatus ?? prev.fingerprintStatus;
+        if (nextStatus === prev.status && nextFingerprintStatus === prev.fingerprintStatus) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          status: nextStatus,
+          fingerprintStatus: nextFingerprintStatus,
+        };
+      });
+    },
+    []
+  );
+
   useEffect(() => {
     setStudentPage(1);
   }, [queryText, courseFilter, yearFilter]);
@@ -631,8 +746,15 @@ export default function ECStudentLookup() {
   }, [paymentsTotalPages]);
 
   useEffect(() => {
-    if (!statusModalOpen || !selectedStudent) return;
-    const currentStudent = selectedStudent;
+    if (!statusModalOpen || !selectedStudentUid) return;
+    const currentStudent = {
+      uid: selectedStudentUid,
+      id: selectedStudentId,
+      name: selectedStudentName,
+      course: selectedStudentCourse,
+      year: selectedStudentYear,
+      status: selectedStudentStatus,
+    };
 
     let active = true;
 
@@ -641,7 +763,25 @@ export default function ECStudentLookup() {
       setStatusError(null);
 
       try {
-        const eventsSnap = await getDocs(query(collection(db, "events"), orderBy("createdAt", "desc")));
+        const [eventsSnap, paymentSnap] = await Promise.all([
+          getDocs(query(collection(db, "events"), orderBy("createdAt", "desc"))),
+          getDocs(query(collection(db, "payments"), orderBy("createdAt", "desc"))),
+        ]);
+
+        try {
+          const studentProjectionSnap = await getDoc(doc(db, "students", currentStudent.uid));
+          const studentProjection = studentProjectionSnap.exists()
+            ? (studentProjectionSnap.data() as StudentDirectoryProjection)
+            : null;
+
+          updateStudentState(currentStudent.uid, {
+            status: normalizeStudentAccountStatus(studentProjection?.status ?? currentStudent.status),
+            fingerprintStatus: getFingerprintStatus(studentProjection),
+          });
+        } catch {
+          // Keep the modal usable even if the fingerprint projection cannot be read.
+        }
+
         const rawEvents: RawEventDoc[] = eventsSnap.docs.map((eventDoc) => {
           const data = eventDoc.data() as Partial<RawEventDoc>;
           const yearLevels = toTargetList(data.yearLevels);
@@ -703,7 +843,6 @@ export default function ECStudentLookup() {
           })
         );
 
-        const paymentSnap = await getDocs(query(collection(db, "payments"), orderBy("createdAt", "desc")));
         const paymentRows = await Promise.all(
           paymentSnap.docs.map(async (paymentDoc): Promise<StudentStatusPayment | null> => {
             const assignmentSnap = await getDoc(doc(db, "payments", paymentDoc.id, "students", currentStudent.uid));
@@ -744,7 +883,16 @@ export default function ECStudentLookup() {
     return () => {
       active = false;
     };
-  }, [selectedStudent, statusModalOpen]);
+  }, [
+    selectedStudentUid,
+    selectedStudentId,
+    selectedStudentName,
+    selectedStudentCourse,
+    selectedStudentYear,
+    selectedStudentStatus,
+    statusModalOpen,
+    updateStudentState,
+  ]);
 
   const summaryCards = useMemo(
     () => [
@@ -766,6 +914,7 @@ export default function ECStudentLookup() {
 
   const openStudentStatusModal = (student: Student) => {
     setSelectedStudent(student);
+    setStatusNotice(null);
     setStatusTab("attended");
     setAttendedSearch("");
     setMissedSearch("");
@@ -777,6 +926,71 @@ export default function ECStudentLookup() {
     setStatusError(null);
     setStatusModalOpen(true);
   };
+
+  async function toggleStudentStatus(student: Student) {
+    if (!student.uid) {
+      setStatusNotice({ type: "err", msg: "This student record is missing a UID." });
+      return;
+    }
+
+    const nextStatus: StudentAccountStatus = student.status === "Active" ? "Inactive" : "Active";
+    setUpdatingStudentUid(student.uid);
+    setStatusNotice(null);
+
+    try {
+      const timestamp = serverTimestamp();
+
+      await setDoc(
+        doc(db, "students", student.uid),
+        {
+          uid: student.uid,
+          studentId: student.uid,
+          schoolId: student.id,
+          studentName: student.name,
+          course: student.course,
+          year: student.year,
+          yearLevel: student.year,
+          status: nextStatus,
+          updatedAt: timestamp,
+        },
+        { merge: true }
+      );
+
+      try {
+        await setDoc(
+          doc(db, "profiles", student.uid),
+          {
+            status: nextStatus,
+            updatedAt: timestamp,
+          },
+          { merge: true }
+        );
+      } catch (error: unknown) {
+        const message = toErrorMessage(error, "");
+        if (!message.toLowerCase().includes("permission-denied")) {
+          throw error;
+        }
+      }
+
+      if (nextStatus === "Inactive") {
+        const registrationsSnap = await getDocs(
+          query(collectionGroup(db, "registrations"), where("uid", "==", student.uid))
+        );
+
+        await Promise.all(registrationsSnap.docs.map((snapshot) => deleteDoc(snapshot.ref)));
+      }
+
+      updateStudentState(student.uid, { status: nextStatus });
+      setStatusNotice({ type: "ok", msg: `${student.name} is now ${nextStatus}.` });
+    } catch (error: unknown) {
+      setStatusNotice({
+        type: "err",
+        msg: toErrorMessage(error, "Failed to update student status."),
+      });
+    } finally {
+      setUpdatingStudentUid(null);
+    }
+  }
 
   async function createStudentAccount() {
     const schoolId = newSchoolId.trim();
@@ -865,7 +1079,7 @@ export default function ECStudentLookup() {
             <p className="text-sm text-campus-text-secondary">Built to stay readable on both desktop and phone screens.</p>
           </div>
         </CardHeader>
-        <CardBody className="grid grid-cols-1 gap-3 p-5 pt-3 xl:grid-cols-[minmax(0,1.3fr)_220px_180px_auto_auto] xl:items-end">
+        <CardBody className="grid grid-cols-1 gap-3 p-5 pt-3 xl:grid-cols-[minmax(0,1.3fr)_220px_180px_auto_auto_auto] xl:items-end">
           <Input
             aria-label="Search students"
             type="text"
@@ -912,6 +1126,8 @@ export default function ECStudentLookup() {
           <Button variant="bordered" onPress={clearFilters} className="w-full xl:w-auto">
             Clear Filters
           </Button>
+
+          <FingerprintEnrollmentManager students={students} />
 
           <Button
             onPress={() => setShowAddForm((prev) => !prev)}
@@ -1200,6 +1416,7 @@ export default function ECStudentLookup() {
             setStatusEvents([]);
             setStatusPayments([]);
             setStatusError(null);
+            setStatusNotice(null);
             setStatusTab("attended");
             setAttendedSearch("");
             setMissedSearch("");
@@ -1208,6 +1425,7 @@ export default function ECStudentLookup() {
             setMissedPage(1);
             setPaymentsPage(1);
             setPaymentSortMode("paid");
+            setUpdatingStudentUid(null);
           }
         }}
         size="5xl"
@@ -1227,14 +1445,45 @@ export default function ECStudentLookup() {
                     <p className="text-sm text-campus-text-secondary">Overview of attendance and payments</p>
                     {selectedStudent && (
                       <p className="text-xs text-campus-text-secondary mt-1">
-                        {selectedStudent.name} ({selectedStudent.id}) | {selectedStudent.course} | {selectedStudent.year}
+                        {selectedStudent.name} ({selectedStudent.id}) | {selectedStudent.course} | {selectedStudent.year} | Fingerprint: {selectedStudent.fingerprintStatus}
                       </p>
+                    )}
+                    {selectedStudent && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Chip color={selectedStudent.status === "Active" ? "success" : "default"} variant="flat">
+                          Account: {selectedStudent.status}
+                        </Chip>
+                        <Chip color={selectedStudent.fingerprintStatus === "Active" ? "success" : "default"} variant="flat">
+                          Fingerprint: {selectedStudent.fingerprintStatus}
+                        </Chip>
+                        <Button
+                          size="sm"
+                          className="bg-[#7b0000] text-white"
+                          onPress={() => void toggleStudentStatus(selectedStudent)}
+                          isLoading={updatingStudentUid === selectedStudent.uid}
+                        >
+                          Set {selectedStudent.status === "Active" ? "Inactive" : "Active"}
+                        </Button>
+                      </div>
                     )}
                   </div>
                 </div>
               </ModalHeader>
 
               <ModalBody className="pb-6 space-y-6">
+                {statusNotice && (
+                  <div
+                    className={[
+                      "rounded-lg border px-4 py-3 text-sm",
+                      statusNotice.type === "ok"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                        : "border-red-200 bg-red-50 text-red-900",
+                    ].join(" ")}
+                  >
+                    {statusNotice.msg}
+                  </div>
+                )}
+
                 {statusError && (
                   <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
                     {statusError}

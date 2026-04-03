@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, ReactNode } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
@@ -39,9 +39,24 @@ const ecNavItems: NavItem[] = [
     }
 ];
 
+const adminStudentLookupNavItems: NavItem[] = [
+    {
+        href: "/admin",
+        icon: "dashboard",
+        label: "Admin Dashboard"
+    },
+    {
+        href: "/ecmember/students",
+        icon: "search",
+        label: "Student Lookup"
+    }
+];
+
 export default function ECLayout({ children }: Props) {
     const router = useRouter();
+    const pathname = usePathname();
     const [allowed, setAllowed] = useState(false);
+    const [viewerRole, setViewerRole] = useState<"ec" | "admin" | null>(null);
 
     useEffect(() => {
         const unsub = onAuthStateChanged(auth, async (user) => {
@@ -66,16 +81,20 @@ export default function ECLayout({ children }: Props) {
                 return;
             }
 
-            if (data.role !== "ec") {
+            const canOpenStudentLookupAsAdmin =
+                data.role === "admin" && pathname === "/ecmember/students";
+
+            if (data.role !== "ec" && !canOpenStudentLookupAsAdmin) {
                 router.replace("/login");
                 return;
             }
 
+            setViewerRole(canOpenStudentLookupAsAdmin ? "admin" : "ec");
             setAllowed(true);
         });
 
         return () => unsub();
-    }, [router]);
+    }, [pathname, router]);
 
     if (!allowed) {
         return <div className="p-3 sm:p-6">Loading...</div>;
@@ -85,12 +104,12 @@ export default function ECLayout({ children }: Props) {
         <div className="min-h-[100dvh] bg-[#f2f2f2]">
             <div className="flex flex-col lg:flex-row">
                 <Sidebar
-                    navItems={ecNavItems}
+                    navItems={viewerRole === "admin" ? adminStudentLookupNavItems : ecNavItems}
                     enableMobileDrawer
                     titleSize="sm"
                     logoSize={80}
                     showLogout
-                    showStudentAccountSwitch
+                    showStudentAccountSwitch={viewerRole === "ec"}
                     studentAccountHref="/student"
                     studentAccountLabel="Student Account"
                 />

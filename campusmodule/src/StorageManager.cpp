@@ -10,9 +10,13 @@
 #include "Pins.h"
 
 namespace {
-constexpr char kPendingStudentsPath[] = "/pending_students.json";
+constexpr char kDeviceConfigPath[] = "/config/device.json";
+constexpr char kEnrollmentSessionPath[] = "/sessions/current_enrollment_session.json";
+constexpr char kPendingStudentsPath[] = "/students/enrollment_queue.json";
 constexpr char kFingerprintMapPath[] = "/fingerprint_map.json";
 constexpr char kAttendancePath[] = "/attendance_records.json";
+constexpr char kEnrollmentLogsPath[] = "/logs/enrollment_logs.json";
+constexpr char kEnrollmentSyncQueuePath[] = "/logs/sync_queue.json";
 constexpr char kPairedEventContextPath[] = "/paired_event_context.json";
 constexpr char kTempPath[] = "/campus_tmp.json";
 constexpr char kSdAuditPath[] = "/attendance_audit.csv";
@@ -21,6 +25,7 @@ constexpr size_t kPendingDocSize = 16384;
 constexpr size_t kFingerprintDocSize = 16384;
 constexpr size_t kAttendanceDocSize = 65536;
 constexpr size_t kPairedEventContextDocSize = 65536;
+constexpr size_t kEnrollmentSessionDocSize = 4096;
 
 void studentToJson(JsonObject object, const StudentInfo &student) {
   object["studentUid"] = student.studentUid;
@@ -28,9 +33,14 @@ void studentToJson(JsonObject object, const StudentInfo &student) {
   object["studentName"] = student.studentName;
   object["course"] = student.course;
   object["yearLevel"] = student.yearLevel;
+  object["sessionId"] = student.sessionId;
   object["queueId"] = student.queueId;
   object["fingerprintStatus"] = student.fingerprintStatus;
   object["fingerprintDeviceId"] = student.fingerprintDeviceId;
+  object["enrollmentStatus"] = student.enrollmentStatus;
+  object["syncStatus"] = student.syncStatus;
+  object["remarks"] = student.remarks;
+  object["enrolledAtIso"] = student.enrolledAtIso;
   object["templateId"] = student.templateId;
   object["enrollmentSynced"] = student.enrollmentSynced;
 }
@@ -42,12 +52,50 @@ StudentInfo studentFromJson(JsonObjectConst object) {
   student.studentName = String(object["studentName"] | "");
   student.course = String(object["course"] | "");
   student.yearLevel = String(object["yearLevel"] | object["year"] | "");
+  student.sessionId = String(object["sessionId"] | "");
   student.queueId = String(object["queueId"] | "");
   student.fingerprintStatus = String(object["fingerprintStatus"] | "");
   student.fingerprintDeviceId = String(object["fingerprintDeviceId"] | "");
+  student.enrollmentStatus = String(object["enrollmentStatus"] | "");
+  student.syncStatus = String(object["syncStatus"] | "");
+  student.remarks = String(object["remarks"] | "");
+  student.enrolledAtIso = String(object["enrolledAtIso"] | "");
   student.templateId = object["templateId"] | -1;
   student.enrollmentSynced = object["enrollmentSynced"] | false;
   return student;
+}
+
+void enrollmentSessionToJson(JsonObject object,
+                             const EnrollmentSessionInfo &session) {
+  object["sessionId"] = session.sessionId;
+  object["createdBy"] = session.createdBy;
+  object["createdByName"] = session.createdByName;
+  object["createdBySchoolId"] = session.createdBySchoolId;
+  object["status"] = session.status;
+  object["pairedDeviceId"] = session.pairedDeviceId;
+  object["totalStudents"] = session.totalStudents;
+  object["pendingCount"] = session.pendingCount;
+  object["downloadedCount"] = session.downloadedCount;
+  object["enrolledCount"] = session.enrolledCount;
+  object["syncedCount"] = session.syncedCount;
+  object["failedCount"] = session.failedCount;
+}
+
+EnrollmentSessionInfo enrollmentSessionFromJson(JsonObjectConst object) {
+  EnrollmentSessionInfo session;
+  session.sessionId = String(object["sessionId"] | "");
+  session.createdBy = String(object["createdBy"] | "");
+  session.createdByName = String(object["createdByName"] | "");
+  session.createdBySchoolId = String(object["createdBySchoolId"] | "");
+  session.status = String(object["status"] | "");
+  session.pairedDeviceId = String(object["pairedDeviceId"] | "");
+  session.totalStudents = object["totalStudents"] | 0;
+  session.pendingCount = object["pendingCount"] | 0;
+  session.downloadedCount = object["downloadedCount"] | 0;
+  session.enrolledCount = object["enrolledCount"] | 0;
+  session.syncedCount = object["syncedCount"] | 0;
+  session.failedCount = object["failedCount"] | 0;
+  return session;
 }
 
 void attendanceToJson(JsonObject object, const AttendanceRecord &record) {
@@ -172,9 +220,23 @@ bool StorageManager::begin() {
   prefsReady_ = prefs_.begin("campus", false);
   littleFsReady_ = LittleFS.begin(true);
 
+  if (littleFsReady_) {
+    LittleFS.mkdir("/config");
+    LittleFS.mkdir("/sessions");
+    LittleFS.mkdir("/students");
+    LittleFS.mkdir("/logs");
+    saveDeviceConfigSnapshot();
+  }
+
   if (CampusConfig::kUseSd) {
     SPI.begin(Pins::kSdSck, Pins::kSdMiso, Pins::kSdMosi, Pins::kSdCs);
     sdReady_ = SD.begin(Pins::kSdCs);
+    if (sdReady_) {
+      SD.mkdir("/config");
+      SD.mkdir("/sessions");
+      SD.mkdir("/students");
+      SD.mkdir("/logs");
+    }
   }
 
   return prefsReady_ && littleFsReady_;
@@ -349,6 +411,49 @@ String StorageManager::deviceId() const {
   return String(CampusConfig::kDeviceId);
 }
 
+EnrollmentSessionInfo StorageManager::loadCurrentEnrollmentSession() const {
+  EnrollmentSessionInfo session;
+  if (!littleFsReady_ || !LittleFS.exists(kEnrollmentSessionPath)) {
+    return session;
+  }
+
+  DynamicJsonDocument doc(kEnrollmentSessionDocSize);
+  File file = LittleFS.open(kEnrollmentSessionPath, FILE_READ);
+  if (!file) {
+    return session;
+  }
+
+  const DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  if (error) {
+    return session;
+  }
+
+  JsonObject object = doc.as<JsonObject>();
+  if (!object.isNull()) {
+    session = enrollmentSessionFromJson(object);
+  }
+  return session;
+}
+
+bool StorageManager::saveCurrentEnrollmentSession(
+    const EnrollmentSessionInfo &session) {
+  if (!littleFsReady_) {
+    return false;
+  }
+  return writeCurrentEnrollmentSession(session);
+}
+
+bool StorageManager::clearCurrentEnrollmentSession() {
+  if (!littleFsReady_) {
+    return false;
+  }
+  if (!LittleFS.exists(kEnrollmentSessionPath)) {
+    return true;
+  }
+  return LittleFS.remove(kEnrollmentSessionPath);
+}
+
 std::vector<StudentInfo> StorageManager::loadPendingStudents() const {
   std::vector<StudentInfo> students;
   if (!littleFsReady_) {
@@ -414,7 +519,11 @@ bool StorageManager::upsertFingerprintMapping(const StudentInfo &student) {
     students.push_back(student);
   }
 
-  return writeFingerprintMappings(students);
+  if (!writeFingerprintMappings(students)) {
+    return false;
+  }
+
+  return updateEnrollmentArtifacts(student);
 }
 
 bool StorageManager::findStudentByTemplate(int templateId, StudentInfo &outStudent) const {
@@ -447,6 +556,20 @@ int StorageManager::nextFreeTemplateId(uint16_t startId, uint16_t endId) const {
 
 std::vector<StudentInfo> StorageManager::loadUnsyncedEnrollments() const {
   std::vector<StudentInfo> pending;
+  DynamicJsonDocument doc(kPendingDocSize);
+  if (littleFsReady_ && loadArrayDocument(LittleFS, kEnrollmentSyncQueuePath, doc)) {
+    for (JsonObjectConst item : doc.as<JsonArrayConst>()) {
+      const StudentInfo student = studentFromJson(item);
+      if (student.templateId > 0 && !student.enrollmentSynced) {
+        pending.push_back(student);
+      }
+    }
+  }
+
+  if (!pending.empty()) {
+    return pending;
+  }
+
   const std::vector<StudentInfo> students = loadFingerprintMappings();
   for (const auto &student : students) {
     if (student.templateId > 0 && !student.enrollmentSynced) {
@@ -468,7 +591,20 @@ bool StorageManager::markEnrollmentSynced(const String &studentUid) {
     }
   }
 
-  return changed ? writeFingerprintMappings(students) : false;
+  std::vector<StudentInfo> queue = loadPendingStudents();
+  for (auto &student : queue) {
+    if (student.studentUid == studentUid) {
+      student.enrollmentSynced = true;
+      student.syncStatus = "synced";
+      student.enrollmentStatus = "synced";
+      break;
+    }
+  }
+
+  const bool mappingSaved = changed ? writeFingerprintMappings(students) : true;
+  const bool pendingSaved = writePendingStudents(queue);
+  const bool queueSaved = removeFromSyncQueue(studentUid);
+  return mappingSaved && pendingSaved && queueSaved;
 }
 
 std::vector<AttendanceRecord> StorageManager::loadAttendanceRecords() const {
@@ -560,13 +696,18 @@ bool StorageManager::applySyncResults(const std::vector<SyncItemResult> &results
 
 bool StorageManager::writePendingStudents(
     const std::vector<StudentInfo> &students) const {
+  return writeStudentList(kPendingStudentsPath, students);
+}
+
+bool StorageManager::writeStudentList(const char *path,
+                                      const std::vector<StudentInfo> &students) const {
   DynamicJsonDocument doc(kPendingDocSize);
   JsonArray array = doc.to<JsonArray>();
   for (const auto &student : students) {
     JsonObject object = array.createNestedObject();
     studentToJson(object, student);
   }
-  return saveDocument(LittleFS, kPendingStudentsPath, kTempPath, doc);
+  return saveDocument(LittleFS, path, kTempPath, doc);
 }
 
 bool StorageManager::writeFingerprintMappings(
@@ -578,6 +719,14 @@ bool StorageManager::writeFingerprintMappings(
     studentToJson(object, student);
   }
   return saveDocument(LittleFS, kFingerprintMapPath, kTempPath, doc);
+}
+
+bool StorageManager::writeCurrentEnrollmentSession(
+    const EnrollmentSessionInfo &session) const {
+  DynamicJsonDocument doc(kEnrollmentSessionDocSize);
+  JsonObject object = doc.to<JsonObject>();
+  enrollmentSessionToJson(object, session);
+  return saveDocument(LittleFS, kEnrollmentSessionPath, kTempPath, doc);
 }
 
 bool StorageManager::writeAttendanceRecords(
@@ -610,6 +759,88 @@ bool StorageManager::writePairedEventContext(
   }
 
   return saveDocument(LittleFS, kPairedEventContextPath, kTempPath, doc);
+}
+
+bool StorageManager::updateEnrollmentArtifacts(const StudentInfo &student) {
+  std::vector<StudentInfo> logs;
+  DynamicJsonDocument logsDoc(kPendingDocSize);
+  loadArrayDocument(LittleFS, kEnrollmentLogsPath, logsDoc);
+  for (JsonObjectConst item : logsDoc.as<JsonArrayConst>()) {
+    const StudentInfo row = studentFromJson(item);
+    if (row.isValid()) {
+      logs.push_back(row);
+    }
+  }
+  logs.push_back(student);
+
+  std::vector<StudentInfo> syncQueue;
+  DynamicJsonDocument queueDoc(kPendingDocSize);
+  loadArrayDocument(LittleFS, kEnrollmentSyncQueuePath, queueDoc);
+  for (JsonObjectConst item : queueDoc.as<JsonArrayConst>()) {
+    const StudentInfo row = studentFromJson(item);
+    if (row.isValid() && row.studentUid != student.studentUid) {
+      syncQueue.push_back(row);
+    }
+  }
+  syncQueue.push_back(student);
+
+  auto queue = loadPendingStudents();
+  bool queueChanged = false;
+  for (auto &entry : queue) {
+    if (entry.studentUid == student.studentUid) {
+      entry = student;
+      queueChanged = true;
+      break;
+    }
+  }
+  if (!queueChanged) {
+    queue.push_back(student);
+  }
+
+  return writeStudentList(kEnrollmentLogsPath, logs) &&
+         writeStudentList(kEnrollmentSyncQueuePath, syncQueue) &&
+         writePendingStudents(queue);
+}
+
+bool StorageManager::removeFromSyncQueue(const String &studentUid) {
+  if (!littleFsReady_) {
+    return false;
+  }
+
+  DynamicJsonDocument doc(kPendingDocSize);
+  loadArrayDocument(LittleFS, kEnrollmentSyncQueuePath, doc);
+  std::vector<StudentInfo> students;
+  for (JsonObjectConst item : doc.as<JsonArrayConst>()) {
+    StudentInfo student = studentFromJson(item);
+    if (!student.isValid()) {
+      continue;
+    }
+    if (student.studentUid == studentUid) {
+      student.enrollmentSynced = true;
+      student.syncStatus = "synced";
+    }
+    if (!student.enrollmentSynced) {
+      students.push_back(student);
+    }
+  }
+
+  return writeStudentList(kEnrollmentSyncQueuePath, students);
+}
+
+bool StorageManager::saveDeviceConfigSnapshot() const {
+  if (!littleFsReady_) {
+    return false;
+  }
+
+  DynamicJsonDocument doc(512);
+  JsonObject object = doc.to<JsonObject>();
+  object["deviceId"] = CampusConfig::kDeviceId;
+  object["apiBaseUrl"] = CampusConfig::kApiBaseUrl;
+  object["lcdColumns"] = CampusConfig::kLcdColumns;
+  object["lcdRows"] = CampusConfig::kLcdRows;
+  object["usesSd"] = CampusConfig::kUseSd;
+  object["usesRtc"] = CampusConfig::kUseRtc;
+  return saveDocument(LittleFS, kDeviceConfigPath, kTempPath, doc);
 }
 
 bool StorageManager::backupAttendanceToSd(const AttendanceRecord &record) {

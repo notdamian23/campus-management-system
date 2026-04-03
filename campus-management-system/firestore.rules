@@ -35,11 +35,24 @@ service cloud.firestore {
       return isAdmin() || isEC();
     }
 
+    function canManageStudentStatusOnProfile() {
+      return isAdminOrEC() &&
+        resource.data.role == "student" &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"]) &&
+        request.resource.data.status in ["Active", "Inactive"];
+    }
+
+    function activeStudentAccount() {
+      return signedIn() &&
+        role() == "student" &&
+        get(profilePath()).data.status != "Inactive";
+    }
+
     // Profiles
     match /profiles/{uid} {
       allow read: if isSelf(uid) || isAdmin();
       allow create: if isAdmin();
-      allow update: if isSelf(uid) || isAdmin();
+      allow update: if isSelf(uid) || isAdmin() || canManageStudentStatusOnProfile();
       allow delete: if isAdmin();
 
       // EC member personal documents
@@ -71,9 +84,11 @@ service cloud.firestore {
           isSelf(uid) ||
           (signedIn() && resource.data.uid == request.auth.uid);
         allow create: if isSelf(uid) &&
-          request.resource.data.uid == request.auth.uid;
+          request.resource.data.uid == request.auth.uid &&
+          activeStudentAccount();
         allow update: if isSelf(uid) &&
-          request.resource.data.uid == request.auth.uid;
+          request.resource.data.uid == request.auth.uid &&
+          activeStudentAccount();
         allow delete: if isAdminOrEC() || isSelf(uid);
       }
 
@@ -111,12 +126,26 @@ service cloud.firestore {
     // Physical device secrets and session state.
     match /devices/{deviceId} {
       allow read, write: if isAdmin();
+
+      match /syncLogs/{logId} {
+        allow read: if isAdminOrEC();
+        allow write: if false;
+      }
     }
 
     // Device pairing state that can be shown on EC dashboards.
     match /devicePairings/{deviceId} {
       allow read: if isAdminOrEC();
       allow create, update, delete: if isAdminOrEC();
+    }
+
+    // Fingerprint enrollment sessions prepared by EC/Admin for the CAMPUS module.
+    match /enrollmentSessions/{sessionId} {
+      allow read, create, update, delete: if isAdminOrEC();
+
+      match /students/{studentId} {
+        allow read, create, update, delete: if isAdminOrEC();
+      }
     }
 
     // Enrollment tasks prepared on the website, consumed by the device through Cloud Functions.

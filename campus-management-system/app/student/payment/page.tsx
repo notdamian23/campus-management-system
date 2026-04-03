@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Card, CardBody } from "@heroui/card";
+import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Chip } from "@heroui/chip";
 import { Select, SelectItem } from "@heroui/select";
 import { CampusBadge } from "@/components/heroui";
 import { StudentPayment, useStudentPortal } from "@/components/student/StudentPortalProvider";
@@ -91,52 +92,123 @@ export default function StudentPaymentsPage() {
     });
 
     return Array.from(map.values())
-      .sort((a, b) => (a.dateMs - b.dateMs) * direction)
+      .sort((left, right) => (left.dateMs - right.dateMs) * direction)
       .map((group) => ({
         ...group,
         items: group.items.sort(
-          (a, b) => (getPaymentDateMs(a) - getPaymentDateMs(b)) * direction
+          (left, right) => (getPaymentDateMs(left) - getPaymentDateMs(right)) * direction
         ),
       }));
   }, [filteredPayments, sortMode]);
 
+  const paidCount = useMemo(
+    () => payments.filter((item) => item.status === "PAID").length,
+    [payments]
+  );
+  const unpaidCount = useMemo(
+    () => payments.filter((item) => item.status === "UNPAID").length,
+    [payments]
+  );
+  const totalOutstanding = useMemo(
+    () => payments
+      .filter((item) => item.status === "UNPAID")
+      .reduce((sum, item) => sum + (Number(item.amount) || 0), 0),
+    [payments]
+  );
+
   return (
-    <div className="space-y-4 sm:space-y-6 text-campus-text-primary">
-      <h1 className="text-2xl sm:text-3xl font-bold mb-4 sm:mb-6 text-primary-900">
-        Payments
-      </h1>
+    <div className="space-y-5 sm:space-y-6 text-campus-text-primary">
+      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#bb2020] to-[#f19b4c] text-white">
+        <CardBody className="space-y-4 p-5 sm:p-6">
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
+              Student Payments
+            </p>
+            <h1 className="text-2xl font-black sm:text-3xl">Payments</h1>
+            <p className="text-sm text-white/80 sm:text-base">
+              Track balances, review due dates, and keep the same payment timeline format.
+            </p>
+          </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
-        <Select
-          aria-label="Sort payments"
-          label="Sort"
-          size="sm"
-          selectedKeys={[sortMode]}
-          onChange={(e) => setSortMode(e.target.value as PaymentSortMode)}
-          disallowEmptySelection
-          className="w-full"
-        >
-          <SelectItem key="latest_to_oldest">Latest to Oldest</SelectItem>
-          <SelectItem key="oldest_to_latest">Oldest to Latest</SelectItem>
-        </Select>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Card shadow="none" className="border border-white/20 bg-white/10 text-white">
+              <CardBody className="p-4">
+                <p className="text-sm text-white/70">Total Records</p>
+                <h2 className="mt-2 text-3xl font-black">{loading ? "-" : payments.length}</h2>
+              </CardBody>
+            </Card>
 
-        <Select
-          aria-label="Filter payments by status"
-          label="Status"
-          size="sm"
-          selectedKeys={[statusFilter]}
-          onChange={(e) => setStatusFilter(e.target.value as PaymentStatusFilter)}
-          disallowEmptySelection
-          className="w-full"
-        >
-          <SelectItem key="all">All</SelectItem>
-          <SelectItem key="paid">Paid</SelectItem>
-          <SelectItem key="unpaid">Unpaid</SelectItem>
-        </Select>
+            <Card shadow="none" className="border border-white/20 bg-white/10 text-white">
+              <CardBody className="p-4">
+                <p className="text-sm text-white/70">Paid</p>
+                <h2 className="mt-2 text-3xl font-black">{loading ? "-" : paidCount}</h2>
+              </CardBody>
+            </Card>
+
+            <Card shadow="none" className="border border-white/20 bg-white/10 text-white">
+              <CardBody className="p-4">
+                <p className="text-sm text-white/70">Outstanding</p>
+                <h2 className="mt-2 text-2xl font-black">{loading ? "-" : formatAmount(totalOutstanding)}</h2>
+              </CardBody>
+            </Card>
+          </div>
+        </CardBody>
+      </Card>
+
+      <Card shadow="sm" className="border">
+        <CardHeader className="px-5 pt-5">
+          <div>
+            <h2 className="text-lg font-semibold text-campus-text-primary">Filters</h2>
+            <p className="text-sm text-campus-text-secondary">
+              Keep the same payment timeline while sorting and filtering faster.
+            </p>
+          </div>
+        </CardHeader>
+
+        <CardBody className="grid grid-cols-1 gap-3 p-5 pt-3 sm:grid-cols-2">
+          <Select
+            aria-label="Sort payments"
+            label="Sort"
+            size="sm"
+            selectedKeys={[sortMode]}
+            onChange={(event) => setSortMode(event.target.value as PaymentSortMode)}
+            disallowEmptySelection
+            className="w-full"
+          >
+            <SelectItem key="latest_to_oldest">Latest to Oldest</SelectItem>
+            <SelectItem key="oldest_to_latest">Oldest to Latest</SelectItem>
+          </Select>
+
+          <Select
+            aria-label="Filter payments by status"
+            label="Status"
+            size="sm"
+            selectedKeys={[statusFilter]}
+            onChange={(event) => setStatusFilter(event.target.value as PaymentStatusFilter)}
+            disallowEmptySelection
+            className="w-full"
+          >
+            <SelectItem key="all">All</SelectItem>
+            <SelectItem key="paid">Paid</SelectItem>
+            <SelectItem key="unpaid">Unpaid</SelectItem>
+          </Select>
+        </CardBody>
+      </Card>
+
+      <div className="flex flex-wrap gap-2">
+        <Chip color="success" variant="flat">
+          {loading ? "-" : paidCount} paid
+        </Chip>
+        <Chip color="danger" variant="flat">
+          {loading ? "-" : unpaidCount} unpaid
+        </Chip>
+        <Chip variant="bordered">
+          {loading ? "-" : filteredPayments.length} shown
+        </Chip>
       </div>
 
       {error && (
-        <div className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
           {error}
         </div>
       )}
@@ -151,31 +223,54 @@ export default function StudentPaymentsPage() {
         <div className="space-y-8 sm:space-y-10">
           {groupedPayments.map((group) => (
             <div key={`${group.date}-${group.dateMs}`}>
-              <h2 className="text-lg font-semibold text-campus-text-primary mb-4">
-                {group.date}
-              </h2>
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <h2 className="text-lg font-semibold text-campus-text-primary">
+                  {group.date}
+                </h2>
+                <Chip variant="bordered">
+                  {group.items.length} item{group.items.length === 1 ? "" : "s"}
+                </Chip>
+              </div>
 
               <div className="space-y-4">
                 {group.items.map((item) => (
-                  <Card key={item.paymentId} shadow="sm" isPressable className="w-full">
-                    <CardBody className="p-4 sm:p-5 w-full">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <h3 className="text-lg font-semibold leading-snug break-words">
-                            {item.title}
-                          </h3>
-                          <p className="text-sm text-campus-text-secondary mt-1 break-words">
+                  <Card key={item.paymentId} shadow="sm" isPressable className="w-full border">
+                    <CardBody className="w-full p-4 sm:p-5">
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-lg font-semibold leading-snug break-words">
+                              {item.title}
+                            </h3>
+                            <CampusBadge status={item.status === "PAID" ? "paid" : "unpaid"}>
+                              {item.status}
+                            </CampusBadge>
+                          </div>
+
+                          <p className="text-sm text-campus-text-secondary break-words">
                             Ref: {item.ref}
                           </p>
-                          <p className="text-xs text-campus-text-tertiary mt-2 break-words">
-                            Due: {item.date || "-"} | Amount: {formatAmount(item.amount)}
-                          </p>
+
+                          <div className="flex flex-wrap gap-2">
+                            <Chip variant="flat" className="text-campus-text-primary">
+                              Due: {item.date || "-"}
+                            </Chip>
+                            <Chip
+                              variant="flat"
+                              className={item.status === "PAID" ? "bg-emerald-50 text-emerald-800" : "bg-red-50 text-red-800"}
+                            >
+                              Amount: {formatAmount(item.amount)}
+                            </Chip>
+                          </div>
                         </div>
 
-                        <div className="shrink-0">
-                          <CampusBadge status={item.status === "PAID" ? "paid" : "unpaid"}>
-                            {item.status}
-                          </CampusBadge>
+                        <div className="shrink-0 text-right">
+                          <p className="text-xs uppercase tracking-wide text-campus-text-tertiary">
+                            Amount
+                          </p>
+                          <p className="text-xl font-black text-campus-text-primary">
+                            {formatAmount(item.amount)}
+                          </p>
                         </div>
                       </div>
                     </CardBody>
@@ -189,4 +284,3 @@ export default function StudentPaymentsPage() {
     </div>
   );
 }
-

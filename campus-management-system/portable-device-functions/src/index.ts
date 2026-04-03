@@ -16,6 +16,8 @@ const DEFAULT_EVENT_LIMIT = 20;
 const MAX_EVENT_LIMIT = 50;
 const DEFAULT_ENROLLMENT_LIMIT = 20;
 const MAX_ENROLLMENT_LIMIT = 50;
+const DEFAULT_ENROLLMENT_SESSION_LIMIT = 15;
+const MAX_ENROLLMENT_SESSION_LIMIT = 25;
 const DEFAULT_SYNC_BATCH_LIMIT = 25;
 const MAX_SYNC_BATCH_LIMIT = 50;
 const TOKEN_VERSION = 1;
@@ -70,6 +72,56 @@ type DeviceContext = {
 };
 
 type AttendanceResponseStatus = "uploaded" | "duplicate" | "failed";
+type EnrollmentResponseStatus = "uploaded" | "duplicate" | "failed";
+
+type EnrollmentSessionStatus =
+  | "pending"
+  | "paired"
+  | "downloading"
+  | "enrolling"
+  | "completed"
+  | "partially-completed"
+  | "closed";
+
+type EnrollmentStudentStatus =
+  | "pending"
+  | "downloaded"
+  | "enrolled"
+  | "synced"
+  | "failed";
+
+type EnrollmentSessionSummary = {
+  sessionId: string;
+  createdBy: string;
+  createdByName: string;
+  createdBySchoolId: string;
+  status: EnrollmentSessionStatus;
+  pairedDeviceId: string;
+  totalStudents: number;
+  pendingCount: number;
+  downloadedCount: number;
+  enrolledCount: number;
+  syncedCount: number;
+  failedCount: number;
+  selectedStudentIds: string[];
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+type EnrollmentSessionStudent = {
+  studentId: string;
+  studentUid: string;
+  schoolId: string;
+  fullName: string;
+  course: string;
+  yearLevel: string;
+  status: EnrollmentStudentStatus;
+  syncStatus: "pending" | "synced" | "failed";
+  fingerprintTemplateId: number;
+  enrolledByDevice: string;
+  assignedDeviceId: string;
+  remarks: string;
+};
 
 type DeviceHandler = (
   req: Request,
@@ -162,6 +214,31 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+async function callerRole(
+  context: functions.https.CallableContext
+): Promise<string> {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "Login required.");
+  }
+
+  const callerProfileSnap = await db.doc(`profiles/${context.auth.uid}`).get();
+  return callerProfileSnap.exists ?
+    normalizeLower(callerProfileSnap.data()?.role) :
+    "";
+}
+
+async function requireAdminOrEC(
+  context: functions.https.CallableContext
+): Promise<void> {
+  const role = await callerRole(context);
+  if (role !== "admin" && role !== "ec") {
+    throw new functions.https.HttpsError(
+      "permission-denied",
+      "EC/Admin only."
+    );
+  }
+}
+
 function formatManilaDate(now: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: MANILA_TIME_ZONE,
@@ -231,6 +308,35 @@ function normalizeYearLevel(value: unknown): string {
 
 function normalizeCourse(value: unknown): string {
   return normalizeText(value);
+}
+
+function normalizeEnrollmentSessionStatus(value: unknown): EnrollmentSessionStatus {
+  const raw = normalizeLower(value);
+  if (raw === "paired") return "paired";
+  if (raw === "downloading") return "downloading";
+  if (raw === "enrolling") return "enrolling";
+  if (raw === "completed") return "completed";
+  if (raw === "partially completed" || raw === "partially-completed") {
+    return "partially-completed";
+  }
+  if (raw === "closed") return "closed";
+  return "pending";
+}
+
+function normalizeEnrollmentStudentStatus(value: unknown): EnrollmentStudentStatus {
+  const raw = normalizeLower(value);
+  if (raw === "downloaded") return "downloaded";
+  if (raw === "enrolled") return "enrolled";
+  if (raw === "synced") return "synced";
+  if (raw === "failed") return "failed";
+  return "pending";
+}
+
+function normalizeEnrollmentSyncStatus(value: unknown): "pending" | "synced" | "failed" {
+  const raw = normalizeLower(value);
+  if (raw === "synced") return "synced";
+  if (raw === "failed") return "failed";
+  return "pending";
 }
 
 function normalizeTargetList(value: unknown): string[] {
@@ -709,6 +815,420 @@ async function ensurePairedEventContext(device: DeviceContext) {
   };
 }
 
+function enrollmentSessionSummaryFromSnapshot(
+  snap: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot
+): EnrollmentSessionSummary {
+  const data = snap.data() ?? {};
+
+  return {
+    sessionId: snap.id,
+    createdBy: normalizeText(data.createdBy),
+    createdByName: normalizeText(data.createdByName),
+    createdBySchoolId: normalizeText(data.createdBySchoolId),
+    status: normalizeEnrollmentSessionStatus(data.status),
+    pairedDeviceId: normalizeText(data.pairedDeviceId),
+    totalStudents: toPositiveInt(data.totalStudents, 0),
+    pendingCount: toPositiveInt(data.pendingCount, 0),
+    downloadedCount: toPositiveInt(data.downloadedCount, 0),
+    enrolledCount: toPositiveInt(data.enrolledCount, 0),
+    syncedCount: toPositiveInt(data.syncedCount, 0),
+    failedCount: toPositiveInt(data.failedCount, 0),
+    selectedStudentIds: asStringArray(data.selectedStudentIds),
+    createdAtMs: toMillis(data.createdAt),
+    updatedAtMs: toMillis(data.updatedAt),
+  };
+}
+
+function enrollmentSessionStudentFromSnapshot(
+  snap: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot
+): EnrollmentSessionStudent {
+  const data = snap.data() ?? {};
+  const studentId = normalizeText(data.studentId) || snap.id;
+
+  return {
+    studentId,
+    studentUid: normalizeText(data.studentUid) || studentId,
+    schoolId: normalizeText(data.schoolId) || studentId,
+    fullName:
+      normalizeText(data.fullName) ||
+      normalizeText(data.studentName) ||
+      normalizeText(data.name) ||
+      studentId,
+    course: normalizeCourse(data.course) || "Unassigned",
+    yearLevel: normalizeYearLevel(data.yearLevel ?? data.year) || "Unassigned",
+    status: normalizeEnrollmentStudentStatus(data.status),
+    syncStatus: normalizeEnrollmentSyncStatus(data.syncStatus),
+    fingerprintTemplateId: toPositiveInt(data.fingerprintTemplateId ?? data.templateId, -1),
+    enrolledByDevice: normalizeText(data.enrolledByDevice),
+    assignedDeviceId: normalizeText(data.assignedDeviceId),
+    remarks: normalizeText(data.remarks),
+  };
+}
+
+async function listEnrollmentSessionsForDevice(
+  device: DeviceContext,
+  limit: number
+): Promise<EnrollmentSessionSummary[]> {
+  const snapshot = await db
+    .collection("enrollmentSessions")
+    .limit(MAX_ENROLLMENT_SESSION_LIMIT)
+    .get();
+
+  return snapshot.docs
+    .map((doc) => enrollmentSessionSummaryFromSnapshot(doc))
+    .filter((session) => {
+      if (session.status === "completed" || session.status === "closed") {
+        return false;
+      }
+
+      return !session.pairedDeviceId || session.pairedDeviceId === device.deviceId;
+    })
+    .sort((left, right) => {
+      if (left.createdAtMs !== right.createdAtMs) {
+        return right.createdAtMs - left.createdAtMs;
+      }
+      return left.sessionId.localeCompare(right.sessionId);
+    })
+    .slice(0, limit);
+}
+
+async function readEnrollmentSessionSummary(sessionId: string): Promise<EnrollmentSessionSummary> {
+  const snap = await db.doc(`enrollmentSessions/${sessionId}`).get();
+  if (!snap.exists) {
+    throw new ApiError(404, "Enrollment session not found.");
+  }
+
+  return enrollmentSessionSummaryFromSnapshot(snap);
+}
+
+async function readEnrollmentSessionStudents(sessionId: string) {
+  const snapshot = await db
+    .collection(`enrollmentSessions/${sessionId}/students`)
+    .orderBy("fullName", "asc")
+    .get();
+
+  return snapshot.docs.map((doc) => ({
+    ref: doc.ref,
+    student: enrollmentSessionStudentFromSnapshot(doc),
+  }));
+}
+
+async function refreshEnrollmentSessionSummary(sessionId: string): Promise<EnrollmentSessionSummary> {
+  const sessionRef = db.doc(`enrollmentSessions/${sessionId}`);
+  const sessionSnap = await sessionRef.get();
+  if (!sessionSnap.exists) {
+    throw new ApiError(404, "Enrollment session not found.");
+  }
+
+  const current = enrollmentSessionSummaryFromSnapshot(sessionSnap);
+  const students = await readEnrollmentSessionStudents(sessionId);
+
+  let pendingCount = 0;
+  let downloadedCount = 0;
+  let enrolledCount = 0;
+  let syncedCount = 0;
+  let failedCount = 0;
+
+  students.forEach(({student}) => {
+    if (student.status === "pending") {
+      pendingCount += 1;
+      return;
+    }
+
+    downloadedCount += 1;
+
+    if (student.status === "enrolled" || student.status === "synced") {
+      enrolledCount += 1;
+    }
+    if (student.syncStatus === "synced" || student.status === "synced") {
+      syncedCount += 1;
+    }
+    if (student.status === "failed" || student.syncStatus === "failed") {
+      failedCount += 1;
+    }
+  });
+
+  let nextStatus: EnrollmentSessionStatus = current.pairedDeviceId ? "paired" : "pending";
+  const totalStudents = students.length || current.totalStudents;
+
+  if (current.status === "closed") {
+    nextStatus = "closed";
+  } else if (totalStudents > 0 && syncedCount === totalStudents && failedCount === 0) {
+    nextStatus = "completed";
+  } else if (totalStudents > 0 && syncedCount > 0 && syncedCount + failedCount >= totalStudents) {
+    nextStatus = "partially-completed";
+  } else if (enrolledCount > 0 || syncedCount > 0 || failedCount > 0) {
+    nextStatus = "enrolling";
+  } else if (downloadedCount > 0) {
+    nextStatus = "downloading";
+  }
+
+  await sessionRef.set(
+    {
+      totalStudents,
+      pendingCount,
+      downloadedCount,
+      enrolledCount,
+      syncedCount,
+      failedCount,
+      status: nextStatus,
+      completedAt: nextStatus === "completed" || nextStatus === "partially-completed" ? serverTimestamp() : null,
+      updatedAt: serverTimestamp(),
+    },
+    {merge: true}
+  );
+
+  return {
+    ...current,
+    totalStudents,
+    pendingCount,
+    downloadedCount,
+    enrolledCount,
+    syncedCount,
+    failedCount,
+    status: nextStatus,
+    updatedAtMs: Date.now(),
+  };
+}
+
+async function pairDeviceToEnrollmentSession(
+  device: DeviceContext,
+  sessionId: string
+): Promise<EnrollmentSessionSummary> {
+  const sessionRef = db.doc(`enrollmentSessions/${sessionId}`);
+  const sessionSnap = await sessionRef.get();
+  if (!sessionSnap.exists) {
+    throw new ApiError(404, "Enrollment session not found.");
+  }
+
+  const session = enrollmentSessionSummaryFromSnapshot(sessionSnap);
+  if (session.pairedDeviceId && session.pairedDeviceId !== device.deviceId) {
+    throw new ApiError(409, "Enrollment session is already paired to another device.");
+  }
+  if (session.status === "completed" || session.status === "closed") {
+    throw new ApiError(400, "Enrollment session is no longer available.");
+  }
+
+  await sessionRef.set(
+    {
+      pairedDeviceId: device.deviceId,
+      status: session.status === "pending" ? "paired" : session.status,
+      pairedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    },
+    {merge: true}
+  );
+
+  await device.ref.set(
+    {
+      activeEnrollmentSessionId: sessionId,
+      lastEnrollmentSessionPairedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    },
+    {merge: true}
+  );
+
+  return readEnrollmentSessionSummary(sessionId);
+}
+
+async function resolveDeviceEnrollmentSession(
+  device: DeviceContext,
+  explicitSessionId: string
+): Promise<EnrollmentSessionSummary> {
+  const sessionId = explicitSessionId || normalizeText(device.data.activeEnrollmentSessionId);
+  if (!sessionId) {
+    throw new ApiError(404, "Device is not paired to an enrollment session.");
+  }
+
+  const session = await readEnrollmentSessionSummary(sessionId);
+  if (session.pairedDeviceId && session.pairedDeviceId !== device.deviceId) {
+    throw new ApiError(403, "Device can only access its assigned enrollment session.");
+  }
+
+  return session;
+}
+
+async function markEnrollmentSessionDownloaded(
+  device: DeviceContext,
+  sessionId: string
+): Promise<Array<{ref: FirebaseFirestore.DocumentReference; student: EnrollmentSessionStudent}>> {
+  const session = await resolveDeviceEnrollmentSession(device, sessionId);
+  if (!session.pairedDeviceId) {
+    throw new ApiError(400, "Enrollment session must be paired before download.");
+  }
+
+  const students = await readEnrollmentSessionStudents(sessionId);
+  const batch = db.batch();
+
+  students.forEach(({ref, student}) => {
+    if (student.status === "pending") {
+      batch.set(
+        ref,
+        {
+          status: "downloaded",
+          syncStatus: student.syncStatus,
+          assignedDeviceId: device.deviceId,
+          downloadedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        {merge: true}
+      );
+    }
+  });
+
+  batch.set(
+    db.doc(`enrollmentSessions/${sessionId}`),
+    {
+      status: "downloading",
+      pairedDeviceId: device.deviceId,
+      lastDownloadedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    },
+    {merge: true}
+  );
+  await batch.commit();
+
+  await refreshEnrollmentSessionSummary(sessionId);
+  return readEnrollmentSessionStudents(sessionId);
+}
+
+async function listEnrollmentSessions(
+  limit: number
+): Promise<EnrollmentSessionSummary[]> {
+  const snapshot = await db
+    .collection("enrollmentSessions")
+    .limit(Math.min(limit, MAX_ENROLLMENT_SESSION_LIMIT))
+    .get();
+
+  return snapshot.docs
+    .map((doc) => enrollmentSessionSummaryFromSnapshot(doc))
+    .sort((left, right) => {
+      if (left.createdAtMs !== right.createdAtMs) {
+        return right.createdAtMs - left.createdAtMs;
+      }
+      return left.sessionId.localeCompare(right.sessionId);
+    })
+    .slice(0, limit);
+}
+
+async function assertStudentsNotInActiveEnrollmentSessions(
+  studentIds: string[]
+): Promise<void> {
+  const probeIds = dedupeStrings(studentIds).slice(0, 30);
+  if (probeIds.length === 0) {
+    return;
+  }
+
+  const snapshot = await db
+    .collection("enrollmentSessions")
+    .where("selectedStudentIds", "array-contains-any", probeIds)
+    .get();
+
+  for (const doc of snapshot.docs) {
+    const session = enrollmentSessionSummaryFromSnapshot(doc);
+    if (session.status === "completed" || session.status === "closed") {
+      continue;
+    }
+
+    const overlap = session.selectedStudentIds.filter((id) => probeIds.includes(id));
+    if (overlap.length > 0) {
+      throw new functions.https.HttpsError(
+        "already-exists",
+        "One or more students are already included in an active fingerprint enrollment session."
+      );
+    }
+  }
+}
+
+async function buildEnrollmentSessionStudentsFromIds(
+  studentIds: string[]
+): Promise<Array<EnrollmentSessionStudent & {studentUid: string}>> {
+  const uniqueIds = dedupeStrings(studentIds);
+  const [profilesById, portableStudentsById] = await Promise.all([
+    loadDocsById("profiles", uniqueIds),
+    loadDocsById("students", uniqueIds),
+  ]);
+
+  const rows = uniqueIds.map((studentId) => {
+    const merged = {
+      ...(profilesById.get(studentId) ?? {}),
+      ...(portableStudentsById.get(studentId) ?? {}),
+    };
+    const context = mapStudentContext(
+      studentId,
+      profilesById.get(studentId),
+      portableStudentsById.get(studentId),
+      ""
+    );
+
+    const alreadyHasFingerprint =
+      context.fingerprintTemplateId > 0 ||
+      normalizeLower(merged.fingerprintStatus) === "enrolled" ||
+      normalizeLower(merged.fingerprintStatus) === "active";
+
+    if (alreadyHasFingerprint) {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        `${context.studentName} already has a fingerprint record.`
+      );
+    }
+
+    return {
+      studentId: context.studentId,
+      studentUid: context.studentUid,
+      schoolId: context.schoolId,
+      fullName: context.studentName,
+      course: context.course,
+      yearLevel: context.yearLevel,
+      status: "pending" as EnrollmentStudentStatus,
+      syncStatus: "pending" as const,
+      fingerprintTemplateId: -1,
+      enrolledByDevice: "",
+      assignedDeviceId: "",
+      remarks: "",
+    };
+  });
+
+  return rows;
+}
+
+function enrollmentSessionPayload(session: EnrollmentSessionSummary) {
+  return {
+    sessionId: session.sessionId,
+    createdBy: session.createdBy,
+    createdByName: session.createdByName,
+    createdBySchoolId: session.createdBySchoolId,
+    status: session.status,
+    pairedDeviceId: session.pairedDeviceId,
+    totalStudents: session.totalStudents,
+    pendingCount: session.pendingCount,
+    downloadedCount: session.downloadedCount,
+    enrolledCount: session.enrolledCount,
+    syncedCount: session.syncedCount,
+    failedCount: session.failedCount,
+    selectedStudentIds: session.selectedStudentIds,
+    createdAtMs: session.createdAtMs,
+    updatedAtMs: session.updatedAtMs,
+  };
+}
+
+function enrollmentSessionStudentPayload(student: EnrollmentSessionStudent) {
+  return {
+    studentId: student.studentId,
+    studentUid: student.studentUid,
+    schoolId: student.schoolId,
+    fullName: student.fullName,
+    course: student.course,
+    yearLevel: student.yearLevel,
+    status: student.status,
+    syncStatus: student.syncStatus,
+    fingerprintTemplateId: student.fingerprintTemplateId,
+    enrolledByDevice: student.enrolledByDevice,
+    assignedDeviceId: student.assignedDeviceId,
+    remarks: student.remarks,
+  };
+}
+
 type EnrollmentCandidate = EventContextStudent & {
   eventId: string;
 };
@@ -717,6 +1237,28 @@ async function listPendingEnrollments(
   device: DeviceContext,
   limit: number
 ): Promise<EnrollmentCandidate[]> {
+  const activeEnrollmentSessionId = normalizeText(device.data.activeEnrollmentSessionId);
+  if (activeEnrollmentSessionId) {
+    const sessionStudents = await readEnrollmentSessionStudents(activeEnrollmentSessionId);
+    return sessionStudents
+      .filter(({student}) => student.syncStatus !== "synced" && student.status !== "failed")
+      .slice(0, limit)
+      .map(({student}) => ({
+        studentId: student.studentId,
+        studentUid: student.studentUid,
+        schoolId: student.schoolId,
+        studentName: student.fullName,
+        course: student.course,
+        yearLevel: student.yearLevel,
+        fingerprintTemplateId: student.fingerprintTemplateId,
+        fingerprintStatus: student.status,
+        fingerprintDeviceId: student.enrolledByDevice,
+        queueId: student.studentId,
+        registrationId: "",
+        eventId: activeEnrollmentSessionId,
+      }));
+  }
+
   const pairedEventId = normalizeText(device.pairingData?.eventId);
   const snapshot = await db
     .collection("enrollmentQueue")
@@ -802,6 +1344,225 @@ function resolveRecordedTimestamp(record: Record<string, unknown>) {
     timestamp: serverTimestamp(),
     epochSeconds: 0,
     iso: "",
+  };
+}
+
+async function syncEnrollmentResult(
+  device: DeviceContext,
+  record: Record<string, unknown>
+): Promise<{
+  recordId: string;
+  studentId: string;
+  status: EnrollmentResponseStatus;
+  message: string;
+}> {
+  const sessionId =
+    normalizeText(record.sessionId) ||
+    normalizeText(device.data.activeEnrollmentSessionId);
+  const studentId =
+    normalizeText(record.studentId) ||
+    normalizeText(record.studentUid) ||
+    normalizeText(record.uid);
+  const templateId = toPositiveInt(
+    record.fingerprintTemplateId ?? record.templateId,
+    -1
+  );
+  const recordId =
+    normalizeText(record.recordId) ||
+    `enrollment:${sessionId}:${studentId}`;
+  const requestedStatus = normalizeEnrollmentStudentStatus(
+    record.status ?? record.enrollmentStatus
+  );
+  const failedUpload =
+    requestedStatus === "failed" ||
+    normalizeEnrollmentSyncStatus(record.syncStatus) === "failed";
+
+  if (!sessionId || !studentId) {
+    return {
+      recordId,
+      studentId,
+      status: "failed",
+      message: "sessionId and studentId are required.",
+    };
+  }
+
+  if (!failedUpload && templateId <= 0) {
+    return {
+      recordId,
+      studentId,
+      status: "failed",
+      message: "fingerprintTemplateId must be a positive integer.",
+    };
+  }
+
+  const session = await resolveDeviceEnrollmentSession(device, sessionId);
+  if (session.status === "closed") {
+    return {
+      recordId,
+      studentId,
+      status: "failed",
+      message: "Enrollment session is already closed.",
+    };
+  }
+
+  const sessionRef = db.doc(`enrollmentSessions/${sessionId}`);
+  const sessionStudentRef = db.doc(`enrollmentSessions/${sessionId}/students/${studentId}`);
+  const portableStudentRef = db.doc(`students/${studentId}`);
+  const profileRef = db.doc(`profiles/${studentId}`);
+  const syncLogRef = db.doc(`devices/${device.deviceId}/syncLogs/${recordId}`);
+  const recordedTimestamp = resolveRecordedTimestamp(record);
+
+  let resultStatus: EnrollmentResponseStatus = "uploaded";
+  let resultMessage = failedUpload ?
+    "Enrollment marked as failed." :
+    "Fingerprint enrollment synced.";
+
+  await db.runTransaction(async (transaction) => {
+    const [
+      freshSessionSnap,
+      sessionStudentSnap,
+      portableStudentSnap,
+      profileSnap,
+      syncLogSnap,
+    ] = await transaction.getAll(
+      sessionRef,
+      sessionStudentRef,
+      portableStudentRef,
+      profileRef,
+      syncLogRef
+    );
+
+    if (!freshSessionSnap.exists || !sessionStudentSnap.exists) {
+      resultStatus = "failed";
+      resultMessage = "Enrollment session student was not found.";
+      return;
+    }
+
+    if (syncLogSnap.exists) {
+      resultStatus = "duplicate";
+      resultMessage = "Enrollment result was already processed.";
+      return;
+    }
+
+    const freshSession = enrollmentSessionSummaryFromSnapshot(freshSessionSnap);
+    if (freshSession.pairedDeviceId && freshSession.pairedDeviceId !== device.deviceId) {
+      resultStatus = "failed";
+      resultMessage = "Device can only sync its assigned enrollment session.";
+      return;
+    }
+
+    const sessionStudentData = sessionStudentSnap.data() ?? {};
+    if (normalizeEnrollmentSyncStatus(sessionStudentData.syncStatus) === "synced") {
+      resultStatus = "duplicate";
+      resultMessage = "Student fingerprint is already synced.";
+      return;
+    }
+
+    const mergedStudent = {
+      ...(profileSnap.exists ? profileSnap.data() ?? {} : {}),
+      ...(portableStudentSnap.exists ? portableStudentSnap.data() ?? {} : {}),
+      ...sessionStudentData,
+      ...record,
+    };
+
+    const sessionStudentPatch: Record<string, unknown> = {
+      status: failedUpload ? "failed" : "synced",
+      syncStatus: failedUpload ? "failed" : "synced",
+      fingerprintTemplateId: failedUpload ? sessionStudentData.fingerprintTemplateId ?? null : templateId,
+      enrolledByDevice: device.deviceId,
+      assignedDeviceId: device.deviceId,
+      remarks: normalizeText(record.remarks) || (failedUpload ? "Enrollment failed on device." : ""),
+      updatedAt: serverTimestamp(),
+      syncedAt: serverTimestamp(),
+    };
+
+    if (!failedUpload) {
+      sessionStudentPatch.enrolledAt = recordedTimestamp.timestamp;
+    }
+
+    transaction.set(sessionStudentRef, sessionStudentPatch, {merge: true});
+
+    if (!failedUpload) {
+      const portableStudentPatch = {
+        uid: studentId,
+        studentId,
+        schoolId: normalizeText(mergedStudent.schoolId) || studentId,
+        studentName:
+          normalizeText(mergedStudent.studentName) ||
+          normalizeText(mergedStudent.fullName) ||
+          normalizeText(mergedStudent.name) ||
+          studentId,
+        course: normalizeCourse(mergedStudent.course) || "Unassigned",
+        yearLevel:
+          normalizeYearLevel(mergedStudent.yearLevel ?? mergedStudent.year) || "Unassigned",
+        year:
+          normalizeYearLevel(mergedStudent.yearLevel ?? mergedStudent.year) || "Unassigned",
+        hasFingerprint: true,
+        fingerprintTemplateId: templateId,
+        templateId,
+        fingerprintStatus: "enrolled",
+        fingerprintDeviceId: device.deviceId,
+        fingerprintEnrolledAt: recordedTimestamp.timestamp,
+        latestEnrollmentSessionId: sessionId,
+        updatedAt: serverTimestamp(),
+      };
+
+      transaction.set(portableStudentRef, portableStudentPatch, {merge: true});
+      transaction.set(
+        profileRef,
+        {
+          hasFingerprint: true,
+          fingerprintTemplateId: templateId,
+          fingerprintStatus: "enrolled",
+          fingerprintDeviceId: device.deviceId,
+          fingerprintEnrolledAt: recordedTimestamp.timestamp,
+          latestEnrollmentSessionId: sessionId,
+          updatedAt: serverTimestamp(),
+        },
+        {merge: true}
+      );
+    }
+
+    transaction.set(
+      syncLogRef,
+      {
+        recordId,
+        sessionId,
+        studentId,
+        schoolId: normalizeText(mergedStudent.schoolId) || studentId,
+        studentName:
+          normalizeText(mergedStudent.studentName) ||
+          normalizeText(mergedStudent.fullName) ||
+          normalizeText(mergedStudent.name) ||
+          studentId,
+        deviceId: device.deviceId,
+        fingerprintTemplateId: templateId > 0 ? templateId : null,
+        syncStatus: failedUpload ? "failed" : "uploaded",
+        message: resultMessage,
+        attemptedAt: serverTimestamp(),
+        processedAt: serverTimestamp(),
+        source: "portable-device",
+      },
+      {merge: true}
+    );
+
+    transaction.set(
+      device.ref,
+      {
+        lastEnrollmentSyncAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      },
+      {merge: true}
+    );
+  });
+
+  await refreshEnrollmentSessionSummary(sessionId);
+
+  return {
+    recordId,
+    studentId,
+    status: resultStatus,
+    message: resultMessage,
   };
 }
 
@@ -1088,6 +1849,162 @@ async function syncAttendanceRecord(
   };
 }
 
+export const ecListFingerprintEnrollmentSessions = functions
+  .region(REGION)
+  .https.onCall(async (data, context) => {
+    await requireAdminOrEC(context);
+
+    const body = asRecord(data);
+    const limit = parseQueryInt(
+      body.limit,
+      DEFAULT_ENROLLMENT_SESSION_LIMIT,
+      1,
+      MAX_ENROLLMENT_SESSION_LIMIT
+    );
+    const sessions = await listEnrollmentSessions(limit);
+
+    return {
+      sessions: sessions.map((session) => enrollmentSessionPayload(session)),
+    };
+  });
+
+export const ecGetFingerprintEnrollmentSessionDetail = functions
+  .region(REGION)
+  .https.onCall(async (data, context) => {
+    await requireAdminOrEC(context);
+
+    const body = asRecord(data);
+    const sessionId = normalizeText(body.sessionId);
+    if (!sessionId) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "sessionId is required."
+      );
+    }
+
+    const session = await refreshEnrollmentSessionSummary(sessionId);
+    const students = await readEnrollmentSessionStudents(sessionId);
+
+    return {
+      session: enrollmentSessionPayload(session),
+      students: students.map(({student}) => enrollmentSessionStudentPayload(student)),
+    };
+  });
+
+export const ecCreateFingerprintEnrollmentSession = functions
+  .region(REGION)
+  .https.onCall(async (data, context) => {
+    await requireAdminOrEC(context);
+
+    const body = asRecord(data);
+    const studentIds = dedupeStrings(asStringArray(body.studentIds));
+    if (studentIds.length === 0) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "studentIds must contain at least one student."
+      );
+    }
+
+    await assertStudentsNotInActiveEnrollmentSessions(studentIds);
+
+    const [studentRows, callerProfileSnap] = await Promise.all([
+      buildEnrollmentSessionStudentsFromIds(studentIds),
+      db.doc(`profiles/${context.auth?.uid}`).get(),
+    ]);
+
+    const callerProfile = callerProfileSnap.exists ? callerProfileSnap.data() ?? {} : {};
+    const createdBy = normalizeText(context.auth?.uid);
+    const createdBySchoolId =
+      normalizeText(callerProfile.schoolId) ||
+      normalizeText(context.auth?.token.email) ||
+      createdBy;
+    const createdByName =
+      normalizeText(callerProfile.name) ||
+      normalizeText(callerProfile.studentName) ||
+      createdBySchoolId;
+
+    const sessionRef = db.collection("enrollmentSessions").doc();
+    const batch = db.batch();
+
+    batch.set(sessionRef, {
+      sessionId: sessionRef.id,
+      createdBy,
+      createdByName,
+      createdBySchoolId,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      status: "pending",
+      pairedDeviceId: "",
+      targetDeviceId: "",
+      totalStudents: studentRows.length,
+      pendingCount: studentRows.length,
+      downloadedCount: 0,
+      enrolledCount: 0,
+      syncedCount: 0,
+      failedCount: 0,
+      selectedStudentIds: studentIds,
+    });
+
+    studentRows.forEach((student) => {
+      batch.set(
+        db.doc(`enrollmentSessions/${sessionRef.id}/students/${student.studentId}`),
+        {
+          enrollmentSessionId: sessionRef.id,
+          studentId: student.studentId,
+          studentUid: student.studentUid,
+          schoolId: student.schoolId,
+          fullName: student.fullName,
+          course: student.course,
+          yearLevel: student.yearLevel,
+          status: "pending",
+          syncStatus: "pending",
+          fingerprintTemplateId: null,
+          enrolledByDevice: "",
+          assignedDeviceId: "",
+          remarks: "",
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }
+      );
+    });
+
+    await batch.commit();
+    const session = await readEnrollmentSessionSummary(sessionRef.id);
+
+    return {
+      session: enrollmentSessionPayload(session),
+    };
+  });
+
+export const ecCloseFingerprintEnrollmentSession = functions
+  .region(REGION)
+  .https.onCall(async (data, context) => {
+    await requireAdminOrEC(context);
+
+    const body = asRecord(data);
+    const sessionId = normalizeText(body.sessionId);
+    if (!sessionId) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "sessionId is required."
+      );
+    }
+
+    await db.doc(`enrollmentSessions/${sessionId}`).set(
+      {
+        status: "closed",
+        closedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      },
+      {merge: true}
+    );
+
+    const session = await readEnrollmentSessionSummary(sessionId);
+    return {
+      session: enrollmentSessionPayload(session),
+    };
+  });
+
 export const campusDeviceCreateSession = deviceEndpoint(
   "POST",
   "secret",
@@ -1207,6 +2124,158 @@ export const campusDevicePairedEventContext = deviceEndpoint(
   }
 );
 
+export const campusDeviceListEnrollmentSessions = deviceEndpoint(
+  "GET",
+  "session-or-secret",
+  async (req, res, device) => {
+    const limit = parseQueryInt(
+      req.query.limit,
+      DEFAULT_ENROLLMENT_SESSION_LIMIT,
+      1,
+      MAX_ENROLLMENT_SESSION_LIMIT
+    );
+    const sessions = await listEnrollmentSessionsForDevice(device, limit);
+
+    sendJson(res, 200, {
+      sessions: sessions.map((session) => ({
+        sessionId: session.sessionId,
+        createdBy: session.createdBy,
+        createdByName: session.createdByName,
+        createdBySchoolId: session.createdBySchoolId,
+        status: session.status,
+        pairedDeviceId: session.pairedDeviceId,
+        totalStudents: session.totalStudents,
+        pendingCount: session.pendingCount,
+        downloadedCount: session.downloadedCount,
+        enrolledCount: session.enrolledCount,
+        syncedCount: session.syncedCount,
+        failedCount: session.failedCount,
+        createdAtMs: session.createdAtMs,
+        updatedAtMs: session.updatedAtMs,
+      })),
+    });
+  }
+);
+
+export const campusDevicePairEnrollmentSession = deviceEndpoint(
+  "POST",
+  "session-or-secret",
+  async (req, res, device) => {
+    const body = asRecord(req.body);
+    const sessionId = normalizeText(body.sessionId);
+    if (!sessionId) {
+      throw new ApiError(400, "sessionId is required.");
+    }
+
+    const session = await pairDeviceToEnrollmentSession(device, sessionId);
+    sendJson(res, 200, {
+      status: "paired",
+      session: {
+        sessionId: session.sessionId,
+        createdBy: session.createdBy,
+        createdByName: session.createdByName,
+        createdBySchoolId: session.createdBySchoolId,
+        status: session.status,
+        pairedDeviceId: session.pairedDeviceId,
+        totalStudents: session.totalStudents,
+        pendingCount: session.pendingCount,
+        downloadedCount: session.downloadedCount,
+        enrolledCount: session.enrolledCount,
+        syncedCount: session.syncedCount,
+        failedCount: session.failedCount,
+      },
+    });
+  }
+);
+
+export const campusDeviceDownloadEnrollmentSession = deviceEndpoint(
+  "POST",
+  "session-or-secret",
+  async (req, res, device) => {
+    const body = asRecord(req.body);
+    const sessionId = normalizeText(body.sessionId);
+    const students = await markEnrollmentSessionDownloaded(device, sessionId);
+    const session = await readEnrollmentSessionSummary(
+      sessionId || normalizeText(device.data.activeEnrollmentSessionId)
+    );
+
+    sendJson(res, 200, {
+      session: {
+        sessionId: session.sessionId,
+        createdBy: session.createdBy,
+        createdByName: session.createdByName,
+        createdBySchoolId: session.createdBySchoolId,
+        status: session.status,
+        pairedDeviceId: session.pairedDeviceId,
+        totalStudents: session.totalStudents,
+        pendingCount: session.pendingCount,
+        downloadedCount: session.downloadedCount,
+        enrolledCount: session.enrolledCount,
+        syncedCount: session.syncedCount,
+        failedCount: session.failedCount,
+      },
+      students: students.map(({student}) => ({
+        sessionId: session.sessionId,
+        studentId: student.studentId,
+        studentUid: student.studentUid,
+        schoolId: student.schoolId,
+        studentName: student.fullName,
+        course: student.course,
+        yearLevel: student.yearLevel,
+        fingerprintTemplateId: student.fingerprintTemplateId,
+        enrollmentStatus: student.status,
+        syncStatus: student.syncStatus,
+        remarks: student.remarks,
+      })),
+    });
+  }
+);
+
+export const campusDeviceSyncEnrollmentResults = deviceEndpoint(
+  "POST",
+  "session-or-secret",
+  async (req, res, device) => {
+    const body = asRecord(req.body);
+    const rawResults = Array.isArray(body.results) ? body.results : [body];
+
+    if (rawResults.length > MAX_SYNC_BATCH_LIMIT) {
+      throw new ApiError(400, `results must contain at most ${MAX_SYNC_BATCH_LIMIT} items.`);
+    }
+
+    const results: Array<{
+      recordId: string;
+      studentId: string;
+      status: EnrollmentResponseStatus;
+      message: string;
+    }> = [];
+
+    for (const rawResult of rawResults.slice(0, DEFAULT_SYNC_BATCH_LIMIT)) {
+      const result = await syncEnrollmentResult(device, asRecord(rawResult));
+      results.push(result);
+    }
+
+    const sessionId =
+      normalizeText(body.sessionId) ||
+      normalizeText(device.data.activeEnrollmentSessionId);
+    const session = sessionId ? await readEnrollmentSessionSummary(sessionId) : null;
+
+    sendJson(res, 200, {
+      session: session ? {
+        sessionId: session.sessionId,
+        status: session.status,
+        pairedDeviceId: session.pairedDeviceId,
+        totalStudents: session.totalStudents,
+        pendingCount: session.pendingCount,
+        downloadedCount: session.downloadedCount,
+        enrolledCount: session.enrolledCount,
+        syncedCount: session.syncedCount,
+        failedCount: session.failedCount,
+      } : null,
+      results,
+    });
+  }
+);
+
 export const campusDevicePendingEnrollments = deviceEndpoint(
   "GET",
   "session-or-secret",
@@ -1240,6 +2309,9 @@ export const campusDeviceSubmitEnrollment = deviceEndpoint(
   "session-or-secret",
   async (req, res, device) => {
     const body = asRecord(req.body);
+    const sessionId =
+      normalizeText(body.sessionId) ||
+      normalizeText(device.data.activeEnrollmentSessionId);
     const studentId =
       normalizeText(body.studentId) ||
       normalizeText(body.studentUid);
@@ -1251,6 +2323,25 @@ export const campusDeviceSubmitEnrollment = deviceEndpoint(
     const eventId =
       normalizeText(body.eventId) ||
       normalizeText(device.pairingData?.eventId);
+
+    if (sessionId) {
+      const result = await syncEnrollmentResult(device, {
+        ...body,
+        sessionId,
+        studentId,
+        fingerprintTemplateId: templateId,
+      });
+
+      sendJson(res, 200, {
+        status: result.status === "uploaded" ? "enrolled" : result.status,
+        sessionId,
+        studentId: result.studentId,
+        fingerprintTemplateId: templateId,
+        deviceId: device.deviceId,
+        message: result.message,
+      });
+      return;
+    }
 
     if (!studentId) {
       throw new ApiError(400, "studentId is required.");

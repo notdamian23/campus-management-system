@@ -31,7 +31,14 @@ function getCardClasses(type: StudentNotificationType) {
 type NotificationSortMode = "ascending" | "descending";
 
 export default function NotificationsPage() {
-  const { notifications, loading, error, markNotificationRead } = useStudentPortal();
+  const {
+    notifications,
+    loading,
+    error,
+    unreadNotificationsCount,
+    markNotificationRead,
+    markAllNotificationsRead,
+  } = useStudentPortal();
   const [sortMode, setSortMode] = useState<NotificationSortMode>("descending");
 
   const sortedNotifications = useMemo(() => {
@@ -73,6 +80,16 @@ export default function NotificationsPage() {
             <DropdownItem key="descending">Descending</DropdownItem>
           </DropdownMenu>
         </Dropdown>
+
+        <div className="mt-3">
+          <Button
+            className="bg-[#7b0000] text-white"
+            onPress={markAllNotificationsRead}
+            isDisabled={unreadNotificationsCount === 0}
+          >
+            Mark All As Read
+          </Button>
+        </div>
       </div>
 
       {error && (

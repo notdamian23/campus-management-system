@@ -41,11 +41,19 @@ StudentInfo studentFromJson(JsonObjectConst object) {
   student.studentName = String(object["studentName"] | object["name"] | "");
   student.course = String(object["course"] | "");
   student.yearLevel = String(object["yearLevel"] | object["year"] | "");
+  student.sessionId = String(object["sessionId"] | "");
   student.queueId = String(object["queueId"] | "");
   student.fingerprintStatus = String(object["fingerprintStatus"] | "");
   student.fingerprintDeviceId = String(object["fingerprintDeviceId"] | "");
+  student.enrollmentStatus =
+      String(object["enrollmentStatus"] | object["status"] | "");
+  student.syncStatus = String(object["syncStatus"] | "");
+  student.remarks = String(object["remarks"] | "");
+  student.enrolledAtIso =
+      String(object["enrolledAtIso"] | object["timestampIso"] | "");
   student.templateId =
       object["fingerprintTemplateId"] | object["templateId"] | -1;
+  student.enrollmentSynced = student.syncStatus == "synced";
   return student;
 }
 
@@ -101,6 +109,93 @@ bool BackendClient::fetchLatestEvent(EventInfo &event, String &error) {
     return false;
   }
   event = events.front();
+  return true;
+}
+
+bool BackendClient::fetchEnrollmentSessions(
+    std::vector<EnrollmentSessionInfo> &sessions, String &error) {
+  DynamicJsonDocument response(16384);
+  if (!requestJson("GET",
+                   String("/campusDeviceListEnrollmentSessions?limit=") +
+                       String(CampusConfig::kPendingEnrollmentLimit),
+                   nullptr, response, error)) {
+    return false;
+  }
+
+  sessions.clear();
+  JsonArray array = response["sessions"].as<JsonArray>();
+  if (array.isNull()) {
+    return true;
+  }
+
+  for (JsonObjectConst item : array) {
+    EnrollmentSessionInfo session;
+    if (parseEnrollmentSession(item, session, error) && session.isValid()) {
+      sessions.push_back(session);
+    }
+  }
+  return true;
+}
+
+bool BackendClient::pairEnrollmentSession(const String &sessionId,
+                                          EnrollmentSessionInfo &session,
+                                          String &error) {
+  DynamicJsonDocument payload(256);
+  payload["sessionId"] = sessionId;
+
+  String body;
+  serializeJson(payload, body);
+
+  DynamicJsonDocument response(4096);
+  if (!requestJson("POST", "/campusDevicePairEnrollmentSession", &body,
+                   response, error)) {
+    return false;
+  }
+
+  JsonObject sessionObject = response["session"];
+  if (sessionObject.isNull()) {
+    error = "Session payload missing";
+    return false;
+  }
+
+  return parseEnrollmentSession(sessionObject, session, error);
+}
+
+bool BackendClient::downloadEnrollmentSession(const String &sessionId,
+                                              EnrollmentSessionInfo &session,
+                                              std::vector<StudentInfo> &students,
+                                              String &error) {
+  DynamicJsonDocument payload(256);
+  payload["sessionId"] = sessionId;
+
+  String body;
+  serializeJson(payload, body);
+
+  DynamicJsonDocument response(24576);
+  if (!requestJson("POST", "/campusDeviceDownloadEnrollmentSession", &body,
+                   response, error)) {
+    return false;
+  }
+
+  JsonObject sessionObject = response["session"];
+  if (sessionObject.isNull() || !parseEnrollmentSession(sessionObject, session, error)) {
+    error = error.isEmpty() ? "Session payload missing" : error;
+    return false;
+  }
+
+  students.clear();
+  JsonArray array = response["students"].as<JsonArray>();
+  if (array.isNull()) {
+    return true;
+  }
+
+  for (JsonObjectConst item : array) {
+    StudentInfo student = studentFromJson(item);
+    student.sessionId = session.sessionId;
+    if (student.isValid()) {
+      students.push_back(student);
+    }
+  }
   return true;
 }
 
@@ -170,13 +265,20 @@ bool BackendClient::fetchPendingEnrollments(std::vector<StudentInfo> &students,
 }
 
 bool BackendClient::submitEnrollment(const StudentInfo &student, String &error) {
-  DynamicJsonDocument payload(768);
+  DynamicJsonDocument payload(1024);
+  if (!student.sessionId.isEmpty()) {
+    payload["sessionId"] = student.sessionId;
+  }
   payload["studentId"] = student.studentUid;
   payload["schoolId"] = student.schoolId;
   payload["studentName"] = student.studentName;
   payload["course"] = student.course;
   payload["yearLevel"] = student.yearLevel;
   payload["queueId"] = student.queueId;
+  payload["status"] = student.enrollmentStatus;
+  payload["syncStatus"] = student.syncStatus;
+  payload["remarks"] = student.remarks;
+  payload["timestampIso"] = student.enrolledAtIso;
   payload["fingerprintTemplateId"] = student.templateId;
 
   String body;
@@ -260,6 +362,28 @@ bool BackendClient::requestSession(String &error) {
   sessionToken_ = String(response["sessionToken"] | "");
   if (sessionToken_.isEmpty()) {
     error = "Session token missing";
+    return false;
+  }
+  return true;
+}
+
+bool BackendClient::parseEnrollmentSession(JsonObjectConst object,
+                                           EnrollmentSessionInfo &session,
+                                           String &error) {
+  session.sessionId = String(object["sessionId"] | "");
+  session.createdBy = String(object["createdBy"] | "");
+  session.createdByName = String(object["createdByName"] | "");
+  session.createdBySchoolId = String(object["createdBySchoolId"] | "");
+  session.status = String(object["status"] | "");
+  session.pairedDeviceId = String(object["pairedDeviceId"] | "");
+  session.totalStudents = object["totalStudents"] | 0;
+  session.pendingCount = object["pendingCount"] | 0;
+  session.downloadedCount = object["downloadedCount"] | 0;
+  session.enrolledCount = object["enrolledCount"] | 0;
+  session.syncedCount = object["syncedCount"] | 0;
+  session.failedCount = object["failedCount"] | 0;
+  if (!session.isValid()) {
+    error = "Session ID missing";
     return false;
   }
   return true;

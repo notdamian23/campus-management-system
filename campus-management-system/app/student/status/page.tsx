@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { Button } from "@heroui/button";
 import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
@@ -39,6 +41,7 @@ export default function StudentStatus() {
   );
   const [sortMode, setSortMode] = useState("default");
   const [isMobile, setIsMobile] = useState(false);
+  const [inactiveModalOpen, setInactiveModalOpen] = useState(false);
   const [attendedPage, setAttendedPage] = useState(1);
   const [missedPage, setMissedPage] = useState(1);
   const [paymentsPage, setPaymentsPage] = useState(1);
@@ -155,12 +158,41 @@ export default function StudentStatus() {
     if (filter === "payments") setPaymentsPage(1);
   }, [filter]);
 
+  useEffect(() => {
+    setInactiveModalOpen(profile?.accountStatus === "Inactive");
+  }, [profile?.accountStatus]);
+
   const avatarLabel = profile?.studentName
     ? initialsFromName(profile.studentName)
     : "ST";
 
   return (
     <div className="space-y-6 sm:space-y-8">
+      <Modal
+        isOpen={inactiveModalOpen}
+        onOpenChange={setInactiveModalOpen}
+        isDismissable={false}
+        hideCloseButton
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>Account Inactive</ModalHeader>
+              <ModalBody>
+                <p className="text-sm text-campus-text-secondary">
+                  Approach ec member to make account active.
+                </p>
+              </ModalBody>
+              <ModalFooter>
+                <Button className="bg-[#7b0000] text-white" onPress={onClose}>
+                  Okay
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
       <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b71f1f] to-[#f09a4a] text-white">
         <CardBody className="flex flex-col gap-4 p-5 sm:p-6 sm:flex-row sm:items-center">
           <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/15 text-lg font-bold">

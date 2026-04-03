@@ -16,6 +16,7 @@ function redirectToLogin(req: NextRequest) {
 
 export function middleware(req: NextRequest) {
     const { pathname } = req.nextUrl;
+    const adminCanUseEcStudentLookup = pathname === "/ecmember/students";
 
     // Ignore Next internals + static assets
     if (
@@ -78,7 +79,7 @@ export function middleware(req: NextRequest) {
         return NextResponse.redirect(url);
     }
 
-    if (pathname.startsWith("/ecmember") && role !== "ec") {
+    if (pathname.startsWith("/ecmember") && role !== "ec" && !(role === "admin" && adminCanUseEcStudentLookup)) {
         const url = req.nextUrl.clone();
         url.pathname = ROLE_HOME[role ?? ""] ?? "/";
         return NextResponse.redirect(url);

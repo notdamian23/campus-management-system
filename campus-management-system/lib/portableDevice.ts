@@ -1,6 +1,7 @@
 export const PORTABLE_DEVICE_COLLECTIONS = {
   devices: "devices",
   devicePairings: "devicePairings",
+  enrollmentSessions: "enrollmentSessions",
   students: "students",
   enrollmentQueue: "enrollmentQueue",
   syncLogs: "syncLogs",
@@ -17,6 +18,22 @@ export type PortableDeviceEnrollmentStatus =
 export type PortableDeviceSyncStatus =
   | "uploaded"
   | "duplicate"
+  | "failed";
+
+export type PortableDeviceEnrollmentSessionStatus =
+  | "pending"
+  | "paired"
+  | "downloading"
+  | "enrolling"
+  | "completed"
+  | "partially-completed"
+  | "closed";
+
+export type PortableDeviceEnrollmentStudentStatus =
+  | "pending"
+  | "downloaded"
+  | "enrolled"
+  | "synced"
   | "failed";
 
 export type PortableDeviceEventSummary = {
@@ -135,6 +152,50 @@ export type PortableDeviceSyncLogDoc = {
   source: "portable-device";
 };
 
+export type PortableDeviceEnrollmentSessionDoc = {
+  sessionId: string;
+  createdBy: string;
+  createdByName?: string;
+  createdBySchoolId?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+  status: PortableDeviceEnrollmentSessionStatus;
+  pairedDeviceId?: string;
+  targetDeviceId?: string;
+  totalStudents: number;
+  pendingCount: number;
+  downloadedCount: number;
+  enrolledCount: number;
+  syncedCount: number;
+  failedCount: number;
+  selectedStudentIds?: string[];
+  closedAt?: unknown;
+  lastDownloadedAt?: unknown;
+  lastEnrollmentSyncAt?: unknown;
+  completedAt?: unknown;
+};
+
+export type PortableDeviceEnrollmentSessionStudentDoc = {
+  enrollmentSessionId: string;
+  studentId: string;
+  studentUid?: string;
+  schoolId: string;
+  fullName: string;
+  course: string;
+  yearLevel: string;
+  status: PortableDeviceEnrollmentStudentStatus;
+  syncStatus: "pending" | "synced" | "failed";
+  fingerprintTemplateId?: number;
+  enrolledAt?: unknown;
+  downloadedAt?: unknown;
+  syncedAt?: unknown;
+  enrolledByDevice?: string;
+  assignedDeviceId?: string;
+  remarks?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+};
+
 export type PortableDeviceSessionResponse = {
   sessionToken: string;
   expiresAtMs: number;
@@ -176,6 +237,14 @@ export function portableAttendancePath(eventId: string, studentId: string) {
   ] as const;
 }
 
+export function portableEnrollmentSessionStudentsPath(sessionId: string) {
+  return [
+    PORTABLE_DEVICE_COLLECTIONS.enrollmentSessions,
+    sessionId,
+    PORTABLE_DEVICE_COLLECTIONS.students,
+  ] as const;
+}
+
 export function createEnrollmentQueueDraft(
   input: Omit<PortableDeviceEnrollmentQueueDoc, "status">
 ): PortableDeviceEnrollmentQueueDoc {
@@ -184,4 +253,30 @@ export function createEnrollmentQueueDraft(
     yearLevel: normalizePortableYearLevel(input.yearLevel),
     status: "pending",
   };
+}
+
+export function normalizePortableEnrollmentSessionStatus(
+  value: unknown
+): PortableDeviceEnrollmentSessionStatus {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (raw === "paired") return "paired";
+  if (raw === "downloading") return "downloading";
+  if (raw === "enrolling") return "enrolling";
+  if (raw === "completed") return "completed";
+  if (raw === "partially-completed" || raw === "partially completed") {
+    return "partially-completed";
+  }
+  if (raw === "closed") return "closed";
+  return "pending";
+}
+
+export function normalizePortableEnrollmentStudentStatus(
+  value: unknown
+): PortableDeviceEnrollmentStudentStatus {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (raw === "downloaded") return "downloaded";
+  if (raw === "enrolled") return "enrolled";
+  if (raw === "synced") return "synced";
+  if (raw === "failed") return "failed";
+  return "pending";
 }

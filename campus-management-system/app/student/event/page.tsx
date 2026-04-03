@@ -48,15 +48,15 @@ function eventStatusChip(status: StudentEventStatus) {
 function getEventTileStyle(status: StudentEventStatus) {
   if (status === "Missed") {
     return {
-      backgroundColor: "#310413",
-      borderLeftColor: "#f7719f",
+      backgroundColor: "#FFE8EE",
+      borderLeftColor: "#F87171",
     };
   }
 
   if (status === "Attended") {
     return {
-      backgroundColor: "#A2E9C1",
-      borderLeftColor: "#64cf95",
+      backgroundColor: "#DCFCE7",
+      borderLeftColor: "#4ADE80",
     };
   }
 
@@ -80,6 +80,7 @@ function matchesStatusFilter(item: StudentEvent, filter: EventStatusFilter) {
 
 export default function StudentEvents() {
   const {
+    profile,
     events,
     loading,
     error,
@@ -272,6 +273,7 @@ export default function StudentEvents() {
                   const open = isOpen(item.id);
                   const registered = registeredSet.has(item.id);
                   const canRegister = item.status === "Pre-registration";
+                  const accountInactive = profile?.accountStatus === "Inactive";
                   const requirementText = item.withPayment
                     ? "Bring payment receipt if required."
                     : "Follow event instructions from EC.";
@@ -331,18 +333,28 @@ export default function StudentEvents() {
                             </p>
 
                             {canRegister && (
-                              <CampusButton
-                                variant="secondary"
-                                className="mt-3 w-full sm:w-auto"
-                                disabled={registered || registeringId === item.id}
-                                onClick={() => handleRegister(item.id)}
-                              >
-                                {registered
-                                  ? "Registered"
-                                  : registeringId === item.id
-                                    ? "Registering..."
-                                    : "Register"}
-                              </CampusButton>
+                              <div className="mt-3 space-y-2">
+                                <CampusButton
+                                  variant="secondary"
+                                  className="w-full sm:w-auto"
+                                  disabled={registered || registeringId === item.id || accountInactive}
+                                  onClick={() => handleRegister(item.id)}
+                                >
+                                  {registered
+                                    ? "Registered"
+                                    : registeringId === item.id
+                                      ? "Registering..."
+                                      : accountInactive
+                                        ? "Account Inactive"
+                                        : "Register"}
+                                </CampusButton>
+
+                                {accountInactive && (
+                                  <p className="text-xs text-red-700">
+                                    Approach ec member to make account active.
+                                  </p>
+                                )}
+                              </div>
                             )}
                           </div>
                         )}

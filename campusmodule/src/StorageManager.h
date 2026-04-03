@@ -29,6 +29,10 @@ class StorageManager {
   void setLastKnownEpoch(uint64_t epoch);
   String deviceId() const;
 
+  EnrollmentSessionInfo loadCurrentEnrollmentSession() const;
+  bool saveCurrentEnrollmentSession(const EnrollmentSessionInfo &session);
+  bool clearCurrentEnrollmentSession();
+
   std::vector<StudentInfo> loadPendingStudents() const;
   bool savePendingStudents(const std::vector<StudentInfo> &students);
 
@@ -48,10 +52,15 @@ class StorageManager {
  private:
   bool writePendingStudents(const std::vector<StudentInfo> &students) const;
   bool writeFingerprintMappings(const std::vector<StudentInfo> &students) const;
+  bool writeStudentList(const char *path, const std::vector<StudentInfo> &students) const;
   bool writeAttendanceRecords(const std::vector<AttendanceRecord> &records) const;
+  bool writeCurrentEnrollmentSession(const EnrollmentSessionInfo &session) const;
   bool writePairedEventContext(const EventInfo &event,
                                const std::vector<StudentInfo> &students,
                                const std::vector<String> &recordedStudentIds) const;
+  bool updateEnrollmentArtifacts(const StudentInfo &student);
+  bool removeFromSyncQueue(const String &studentUid);
+  bool saveDeviceConfigSnapshot() const;
   bool backupAttendanceToSd(const AttendanceRecord &record);
 
   mutable Preferences prefs_;

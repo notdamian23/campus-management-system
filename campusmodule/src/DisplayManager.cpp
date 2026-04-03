@@ -34,6 +34,7 @@ bool DisplayManager::begin() {
   lcd_->backlight();
   lcd_->clear();
   ready_ = true;
+  hasFrame_ = false;
   return true;
 }
 
@@ -44,19 +45,42 @@ bool DisplayManager::isReady() const {
 void DisplayManager::clear() {
   if (ready_) {
     lcd_->clear();
+    hasFrame_ = false;
+    for (auto &row : lastRows_) {
+      row = "";
+    }
   }
 }
 
 void DisplayManager::show(const String &line1, const String &line2) {
+  showLines(line1, line2, "", "");
+}
+
+void DisplayManager::showLines(const String &line1, const String &line2,
+                               const String &line3, const String &line4) {
   if (!ready_) {
     return;
   }
 
-  lcd_->clear();
-  lcd_->setCursor(0, 0);
-  lcd_->print(fit(line1));
-  lcd_->setCursor(0, 1);
-  lcd_->print(fit(line2));
+  const String rows[] = {
+      fit(line1),
+      fit(line2),
+      fit(line3),
+      fit(line4),
+  };
+
+  if (!hasFrame_) {
+    lcd_->clear();
+  }
+
+  for (uint8_t row = 0; row < CampusConfig::kLcdRows && row < 4; ++row) {
+    if (!hasFrame_ || lastRows_[row] != rows[row]) {
+      printRow(row, rows[row]);
+      lastRows_[row] = rows[row];
+    }
+  }
+
+  hasFrame_ = true;
 }
 
 void DisplayManager::showMenu(const String &title, const char *const items[],
@@ -64,8 +88,6 @@ void DisplayManager::showMenu(const String &title, const char *const items[],
   if (!ready_) {
     return;
   }
-
-  lcd_->clear();
 
   String header = title;
   if (total > 0) {
@@ -75,11 +97,9 @@ void DisplayManager::showMenu(const String &title, const char *const items[],
     header += String(total);
   }
 
-  lcd_->setCursor(0, 0);
-  lcd_->print(center(header));
-
   const int visibleItemRows = CampusConfig::kLcdRows > 1 ? CampusConfig::kLcdRows - 1 : 0;
   if (items == nullptr || total <= 0 || visibleItemRows <= 0) {
+    showLines(center(header), "", "", "");
     return;
   }
 
@@ -93,18 +113,59 @@ void DisplayManager::showMenu(const String &title, const char *const items[],
     windowStart = maxWindowStart;
   }
 
+  String row1 = center(header);
+  String row2 = "";
+  String row3 = "";
+  String row4 = "";
+
   for (int row = 0; row < visibleItemRows; ++row) {
     const int itemIndex = windowStart + row;
-    lcd_->setCursor(0, row + 1);
+    String line = "";
     if (itemIndex >= total) {
-      lcd_->print(fit(""));
-      continue;
+      line = "";
+    } else {
+      line = itemIndex == selectedIndex ? ">" : " ";
+      line += items[itemIndex];
     }
 
-    String line = itemIndex == selectedIndex ? ">" : " ";
-    line += items[itemIndex];
-    lcd_->print(fit(line));
+    if (row == 0) {
+      row2 = line;
+    } else if (row == 1) {
+      row3 = line;
+    } else if (row == 2) {
+      row4 = line;
+    }
   }
+
+  showLines(row1, row2, row3, row4);
+}
+
+void DisplayManager::showEnrollmentSession(const EnrollmentSessionInfo &session,
+                                           int index, int total) {
+  String line1 = "Enroll Session";
+  String line2 = session.sessionId;
+  if (total > 0) {
+    line2 += " ";
+    line2 += String(index + 1);
+    line2 += "/";
+    line2 += String(total);
+  }
+
+  String line3 = "Stat:" + session.status + " Q:";
+  line3 += String(session.totalStudents);
+  line3 += " S:";
+  line3 += String(session.syncedCount);
+  String line4 = "UP/DN SEL BK";
+  if (line4.length() < CampusConfig::kLcdColumns) {
+    line4 += " ";
+  }
+  line4 += String(index + 1);
+  line4 += "/";
+  line4 += String(total);
+  if (line4.length() > CampusConfig::kLcdColumns) {
+    line4 = line4.substring(0, CampusConfig::kLcdColumns);
+  }
+  showLines(line1, line2, line3, line4);
 }
 
 String DisplayManager::center(const String &value) const {
@@ -139,7 +200,23 @@ void DisplayManager::showStudent(const StudentInfo &student, int index, int tota
     line2 += "/";
     line2 += String(total);
   }
-  show(line1, line2);
+
+  String line3 = student.course;
+  if (!student.yearLevel.isEmpty()) {
+    if (!line3.isEmpty()) {
+      line3 += " | ";
+    }
+    line3 += student.yearLevel;
+  }
+
+  String line4 = "SEL enroll BK exit";
+  if (!student.syncStatus.isEmpty()) {
+    line4 = "FP:";
+    line4 += student.fingerprintStatus.isEmpty() ? "pending" : student.fingerprintStatus;
+    line4 += " ";
+    line4 += student.syncStatus;
+  }
+  showLines(line1, line2, line3, line4);
 }
 
 void DisplayManager::showAttendancePrompt(const EventInfo &event,
@@ -150,15 +227,15 @@ void DisplayManager::showAttendancePrompt(const EventInfo &event,
     footer = "Unsynced:";
     footer += String(unsyncedCount);
   }
-  show(header, footer);
+  showLines(header, event.date, event.location, footer);
 }
 
 void DisplayManager::showSyncProgress(size_t current, size_t total) {
-  String footer = "Batch ";
-  footer += String(current);
-  footer += "/";
-  footer += String(total);
-  show("Sync Records", footer);
+  String line2 = "Batch ";
+  line2 += String(current);
+  line2 += "/";
+  line2 += String(total);
+  showLines("Sync Records", line2, "Uploading offline", "fingerprint data");
 }
 
 String DisplayManager::fit(const String &value) const {
@@ -171,4 +248,13 @@ String DisplayManager::fit(const String &value) const {
     output += ' ';
   }
   return output;
+}
+
+void DisplayManager::printRow(uint8_t row, const String &value) {
+  if (!ready_ || row >= CampusConfig::kLcdRows || row >= 4) {
+    return;
+  }
+
+  lcd_->setCursor(0, row);
+  lcd_->print(value);
 }

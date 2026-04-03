@@ -16,15 +16,39 @@ struct EventInfo {
   }
 };
 
+struct EnrollmentSessionInfo {
+  String sessionId;
+  String createdBy;
+  String createdByName;
+  String createdBySchoolId;
+  String status;
+  String pairedDeviceId;
+  int totalStudents = 0;
+  int pendingCount = 0;
+  int downloadedCount = 0;
+  int enrolledCount = 0;
+  int syncedCount = 0;
+  int failedCount = 0;
+
+  bool isValid() const {
+    return !sessionId.isEmpty();
+  }
+};
+
 struct StudentInfo {
   String studentUid;
   String schoolId;
   String studentName;
   String course;
   String yearLevel;
+  String sessionId;
   String queueId;
   String fingerprintStatus;
   String fingerprintDeviceId;
+  String enrollmentStatus;
+  String syncStatus;
+  String remarks;
+  String enrolledAtIso;
   int templateId = -1;
   bool enrollmentSynced = false;
 
