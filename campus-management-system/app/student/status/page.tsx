@@ -3,10 +3,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@heroui/button";
 import { Card, CardBody, CardHeader } from "@heroui/card";
-import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/modal";
+import {
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+} from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
+import { CampusCardListSkeleton, CampusMetricSkeleton } from "@/components/ui";
 import { CampusBadge } from "@/components/heroui";
 import { useStudentPortal } from "@/components/student/StudentPortalProvider";
 
@@ -37,7 +44,7 @@ export default function StudentStatus() {
   const { profile, events, payments, loading, error } = useStudentPortal();
 
   const [filter, setFilter] = useState<"attended" | "missed" | "payments">(
-    "attended"
+    "attended",
   );
   const [sortMode, setSortMode] = useState("default");
   const [isMobile, setIsMobile] = useState(false);
@@ -70,9 +77,9 @@ export default function StudentStatus() {
         .filter((event) => event.status === "Attended")
         .sort(
           (a, b) =>
-            (b.eventDate?.getTime() ?? 0) - (a.eventDate?.getTime() ?? 0)
+            (b.eventDate?.getTime() ?? 0) - (a.eventDate?.getTime() ?? 0),
         ),
-    [events]
+    [events],
   );
 
   const missedEvents = useMemo(
@@ -81,9 +88,9 @@ export default function StudentStatus() {
         .filter((event) => event.status === "Missed")
         .sort(
           (a, b) =>
-            (b.eventDate?.getTime() ?? 0) - (a.eventDate?.getTime() ?? 0)
+            (b.eventDate?.getTime() ?? 0) - (a.eventDate?.getTime() ?? 0),
         ),
-    [events]
+    [events],
   );
 
   const sortedPayments = useMemo(() => {
@@ -108,17 +115,17 @@ export default function StudentStatus() {
 
   const attendedTotalPages = useMemo(
     () => Math.max(1, Math.ceil(attendedEvents.length / attendedItemsPerPage)),
-    [attendedEvents.length, attendedItemsPerPage]
+    [attendedEvents.length, attendedItemsPerPage],
   );
 
   const missedTotalPages = useMemo(
     () => Math.max(1, Math.ceil(missedEvents.length / missedItemsPerPage)),
-    [missedEvents.length, missedItemsPerPage]
+    [missedEvents.length, missedItemsPerPage],
   );
 
   const paymentsTotalPages = useMemo(
     () => Math.max(1, Math.ceil(sortedPayments.length / paymentsItemsPerPage)),
-    [sortedPayments.length, paymentsItemsPerPage]
+    [sortedPayments.length, paymentsItemsPerPage],
   );
 
   const paginatedAttendedEvents = useMemo(() => {
@@ -193,14 +200,19 @@ export default function StudentStatus() {
         </ModalContent>
       </Modal>
 
-      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b71f1f] to-[#f09a4a] text-white">
+      <Card
+        shadow="sm"
+        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b71f1f] to-[#f09a4a] text-white"
+      >
         <CardBody className="flex flex-col gap-4 p-5 sm:p-6 sm:flex-row sm:items-center">
           <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/15 text-lg font-bold">
             {avatarLabel}
           </div>
           <div>
             <h1 className="text-2xl font-black sm:text-3xl">Student Status</h1>
-            <p className="text-sm text-white/80 sm:text-base">Overview of your attendance and payment standing.</p>
+            <p className="text-sm text-white/80 sm:text-base">
+              Overview of your attendance and payment standing.
+            </p>
           </div>
         </CardBody>
       </Card>
@@ -211,29 +223,65 @@ export default function StudentStatus() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <Card shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-campus-text-secondary">Attended</p><h2 className="mt-2 text-3xl font-black text-emerald-600">{attendedEvents.length}</h2></CardBody></Card>
-        <Card shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-campus-text-secondary">Missed</p><h2 className="mt-2 text-3xl font-black text-rose-600">{missedEvents.length}</h2></CardBody></Card>
-        <Card shadow="sm" className="border"><CardBody className="p-5"><p className="text-sm text-campus-text-secondary">Payments</p><h2 className="mt-2 text-3xl font-black text-amber-600">{payments.length}</h2></CardBody></Card>
-      </div>
+      {loading ? (
+        <CampusMetricSkeleton
+          count={3}
+          className="sm:grid-cols-3 xl:grid-cols-3"
+        />
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <Card shadow="sm" className="border">
+            <CardBody className="p-5">
+              <p className="text-sm text-campus-text-secondary">Attended</p>
+              <h2 className="mt-2 text-3xl font-black text-emerald-600">
+                {attendedEvents.length}
+              </h2>
+            </CardBody>
+          </Card>
+          <Card shadow="sm" className="border">
+            <CardBody className="p-5">
+              <p className="text-sm text-campus-text-secondary">Missed</p>
+              <h2 className="mt-2 text-3xl font-black text-rose-600">
+                {missedEvents.length}
+              </h2>
+            </CardBody>
+          </Card>
+          <Card shadow="sm" className="border">
+            <CardBody className="p-5">
+              <p className="text-sm text-campus-text-secondary">Payments</p>
+              <h2 className="mt-2 text-3xl font-black text-amber-600">
+                {payments.length}
+              </h2>
+            </CardBody>
+          </Card>
+        </div>
+      )}
 
       <Card shadow="sm" className="border">
         <CardHeader className="px-5 pt-5">
           <div>
-            <h2 className="text-lg font-semibold text-campus-text-primary">Status Views</h2>
-            <p className="text-sm text-campus-text-secondary">Switch between attendance history and payment records.</p>
+            <h2 className="text-lg font-semibold text-campus-text-primary">
+              Status Views
+            </h2>
+            <p className="text-sm text-campus-text-secondary">
+              Switch between attendance history and payment records.
+            </p>
           </div>
         </CardHeader>
         <CardBody className="p-4 pt-2">
           <Tabs
             selectedKey={filter}
-            onSelectionChange={(key) => setFilter(String(key) as "attended" | "missed" | "payments")}
+            onSelectionChange={(key) =>
+              setFilter(String(key) as "attended" | "missed" | "payments")
+            }
             fullWidth
             classNames={{
-              tabList: "grid w-full grid-cols-1 gap-2 rounded-2xl bg-gray-100 p-1 sm:grid-cols-3",
+              tabList:
+                "grid w-full grid-cols-1 gap-2 rounded-2xl bg-gray-100 p-1 sm:grid-cols-3",
               cursor: "bg-primary-500",
               tab: "h-11",
-              tabContent: "text-sm font-semibold group-data-[selected=true]:text-white",
+              tabContent:
+                "text-sm font-semibold group-data-[selected=true]:text-white",
             }}
           >
             {statusTabs.map((item) => (
@@ -250,9 +298,7 @@ export default function StudentStatus() {
           </h2>
 
           {loading ? (
-            <p className="text-sm text-campus-text-secondary">
-              Loading attended events...
-            </p>
+            <CampusCardListSkeleton rows={3} />
           ) : attendedEvents.length === 0 ? (
             <p className="text-sm text-campus-text-secondary">
               No attended events found yet.
@@ -300,9 +346,7 @@ export default function StudentStatus() {
           </h2>
 
           {loading ? (
-            <p className="text-sm text-campus-text-secondary">
-              Loading missed events...
-            </p>
+            <CampusCardListSkeleton rows={3} />
           ) : missedEvents.length === 0 ? (
             <p className="text-sm text-campus-text-secondary">
               No missed events found.
@@ -310,7 +354,11 @@ export default function StudentStatus() {
           ) : (
             <div className="space-y-3">
               {paginatedMissedEvents.map((event) => (
-                <Card key={event.id} shadow="sm" className="bg-red-50 border-red-100">
+                <Card
+                  key={event.id}
+                  shadow="sm"
+                  className="bg-red-50 border-red-100"
+                >
                   <CardBody>
                     <h3 className="font-semibold text-campus-text-primary">
                       {event.title}
@@ -362,9 +410,7 @@ export default function StudentStatus() {
           </div>
 
           {loading ? (
-            <p className="text-sm text-campus-text-secondary">
-              Loading payments...
-            </p>
+            <CampusCardListSkeleton rows={3} />
           ) : sortedPayments.length === 0 ? (
             <p className="text-sm text-campus-text-secondary">
               No payment records found for your account.

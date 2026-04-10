@@ -27,10 +27,27 @@ void eventFromJson(JsonObjectConst object, EventInfo &event) {
   event.eventId = String(object["eventId"] | object["id"] | "");
   event.title = String(object["title"] | "");
   event.date = String(object["date"] | "");
-  event.scheduledTime = String(object["scheduledTime"] | "");
+  event.scheduledTime = String(object["scheduledTimeStart"] |
+                               object["scheduledTime"] |
+                               object["startTime"] | "");
+  event.scheduledTimeEnd =
+      String(object["scheduledTimeEnd"] | object["endTime"] | "");
   event.location = String(object["location"] | "");
   event.status = String(object["status"] | "");
   event.requiresRegistration = object["requiresRegistration"] | false;
+  if (event.scheduledTimeEnd.isEmpty()) {
+    const int dashIndex = event.scheduledTime.indexOf('-');
+    if (dashIndex > 0) {
+      String start = event.scheduledTime.substring(0, dashIndex);
+      String end = event.scheduledTime.substring(dashIndex + 1);
+      start.trim();
+      end.trim();
+      if (!start.isEmpty() && !end.isEmpty()) {
+        event.scheduledTime = start;
+        event.scheduledTimeEnd = end;
+      }
+    }
+  }
 }
 
 StudentInfo studentFromJson(JsonObjectConst object) {
@@ -299,12 +316,23 @@ bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
     object["recordId"] = record.recordId;
     object["eventId"] = record.eventId;
     object["eventTitle"] = record.eventTitle;
+    object["eventDate"] = record.eventDate;
+    object["scheduledTimeStart"] = record.scheduledTimeStart;
+    object["scheduledTimeEnd"] = record.scheduledTimeEnd;
+    object["location"] = record.eventLocation;
     object["studentId"] = record.studentUid;
     object["studentUid"] = record.studentUid;
     object["schoolId"] = record.schoolId;
     object["studentName"] = record.studentName;
     object["course"] = record.course;
     object["yearLevel"] = record.yearLevel;
+    object["attendanceStatus"] = record.attendanceStatus;
+    object["timeInEpoch"] = record.timeInEpoch;
+    object["timeInIso"] = record.timeInIso;
+    object["timeInSource"] = record.timeInSource;
+    object["timeOutEpoch"] = record.timeOutEpoch;
+    object["timeOutIso"] = record.timeOutIso;
+    object["timeOutSource"] = record.timeOutSource;
     object["fingerprintTemplateId"] = record.templateId;
     object["deviceId"] = record.deviceId;
     object["timestampEpoch"] = record.capturedAtEpoch;

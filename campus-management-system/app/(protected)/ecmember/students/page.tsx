@@ -5,16 +5,39 @@ import { FiChevronDown, FiPlus } from "react-icons/fi";
 import { Button } from "@heroui/button";
 import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
-import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
+import {
+  Dropdown,
+  DropdownItem,
+  DropdownMenu,
+  DropdownTrigger,
+} from "@heroui/dropdown";
 import { Input } from "@heroui/input";
 import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
+import {
+  CampusCardListSkeleton,
+  CampusDataTable,
+  type CampusTableColumn,
+} from "@/components/ui";
 import { getFunctions, httpsCallable } from "firebase/functions";
-import { collection, collectionGroup, deleteDoc, doc, getDoc, getDocs, orderBy, query, serverTimestamp, setDoc, where } from "firebase/firestore";
+import {
+  collection,
+  collectionGroup,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+} from "firebase/firestore";
 import { FingerprintEnrollmentManager } from "@/components/ecmember/FingerprintEnrollmentManager";
 import { app, db } from "@/lib/firebase";
+import { campusToast } from "@/lib/toast";
 
 type StudentAccountStatus = "Active" | "Inactive";
 type StudentFingerprintStatus = "Active" | "Inactive";
@@ -133,11 +156,26 @@ const DEFAULT_COURSES = [
   "Electronics Engineering",
 ];
 
-const DEFAULT_YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "5th Year"];
+const DEFAULT_YEARS = [
+  "1st Year",
+  "2nd Year",
+  "3rd Year",
+  "4th Year",
+  "5th Year",
+];
 const STUDENTS_PER_PAGE_DESKTOP = 10;
 const STUDENTS_PER_PAGE_PHONE = 5;
 const PHONE_BREAKPOINT_PX = 768;
 const STATUS_ITEMS_PER_PAGE = 4;
+
+const studentColumns: CampusTableColumn<Student>[] = [
+  { key: "id", label: "Student ID" },
+  { key: "name", label: "Name" },
+  { key: "course", label: "Course" },
+  { key: "year", label: "Year Level" },
+  { key: "status", label: "Status" },
+  { key: "actions", label: "Actions", align: "end", className: "text-right" },
+];
 
 function initialsFromName(name: string) {
   const parts = name
@@ -151,7 +189,9 @@ function initialsFromName(name: string) {
 }
 
 function normalizeText(value: unknown) {
-  return String(value ?? "").trim().toLowerCase();
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
 }
 
 function toMillis(value: unknown) {
@@ -203,7 +243,11 @@ function toDateWithMinutes(baseDate: Date, minutes: number) {
   return date;
 }
 
-function computeLifecycle(date: string, scheduledTime: string, timeEnd: string) {
+function computeLifecycle(
+  date: string,
+  scheduledTime: string,
+  timeEnd: string,
+) {
   const baseDate = parseDateOnly(date);
   if (!baseDate) return "upcoming" as const;
 
@@ -248,9 +292,7 @@ function toEventDate(date: string, scheduledTime: string) {
 
 function toTargetList(value: unknown) {
   if (Array.isArray(value)) {
-    return value
-      .map((item) => String(item ?? "").trim())
-      .filter(Boolean);
+    return value.map((item) => String(item ?? "").trim()).filter(Boolean);
   }
 
   const raw = String(value ?? "").trim();
@@ -262,16 +304,29 @@ function toTargetList(value: unknown) {
     .filter(Boolean);
 }
 
-function matchesTarget(eventValue: unknown, studentValue: string, allLabel: string) {
+function matchesTarget(
+  eventValue: unknown,
+  studentValue: string,
+  allLabel: string,
+) {
   const eventTargets = toTargetList(eventValue);
   const studentTarget = String(studentValue ?? "").trim();
 
   if (eventTargets.length === 0) return true;
-  if (eventTargets.some((item) => normalizeText(item) === normalizeText(allLabel))) return true;
-  return eventTargets.some((item) => normalizeText(item) === normalizeText(studentTarget));
+  if (
+    eventTargets.some((item) => normalizeText(item) === normalizeText(allLabel))
+  )
+    return true;
+  return eventTargets.some(
+    (item) => normalizeText(item) === normalizeText(studentTarget),
+  );
 }
 
-function matchesSpecificStudentTarget(targetValue: string, schoolId: string, studentName: string) {
+function matchesSpecificStudentTarget(
+  targetValue: string,
+  schoolId: string,
+  studentName: string,
+) {
   const rawTarget = String(targetValue ?? "").trim();
   if (!rawTarget) return true;
 
@@ -292,7 +347,12 @@ function matchesSpecificStudentTarget(targetValue: string, schoolId: string, stu
 
     if (normalized === sid || normalized === name) return true;
     if (insideParen && insideParen === sid) return true;
-    if (withoutParens && (withoutParens === name || name.includes(withoutParens) || withoutParens.includes(name))) {
+    if (
+      withoutParens &&
+      (withoutParens === name ||
+        name.includes(withoutParens) ||
+        withoutParens.includes(name))
+    ) {
       return true;
     }
 
@@ -335,11 +395,17 @@ function toPositiveNumber(raw: unknown) {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function getFingerprintStatus(raw: StudentDirectoryProjection | null | undefined): StudentFingerprintStatus {
+function getFingerprintStatus(
+  raw: StudentDirectoryProjection | null | undefined,
+): StudentFingerprintStatus {
   const fingerprintState = normalizeText(raw?.fingerprintStatus);
-  const templateId = toPositiveNumber(raw?.fingerprintTemplateId ?? raw?.templateId);
+  const templateId = toPositiveNumber(
+    raw?.fingerprintTemplateId ?? raw?.templateId,
+  );
 
-  return fingerprintState === "enrolled" || fingerprintState === "active" || templateId > 0
+  return fingerprintState === "enrolled" ||
+    fingerprintState === "active" ||
+    templateId > 0
     ? "Active"
     : "Inactive";
 }
@@ -361,11 +427,15 @@ function mapRemoteStudent(data: RemoteStudent): Student {
     status,
     fingerprintStatus: "Inactive",
     email: String(data.email ?? "").trim() || undefined,
-    createdAt: typeof data.createdAtMs === "number" ? data.createdAtMs : undefined,
+    createdAt:
+      typeof data.createdAtMs === "number" ? data.createdAtMs : undefined,
   };
 }
 
-function mergeStudentProjection(student: Student, projection?: StudentDirectoryProjection) {
+function mergeStudentProjection(
+  student: Student,
+  projection?: StudentDirectoryProjection,
+) {
   if (!projection) return student;
 
   return {
@@ -378,7 +448,8 @@ function mergeStudentProjection(student: Student, projection?: StudentDirectoryP
 function toErrorMessage(error: unknown, fallback: string) {
   if (typeof error === "object" && error !== null) {
     const maybe = error as { code?: unknown; message?: unknown };
-    const message = typeof maybe.message === "string" ? maybe.message : fallback;
+    const message =
+      typeof maybe.message === "string" ? maybe.message : fallback;
     if (typeof maybe.code === "string" && maybe.code) {
       return `${maybe.code}: ${message}`;
     }
@@ -406,7 +477,9 @@ export default function ECStudentLookup() {
   const [courseFilter, setCourseFilter] = useState<string>("");
   const [yearFilter, setYearFilter] = useState<string>("");
   const [studentPage, setStudentPage] = useState(1);
-  const [studentsPerPage, setStudentsPerPage] = useState<number>(STUDENTS_PER_PAGE_DESKTOP);
+  const [studentsPerPage, setStudentsPerPage] = useState<number>(
+    STUDENTS_PER_PAGE_DESKTOP,
+  );
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [newSchoolId, setNewSchoolId] = useState("");
@@ -422,7 +495,9 @@ export default function ECStudentLookup() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [statusModalOpen, setStatusModalOpen] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
-  const [updatingStudentUid, setUpdatingStudentUid] = useState<string | null>(null);
+  const [updatingStudentUid, setUpdatingStudentUid] = useState<string | null>(
+    null,
+  );
   const [statusNotice, setStatusNotice] = useState<Notice | null>(null);
   const [statusTab, setStatusTab] = useState<StudentStatusTab>("attended");
   const [attendedSearch, setAttendedSearch] = useState("");
@@ -431,25 +506,34 @@ export default function ECStudentLookup() {
   const [attendedPage, setAttendedPage] = useState(1);
   const [missedPage, setMissedPage] = useState(1);
   const [paymentsPage, setPaymentsPage] = useState(1);
-  const [paymentSortMode, setPaymentSortMode] = useState<PaymentSortMode>("paid");
+  const [paymentSortMode, setPaymentSortMode] =
+    useState<PaymentSortMode>("paid");
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusEvents, setStatusEvents] = useState<StudentStatusEvent[]>([]);
-  const [statusPayments, setStatusPayments] = useState<StudentStatusPayment[]>([]);
+  const [statusPayments, setStatusPayments] = useState<StudentStatusPayment[]>(
+    [],
+  );
 
   const loadStudents = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
 
     try {
-      const fn = httpsCallable<{ limit: number }, { students?: RemoteStudent[] }>(functions, "ecListStudents");
+      const fn = httpsCallable<
+        { limit: number },
+        { students?: RemoteStudent[] }
+      >(functions, "ecListStudents");
       const res = await fn({ limit: 2000 });
 
       const projectionByUid = new Map<string, StudentDirectoryProjection>();
       try {
         const projectionSnap = await getDocs(collection(db, "students"));
         projectionSnap.docs.forEach((snapshot) => {
-          projectionByUid.set(snapshot.id, snapshot.data() as StudentDirectoryProjection);
+          projectionByUid.set(
+            snapshot.id,
+            snapshot.data() as StudentDirectoryProjection,
+          );
         });
       } catch {
         // Student status controls should still load even if the portable projection is unavailable.
@@ -457,10 +541,15 @@ export default function ECStudentLookup() {
 
       const rows = (res.data?.students ?? []).map((remoteStudent) => {
         const student = mapRemoteStudent(remoteStudent);
-        return mergeStudentProjection(student, projectionByUid.get(student.uid));
+        return mergeStudentProjection(
+          student,
+          projectionByUid.get(student.uid),
+        );
       });
 
-      rows.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+      rows.sort(
+        (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+      );
       setStudents(rows);
     } catch (error: unknown) {
       setLoadError(toErrorMessage(error, "Failed to load students."));
@@ -477,7 +566,9 @@ export default function ECStudentLookup() {
   useEffect(() => {
     const syncStudentsPerPage = () => {
       setStudentsPerPage(
-        window.innerWidth < PHONE_BREAKPOINT_PX ? STUDENTS_PER_PAGE_PHONE : STUDENTS_PER_PAGE_DESKTOP
+        window.innerWidth < PHONE_BREAKPOINT_PX
+          ? STUDENTS_PER_PAGE_PHONE
+          : STUDENTS_PER_PAGE_DESKTOP,
       );
     };
 
@@ -505,9 +596,12 @@ export default function ECStudentLookup() {
   const courseFilterItems = useMemo<SelectOption[]>(
     () => [
       { key: "__all_courses__", label: "All Courses" },
-      ...courseOptions.map((courseName) => ({ key: courseName, label: courseName })),
+      ...courseOptions.map((courseName) => ({
+        key: courseName,
+        label: courseName,
+      })),
     ],
-    [courseOptions]
+    [courseOptions],
   );
 
   const yearFilterItems = useMemo<SelectOption[]>(
@@ -515,15 +609,18 @@ export default function ECStudentLookup() {
       { key: "__all_years__", label: "All Years" },
       ...yearOptions.map((yearName) => ({ key: yearName, label: yearName })),
     ],
-    [yearOptions]
+    [yearOptions],
   );
 
   const addCourseItems = useMemo<SelectOption[]>(
     () => [
       { key: "__select_course__", label: "Select course" },
-      ...DEFAULT_COURSES.map((courseName) => ({ key: courseName, label: courseName })),
+      ...DEFAULT_COURSES.map((courseName) => ({
+        key: courseName,
+        label: courseName,
+      })),
     ],
-    []
+    [],
   );
 
   const addYearItems = useMemo<SelectOption[]>(
@@ -531,7 +628,7 @@ export default function ECStudentLookup() {
       { key: "__select_year__", label: "Select year" },
       ...DEFAULT_YEARS.map((yearName) => ({ key: yearName, label: yearName })),
     ],
-    []
+    [],
   );
 
   const filtered = useMemo(() => {
@@ -553,7 +650,7 @@ export default function ECStudentLookup() {
 
   const studentTotalPages = useMemo(
     () => Math.max(1, Math.ceil(filtered.length / studentsPerPage)),
-    [filtered.length, studentsPerPage]
+    [filtered.length, studentsPerPage],
   );
 
   const paginatedStudents = useMemo(() => {
@@ -565,16 +662,22 @@ export default function ECStudentLookup() {
     () =>
       statusEvents
         .filter((event) => event.status === "Attended")
-        .sort((a, b) => (b.eventDate?.getTime() ?? 0) - (a.eventDate?.getTime() ?? 0)),
-    [statusEvents]
+        .sort(
+          (a, b) =>
+            (b.eventDate?.getTime() ?? 0) - (a.eventDate?.getTime() ?? 0),
+        ),
+    [statusEvents],
   );
 
   const missedEvents = useMemo(
     () =>
       statusEvents
         .filter((event) => event.status === "Missed")
-        .sort((a, b) => (b.eventDate?.getTime() ?? 0) - (a.eventDate?.getTime() ?? 0)),
-    [statusEvents]
+        .sort(
+          (a, b) =>
+            (b.eventDate?.getTime() ?? 0) - (a.eventDate?.getTime() ?? 0),
+        ),
+    [statusEvents],
   );
 
   const filteredAttendedEvents = useMemo(() => {
@@ -630,12 +733,16 @@ export default function ECStudentLookup() {
 
   const paymentSortLabel = useMemo(
     () => (paymentSortMode === "paid" ? "Paid" : "Unpaid"),
-    [paymentSortMode]
+    [paymentSortMode],
   );
 
   const attendedTotalPages = useMemo(
-    () => Math.max(1, Math.ceil(filteredAttendedEvents.length / STATUS_ITEMS_PER_PAGE)),
-    [filteredAttendedEvents.length]
+    () =>
+      Math.max(
+        1,
+        Math.ceil(filteredAttendedEvents.length / STATUS_ITEMS_PER_PAGE),
+      ),
+    [filteredAttendedEvents.length],
   );
 
   const paginatedAttendedEvents = useMemo(() => {
@@ -644,8 +751,12 @@ export default function ECStudentLookup() {
   }, [filteredAttendedEvents, attendedPage]);
 
   const missedTotalPages = useMemo(
-    () => Math.max(1, Math.ceil(filteredMissedEvents.length / STATUS_ITEMS_PER_PAGE)),
-    [filteredMissedEvents.length]
+    () =>
+      Math.max(
+        1,
+        Math.ceil(filteredMissedEvents.length / STATUS_ITEMS_PER_PAGE),
+      ),
+    [filteredMissedEvents.length],
   );
 
   const paginatedMissedEvents = useMemo(() => {
@@ -654,8 +765,12 @@ export default function ECStudentLookup() {
   }, [filteredMissedEvents, missedPage]);
 
   const paymentsTotalPages = useMemo(
-    () => Math.max(1, Math.ceil(sortedStatusPayments.length / STATUS_ITEMS_PER_PAGE)),
-    [sortedStatusPayments.length]
+    () =>
+      Math.max(
+        1,
+        Math.ceil(sortedStatusPayments.length / STATUS_ITEMS_PER_PAGE),
+      ),
+    [sortedStatusPayments.length],
   );
 
   const paginatedStatusPayments = useMemo(() => {
@@ -671,15 +786,22 @@ export default function ECStudentLookup() {
   const selectedStudentStatus = selectedStudent?.status ?? "Active";
 
   const updateStudentState = useCallback(
-    (studentUid: string, patch: Partial<Pick<Student, "status" | "fingerprintStatus">>) => {
+    (
+      studentUid: string,
+      patch: Partial<Pick<Student, "status" | "fingerprintStatus">>,
+    ) => {
       setStudents((prev) => {
         let changed = false;
         const next = prev.map((student) => {
           if (student.uid !== studentUid) return student;
 
           const nextStatus = patch.status ?? student.status;
-          const nextFingerprintStatus = patch.fingerprintStatus ?? student.fingerprintStatus;
-          if (nextStatus === student.status && nextFingerprintStatus === student.fingerprintStatus) {
+          const nextFingerprintStatus =
+            patch.fingerprintStatus ?? student.fingerprintStatus;
+          if (
+            nextStatus === student.status &&
+            nextFingerprintStatus === student.fingerprintStatus
+          ) {
             return student;
           }
 
@@ -698,8 +820,12 @@ export default function ECStudentLookup() {
         if (!prev || prev.uid !== studentUid) return prev;
 
         const nextStatus = patch.status ?? prev.status;
-        const nextFingerprintStatus = patch.fingerprintStatus ?? prev.fingerprintStatus;
-        if (nextStatus === prev.status && nextFingerprintStatus === prev.fingerprintStatus) {
+        const nextFingerprintStatus =
+          patch.fingerprintStatus ?? prev.fingerprintStatus;
+        if (
+          nextStatus === prev.status &&
+          nextFingerprintStatus === prev.fingerprintStatus
+        ) {
           return prev;
         }
 
@@ -710,7 +836,7 @@ export default function ECStudentLookup() {
         };
       });
     },
-    []
+    [],
   );
 
   useEffect(() => {
@@ -764,18 +890,26 @@ export default function ECStudentLookup() {
 
       try {
         const [eventsSnap, paymentSnap] = await Promise.all([
-          getDocs(query(collection(db, "events"), orderBy("createdAt", "desc"))),
-          getDocs(query(collection(db, "payments"), orderBy("createdAt", "desc"))),
+          getDocs(
+            query(collection(db, "events"), orderBy("createdAt", "desc")),
+          ),
+          getDocs(
+            query(collection(db, "payments"), orderBy("createdAt", "desc")),
+          ),
         ]);
 
         try {
-          const studentProjectionSnap = await getDoc(doc(db, "students", currentStudent.uid));
+          const studentProjectionSnap = await getDoc(
+            doc(db, "students", currentStudent.uid),
+          );
           const studentProjection = studentProjectionSnap.exists()
             ? (studentProjectionSnap.data() as StudentDirectoryProjection)
             : null;
 
           updateStudentState(currentStudent.uid, {
-            status: normalizeStudentAccountStatus(studentProjection?.status ?? currentStudent.status),
+            status: normalizeStudentAccountStatus(
+              studentProjection?.status ?? currentStudent.status,
+            ),
             fingerprintStatus: getFingerprintStatus(studentProjection),
           });
         } catch {
@@ -795,8 +929,12 @@ export default function ECStudentLookup() {
             timeStart: String(data.timeStart ?? ""),
             timeEnd: String(data.timeEnd ?? ""),
             location: String(data.location ?? ""),
-            yearLevel: String(data.yearLevel ?? "").trim() || (yearLevels.length > 0 ? yearLevels.join(", ") : "All Years"),
-            course: String(data.course ?? "").trim() || (courses.length > 0 ? courses.join(", ") : "All Courses"),
+            yearLevel:
+              String(data.yearLevel ?? "").trim() ||
+              (yearLevels.length > 0 ? yearLevels.join(", ") : "All Years"),
+            course:
+              String(data.course ?? "").trim() ||
+              (courses.length > 0 ? courses.join(", ") : "All Courses"),
             yearLevels,
             courses,
             targetStudent: String(data.targetStudent ?? ""),
@@ -808,66 +946,106 @@ export default function ECStudentLookup() {
           const courseMatch = matchesTarget(
             event.courses.length > 0 ? event.courses : event.course,
             currentStudent.course,
-            "All Courses"
+            "All Courses",
           );
           const yearMatch = matchesTarget(
             event.yearLevels.length > 0 ? event.yearLevels : event.yearLevel,
             currentStudent.year,
-            "All Years"
+            "All Years",
           );
-          const studentMatch = matchesSpecificStudentTarget(event.targetStudent, currentStudent.id, currentStudent.name);
+          const studentMatch = matchesSpecificStudentTarget(
+            event.targetStudent,
+            currentStudent.id,
+            currentStudent.name,
+          );
           return courseMatch && yearMatch && studentMatch;
         });
 
         const eventRows = await Promise.all(
-          targetedEvents.map(async (event): Promise<StudentStatusEvent | null> => {
-            const scheduledTime = event.scheduledTime || event.timeStart;
-            const lifecycle = computeLifecycle(event.date, scheduledTime, event.timeEnd);
-            if (lifecycle !== "completed") return null;
+          targetedEvents.map(
+            async (event): Promise<StudentStatusEvent | null> => {
+              const scheduledTime = event.scheduledTime || event.timeStart;
+              const lifecycle = computeLifecycle(
+                event.date,
+                scheduledTime,
+                event.timeEnd,
+              );
+              if (lifecycle !== "completed") return null;
 
-            const attendanceSnap = await getDoc(doc(db, "events", event.id, "attendance", currentStudent.uid));
-            const attendanceData = attendanceSnap.exists() ? (attendanceSnap.data() as AttendanceDocData) : {};
-            const attendanceRaw = normalizeText(attendanceData.status ?? attendanceData.attendanceStatus ?? "");
+              const attendanceSnap = await getDoc(
+                doc(db, "events", event.id, "attendance", currentStudent.uid),
+              );
+              const attendanceData = attendanceSnap.exists()
+                ? (attendanceSnap.data() as AttendanceDocData)
+                : {};
+              const attendanceRaw = normalizeText(
+                attendanceData.status ?? attendanceData.attendanceStatus ?? "",
+              );
 
-            const status: AttendanceStatus = attendanceRaw === "present" || attendanceRaw === "attended" ? "Attended" : "Missed";
+              const status: AttendanceStatus =
+                attendanceRaw === "present" || attendanceRaw === "attended"
+                  ? "Attended"
+                  : "Missed";
 
-            return {
-              id: event.id,
-              title: event.title,
-              date: event.date,
-              scheduledTime: scheduledTime || "TBA",
-              location: event.location || "TBA",
-              eventDate: toEventDate(event.date, scheduledTime),
-              status,
-            };
-          })
+              return {
+                id: event.id,
+                title: event.title,
+                date: event.date,
+                scheduledTime: scheduledTime || "TBA",
+                location: event.location || "TBA",
+                eventDate: toEventDate(event.date, scheduledTime),
+                status,
+              };
+            },
+          ),
         );
 
         const paymentRows = await Promise.all(
-          paymentSnap.docs.map(async (paymentDoc): Promise<StudentStatusPayment | null> => {
-            const assignmentSnap = await getDoc(doc(db, "payments", paymentDoc.id, "students", currentStudent.uid));
-            if (!assignmentSnap.exists()) return null;
+          paymentSnap.docs.map(
+            async (paymentDoc): Promise<StudentStatusPayment | null> => {
+              const assignmentSnap = await getDoc(
+                doc(
+                  db,
+                  "payments",
+                  paymentDoc.id,
+                  "students",
+                  currentStudent.uid,
+                ),
+              );
+              if (!assignmentSnap.exists()) return null;
 
-            const paymentData = paymentDoc.data() as PaymentDocData;
-            const assignmentData = assignmentSnap.data() as PaymentAssignmentData;
-            const status = normalizeText(assignmentData.status) === "paid" ? "PAID" : "UNPAID";
-            const createdAtMs = toMillis(assignmentData.createdAt);
-            const updatedAtMs = toMillis(assignmentData.updatedAt) || createdAtMs;
+              const paymentData = paymentDoc.data() as PaymentDocData;
+              const assignmentData =
+                assignmentSnap.data() as PaymentAssignmentData;
+              const status =
+                normalizeText(assignmentData.status) === "paid"
+                  ? "PAID"
+                  : "UNPAID";
+              const createdAtMs = toMillis(assignmentData.createdAt);
+              const updatedAtMs =
+                toMillis(assignmentData.updatedAt) || createdAtMs;
 
-            return {
-              paymentId: paymentDoc.id,
-              title: String(paymentData.title ?? "Untitled Payment"),
-              ref: String(paymentData.ref ?? paymentDoc.id),
-              date: String(paymentData.date ?? ""),
-              status,
-              updatedAtMs,
-            };
-          })
+              return {
+                paymentId: paymentDoc.id,
+                title: String(paymentData.title ?? "Untitled Payment"),
+                ref: String(paymentData.ref ?? paymentDoc.id),
+                date: String(paymentData.date ?? ""),
+                status,
+                updatedAtMs,
+              };
+            },
+          ),
         );
 
         if (!active) return;
-        setStatusEvents(eventRows.filter((row): row is StudentStatusEvent => Boolean(row)));
-        setStatusPayments(paymentRows.filter((row): row is StudentStatusPayment => Boolean(row)));
+        setStatusEvents(
+          eventRows.filter((row): row is StudentStatusEvent => Boolean(row)),
+        );
+        setStatusPayments(
+          paymentRows.filter((row): row is StudentStatusPayment =>
+            Boolean(row),
+          ),
+        );
       } catch (error: unknown) {
         if (!active) return;
         setStatusEvents([]);
@@ -897,13 +1075,33 @@ export default function ECStudentLookup() {
   const summaryCards = useMemo(
     () => [
       { label: "Total Students", count: students.length },
-      { label: "Mechanical", count: students.filter((s) => s.course === "Mechanical Engineering").length },
-      { label: "Electrical", count: students.filter((s) => s.course === "Electrical Engineering").length },
-      { label: "Electronics", count: students.filter((s) => s.course === "Electronics Engineering").length },
-      { label: "Computer", count: students.filter((s) => s.course === "Computer Engineering").length },
-      { label: "Industrial", count: students.filter((s) => s.course === "Industrial Engineering").length },
+      {
+        label: "Mechanical",
+        count: students.filter((s) => s.course === "Mechanical Engineering")
+          .length,
+      },
+      {
+        label: "Electrical",
+        count: students.filter((s) => s.course === "Electrical Engineering")
+          .length,
+      },
+      {
+        label: "Electronics",
+        count: students.filter((s) => s.course === "Electronics Engineering")
+          .length,
+      },
+      {
+        label: "Computer",
+        count: students.filter((s) => s.course === "Computer Engineering")
+          .length,
+      },
+      {
+        label: "Industrial",
+        count: students.filter((s) => s.course === "Industrial Engineering")
+          .length,
+      },
     ],
-    [students]
+    [students],
   );
 
   const clearFilters = () => {
@@ -929,11 +1127,20 @@ export default function ECStudentLookup() {
 
   async function toggleStudentStatus(student: Student) {
     if (!student.uid) {
-      setStatusNotice({ type: "err", msg: "This student record is missing a UID." });
+      setStatusNotice({
+        type: "err",
+        msg: "This student record is missing a UID.",
+      });
+      campusToast.error({
+        title: "Student record incomplete",
+        description: "This student record is missing a UID.",
+        dedupeKey: "ec-students:missing-uid",
+      });
       return;
     }
 
-    const nextStatus: StudentAccountStatus = student.status === "Active" ? "Inactive" : "Active";
+    const nextStatus: StudentAccountStatus =
+      student.status === "Active" ? "Inactive" : "Active";
     setUpdatingStudentUid(student.uid);
     setStatusNotice(null);
 
@@ -953,7 +1160,7 @@ export default function ECStudentLookup() {
           status: nextStatus,
           updatedAt: timestamp,
         },
-        { merge: true }
+        { merge: true },
       );
 
       try {
@@ -963,7 +1170,7 @@ export default function ECStudentLookup() {
             status: nextStatus,
             updatedAt: timestamp,
           },
-          { merge: true }
+          { merge: true },
         );
       } catch (error: unknown) {
         const message = toErrorMessage(error, "");
@@ -974,18 +1181,37 @@ export default function ECStudentLookup() {
 
       if (nextStatus === "Inactive") {
         const registrationsSnap = await getDocs(
-          query(collectionGroup(db, "registrations"), where("uid", "==", student.uid))
+          query(
+            collectionGroup(db, "registrations"),
+            where("uid", "==", student.uid),
+          ),
         );
 
-        await Promise.all(registrationsSnap.docs.map((snapshot) => deleteDoc(snapshot.ref)));
+        await Promise.all(
+          registrationsSnap.docs.map((snapshot) => deleteDoc(snapshot.ref)),
+        );
       }
 
       updateStudentState(student.uid, { status: nextStatus });
-      setStatusNotice({ type: "ok", msg: `${student.name} is now ${nextStatus}.` });
+      setStatusNotice({
+        type: "ok",
+        msg: `${student.name} is now ${nextStatus}.`,
+      });
+      campusToast.success({
+        title: "Student status updated",
+        description: `${student.name} is now ${nextStatus}.`,
+        dedupeKey: `ec-students:status:${student.uid}:${nextStatus}`,
+      });
     } catch (error: unknown) {
+      const message = toErrorMessage(error, "Failed to update student status.");
       setStatusNotice({
         type: "err",
-        msg: toErrorMessage(error, "Failed to update student status."),
+        msg: message,
+      });
+      campusToast.error({
+        title: "Status update failed",
+        description: message,
+        dedupeKey: `ec-students:status-error:${student.uid}`,
       });
     } finally {
       setUpdatingStudentUid(null);
@@ -999,8 +1225,10 @@ export default function ECStudentLookup() {
     const year = newYear.trim();
     const email = newEmail.trim();
 
-    if (!schoolId) return setNotice({ type: "err", msg: "School ID is required." });
-    if (!studentName) return setNotice({ type: "err", msg: "Student name is required." });
+    if (!schoolId)
+      return setNotice({ type: "err", msg: "School ID is required." });
+    if (!studentName)
+      return setNotice({ type: "err", msg: "Student name is required." });
     if (!course) return setNotice({ type: "err", msg: "Course is required." });
     if (!year) return setNotice({ type: "err", msg: "Year is required." });
 
@@ -1037,9 +1265,23 @@ export default function ECStudentLookup() {
       setNewYear("");
       setNewEmail("");
       setShowAddForm(false);
+      campusToast.success({
+        title: "Student account created",
+        description: `UID: ${res.data?.uid ?? "-"}`,
+        dedupeKey: `ec-students:create:${res.data?.uid ?? schoolId}`,
+      });
       await loadStudents();
     } catch (error: unknown) {
-      setNotice({ type: "err", msg: toErrorMessage(error, "Failed to create student account.") });
+      const message = toErrorMessage(
+        error,
+        "Failed to create student account.",
+      );
+      setNotice({ type: "err", msg: message });
+      campusToast.error({
+        title: "Create student failed",
+        description: message,
+        dedupeKey: "ec-students:create-error",
+      });
     } finally {
       setCreating(false);
     }
@@ -1047,16 +1289,30 @@ export default function ECStudentLookup() {
 
   return (
     <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
-      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b71f1f] to-[#f09a4a] text-white">
+      <Card
+        shadow="sm"
+        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b71f1f] to-[#f09a4a] text-white"
+      >
         <CardBody className="space-y-4 p-5 sm:p-8">
           <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">EC Students</p>
-            <h1 className="text-3xl font-black sm:text-4xl">Engineering Student Management System</h1>
-            <p className="max-w-2xl text-sm text-white/80 sm:text-base">Search the roster, filter by program or year, and open each student profile without losing mobile usability.</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
+              EC Students
+            </p>
+            <h1 className="text-3xl font-black sm:text-4xl">
+              Engineering Student Management System
+            </h1>
+            <p className="max-w-2xl text-sm text-white/80 sm:text-base">
+              Search the roster, filter by program or year, and open each
+              student profile without losing mobile usability.
+            </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Chip variant="flat" className="bg-white/15 text-white">{students.length} students loaded</Chip>
-            <Chip variant="flat" className="bg-white/15 text-white">{filtered.length} matching current filters</Chip>
+            <Chip variant="flat" className="bg-white/15 text-white">
+              {students.length} students loaded
+            </Chip>
+            <Chip variant="flat" className="bg-white/15 text-white">
+              {filtered.length} matching current filters
+            </Chip>
           </div>
         </CardBody>
       </Card>
@@ -1065,7 +1321,9 @@ export default function ECStudentLookup() {
         {summaryCards.map((item) => (
           <Card key={item.label} shadow="sm" className="border">
             <CardBody className="p-4 text-center">
-              <div className="text-2xl font-black text-campus-text-primary">{item.count}</div>
+              <div className="text-2xl font-black text-campus-text-primary">
+                {item.count}
+              </div>
               <p className="text-sm text-campus-text-secondary">{item.label}</p>
             </CardBody>
           </Card>
@@ -1075,8 +1333,12 @@ export default function ECStudentLookup() {
       <Card shadow="sm" className="border">
         <CardHeader className="px-5 pt-5">
           <div>
-            <h2 className="text-lg font-semibold text-campus-text-primary">Roster Filters</h2>
-            <p className="text-sm text-campus-text-secondary">Built to stay readable on both desktop and phone screens.</p>
+            <h2 className="text-lg font-semibold text-campus-text-primary">
+              Roster Filters
+            </h2>
+            <p className="text-sm text-campus-text-secondary">
+              Built to stay readable on both desktop and phone screens.
+            </p>
           </div>
         </CardHeader>
         <CardBody className="grid grid-cols-1 gap-3 p-5 pt-3 xl:grid-cols-[minmax(0,1.3fr)_220px_180px_auto_auto_auto] xl:items-end">
@@ -1123,7 +1385,11 @@ export default function ECStudentLookup() {
             {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
           </Select>
 
-          <Button variant="bordered" onPress={clearFilters} className="w-full xl:w-auto">
+          <Button
+            variant="bordered"
+            onPress={clearFilters}
+            className="w-full xl:w-auto"
+          >
             Clear Filters
           </Button>
 
@@ -1133,7 +1399,9 @@ export default function ECStudentLookup() {
             onPress={() => setShowAddForm((prev) => !prev)}
             className={[
               "w-full justify-center gap-2 text-sm font-medium text-white xl:w-auto",
-              showAddForm ? "bg-gray-600 hover:bg-gray-700" : "bg-[#7b0000] hover:opacity-95",
+              showAddForm
+                ? "bg-gray-600 hover:bg-gray-700"
+                : "bg-[#7b0000] hover:opacity-95",
             ].join(" ")}
           >
             <FiPlus size={16} />
@@ -1158,12 +1426,16 @@ export default function ECStudentLookup() {
       {showAddForm && (
         <div className="bg-white rounded-lg shadow border p-5 space-y-4">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Add Student Account</h2>
+            <h2 className="text-lg font-semibold text-gray-900">
+              Add Student Account
+            </h2>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
             <div>
-              <label className="text-xs font-semibold text-gray-600">School ID *</label>
+              <label className="text-xs font-semibold text-gray-600">
+                School ID *
+              </label>
               <Input
                 aria-label="New student school ID"
                 value={newSchoolId}
@@ -1174,7 +1446,9 @@ export default function ECStudentLookup() {
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-600">Student Name *</label>
+              <label className="text-xs font-semibold text-gray-600">
+                Student Name *
+              </label>
               <Input
                 aria-label="New student name"
                 value={newStudentName}
@@ -1185,7 +1459,9 @@ export default function ECStudentLookup() {
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-600">Course *</label>
+              <label className="text-xs font-semibold text-gray-600">
+                Course *
+              </label>
               <Select
                 aria-label="New student course"
                 selectedKeys={new Set([newCourse || "__select_course__"])}
@@ -1193,7 +1469,9 @@ export default function ECStudentLookup() {
                   if (keys === "all") return;
                   const selected = Array.from(keys)[0];
                   if (typeof selected === "string") {
-                    setNewCourse(selected === "__select_course__" ? "" : selected);
+                    setNewCourse(
+                      selected === "__select_course__" ? "" : selected,
+                    );
                   }
                 }}
                 disallowEmptySelection
@@ -1205,7 +1483,9 @@ export default function ECStudentLookup() {
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-600">Year *</label>
+              <label className="text-xs font-semibold text-gray-600">
+                Year *
+              </label>
               <Select
                 aria-label="New student year"
                 selectedKeys={new Set([newYear || "__select_year__"])}
@@ -1227,7 +1507,9 @@ export default function ECStudentLookup() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
-              <label className="text-xs font-semibold text-gray-600">Email (optional)</label>
+              <label className="text-xs font-semibold text-gray-600">
+                Email (optional)
+              </label>
               <Input
                 aria-label="New student email"
                 value={newEmail}
@@ -1243,7 +1525,9 @@ export default function ECStudentLookup() {
             isDisabled={creating}
             className={[
               "inline-flex items-center justify-center rounded-lg px-4 text-sm font-semibold",
-              creating ? "bg-gray-300 text-gray-700" : "bg-[#7b0000] text-white hover:opacity-95",
+              creating
+                ? "bg-gray-300 text-gray-700"
+                : "bg-[#7b0000] text-white hover:opacity-95",
             ].join(" ")}
           >
             {creating ? "Creating..." : "Create Student"}
@@ -1252,13 +1536,7 @@ export default function ECStudentLookup() {
       )}
 
       <div className="space-y-3 md:hidden">
-        {loading && (
-          <Card shadow="sm" className="border">
-            <CardBody className="p-4 text-center text-sm text-gray-500">
-              Loading students...
-            </CardBody>
-          </Card>
-        )}
+        {loading && <CampusCardListSkeleton rows={3} />}
 
         {!loading && loadError && (
           <Card shadow="sm" className="border border-red-200 bg-red-50">
@@ -1275,8 +1553,12 @@ export default function ECStudentLookup() {
               <CardBody className="p-4 space-y-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-xs text-campus-text-secondary">Student ID</p>
-                    <p className="text-sm font-semibold text-campus-text-primary break-all">{student.id}</p>
+                    <p className="text-xs text-campus-text-secondary">
+                      Student ID
+                    </p>
+                    <p className="text-sm font-semibold text-campus-text-primary break-all">
+                      {student.id}
+                    </p>
                   </div>
                   <Button
                     size="sm"
@@ -1292,17 +1574,36 @@ export default function ECStudentLookup() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="min-w-0">
                     <p className="text-xs text-campus-text-secondary">Name</p>
-                    <p className="text-sm text-campus-text-primary truncate">{student.name}</p>
+                    <p className="text-sm text-campus-text-primary truncate">
+                      {student.name}
+                    </p>
                   </div>
                   <div className="min-w-0">
-                    <p className="text-xs text-campus-text-secondary">Year Level</p>
-                    <p className="text-sm text-campus-text-primary">{student.year}</p>
+                    <p className="text-xs text-campus-text-secondary">
+                      Year Level
+                    </p>
+                    <p className="text-sm text-campus-text-primary">
+                      {student.year}
+                    </p>
                   </div>
                 </div>
 
                 <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <Chip color="primary" variant="flat" className="max-w-full truncate">{student.course}</Chip>
-                  <Chip color={student.status.toLowerCase() === "active" ? "success" : "default"} variant="flat">
+                  <Chip
+                    color="primary"
+                    variant="flat"
+                    className="max-w-full truncate"
+                  >
+                    {student.course}
+                  </Chip>
+                  <Chip
+                    color={
+                      student.status.toLowerCase() === "active"
+                        ? "success"
+                        : "default"
+                    }
+                    variant="flat"
+                  >
                     {student.status}
                   </Chip>
                 </div>
@@ -1319,81 +1620,65 @@ export default function ECStudentLookup() {
         )}
       </div>
 
-      <div className="hidden md:block bg-white rounded-lg shadow border overflow-x-auto">
-        <table className="w-full min-w-[760px] text-left">
-          <thead>
-            <tr className="border-b bg-gray-50 text-sm text-campus-text-secondary">
-              <th className="p-3">Student ID</th>
-              <th className="p-3">Name</th>
-              <th className="p-3">Course</th>
-              <th className="p-3">Year Level</th>
-              <th className="p-3">Status</th>
-              <th className="p-3"></th>
-            </tr>
-          </thead>
+      <div className="hidden md:block">
+        <CampusDataTable
+          ariaLabel="Engineering student roster"
+          columns={studentColumns}
+          items={loadError ? [] : paginatedStudents}
+          isLoading={loading}
+          emptyTitle={
+            loadError ? "Unable to load students" : "No students found"
+          }
+          emptyDescription={
+            loadError || "No students match the current filters."
+          }
+          renderCell={(student, columnKey) => {
+            if (columnKey === "course") {
+              return (
+                <Chip
+                  color="primary"
+                  variant="flat"
+                  className="max-w-full truncate"
+                >
+                  {student.course}
+                </Chip>
+              );
+            }
 
-          <tbody>
-            {loading && (
-              <tr>
-                <td colSpan={6} className="p-6 text-center text-sm text-gray-500">
-                  Loading students...
-                </td>
-              </tr>
-            )}
+            if (columnKey === "status") {
+              return (
+                <Chip
+                  color={
+                    student.status.toLowerCase() === "active"
+                      ? "success"
+                      : "default"
+                  }
+                  variant="flat"
+                >
+                  {student.status}
+                </Chip>
+              );
+            }
 
-            {!loading && loadError && (
-              <tr>
-                <td colSpan={6} className="p-6 text-center text-sm text-red-700">
-                  {loadError}
-                </td>
-              </tr>
-            )}
+            if (columnKey === "actions") {
+              return (
+                <div className="flex justify-end">
+                  <Button
+                    size="sm"
+                    variant="flat"
+                    onPress={() => openStudentStatusModal(student)}
+                    className="px-4 text-xs"
+                    aria-label={`Open status for ${student.name}`}
+                  >
+                    Info
+                  </Button>
+                </div>
+              );
+            }
 
-            {!loading &&
-              !loadError &&
-              paginatedStudents.map((student) => (
-                <tr key={student.uid} className="border-b hover:bg-gray-50">
-                  <td className="p-3">{student.id}</td>
-                  <td className="p-3">{student.name}</td>
-                  <td className="p-3">
-                    <span className="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-700">{student.course}</span>
-                  </td>
-                  <td className="p-3">{student.year}</td>
-                  <td className="p-3">
-                    <span
-                      className={[
-                        "px-3 py-1 text-xs rounded-full",
-                        student.status.toLowerCase() === "active"
-                          ? "bg-green-100 text-green-700"
-                          : "bg-gray-200 text-gray-700",
-                      ].join(" ")}
-                    >
-                      {student.status}
-                    </span>
-                  </td>
-                  <td className="p-3 text-right">
-                    <Button
-                      size="sm"
-                      variant="flat"
-                      onPress={() => openStudentStatusModal(student)}
-                      className="px-4 text-xs"
-                      aria-label={`Open status for ${student.name}`}
-                    >
-                      Info
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-
-            {!loading && !loadError && filtered.length === 0 && (
-              <tr>
-                <td colSpan={6} className="p-6 text-center text-sm text-gray-500">
-                  No students found.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+            return student[columnKey as keyof Student] as string;
+          }}
+        />
       </div>
 
       {!loading && !loadError && filtered.length > studentsPerPage && (
@@ -1441,28 +1726,53 @@ export default function ECStudentLookup() {
                   </div>
 
                   <div>
-                    <h2 className="text-xl sm:text-2xl font-bold text-campus-text-primary">Student Status</h2>
-                    <p className="text-sm text-campus-text-secondary">Overview of attendance and payments</p>
+                    <h2 className="text-xl sm:text-2xl font-bold text-campus-text-primary">
+                      Student Status
+                    </h2>
+                    <p className="text-sm text-campus-text-secondary">
+                      Overview of attendance and payments
+                    </p>
                     {selectedStudent && (
                       <p className="text-xs text-campus-text-secondary mt-1">
-                        {selectedStudent.name} ({selectedStudent.id}) | {selectedStudent.course} | {selectedStudent.year} | Fingerprint: {selectedStudent.fingerprintStatus}
+                        {selectedStudent.name} ({selectedStudent.id}) |{" "}
+                        {selectedStudent.course} | {selectedStudent.year} |
+                        Fingerprint: {selectedStudent.fingerprintStatus}
                       </p>
                     )}
                     {selectedStudent && (
                       <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <Chip color={selectedStudent.status === "Active" ? "success" : "default"} variant="flat">
+                        <Chip
+                          color={
+                            selectedStudent.status === "Active"
+                              ? "success"
+                              : "default"
+                          }
+                          variant="flat"
+                        >
                           Account: {selectedStudent.status}
                         </Chip>
-                        <Chip color={selectedStudent.fingerprintStatus === "Active" ? "success" : "default"} variant="flat">
+                        <Chip
+                          color={
+                            selectedStudent.fingerprintStatus === "Active"
+                              ? "success"
+                              : "default"
+                          }
+                          variant="flat"
+                        >
                           Fingerprint: {selectedStudent.fingerprintStatus}
                         </Chip>
                         <Button
                           size="sm"
                           className="bg-[#7b0000] text-white"
-                          onPress={() => void toggleStudentStatus(selectedStudent)}
+                          onPress={() =>
+                            void toggleStudentStatus(selectedStudent)
+                          }
                           isLoading={updatingStudentUid === selectedStudent.uid}
                         >
-                          Set {selectedStudent.status === "Active" ? "Inactive" : "Active"}
+                          Set{" "}
+                          {selectedStudent.status === "Active"
+                            ? "Inactive"
+                            : "Active"}
                         </Button>
                       </div>
                     )}
@@ -1493,7 +1803,9 @@ export default function ECStudentLookup() {
                 <Tabs
                   aria-label="Student status tabs"
                   selectedKey={statusTab}
-                  onSelectionChange={(key) => setStatusTab(String(key) as StudentStatusTab)}
+                  onSelectionChange={(key) =>
+                    setStatusTab(String(key) as StudentStatusTab)
+                  }
                   fullWidth
                   classNames={{
                     tabList: "w-full grid grid-cols-3",
@@ -1513,25 +1825,36 @@ export default function ECStudentLookup() {
                       />
 
                       {statusLoading ? (
-                        <p className="text-sm text-campus-text-secondary">Loading attended events...</p>
+                        <CampusCardListSkeleton rows={2} />
                       ) : filteredAttendedEvents.length === 0 ? (
-                        <p className="text-sm text-campus-text-secondary">No attended events found.</p>
+                        <p className="text-sm text-campus-text-secondary">
+                          No attended events found.
+                        </p>
                       ) : (
                         <>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             {paginatedAttendedEvents.map((event) => (
                               <Card key={event.id} shadow="sm">
                                 <CardBody>
-                                  <h4 className="font-semibold text-campus-text-primary">{event.title}</h4>
+                                  <h4 className="font-semibold text-campus-text-primary">
+                                    {event.title}
+                                  </h4>
                                   <p className="text-sm text-campus-text-secondary">
-                                    {formatEventDate(event.eventDate, event.date)} | {event.scheduledTime}
+                                    {formatEventDate(
+                                      event.eventDate,
+                                      event.date,
+                                    )}{" "}
+                                    | {event.scheduledTime}
                                   </p>
-                                  <p className="text-xs text-campus-text-secondary">{event.location || "TBA"}</p>
+                                  <p className="text-xs text-campus-text-secondary">
+                                    {event.location || "TBA"}
+                                  </p>
                                 </CardBody>
                               </Card>
                             ))}
                           </div>
-                          {filteredAttendedEvents.length > STATUS_ITEMS_PER_PAGE && (
+                          {filteredAttendedEvents.length >
+                            STATUS_ITEMS_PER_PAGE && (
                             <div className="flex justify-center pt-2">
                               <Pagination
                                 showControls
@@ -1558,25 +1881,40 @@ export default function ECStudentLookup() {
                       />
 
                       {statusLoading ? (
-                        <p className="text-sm text-campus-text-secondary">Loading missed events...</p>
+                        <CampusCardListSkeleton rows={2} />
                       ) : filteredMissedEvents.length === 0 ? (
-                        <p className="text-sm text-campus-text-secondary">No missed events found.</p>
+                        <p className="text-sm text-campus-text-secondary">
+                          No missed events found.
+                        </p>
                       ) : (
                         <>
                           <div className="space-y-3">
                             {paginatedMissedEvents.map((event) => (
-                              <Card key={event.id} shadow="sm" className="bg-red-50 border-red-100">
+                              <Card
+                                key={event.id}
+                                shadow="sm"
+                                className="bg-red-50 border-red-100"
+                              >
                                 <CardBody>
-                                  <h4 className="font-semibold text-campus-text-primary">{event.title}</h4>
+                                  <h4 className="font-semibold text-campus-text-primary">
+                                    {event.title}
+                                  </h4>
                                   <p className="text-sm text-campus-text-secondary">
-                                    {formatEventDate(event.eventDate, event.date)} | {event.scheduledTime}
+                                    {formatEventDate(
+                                      event.eventDate,
+                                      event.date,
+                                    )}{" "}
+                                    | {event.scheduledTime}
                                   </p>
-                                  <p className="text-xs text-campus-text-secondary">{event.location || "TBA"}</p>
+                                  <p className="text-xs text-campus-text-secondary">
+                                    {event.location || "TBA"}
+                                  </p>
                                 </CardBody>
                               </Card>
                             ))}
                           </div>
-                          {filteredMissedEvents.length > STATUS_ITEMS_PER_PAGE && (
+                          {filteredMissedEvents.length >
+                            STATUS_ITEMS_PER_PAGE && (
                             <div className="flex justify-center pt-2">
                               <Pagination
                                 showControls
@@ -1618,7 +1956,9 @@ export default function ECStudentLookup() {
                             disallowEmptySelection
                             selectionMode="single"
                             selectedKeys={new Set([paymentSortMode])}
-                            onAction={(key) => setPaymentSortMode(String(key) as PaymentSortMode)}
+                            onAction={(key) =>
+                              setPaymentSortMode(String(key) as PaymentSortMode)
+                            }
                           >
                             <DropdownItem key="paid">Paid</DropdownItem>
                             <DropdownItem key="unpaid">Unpaid</DropdownItem>
@@ -1627,9 +1967,11 @@ export default function ECStudentLookup() {
                       </div>
 
                       {statusLoading ? (
-                        <p className="text-sm text-campus-text-secondary">Loading payments...</p>
+                        <CampusCardListSkeleton rows={2} />
                       ) : sortedStatusPayments.length === 0 ? (
-                        <p className="text-sm text-campus-text-secondary">No payment records found for this student.</p>
+                        <p className="text-sm text-campus-text-secondary">
+                          No payment records found for this student.
+                        </p>
                       ) : (
                         <>
                           <div className="space-y-3">
@@ -1637,13 +1979,20 @@ export default function ECStudentLookup() {
                               <Card
                                 key={payment.paymentId}
                                 shadow="sm"
-                                className={payment.status === "PAID" ? "bg-green-50 border-green-100" : "bg-red-50 border-red-100"}
+                                className={
+                                  payment.status === "PAID"
+                                    ? "bg-green-50 border-green-100"
+                                    : "bg-red-50 border-red-100"
+                                }
                               >
                                 <CardBody className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                                   <div>
-                                    <p className="font-medium text-campus-text-primary">{payment.title}</p>
+                                    <p className="font-medium text-campus-text-primary">
+                                      {payment.title}
+                                    </p>
                                     <p className="text-xs text-campus-text-secondary">
-                                      Ref: {payment.ref} | Date: {payment.date || "-"}
+                                      Ref: {payment.ref} | Date:{" "}
+                                      {payment.date || "-"}
                                     </p>
                                   </div>
 
@@ -1660,7 +2009,8 @@ export default function ECStudentLookup() {
                               </Card>
                             ))}
                           </div>
-                          {sortedStatusPayments.length > STATUS_ITEMS_PER_PAGE && (
+                          {sortedStatusPayments.length >
+                            STATUS_ITEMS_PER_PAGE && (
                             <div className="flex justify-center pt-2">
                               <Pagination
                                 showControls
@@ -1677,11 +2027,7 @@ export default function ECStudentLookup() {
                 </Tabs>
 
                 <div className="flex justify-end">
-                  <Button
-                    variant="bordered"
-                    onPress={onClose}
-                    className="px-4"
-                  >
+                  <Button variant="bordered" onPress={onClose} className="px-4">
                     Close
                   </Button>
                 </div>

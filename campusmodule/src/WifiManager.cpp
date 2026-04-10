@@ -32,11 +32,13 @@ WifiManager::~WifiManager() {
 void WifiManager::begin() {
   prefsReady_ = prefs_.begin(kWifiNamespace, false);
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(true);
+  WiFi.setSleep(false);
 }
 
-bool WifiManager::connect(String &error, uint32_t timeoutMs) {
+bool WifiManager::beginConnect(String &error, uint32_t timeoutMs) {
+  error = "";
   if (WiFi.status() == WL_CONNECTED) {
+    connectPending_ = false;
     return true;
   }
 
@@ -44,21 +46,78 @@ bool WifiManager::connect(String &error, uint32_t timeoutMs) {
   String password;
   if (!loadCredentials(ssid, password)) {
     error = "Run Wi-Fi setup";
+    connectPending_ = false;
     return false;
   }
 
   stopPortal();
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(true);
-  return connectUsing(ssid, password, error, timeoutMs);
+  WiFi.setSleep(false);
+  WiFi.disconnect(false, false);
+  delay(50);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  connectPending_ = true;
+  connectStartedAt_ = millis();
+  connectTimeoutMs_ = timeoutMs;
+  return true;
+}
+
+WifiConnectResult WifiManager::pollConnect(String &error) {
+  if (WiFi.status() == WL_CONNECTED) {
+    connectPending_ = false;
+    error = "";
+    return WifiConnectResult::Connected;
+  }
+
+  if (!connectPending_) {
+    return WifiConnectResult::Idle;
+  }
+
+  if (dns_ != nullptr) {
+    dns_->processNextRequest();
+  }
+
+  if ((millis() - connectStartedAt_) >= connectTimeoutMs_) {
+    error = statusText(WiFi.status());
+    WiFi.disconnect(false, false);
+    connectPending_ = false;
+    return WifiConnectResult::Failed;
+  }
+
+  return WifiConnectResult::InProgress;
+}
+
+void WifiManager::cancelConnect() {
+  connectPending_ = false;
+  WiFi.disconnect(false, false);
+}
+
+bool WifiManager::connect(String &error, uint32_t timeoutMs) {
+  if (!beginConnect(error, timeoutMs)) {
+    return false;
+  }
+
+  while (true) {
+    const WifiConnectResult result = pollConnect(error);
+    if (result == WifiConnectResult::Connected) {
+      return true;
+    }
+    if (result == WifiConnectResult::Failed) {
+      return false;
+    }
+    delay(50);
+  }
+
+  return WiFi.status() == WL_CONNECTED;
 }
 
 void WifiManager::disconnect() {
   stopPortal();
+  connectPending_ = false;
   WiFi.disconnect(true, false);
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
-  WiFi.setSleep(true);
+  WiFi.setSleep(false);
 }
 
 bool WifiManager::isConnected() const {
@@ -78,6 +137,10 @@ String WifiManager::configuredSsid() const {
     return "";
   }
   return ssid;
+}
+
+String WifiManager::statusText() const {
+  return statusText(WiFi.status());
 }
 
 WifiSetupResult WifiManager::runSetupPortal(DisplayManager &display,
@@ -170,6 +233,7 @@ bool WifiManager::connectUsing(const String &ssid, const String &password,
                                String &error, uint32_t timeoutMs) {
   WiFi.disconnect(false, false);
   delay(150);
+  WiFi.setSleep(false);
   WiFi.begin(ssid.c_str(), password.c_str());
 
   const uint32_t startedAt = millis();

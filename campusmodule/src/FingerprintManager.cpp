@@ -117,12 +117,22 @@ bool FingerprintManager::deleteTemplate(uint16_t templateId, String &error) {
   return true;
 }
 
+bool FingerprintManager::isFingerPresent() {
+  if (!ready_) {
+    return false;
+  }
+
+  const uint8_t imageStatus = finger_.getImage();
+  return imageStatus != FINGERPRINT_NOFINGER;
+}
+
 void FingerprintManager::waitForFingerRemoval(uint32_t timeoutMs) {
   const uint32_t startedAt = millis();
   while ((millis() - startedAt) < timeoutMs) {
     if (finger_.getImage() == FINGERPRINT_NOFINGER) {
       return;
     }
+    yield();
     delay(80);
   }
 }
@@ -134,6 +144,7 @@ bool FingerprintManager::captureToSlot(uint8_t slot, uint32_t timeoutMs,
   while ((millis() - startedAt) < timeoutMs) {
     const uint8_t imageStatus = finger_.getImage();
     if (imageStatus == FINGERPRINT_NOFINGER) {
+      yield();
       delay(90);
       continue;
     }

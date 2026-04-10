@@ -23,10 +23,12 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.campusDeviceSyncAttendance = exports.campusDeviceSubmitEnrollment = exports.campusDevicePendingEnrollments = exports.campusDeviceConfirmPairing = exports.campusDeviceLatestEvent = exports.adminUpsertPortableDevice = exports.adminCreateUser = void 0;
-const functions = __importStar(require("firebase-functions/v1"));
+exports.campusDeviceSyncAttendance = exports.campusDeviceSubmitEnrollment = exports.campusDevicePendingEnrollments = exports.campusDeviceConfirmPairing = exports.campusDeviceLatestEvent = exports.adminUpsertPortableDevice = exports.resolveSchoolIdLogin = exports.adminDeleteUser = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
-admin.initializeApp();
+const functions = __importStar(require("firebase-functions/v1"));
+if (admin.apps.length === 0) {
+    admin.initializeApp();
+}
 const db = admin.firestore();
 const REGION = "asia-southeast1";
 const MANILA_TIME_ZONE = "Asia/Manila";
@@ -43,9 +45,9 @@ function normalizeText(value) {
     return String(value !== null && value !== void 0 ? value : "").trim();
 }
 function asRecord(value) {
-    return typeof value === "object" && value !== null
-        ? value
-        : {};
+    return typeof value === "object" && value !== null ?
+        value :
+        {};
 }
 function toMillis(value) {
     if (value && typeof value.toMillis === "function") {
@@ -108,7 +110,9 @@ async function callerRole(context) {
         throw new functions.https.HttpsError("unauthenticated", "Login required.");
     }
     const callerProfileSnap = await db.doc(`profiles/${context.auth.uid}`).get();
-    return callerProfileSnap.exists ? String((_b = (_a = callerProfileSnap.data()) === null || _a === void 0 ? void 0 : _a.role) !== null && _b !== void 0 ? _b : "") : "";
+    return callerProfileSnap.exists ?
+        String((_b = (_a = callerProfileSnap.data()) === null || _a === void 0 ? void 0 : _a.role) !== null && _b !== void 0 ? _b : "") :
+        "";
 }
 async function requireAdmin(context) {
     const role = await callerRole(context);
@@ -171,11 +175,12 @@ function deviceEndpoint(method, handler) {
 exports.adminCreateUser = functions
     .region(REGION)
     .https.onCall(async (data, context) => {
-    var _a, _b, _c, _d;
+    var _a;
     await requireAdmin(context);
-    const schoolId = String((_a = data === null || data === void 0 ? void 0 : data.schoolId) !== null && _a !== void 0 ? _a : "").trim();
-    const role = String((_b = data === null || data === void 0 ? void 0 : data.role) !== null && _b !== void 0 ? _b : "").trim();
-    const emailRaw = (data === null || data === void 0 ? void 0 : data.email) ? String(data.email).trim() : "";
+    const body = asRecord(data);
+    const schoolId = normalizeText(body.schoolId);
+    const role = normalizeText(body.role);
+    const emailRaw = normalizeText(body.email);
     if (!schoolId) {
         throw new functions.https.HttpsError("invalid-argument", "School ID is required.");
     }
@@ -199,28 +204,91 @@ exports.adminCreateUser = functions
         }, { merge: true });
         await db.collection("logs").add({
             action: "admin_create_user",
-            actorUid: (_d = (_c = context.auth) === null || _c === void 0 ? void 0 : _c.uid) !== null && _d !== void 0 ? _d : "",
+            actorUid: normalizeText((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid),
             targetUid: uid,
             targetSchoolId: schoolId,
             createdAt: serverTimestamp(),
         });
         return { uid };
     }
-    catch (err) {
-        if ((err === null || err === void 0 ? void 0 : err.code) === "auth/email-already-exists") {
+    catch (error) {
+        const authError = error;
+        if (authError.code === "auth/email-already-exists") {
             throw new functions.https.HttpsError("already-exists", "Account already exists.");
         }
-        throw new functions.https.HttpsError("internal", (err === null || err === void 0 ? void 0 : err.message) || "Failed to create user.");
+        throw new functions.https.HttpsError("internal", authError.message || "Failed to create user.");
+    }
+});
+exports.adminDeleteUser = functions
+    .region(REGION)
+    .https.onCall(async (data, context) => {
+    var _a, _b, _c, _d;
+    await requireAdmin(context);
+    const body = asRecord(data);
+    const uid = normalizeText(body.uid);
+    if (!uid) {
+        throw new functions.https.HttpsError("invalid-argument", "uid required");
+    }
+    if (uid === normalizeText((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid)) {
+        throw new functions.https.HttpsError("failed-precondition", "You cannot delete yourself.");
+    }
+    const profileSnap = await db.doc(`profiles/${uid}`).get();
+    const schoolId = (_c = (_b = profileSnap.data()) === null || _b === void 0 ? void 0 : _b.schoolId) !== null && _c !== void 0 ? _c : null;
+    await admin.auth().deleteUser(uid);
+    await db.doc(`profiles/${uid}`).delete().catch(() => undefined);
+    await db.collection("logs").add({
+        action: "DELETE_USER",
+        actorUid: normalizeText((_d = context.auth) === null || _d === void 0 ? void 0 : _d.uid),
+        targetUid: uid,
+        targetSchoolId: schoolId,
+        createdAt: serverTimestamp(),
+    });
+    return { success: true };
+});
+exports.resolveSchoolIdLogin = functions
+    .region(REGION)
+    .https.onCall(async (data) => {
+    var _a;
+    const body = asRecord(data);
+    const schoolId = normalizeText(body.schoolId);
+    if (!schoolId) {
+        throw new functions.https.HttpsError("invalid-argument", "School ID is required.");
+    }
+    const profileSnapshot = await db
+        .collection("profiles")
+        .where("schoolId", "==", schoolId)
+        .limit(1)
+        .get();
+    if (profileSnapshot.empty) {
+        return { email: null };
+    }
+    const profileDoc = profileSnapshot.docs[0];
+    const profileData = (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {};
+    const profileEmail = normalizeText(profileData.email);
+    try {
+        const userRecord = await admin.auth().getUser(profileDoc.id);
+        return {
+            email: normalizeText(userRecord.email) ||
+                profileEmail ||
+                `${schoolId}@campus.local`,
+        };
+    }
+    catch (error) {
+        console.error("resolveSchoolIdLogin failed to read Auth user", error);
+        return {
+            email: profileEmail || `${schoolId}@campus.local`,
+        };
     }
 });
 exports.adminUpsertPortableDevice = functions
     .region(REGION)
     .https.onCall(async (data, context) => {
     await requireAdmin(context);
-    const deviceId = normalizeText(data === null || data === void 0 ? void 0 : data.deviceId);
-    const secret = normalizeText(data === null || data === void 0 ? void 0 : data.secret);
-    const name = normalizeText(data === null || data === void 0 ? void 0 : data.name) || deviceId;
-    const enabled = (data === null || data === void 0 ? void 0 : data.enabled) !== false;
+    const body = asRecord(data);
+    const deviceId = normalizeText(body.deviceId);
+    const secret = normalizeText(body.secret);
+    const name = normalizeText(body.name) || deviceId;
+    const enabled = body.enabled !== false;
     if (!deviceId) {
         throw new functions.https.HttpsError("invalid-argument", "Device ID is required.");
     }
@@ -245,13 +313,14 @@ exports.campusDeviceLatestEvent = deviceEndpoint("GET", async (_req, res) => {
         .limit(25)
         .get();
     const candidates = snapshot.docs
-        .map((doc) => {
-        const data = doc.data();
+        .map((eventDoc) => {
+        const data = eventDoc.data();
         const date = normalizeText(data.date);
-        const scheduledTime = normalizeText(data.scheduledTime) || normalizeText(data.timeStart);
+        const scheduledTime = normalizeText(data.scheduledTime) ||
+            normalizeText(data.timeStart);
         const status = normalizeText(data.status).toLowerCase() || "upcoming";
         return {
-            eventId: doc.id,
+            eventId: eventDoc.id,
             title: normalizeText(data.title) || "Untitled Event",
             date,
             scheduledTime,
@@ -262,11 +331,11 @@ exports.campusDeviceLatestEvent = deviceEndpoint("GET", async (_req, res) => {
         };
     })
         .filter((event) => event.status !== "completed");
-    candidates.sort((a, b) => {
-        if (a.sortMs !== b.sortMs) {
-            return a.sortMs - b.sortMs;
+    candidates.sort((left, right) => {
+        if (left.sortMs !== right.sortMs) {
+            return left.sortMs - right.sortMs;
         }
-        return b.createdAtMs - a.createdAtMs;
+        return right.createdAtMs - left.createdAtMs;
     });
     const event = candidates[0];
     if (!event) {
@@ -319,12 +388,13 @@ exports.campusDevicePendingEnrollments = deviceEndpoint("GET", async (req, res) 
         .limit(limit)
         .get();
     const students = snapshot.docs
-        .map((doc) => {
-        const data = doc.data();
+        .map((studentDoc) => {
+        const data = studentDoc.data();
         return {
-            studentUid: normalizeText(data.studentUid) || doc.id,
+            studentUid: normalizeText(data.studentUid) || studentDoc.id,
             schoolId: normalizeText(data.schoolId),
-            studentName: normalizeText(data.studentName) || normalizeText(data.name),
+            studentName: normalizeText(data.studentName) ||
+                normalizeText(data.name),
             course: normalizeText(data.course),
             year: normalizeText(data.year),
         };
@@ -422,7 +492,9 @@ exports.campusDeviceSyncAttendance = deviceEndpoint("POST", async (req, res, dev
             results.push({
                 recordId,
                 status: duplicate ? "duplicate" : "uploaded",
-                message: duplicate ? "Attendance already exists." : "Attendance saved.",
+                message: duplicate ?
+                    "Attendance already exists." :
+                    "Attendance saved.",
             });
         }
         catch (error) {

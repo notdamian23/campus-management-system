@@ -5,18 +5,37 @@ import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
-import {
-  Modal,
-  ModalBody,
-  ModalContent,
-  ModalHeader,
-} from "@heroui/modal";
+import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
+import {
+  CampusCardListSkeleton,
+  CampusDataTable,
+  type CampusTableColumn,
+  CampusMetricSkeleton,
+} from "@/components/ui";
 import { useTeacherPortal } from "@/components/teacher/TeacherPortalProvider";
 
 const STUDENTS_PER_PAGE = 8;
+
+const teacherStudentColumns: CampusTableColumn<{
+  uid: string;
+  schoolId: string;
+  studentName: string;
+  course: string;
+  year: string;
+  trackedEventIds: string[];
+  presentCount: number;
+  absentCount: number;
+}>[] = [
+  { key: "schoolId", label: "Student ID" },
+  { key: "studentName", label: "Name" },
+  { key: "course", label: "Course" },
+  { key: "year", label: "Year" },
+  { key: "summary", label: "Activity" },
+  { key: "actions", label: "Actions", align: "end", className: "text-right" },
+];
 
 type SelectOption = {
   key: string;
@@ -50,7 +69,7 @@ export default function TeacherStudentsPage() {
   const [yearFilter, setYearFilter] = useState("");
   const [page, setPage] = useState(1);
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(
-    null
+    null,
   );
   const [selectedTab, setSelectedTab] = useState<StudentTabKey>("tracked");
 
@@ -61,13 +80,13 @@ export default function TeacherStudentsPage() {
         new Set(
           students
             .map((student) => student.course)
-            .filter((course) => course && course !== "Unassigned")
-        )
+            .filter((course) => course && course !== "Unassigned"),
+        ),
       )
         .sort((a, b) => a.localeCompare(b))
         .map((course) => ({ key: course, label: course })),
     ],
-    [students]
+    [students],
   );
 
   const yearOptions = useMemo<SelectOption[]>(
@@ -77,13 +96,13 @@ export default function TeacherStudentsPage() {
         new Set(
           students
             .map((student) => student.year)
-            .filter((year) => year && year !== "Unassigned")
-        )
+            .filter((year) => year && year !== "Unassigned"),
+        ),
       )
         .sort((a, b) => a.localeCompare(b))
         .map((year) => ({ key: year, label: year })),
     ],
-    [students]
+    [students],
   );
 
   const filteredStudents = useMemo(() => {
@@ -95,7 +114,9 @@ export default function TeacherStudentsPage() {
         student.studentName.toLowerCase().includes(search) ||
         student.schoolId.toLowerCase().includes(search) ||
         student.course.toLowerCase().includes(search);
-      const matchesCourse = courseFilter ? student.course === courseFilter : true;
+      const matchesCourse = courseFilter
+        ? student.course === courseFilter
+        : true;
       const matchesYear = yearFilter ? student.year === yearFilter : true;
       return matchesSearch && matchesCourse && matchesYear;
     });
@@ -103,7 +124,7 @@ export default function TeacherStudentsPage() {
 
   const totalPages = Math.max(
     1,
-    Math.ceil(filteredStudents.length / STUDENTS_PER_PAGE)
+    Math.ceil(filteredStudents.length / STUDENTS_PER_PAGE),
   );
 
   const paginatedStudents = useMemo(() => {
@@ -113,12 +134,12 @@ export default function TeacherStudentsPage() {
 
   const selectedStudent = useMemo(
     () => students.find((student) => student.uid === selectedStudentId) ?? null,
-    [selectedStudentId, students]
+    [selectedStudentId, students],
   );
 
   const eventMap = useMemo(
     () => new Map(events.map((event) => [event.id, event])),
-    [events]
+    [events],
   );
 
   const selectedStudentRegistered = useMemo(() => {
@@ -148,26 +169,26 @@ export default function TeacherStudentsPage() {
       })
       .filter(
         (
-          item
+          item,
         ): item is {
           event: (typeof selectedStudentRegistered)[number];
           status: "Present" | "Absent" | "Recorded";
           updatedAtMs: number;
-        } => Boolean(item)
+        } => Boolean(item),
       )
       .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
   }, [eventMap, selectedStudent]);
 
   const selectedStudentPresent = selectedStudentAttendance.filter(
-    (item) => item.status === "Present"
+    (item) => item.status === "Present",
   );
   const selectedStudentAbsent = selectedStudentAttendance.filter(
-    (item) => item.status === "Absent"
+    (item) => item.status === "Absent",
   );
 
   const totalMissed = students.reduce(
     (sum, student) => sum + student.absentCount,
-    0
+    0,
   );
 
   useEffect(() => {
@@ -199,47 +220,40 @@ export default function TeacherStudentsPage() {
         </CardBody>
       </Card>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          label="Tracked Students"
-          value={loading ? "-" : String(students.length)}
-          tone="text-blue-700"
-        />
-        <StatCard
-          label="Courses Seen"
-          value={
-            loading
-              ? "-"
-              : String(
-                  new Set(
-                    students
-                      .map((student) => student.course)
-                      .filter((course) => course && course !== "Unassigned")
-                  ).size
-                )
-          }
-          tone="text-emerald-700"
-        />
-        <StatCard
-          label="Attendance Records"
-          value={
-            loading
-              ? "-"
-              : String(
-                  students.reduce(
-                    (sum, student) => sum + student.recordedCount,
-                    0
-                  )
-                )
-          }
-          tone="text-amber-700"
-        />
-        <StatCard
-          label="Missed Records"
-          value={loading ? "-" : String(totalMissed)}
-          tone="text-red-700"
-        />
-      </div>
+      {loading ? (
+        <CampusMetricSkeleton />
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard
+            label="Tracked Students"
+            value={String(students.length)}
+            tone="text-blue-700"
+          />
+          <StatCard
+            label="Courses Seen"
+            value={String(
+              new Set(
+                students
+                  .map((student) => student.course)
+                  .filter((course) => course && course !== "Unassigned"),
+              ).size,
+            )}
+            tone="text-emerald-700"
+          />
+          <StatCard
+            label="Attendance Records"
+            value={String(
+              students.reduce((sum, student) => sum + student.recordedCount, 0),
+            )}
+            tone="text-amber-700"
+          />
+          <StatCard
+            label="Missed Records"
+            value={String(totalMissed)}
+            tone="text-red-700"
+          />
+        </div>
+      )}
 
       <Card shadow="sm">
         <CardBody className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -259,9 +273,7 @@ export default function TeacherStudentsPage() {
               if (keys === "all") return;
               const selected = Array.from(keys)[0];
               if (typeof selected === "string") {
-                setCourseFilter(
-                  selected === "__all_courses__" ? "" : selected
-                );
+                setCourseFilter(selected === "__all_courses__" ? "" : selected);
               }
             }}
           >
@@ -293,33 +305,43 @@ export default function TeacherStudentsPage() {
         </CardBody>
       </Card>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {loading ? (
-          <Card shadow="sm" className="xl:col-span-2">
-            <CardBody className="p-6 text-sm text-campus-text-secondary">
-              Loading student records...
-            </CardBody>
-          </Card>
-        ) : paginatedStudents.length === 0 ? (
-          <Card shadow="sm" className="xl:col-span-2">
-            <CardBody className="p-6 text-sm text-campus-text-secondary">
-              No students match the current filters.
-            </CardBody>
-          </Card>
-        ) : (
-          paginatedStudents.map((student) => (
-            <Card key={student.uid} shadow="sm">
-              <CardBody className="space-y-4 p-5">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <h2 className="text-lg font-semibold text-campus-text-primary">
-                      {student.studentName}
-                    </h2>
-                    <p className="text-sm text-campus-text-secondary">
-                      {student.schoolId}
-                    </p>
-                  </div>
+      {loading ? (
+        <CampusCardListSkeleton rows={4} />
+      ) : (
+        <CampusDataTable
+          ariaLabel="Teacher student activity records"
+          columns={teacherStudentColumns}
+          items={paginatedStudents}
+          emptyTitle="No students match the current filters"
+          emptyDescription="Try another search, year, or course filter."
+          renderCell={(student, columnKey) => {
+            if (columnKey === "course") {
+              return (
+                <Chip size="sm" className="bg-blue-100 text-blue-700">
+                  {student.course}
+                </Chip>
+              );
+            }
 
+            if (columnKey === "summary") {
+              return (
+                <div className="flex flex-wrap gap-2">
+                  <Chip size="sm" className="bg-slate-100 text-slate-700">
+                    Tracked: {student.trackedEventIds.length}
+                  </Chip>
+                  <Chip size="sm" className="bg-emerald-100 text-emerald-700">
+                    Present: {student.presentCount}
+                  </Chip>
+                  <Chip size="sm" className="bg-red-100 text-red-700">
+                    Missed: {student.absentCount}
+                  </Chip>
+                </div>
+              );
+            }
+
+            if (columnKey === "actions") {
+              return (
+                <div className="flex justify-end">
                   <Button
                     color="primary"
                     variant="flat"
@@ -329,26 +351,13 @@ export default function TeacherStudentsPage() {
                     Open
                   </Button>
                 </div>
+              );
+            }
 
-                <div className="flex flex-wrap gap-2">
-                  <Chip size="sm" className="bg-blue-100 text-blue-700">
-                    {student.course}
-                  </Chip>
-                  <Chip size="sm" className="bg-slate-100 text-slate-700">
-                    {student.year}
-                  </Chip>
-                </div>
-
-                <div className="grid grid-cols-3 gap-3">
-                  <MiniStat label="Tracked" value={student.trackedEventIds.length} />
-                  <MiniStat label="Present" value={student.presentCount} />
-                  <MiniStat label="Missed" value={student.absentCount} />
-                </div>
-              </CardBody>
-            </Card>
-          ))
-        )}
-      </div>
+            return student[columnKey as keyof typeof student] as string;
+          }}
+        />
+      )}
 
       {!loading && filteredStudents.length > STUDENTS_PER_PAGE && (
         <div className="flex justify-center">
@@ -380,7 +389,8 @@ export default function TeacherStudentsPage() {
                   {selectedStudent?.studentName || "Student details"}
                 </span>
                 <span className="text-sm font-normal text-campus-text-secondary">
-                  {selectedStudent?.schoolId || "-"} | {selectedStudent?.course || "-"} |{" "}
+                  {selectedStudent?.schoolId || "-"} |{" "}
+                  {selectedStudent?.course || "-"} |{" "}
                   {selectedStudent?.year || "-"}
                 </span>
               </ModalHeader>
@@ -421,7 +431,8 @@ export default function TeacherStudentsPage() {
                     <div className="space-y-3 pt-2">
                       {selectedStudentRegistered.length === 0 ? (
                         <p className="text-sm text-campus-text-secondary">
-                          No teacher-visible event activity found for this student yet.
+                          No teacher-visible event activity found for this
+                          student yet.
                         </p>
                       ) : (
                         selectedStudentRegistered.map((event) => (
@@ -431,7 +442,10 @@ export default function TeacherStudentsPage() {
                                 <p className="font-semibold text-campus-text-primary">
                                   {event.title}
                                 </p>
-                                <Chip size="sm" className="bg-blue-100 text-blue-700">
+                                <Chip
+                                  size="sm"
+                                  className="bg-blue-100 text-blue-700"
+                                >
                                   Tracked
                                 </Chip>
                               </div>
@@ -459,7 +473,10 @@ export default function TeacherStudentsPage() {
                           <AttendanceCard
                             key={`${item.event.id}-present`}
                             title={item.event.title}
-                            date={formatEventDate(item.event.eventDate, item.event.date)}
+                            date={formatEventDate(
+                              item.event.eventDate,
+                              item.event.date,
+                            )}
                             location={item.event.location}
                             status="Present"
                           />
@@ -479,7 +496,10 @@ export default function TeacherStudentsPage() {
                           <AttendanceCard
                             key={`${item.event.id}-absent`}
                             title={item.event.title}
-                            date={formatEventDate(item.event.eventDate, item.event.date)}
+                            date={formatEventDate(
+                              item.event.eventDate,
+                              item.event.date,
+                            )}
                             location={item.event.location}
                             status="Absent"
                           />
@@ -513,15 +533,6 @@ function StatCard({
         <h2 className={`mt-2 text-3xl font-bold ${tone}`}>{value}</h2>
       </CardBody>
     </Card>
-  );
-}
-
-function MiniStat({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-2xl border bg-white px-3 py-4 text-center">
-      <p className="text-2xl font-bold text-campus-text-primary">{value}</p>
-      <p className="text-xs text-campus-text-secondary">{label}</p>
-    </div>
   );
 }
 

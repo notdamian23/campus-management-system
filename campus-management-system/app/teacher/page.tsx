@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
+import { CampusCardListSkeleton, CampusMetricSkeleton } from "@/components/ui";
 import { useTeacherPortal } from "@/components/teacher/TeacherPortalProvider";
 
 function lifecycleChipClass(lifecycle: string) {
@@ -30,11 +31,13 @@ export default function TeacherDashboard() {
   const { profile, events, files, students, loading, error } =
     useTeacherPortal();
 
-  const activeEvents = events.filter((event) => event.lifecycle !== "completed");
+  const activeEvents = events.filter(
+    (event) => event.lifecycle !== "completed",
+  );
   const ongoingEvents = events.filter((event) => event.lifecycle === "ongoing");
   const totalAttendanceRecords = students.reduce(
     (sum, student) => sum + student.recordedCount,
-    0
+    0,
   );
   const recentEvents = [...events]
     .sort((a, b) => {
@@ -67,7 +70,8 @@ export default function TeacherDashboard() {
             Teacher Portal
           </p>
           <h1 className="text-2xl font-bold sm:text-3xl">
-            Welcome back{profile?.teacherName ? `, ${profile.teacherName}` : ""}.
+            Welcome back{profile?.teacherName ? `, ${profile.teacherName}` : ""}
+            .
           </h1>
           <p className="max-w-2xl text-sm text-white/85">
             You are now looking at live campus activity: events, participants,
@@ -92,28 +96,32 @@ export default function TeacherDashboard() {
         </Card>
       )}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard
-          label="Active Events"
-          value={loading ? "-" : String(activeEvents.length)}
-          tone="text-blue-700"
-        />
-        <MetricCard
-          label="Tracked Students"
-          value={loading ? "-" : String(students.length)}
-          tone="text-emerald-700"
-        />
-        <MetricCard
-          label="Attendance Records"
-          value={loading ? "-" : String(totalAttendanceRecords)}
-          tone="text-amber-700"
-        />
-        <MetricCard
-          label="Event Files"
-          value={loading ? "-" : String(files.length)}
-          tone="text-fuchsia-700"
-        />
-      </div>
+      {loading ? (
+        <CampusMetricSkeleton />
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard
+            label="Active Events"
+            value={String(activeEvents.length)}
+            tone="text-blue-700"
+          />
+          <MetricCard
+            label="Tracked Students"
+            value={String(students.length)}
+            tone="text-emerald-700"
+          />
+          <MetricCard
+            label="Attendance Records"
+            value={String(totalAttendanceRecords)}
+            tone="text-amber-700"
+          />
+          <MetricCard
+            label="Event Files"
+            value={String(files.length)}
+            tone="text-fuchsia-700"
+          />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
         <Card shadow="sm">
@@ -137,9 +145,7 @@ export default function TeacherDashboard() {
 
           <CardBody className="space-y-3">
             {loading ? (
-              <p className="text-sm text-campus-text-secondary">
-                Loading event overview...
-              </p>
+              <CampusCardListSkeleton rows={3} />
             ) : recentEvents.length === 0 ? (
               <p className="text-sm text-campus-text-secondary">
                 No events have been posted yet.
@@ -164,8 +170,8 @@ export default function TeacherDashboard() {
                         {formatEventDate(event.eventDate, event.date)}
                       </p>
                       <p className="text-xs text-campus-text-secondary">
-                        {event.location} | {event.attendanceCount} attendance
-                        {" "}records | {event.documentCount + event.imageCount} files
+                        {event.location} | {event.attendanceCount} attendance{" "}
+                        records | {event.documentCount + event.imageCount} files
                       </p>
                     </div>
 
@@ -194,9 +200,7 @@ export default function TeacherDashboard() {
 
           <CardBody className="space-y-3">
             {loading ? (
-              <p className="text-sm text-campus-text-secondary">
-                Loading student activity...
-              </p>
+              <CampusCardListSkeleton rows={3} />
             ) : attentionStudents.length === 0 ? (
               <p className="text-sm text-campus-text-secondary">
                 No missed attendance records yet.

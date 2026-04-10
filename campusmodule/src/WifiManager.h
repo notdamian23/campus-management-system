@@ -16,16 +16,27 @@ enum class WifiSetupResult : uint8_t {
   Failed,
 };
 
+enum class WifiConnectResult : uint8_t {
+  Idle,
+  InProgress,
+  Connected,
+  Failed,
+};
+
 class WifiManager {
  public:
   ~WifiManager();
 
   void begin();
+  bool beginConnect(String &error, uint32_t timeoutMs);
+  WifiConnectResult pollConnect(String &error);
+  void cancelConnect();
   bool connect(String &error, uint32_t timeoutMs);
   void disconnect();
   bool isConnected() const;
   bool hasCredentials() const;
   String configuredSsid() const;
+  String statusText() const;
   WifiSetupResult runSetupPortal(DisplayManager &display, ButtonInput &buttons,
                                  String &message, uint32_t timeoutMs);
 
@@ -54,4 +65,7 @@ class WifiManager {
   String portalStatus_;
   String portalApSsid_;
   String portalApIp_;
+  bool connectPending_ = false;
+  uint32_t connectStartedAt_ = 0;
+  uint32_t connectTimeoutMs_ = 0;
 };

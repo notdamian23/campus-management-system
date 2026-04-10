@@ -15,6 +15,7 @@ class FingerprintManager {
   FingerprintMatch scanOnce();
   bool enrollTemplate(uint16_t templateId, String &error);
   bool deleteTemplate(uint16_t templateId, String &error);
+  bool isFingerPresent();
   void waitForFingerRemoval(uint32_t timeoutMs = 3000);
 
  private:

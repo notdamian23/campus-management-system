@@ -2,22 +2,18 @@
 
 import React from "react";
 
-import Image from "next/image";
-import { Poppins } from "next/font/google";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, Suspense } from "react";
+import { Button } from "@heroui/button";
+import { Input } from "@heroui/input";
+import { Switch } from "@heroui/switch";
+import { getFunctions, httpsCallable } from "firebase/functions";
 
-// Campus components not needed - using native elements for better control
-
-import { auth, db } from "@/lib/firebase";
+import { campusToast } from "@/lib/toast";
+import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
+import { app, auth, db } from "@/lib/firebase";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
-
-const poppins = Poppins({
-    subsets: ["latin"],
-    weight: ["400", "600", "700", "800"],
-});
-
+import { doc, getDoc, updateDoc } from "firebase/firestore";
 
 const EyeSlashFilledIcon = (props: React.SVGProps<SVGSVGElement>) => {
   return (
@@ -79,239 +75,322 @@ const EyeFilledIcon = (props: React.SVGProps<SVGSVGElement>) => {
   );
 };
 
-type Role = "teacher" | "student" | "ec"| "admin";
+type Role = "teacher" | "student" | "ec" | "admin";
+type LoginFieldErrors = {
+  schoolId?: string;
+  password?: string;
+};
+
+function getLoginInputClassNames(isInvalid: boolean) {
+  return {
+    base: "w-full",
+    mainWrapper: "gap-0",
+    label: "text-sm font-semibold text-text-primary mb-2",
+    input: "text-base text-text-primary placeholder:text-text-muted",
+    inputWrapper: [
+      "bg-bg-main px-0 min-h-[58px] border-2 rounded-xl shadow-none transition-all",
+      isInvalid
+        ? "border-danger hover:border-danger focus-within:border-danger focus-within:ring-4 focus-within:ring-danger/20"
+        : "border-border-input hover:border-primary-600 focus-within:border-primary-500 focus-within:ring-4 focus-within:ring-primary-500/20",
+    ].join(" "),
+    innerWrapper: "gap-3 px-4",
+    helperWrapper: "px-1 pt-2",
+    errorMessage: "text-sm text-danger",
+  };
+}
 
 function setCampusCookies(role: string, mustChangePassword: boolean) {
-    // Basic cookies for middleware guard (7 days)
-    const maxAge = 60 * 60 * 24 * 7;
-    document.cookie = `campus_logged_in=1; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
-    document.cookie = `campus_role=${role}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
-    document.cookie = `campus_must_change=${mustChangePassword ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  // Basic cookies for middleware guard (7 days)
+  const maxAge = 60 * 60 * 24 * 7;
+  document.cookie = `campus_logged_in=1; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  document.cookie = `campus_role=${role}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  document.cookie = `campus_must_change=${mustChangePassword ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
 }
 
 function LoginForm() {
-    const router = useRouter();
-    const searchParams = useSearchParams();
-    const nextPath = searchParams.get("next"); // optional redirect target
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const nextPath = searchParams.get("next"); // optional redirect target
 
-    const [schoolId, setSchoolId] = useState("");
-    const [password, setPassword] = useState("");
-    const [loading, setLoading] = useState(false);
+  const [schoolId, setSchoolId] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<LoginFieldErrors>({});
 
-    const [isVisible, setIsVisible] = React.useState(false);
-    const toggleVisibility = () => setIsVisible(!isVisible);
+  const [isVisible, setIsVisible] = React.useState(false);
+  const toggleVisibility = () => setIsVisible(!isVisible);
 
+  const showLoginToast = (
+    title: string,
+    description: string,
+    color: "danger" | "warning" = "danger",
+  ) => {
+    campusToast.show({
+      title,
+      description,
+      tone: color === "warning" ? "warning" : "error",
+    });
+  };
 
-    const handleLogin = async () => {
-        const sid = schoolId.trim();
+  const clearFieldErrors = (...fields: (keyof LoginFieldErrors)[]) => {
+    setFieldErrors((current) => {
+      if (!fields.some((field) => current[field])) {
+        return current;
+      }
 
-        if (!sid || !password) {
-            alert("Please enter School ID and password.");
-            return;
+      const next = { ...current };
+      for (const field of fields) {
+        delete next[field];
+      }
+
+      return next;
+    });
+  };
+
+  const handleLogin = async () => {
+    const sid = schoolId.trim();
+    const nextErrors: LoginFieldErrors = {};
+
+    if (!sid) {
+      nextErrors.schoolId = "School ID is required";
+    }
+
+    if (!password) {
+      nextErrors.password = "Password is required";
+    }
+
+    if (nextErrors.schoolId || nextErrors.password) {
+      setFieldErrors(nextErrors);
+      return;
+    }
+
+    // ✅ Option C: validate School ID numeric (6–12 digits; adjust if needed)
+    if (!/^\d{6,12}$/.test(sid)) {
+      setFieldErrors({ schoolId: "Invalid School ID" });
+      return;
+    }
+
+    // Firebase Email/Password requires an email; we map School ID → pseudo email
+    setFieldErrors({});
+
+    setLoading(true);
+    try {
+      let loginEmail = `${sid}@campus.local`;
+      const functions = getFunctions(app, "asia-southeast1");
+      const resolveSchoolIdLogin = httpsCallable<
+        { schoolId: string },
+        { email?: string | null }
+      >(functions, "resolveSchoolIdLogin");
+
+      try {
+        const resolved = await resolveSchoolIdLogin({ schoolId: sid });
+        const resolvedEmail = resolved.data?.email?.trim();
+
+        if (resolvedEmail) {
+          loginEmail = resolvedEmail;
         }
+      } catch {
+        loginEmail = `${sid}@campus.local`;
+      }
 
-        // ✅ Option C: validate School ID numeric (6–12 digits; adjust if needed)
-        if (!/^\d{6,12}$/.test(sid)) {
-            alert("Invalid School ID format. Example: 23209455");
-            return;
-        }
+      const cred = await signInWithEmailAndPassword(auth, loginEmail, password);
+      const uid = cred.user.uid;
 
-        // Firebase Email/Password requires an email; we map School ID → pseudo email
-        const loginEmail = `${sid}@campus.local`;
+      // 2) Load profile (role + mustChangePassword) from Firestore
+      const snap = await getDoc(doc(db, "profiles", uid));
+      if (!snap.exists()) {
+        await signOut(auth);
+        showLoginToast(
+          "Profile not found",
+          "No profile or role is assigned to this account. Contact admin.",
+        );
+        return;
+      }
 
-        setLoading(true);
-        try {
-            // 1) Sign in
-            const cred = await signInWithEmailAndPassword(auth, loginEmail, password);
-            const uid = cred.user.uid;
+      const data = snap.data() as {
+        role?: Role;
+        mustChangePassword?: boolean;
+        schoolId?: string;
+        email?: string;
+      };
 
-            // 2) Load profile (role + mustChangePassword) from Firestore
-            const snap = await getDoc(doc(db, "profiles", uid));
-            if (!snap.exists()) {
-                await signOut(auth);
-                alert("No profile/role assigned to this account. Contact admin.");
-                return;
-            }
+      // Validate role
+      if (
+        data.role !== "teacher" &&
+        data.role !== "student" &&
+        data.role !== "ec" &&
+        data.role !== "admin"
+      ) {
+        await signOut(auth);
+        showLoginToast(
+          "Invalid account role",
+          "The account role in the database is invalid. Contact admin.",
+        );
+        return;
+      }
 
-            const data = snap.data() as {
-                role?: Role;
-                mustChangePassword?: boolean;
-                schoolId?: string;
-            };
+      if (cred.user.email && cred.user.email !== data.email) {
+        await updateDoc(doc(db, "profiles", uid), { email: cred.user.email });
+      }
 
-            // Validate role
-            if (data.role !== "teacher" && data.role !== "student" && data.role !== "ec" && data.role !== "admin") {
-                await signOut(auth);
-                alert("Invalid role in database. Contact admin.");
-                return;
-            }
+      // 3) Set cookies ONCE (middleware uses these)
+      setCampusCookies(data.role, data.mustChangePassword === true);
 
-            // 3) Set cookies ONCE (middleware uses these)
-            setCampusCookies(data.role, data.mustChangePassword === true);
+      // 4) Force password change on first login
+      if (data.mustChangePassword === true) {
+        router.push("/change-password");
+        return;
+      }
 
-            // 4) Force password change on first login
-            if (data.mustChangePassword === true) {
-                router.push("/change-password");
-                return;
-            }
+      // 5) Redirect by role (or use ?next=...)
+      if (nextPath) {
+        router.push(nextPath);
+        return;
+      }
 
-            // 5) Redirect by role (or use ?next=...)
-            if (nextPath) {
-                router.push(nextPath);
-                return;
-            }
+      if (data.role === "teacher") router.push("/teacher");
+      else if (data.role === "student") router.push("/student");
+      else if (data.role === "ec") router.push("/ecmember");
+      else router.push("/admin");
+    } catch (e: unknown) {
+      const error = e as { code?: string; message?: string };
+      const code = error.code;
 
-            if (data.role === "teacher") router.push("/teacher");
-            else if (data.role === "student") router.push("/student");
-            else if (data.role === "ec") router.push("/ecmember");
-            else router.push("/admin");
-        } catch (e: unknown) {
-            const error = e as { code?: string; message?: string };
-            const code = error.code;
+      if (
+        code === "functions/not-found" ||
+        code === "functions/invalid-argument"
+      ) {
+        setFieldErrors({ schoolId: "Invalid School ID" });
+      } else if (code === "auth/invalid-credential") {
+        setFieldErrors({ password: "Invalid password" });
+      } else if (code === "auth/user-not-found") {
+        setFieldErrors({ schoolId: "Invalid School ID" });
+      } else {
+        showLoginToast(
+          "Login failed",
+          error.message ?? "Unable to sign in right now. Please try again.",
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
-            if (code === "auth/invalid-credential") alert("Wrong School ID or password.");
-            else if (code === "auth/user-not-found") alert("Account not found. Contact admin.");
-            else alert(error.message ?? "Login failed");
-        } finally {
-            setLoading(false);
-        }
-    };
+  return (
+    <CampusAuthShell
+      title="CAMPUS"
+      description="Welcome back! Sign in to your account to access attendance, events, documents, and payment tools."
+      eyebrow="Secure Account Access"
+      footer={
+        <>
+          Don&apos;t have an account?{" "}
+          <span className="font-bold text-primary-600">
+            Contact Administration
+          </span>
+        </>
+      }
+    >
+      <div className="space-y-7">
+        <Input
+          label="School ID"
+          labelPlacement="outside"
+          placeholder="e.g. 23209455"
+          type="text"
+          value={schoolId}
+          onValueChange={(value) => {
+            setSchoolId(value);
+            clearFieldErrors("schoolId", "password");
+          }}
+          inputMode="numeric"
+          isInvalid={Boolean(fieldErrors.schoolId)}
+          errorMessage={fieldErrors.schoolId}
+          startContent={
+            <span className="material-icons pointer-events-none text-xl text-text-muted">
+              person
+            </span>
+          }
+          classNames={getLoginInputClassNames(Boolean(fieldErrors.schoolId))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleLogin();
+          }}
+        />
 
-    return (
-        <div className="min-h-screen w-full bg-primary-500 flex items-center justify-center p-4 sm:p-6 lg:p-8">
-            <div className="bg-bg-main w-full max-w-[520px] rounded-2xl shadow-2xl px-8 py-12 sm:px-12 sm:py-14 flex flex-col items-center border border-border/20">
-                {/* Logo */}
-                <div className="w-36 h-36 sm:w-44 sm:h-44 rounded-full overflow-hidden flex items-center justify-center mb-8 border-4 border-white shadow-xl">
-                    <Image
-                        src="/new campus-logo.jpg"
-                        alt="Campus Logo"
-                        width={200}
-                        height={200}
-                        className="object-cover"
-                        priority
-                    />
-                </div>
+        <Input
+          label="Password"
+          labelPlacement="outside"
+          placeholder="Enter password"
+          type={isVisible ? "text" : "password"}
+          value={password}
+          onValueChange={(value) => {
+            setPassword(value);
+            clearFieldErrors("password");
+          }}
+          isInvalid={Boolean(fieldErrors.password)}
+          errorMessage={fieldErrors.password}
+          startContent={
+            <span className="material-icons pointer-events-none text-xl text-text-muted">
+              lock
+            </span>
+          }
+          endContent={
+            <Button
+              isIconOnly
+              aria-label="Toggle password visibility"
+              className="h-9 w-9 min-w-0 rounded-full bg-transparent text-text-muted"
+              variant="light"
+              type="button"
+              onPress={toggleVisibility}
+            >
+              {isVisible ? (
+                <EyeSlashFilledIcon className="pointer-events-none text-2xl" />
+              ) : (
+                <EyeFilledIcon className="pointer-events-none text-2xl" />
+              )}
+            </Button>
+          }
+          classNames={getLoginInputClassNames(Boolean(fieldErrors.password))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleLogin();
+          }}
+        />
 
-                {/* Title */}
-                <h1
-                    className={`text-5xl sm:text-6xl font-extrabold text-center text-primary-500 tracking-tight mb-3 ${poppins.className}`}
-                >
-                    CAMPUS
-                </h1>
-
-                <p className="text-text-secondary text-center text-base mb-10">
-                    Welcome back! Sign in to your account
-                </p>
-
-                {/* School ID */}
-                <div className="w-full mb-7">
-                    <label className="block text-sm font-semibold text-text-primary mb-2">
-                        School ID
-                    </label>
-                    <div className="relative">
-                        <span className="absolute left-4 top-1/2 -translate-y-1/2 material-icons text-text-muted text-xl z-10">
-                            person
-                        </span>
-                        <input
-                            type="text"
-                            placeholder="e.g. 23209455"
-                            value={schoolId}
-                            onChange={(e) => setSchoolId(e.target.value)}
-                            inputMode="numeric"
-                            className="w-full pl-14 pr-4 py-4 text-base text-text-primary placeholder:text-text-muted bg-bg-main border-2 border-border-input rounded-xl hover:border-primary-600 focus:border-primary-500 focus:ring-4 focus:ring-primary-500/20 outline-none transition-all"
-                            onKeyDown={(e) => {
-                                if (e.key === "Enter") handleLogin();
-                            }}
-                        />
-                    </div>
-                </div>
-
-                {/* Password */}
-                <div className="w-full mb-7">
-                    <label className="block text-sm font-semibold text-text-primary mb-2">
-                        Password
-                    </label>
-                    <div className="relative">
-                        <span className="absolute left-4 top-1/2 -translate-y-1/2 material-icons text-text-muted text-xl z-10">
-                            lock
-                        </span>
-                        <input
-                            type={isVisible ? "text" : "password"}
-                            placeholder="Enter password"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            className="w-full pl-14 pr-14 py-4 text-base text-text-primary placeholder:text-text-muted bg-bg-main border-2 border-border-input rounded-xl hover:border-primary-600 focus:border-primary-500 focus:ring-4 focus:ring-primary-500/20 outline-none transition-all"
-                            onKeyDown={(e) => {
-                                if (e.key === "Enter") handleLogin();
-                            }}
-                        />
-                        <button
-                            aria-label="toggle password visibility"
-                            className="absolute right-4 top-1/2 -translate-y-1/2 focus:outline-none text-text-muted hover:text-text-primary transition-colors z-10"
-                            type="button"
-                            onClick={toggleVisibility}
-                        >
-                            {isVisible ? (
-                                <EyeSlashFilledIcon className="text-2xl pointer-events-none" />
-                            ) : (
-                                <EyeFilledIcon className="text-2xl pointer-events-none" />
-                            )}
-                        </button>
-                    </div>
-                </div>
-
-                {/* Remember + Forgot */}
-                <div className="flex justify-between items-center w-full text-sm mb-10">
-                    <label className="flex items-center gap-2.5 text-text-primary cursor-pointer group">
-                        <input
-                            type="checkbox"
-                            className="w-5 h-5 rounded border-2 border-border-input text-primary-500 focus:ring-2 focus:ring-primary-500/40 cursor-pointer transition-colors"
-                        />
-                        <span className="select-none font-medium group-hover:text-primary-600 transition-colors">Remember me</span>
-                    </label>
-                    <button type="button" className="text-primary-600 font-semibold hover:text-primary-700 hover:underline transition-colors">
-                        Forgot password?
-                    </button>
-                </div>
-
-                {/* Sign In */}
-                <button
-                    onClick={handleLogin}
-                    disabled={loading}
-                    className="w-full py-4 bg-primary-500 hover:bg-primary-600 active:bg-primary-700 text-white font-bold text-base rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:transform-none"
-                >
-                    {loading ? (
-                        <span className="flex items-center justify-center gap-2">
-                            <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                            Signing In...
-                        </span>
-                    ) : "Sign In"}
-                </button>
-
-                {/* Footer */}
-                <div className="mt-10 text-sm text-text-secondary text-center">
-                    Don&apos;t have an account?{" "}
-                    <a className="text-primary-600 font-bold hover:underline hover:text-primary-700 cursor-pointer transition-colors">
-                        Contact Administration
-                    </a>
-                </div>
-            </div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <Switch
+            size="sm"
+            isSelected={rememberMe}
+            onValueChange={setRememberMe}
+            classNames={{
+              label: "text-sm font-medium text-text-primary",
+            }}
+          >
+            Remember me
+          </Switch>
+          <Button
+            type="button"
+            variant="light"
+            className="h-auto min-w-0 self-start px-0 text-sm font-semibold text-primary-600 data-[hover=true]:bg-transparent sm:self-auto"
+          >
+            Forgot password?
+          </Button>
         </div>
-    );
+
+        <Button
+          onPress={handleLogin}
+          isLoading={loading}
+          className="h-14 w-full bg-primary-500 text-base font-bold text-white shadow-lg"
+        >
+          Sign In
+        </Button>
+      </div>
+    </CampusAuthShell>
+  );
 }
 
 export default function LoginPage() {
-    return (
-        <Suspense fallback={
-            <div className="min-h-screen w-full bg-primary-500 flex items-center justify-center">
-                <div className="text-white">Loading...</div>
-            </div>
-        }>
-            <LoginForm />
-        </Suspense>
-    );
+  return (
+    <Suspense fallback={<CampusAuthShellSkeleton />}>
+      <LoginForm />
+    </Suspense>
+  );
 }
-

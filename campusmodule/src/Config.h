@@ -26,6 +26,7 @@ inline constexpr char kNtpServerSecondary[] = "pool.ntp.org";
 
 inline constexpr uint32_t kWifiTimeoutMs = 15000;
 inline constexpr uint32_t kHttpTimeoutMs = 15000;
+inline constexpr uint32_t kNtpSyncTimeoutMs = 10000;
 inline constexpr uint32_t kEnrollmentTimeoutMs = 20000;
 inline constexpr uint32_t kAttendancePollMs = 180;
 inline constexpr uint32_t kAutoSyncIntervalMs = 60000;

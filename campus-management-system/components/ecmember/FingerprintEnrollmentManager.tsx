@@ -1,17 +1,25 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { Selection } from "@react-types/shared";
+import { Alert } from "@heroui/alert";
 import { Button } from "@heroui/button";
 import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
 import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
 import { Progress } from "@heroui/progress";
-import { Spinner } from "@heroui/spinner";
 import { Tab, Tabs } from "@heroui/tabs";
-import { Table, TableBody, TableCell, TableColumn, TableHeader, TableRow } from "@heroui/table";
+import {
+  CampusCardListSkeleton,
+  CampusDataTable,
+  CampusEmptyState,
+  CampusTableBodySkeleton,
+  type CampusTableColumn,
+} from "@/components/ui";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { app } from "@/lib/firebase";
+import { campusToast } from "@/lib/toast";
 import {
   normalizePortableEnrollmentSessionStatus,
   normalizePortableEnrollmentStudentStatus,
@@ -47,9 +55,27 @@ type EnrollmentSessionView = PortableDeviceEnrollmentSessionDoc & {
   updatedAtMs: number;
 };
 
-type EnrollmentSessionStudentView = PortableDeviceEnrollmentSessionStudentDoc & {
-  id: string;
-};
+type EnrollmentSessionStudentView =
+  PortableDeviceEnrollmentSessionStudentDoc & {
+    id: string;
+  };
+
+const enrollmentCandidateColumns: CampusTableColumn<StudentRosterRow>[] = [
+  { key: "name", label: "Student" },
+  { key: "id", label: "School ID" },
+  { key: "courseYear", label: "Course / Year" },
+  { key: "status", label: "Account" },
+];
+
+const sessionStudentColumns: CampusTableColumn<EnrollmentSessionStudentView>[] =
+  [
+    { key: "student", label: "Student" },
+    { key: "courseYear", label: "Course / Year" },
+    { key: "status", label: "Status" },
+    { key: "sync", label: "Sync" },
+    { key: "template", label: "Template" },
+    { key: "device", label: "Device" },
+  ];
 
 type EnrollmentSessionWire = {
   sessionId?: string;
@@ -136,17 +162,25 @@ function progressValue(session: EnrollmentSessionView | null) {
   if (!session || session.totalStudents <= 0) return 0;
   return Math.min(
     100,
-    Math.round(((session.syncedCount + session.failedCount) / session.totalStudents) * 100)
+    Math.round(
+      ((session.syncedCount + session.failedCount) / session.totalStudents) *
+        100,
+    ),
   );
 }
 
 function toEnrollmentError(error: unknown, fallback: string) {
   if (typeof error === "object" && error !== null) {
     const maybe = error as { code?: unknown; message?: unknown };
-    const code = String(maybe.code ?? "").trim().toLowerCase();
+    const code = String(maybe.code ?? "")
+      .trim()
+      .toLowerCase();
     const message = String(maybe.message ?? "").trim();
 
-    if (code.includes("permission-denied") || message.toLowerCase().includes("permission-denied")) {
+    if (
+      code.includes("permission-denied") ||
+      message.toLowerCase().includes("permission-denied")
+    ) {
       return "Fingerprint enrollment access is blocked. Deploy the updated portable-device functions, or verify that this account is EC/Admin.";
     }
 
@@ -164,6 +198,14 @@ function toEnrollmentError(error: unknown, fallback: string) {
   }
 
   return fallback;
+}
+
+function selectionToSet(selection: Selection, keys: string[]) {
+  if (selection === "all") {
+    return new Set(keys);
+  }
+
+  return new Set(Array.from(selection).map((key) => String(key)));
 }
 
 function mapSessionRow(row: EnrollmentSessionWire): EnrollmentSessionView {
@@ -188,12 +230,16 @@ function mapSessionRow(row: EnrollmentSessionWire): EnrollmentSessionView {
     syncedCount: Number(row.syncedCount ?? 0) || 0,
     failedCount: Number(row.failedCount ?? 0) || 0,
     selectedStudentIds: Array.isArray(row.selectedStudentIds)
-      ? row.selectedStudentIds.map((item) => String(item ?? "").trim()).filter(Boolean)
+      ? row.selectedStudentIds
+          .map((item) => String(item ?? "").trim())
+          .filter(Boolean)
       : [],
   };
 }
 
-function mapSessionStudentRow(row: EnrollmentSessionStudentWire): EnrollmentSessionStudentView {
+function mapSessionStudentRow(
+  row: EnrollmentSessionStudentWire,
+): EnrollmentSessionStudentView {
   const studentId = String(row.studentId ?? "").trim();
   return {
     id: studentId,
@@ -206,9 +252,13 @@ function mapSessionStudentRow(row: EnrollmentSessionStudentWire): EnrollmentSess
     yearLevel: String(row.yearLevel ?? "Unassigned").trim() || "Unassigned",
     status: normalizePortableEnrollmentStudentStatus(row.status),
     syncStatus:
-      String(row.syncStatus ?? "").trim().toLowerCase() === "synced"
+      String(row.syncStatus ?? "")
+        .trim()
+        .toLowerCase() === "synced"
         ? "synced"
-        : String(row.syncStatus ?? "").trim().toLowerCase() === "failed"
+        : String(row.syncStatus ?? "")
+              .trim()
+              .toLowerCase() === "failed"
           ? "failed"
           : "pending",
     fingerprintTemplateId: Number(row.fingerprintTemplateId ?? 0) || 0,
@@ -218,19 +268,27 @@ function mapSessionStudentRow(row: EnrollmentSessionStudentWire): EnrollmentSess
   };
 }
 
-export function FingerprintEnrollmentManager({ students }: { students: StudentRosterRow[] }) {
+export function FingerprintEnrollmentManager({
+  students,
+}: {
+  students: StudentRosterRow[];
+}) {
   const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
   const [isOpen, setIsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<EnrollmentTab>("create");
   const [studentSearch, setStudentSearch] = useState("");
-  const [selectedStudentIds, setSelectedStudentIds] = useState<Set<string>>(new Set());
+  const [selectedStudentIds, setSelectedStudentIds] = useState<Set<string>>(
+    new Set(),
+  );
   const [notice, setNotice] = useState<EnrollmentNotice | null>(null);
   const [creating, setCreating] = useState(false);
   const [sessions, setSessions] = useState<EnrollmentSessionView[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState("");
-  const [activeSessionStudents, setActiveSessionStudents] = useState<EnrollmentSessionStudentView[]>([]);
+  const [activeSessionStudents, setActiveSessionStudents] = useState<
+    EnrollmentSessionStudentView[]
+  >([]);
   const [sessionStudentsLoading, setSessionStudentsLoading] = useState(false);
   const [closingSessionId, setClosingSessionId] = useState<string | null>(null);
 
@@ -249,7 +307,11 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
     return [...students]
       .filter((student) => student.fingerprintStatus !== "Active")
       .filter((student) => !reservedStudentIds.has(student.uid))
-      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+      .sort(
+        (left, right) =>
+          left.name.localeCompare(right.name) ||
+          left.id.localeCompare(right.id),
+      );
   }, [reservedStudentIds, students]);
 
   const filteredEligibleStudents = useMemo(() => {
@@ -257,7 +319,13 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
     if (!search) return eligibleStudents;
 
     return eligibleStudents.filter((student) => {
-      return [student.id, student.name, student.course, student.year, student.status]
+      return [
+        student.id,
+        student.name,
+        student.course,
+        student.year,
+        student.status,
+      ]
         .join(" ")
         .toLowerCase()
         .includes(search);
@@ -265,12 +333,14 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
   }, [eligibleStudents, studentSearch]);
 
   const selectedStudents = useMemo(() => {
-    return eligibleStudents.filter((student) => selectedStudentIds.has(student.uid));
+    return eligibleStudents.filter((student) =>
+      selectedStudentIds.has(student.uid),
+    );
   }, [eligibleStudents, selectedStudentIds]);
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
-    [activeSessionId, sessions]
+    [activeSessionId, sessions],
   );
 
   const loadSessions = useCallback(async () => {
@@ -291,12 +361,15 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
       setActiveSessionId((previous) =>
         previous && nextRows.some((session) => session.id === previous)
           ? previous
-          : nextRows[0]?.id ?? ""
+          : (nextRows[0]?.id ?? ""),
       );
     } catch (error: unknown) {
       setSessions([]);
       setSessionsError(
-        toEnrollmentError(error, "Failed to load fingerprint enrollment sessions.")
+        toEnrollmentError(
+          error,
+          "Failed to load fingerprint enrollment sessions.",
+        ),
       );
     } finally {
       setSessionsLoading(false);
@@ -315,16 +388,23 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
       try {
         const fn = httpsCallable<
           { sessionId: string },
-          { session?: EnrollmentSessionWire | null; students?: EnrollmentSessionStudentWire[] }
+          {
+            session?: EnrollmentSessionWire | null;
+            students?: EnrollmentSessionStudentWire[];
+          }
         >(functions, "ecGetFingerprintEnrollmentSessionDetail");
         const result = await fn({ sessionId });
 
         if (result.data?.session?.sessionId) {
           const nextSession = mapSessionRow(result.data.session);
           setSessions((previous) => {
-            const hasExisting = previous.some((row) => row.id === nextSession.id);
+            const hasExisting = previous.some(
+              (row) => row.id === nextSession.id,
+            );
             if (hasExisting) {
-              return previous.map((row) => (row.id === nextSession.id ? nextSession : row));
+              return previous.map((row) =>
+                row.id === nextSession.id ? nextSession : row,
+              );
             }
             return [nextSession, ...previous];
           });
@@ -334,19 +414,22 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
           (result.data?.students ?? []).map((row) => ({
             ...mapSessionStudentRow(row),
             enrollmentSessionId: sessionId,
-          }))
+          })),
         );
       } catch (error: unknown) {
         setActiveSessionStudents([]);
         setNotice({
           type: "err",
-          msg: toEnrollmentError(error, "Failed to load enrollment session detail."),
+          msg: toEnrollmentError(
+            error,
+            "Failed to load enrollment session detail.",
+          ),
         });
       } finally {
         setSessionStudentsLoading(false);
       }
     },
-    [functions]
+    [functions],
   );
 
   useEffect(() => {
@@ -374,18 +457,6 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
     return () => window.clearInterval(intervalId);
   }, [activeSessionId, isOpen, loadSessionDetail]);
 
-  const toggleStudentSelection = useCallback((studentUid: string) => {
-    setSelectedStudentIds((previous) => {
-      const next = new Set(previous);
-      if (next.has(studentUid)) {
-        next.delete(studentUid);
-      } else {
-        next.add(studentUid);
-      }
-      return next;
-    });
-  }, []);
-
   const selectVisibleStudents = useCallback(() => {
     setSelectedStudentIds((previous) => {
       const next = new Set(previous);
@@ -400,7 +471,16 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
 
   const createEnrollmentSession = useCallback(async () => {
     if (selectedStudents.length === 0) {
-      setNotice({ type: "err", msg: "Select at least one student before creating a fingerprint session." });
+      setNotice({
+        type: "err",
+        msg: "Select at least one student before creating a fingerprint session.",
+      });
+      campusToast.warning({
+        title: "Select students first",
+        description:
+          "Choose at least one student before creating a fingerprint session.",
+        dedupeKey: "fingerprint:create:no-selection",
+      });
       return;
     }
 
@@ -416,7 +496,9 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
         studentIds: selectedStudents.map((student) => student.uid),
       });
 
-      const session = result.data?.session ? mapSessionRow(result.data.session) : null;
+      const session = result.data?.session
+        ? mapSessionRow(result.data.session)
+        : null;
       setSelectedStudentIds(new Set());
       if (session?.id) {
         setActiveSessionId(session.id);
@@ -426,11 +508,25 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
         type: "ok",
         msg: `Enrollment session ${(session?.id ?? "").slice(0, 8).toUpperCase()} is ready for the CAMPUS module.`,
       });
+      campusToast.success({
+        title: "Enrollment session ready",
+        description: `Session ${(session?.id ?? "").slice(0, 8).toUpperCase()} is ready for the CAMPUS module.`,
+        dedupeKey: `fingerprint:create:${session?.id ?? "new-session"}`,
+      });
       await loadSessions();
     } catch (error: unknown) {
+      const message = toEnrollmentError(
+        error,
+        "Failed to create fingerprint enrollment session.",
+      );
       setNotice({
         type: "err",
-        msg: toEnrollmentError(error, "Failed to create fingerprint enrollment session."),
+        msg: message,
+      });
+      campusToast.error({
+        title: "Session creation failed",
+        description: message,
+        dedupeKey: "fingerprint:create:error",
       });
     } finally {
       setCreating(false);
@@ -446,20 +542,34 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
     setNotice(null);
 
     try {
-      const fn = httpsCallable<{ sessionId: string }, { session?: EnrollmentSessionWire | null }>(
-        functions,
-        "ecCloseFingerprintEnrollmentSession"
-      );
+      const fn = httpsCallable<
+        { sessionId: string },
+        { session?: EnrollmentSessionWire | null }
+      >(functions, "ecCloseFingerprintEnrollmentSession");
       await fn({ sessionId: activeSession.id });
       setNotice({
         type: "ok",
         msg: `Enrollment session ${activeSession.id.slice(0, 8).toUpperCase()} was marked closed.`,
       });
+      campusToast.success({
+        title: "Session closed",
+        description: `Enrollment session ${activeSession.id.slice(0, 8).toUpperCase()} was marked closed.`,
+        dedupeKey: `fingerprint:close:${activeSession.id}`,
+      });
       await loadSessions();
     } catch (error: unknown) {
+      const message = toEnrollmentError(
+        error,
+        "Failed to close enrollment session.",
+      );
       setNotice({
         type: "err",
-        msg: toEnrollmentError(error, "Failed to close enrollment session."),
+        msg: message,
+      });
+      campusToast.error({
+        title: "Close session failed",
+        description: message,
+        dedupeKey: `fingerprint:close:error:${activeSession.id}`,
       });
     } finally {
       setClosingSessionId(null);
@@ -489,22 +599,30 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
         <ModalContent className="max-w-6xl">
           <ModalHeader className="flex flex-col gap-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-2xl font-black text-campus-text-primary">Fingerprint Enrollment Sessions</span>
-              <Chip color="warning" variant="flat">Portable CAMPUS module ready</Chip>
+              <span className="text-2xl font-black text-campus-text-primary">
+                Fingerprint Enrollment Sessions
+              </span>
+              <Chip color="warning" variant="flat">
+                Portable CAMPUS module ready
+              </Chip>
             </div>
             <p className="text-sm font-normal text-campus-text-secondary">
-              Select students without fingerprints, create an enrollment session, and monitor live sync progress from the portable device.
+              Select students without fingerprints, create an enrollment
+              session, and monitor live sync progress from the portable device.
             </p>
           </ModalHeader>
           <ModalBody className="pb-6">
             <Tabs
               selectedKey={activeTab}
-              onSelectionChange={(key) => setActiveTab(String(key) as EnrollmentTab)}
+              onSelectionChange={(key) =>
+                setActiveTab(String(key) as EnrollmentTab)
+              }
               classNames={{
                 tabList: "rounded-2xl bg-[#f5f1ed] p-1",
                 cursor: "bg-[#7b0000]",
                 tab: "h-11",
-                tabContent: "text-sm font-semibold group-data-[selected=true]:text-white",
+                tabContent:
+                  "text-sm font-semibold group-data-[selected=true]:text-white",
               }}
             >
               <Tab key="create" title="Create Session">
@@ -512,14 +630,21 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                   <Card shadow="sm" className="border">
                     <CardHeader className="flex flex-col gap-3 px-5 pt-5 sm:flex-row sm:items-end sm:justify-between">
                       <div>
-                        <h3 className="text-lg font-semibold text-campus-text-primary">Students Without Fingerprints</h3>
+                        <h3 className="text-lg font-semibold text-campus-text-primary">
+                          Students Without Fingerprints
+                        </h3>
                         <p className="text-sm text-campus-text-secondary">
-                          Active or inactive accounts can be prepared here, but only students with no stored fingerprint are eligible.
+                          Active or inactive accounts can be prepared here, but
+                          only students with no stored fingerprint are eligible.
                         </p>
                       </div>
                       <div className="flex flex-wrap gap-2">
-                        <Chip color="danger" variant="flat">{eligibleStudents.length} eligible</Chip>
-                        <Chip color="primary" variant="flat">{selectedStudents.length} selected</Chip>
+                        <Chip color="danger" variant="flat">
+                          {eligibleStudents.length} eligible
+                        </Chip>
+                        <Chip color="primary" variant="flat">
+                          {selectedStudents.length} selected
+                        </Chip>
                       </div>
                     </CardHeader>
                     <CardBody className="space-y-4 p-5 pt-3">
@@ -532,57 +657,98 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                           className="w-full lg:max-w-xl"
                         />
                         <div className="flex flex-wrap gap-2">
-                          <Button variant="flat" onPress={selectVisibleStudents} isDisabled={!filteredEligibleStudents.length}>
+                          <Button
+                            variant="flat"
+                            onPress={selectVisibleStudents}
+                            isDisabled={!filteredEligibleStudents.length}
+                          >
                             Select Visible
                           </Button>
-                          <Button variant="flat" onPress={clearStudentSelection} isDisabled={!selectedStudentIds.size}>
+                          <Button
+                            variant="flat"
+                            onPress={clearStudentSelection}
+                            isDisabled={!selectedStudentIds.size}
+                          >
                             Clear
                           </Button>
                         </div>
                       </div>
 
-                      <Table aria-label="Students without fingerprints" removeWrapper classNames={{ th: "bg-[#f8f4ef] text-[#6b5f56]" }}>
-                        <TableHeader>
-                          <TableColumn>SELECT</TableColumn>
-                          <TableColumn>STUDENT</TableColumn>
-                          <TableColumn>SCHOOL ID</TableColumn>
-                          <TableColumn>COURSE / YEAR</TableColumn>
-                          <TableColumn>ACCOUNT</TableColumn>
-                        </TableHeader>
-                        <TableBody emptyContent="No students are waiting for fingerprint enrollment.">
-                          {filteredEligibleStudents.map((student) => (
-                            <TableRow key={student.uid}>
-                              <TableCell>
-                                <input
-                                  aria-label={`Select ${student.name}`}
-                                  type="checkbox"
-                                  checked={selectedStudentIds.has(student.uid)}
-                                  onChange={() => toggleStudentSelection(student.uid)}
-                                  className="h-4 w-4 cursor-pointer accent-[#7b0000]"
-                                />
-                              </TableCell>
-                              <TableCell>
-                                <div>
-                                  <p className="font-semibold text-campus-text-primary">{student.name}</p>
-                                  <p className="text-xs text-campus-text-secondary">Fingerprint: {student.fingerprintStatus}</p>
-                                </div>
-                              </TableCell>
-                              <TableCell className="font-medium text-campus-text-primary">{student.id}</TableCell>
-                              <TableCell>
-                                <div>
-                                  <p className="font-medium text-campus-text-primary">{student.course}</p>
-                                  <p className="text-xs text-campus-text-secondary">{student.year}</p>
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                <Chip color={student.status === "Active" ? "success" : "default"} variant="flat">
-                                  {student.status}
-                                </Chip>
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
+                      <CampusDataTable
+                        ariaLabel="Students without fingerprints"
+                        columns={enrollmentCandidateColumns}
+                        items={filteredEligibleStudents}
+                        getRowKey={(student) => student.uid}
+                        renderCell={(student, columnKey) => {
+                          if (columnKey === "name") {
+                            return (
+                              <div>
+                                <p className="font-semibold text-campus-text-primary">
+                                  {student.name}
+                                </p>
+                                <p className="text-xs text-campus-text-secondary">
+                                  Fingerprint: {student.fingerprintStatus}
+                                </p>
+                              </div>
+                            );
+                          }
+
+                          if (columnKey === "id") {
+                            return (
+                              <span className="font-medium text-campus-text-primary">
+                                {student.id}
+                              </span>
+                            );
+                          }
+
+                          if (columnKey === "courseYear") {
+                            return (
+                              <div>
+                                <p className="font-medium text-campus-text-primary">
+                                  {student.course}
+                                </p>
+                                <p className="text-xs text-campus-text-secondary">
+                                  {student.year}
+                                </p>
+                              </div>
+                            );
+                          }
+
+                          if (columnKey === "status") {
+                            return (
+                              <Chip
+                                color={
+                                  student.status === "Active"
+                                    ? "success"
+                                    : "default"
+                                }
+                                variant="flat"
+                              >
+                                {student.status}
+                              </Chip>
+                            );
+                          }
+
+                          return null;
+                        }}
+                        emptyTitle="No eligible students"
+                        emptyDescription="No students are waiting for fingerprint enrollment."
+                        selectionMode="multiple"
+                        selectedKeys={selectedStudentIds}
+                        onSelectionChange={(keys) => {
+                          setSelectedStudentIds(
+                            selectionToSet(
+                              keys,
+                              filteredEligibleStudents.map(
+                                (student) => student.uid,
+                              ),
+                            ),
+                          );
+                        }}
+                        showSelectionCheckboxes
+                        tableClassName="min-w-[720px]"
+                        wrapperClassName="border-[#f0e7df]"
+                      />
                     </CardBody>
                   </Card>
 
@@ -590,9 +756,12 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                     <Card shadow="sm" className="border">
                       <CardHeader className="px-5 pt-5">
                         <div>
-                          <h3 className="text-lg font-semibold text-campus-text-primary">Session Summary</h3>
+                          <h3 className="text-lg font-semibold text-campus-text-primary">
+                            Session Summary
+                          </h3>
                           <p className="text-sm text-campus-text-secondary">
-                            The module will fetch these students as one offline-capable enrollment bundle.
+                            The module will fetch these students as one
+                            offline-capable enrollment bundle.
                           </p>
                         </div>
                       </CardHeader>
@@ -600,42 +769,70 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                         <div className="grid grid-cols-2 gap-3">
                           <Card shadow="none" className="border bg-[#faf7f3]">
                             <CardBody className="p-4">
-                              <p className="text-xs uppercase tracking-wide text-campus-text-secondary">Ready Now</p>
-                              <p className="mt-2 text-3xl font-black text-[#7b0000]">{eligibleStudents.length}</p>
+                              <p className="text-xs uppercase tracking-wide text-campus-text-secondary">
+                                Ready Now
+                              </p>
+                              <p className="mt-2 text-3xl font-black text-[#7b0000]">
+                                {eligibleStudents.length}
+                              </p>
                             </CardBody>
                           </Card>
                           <Card shadow="none" className="border bg-[#faf7f3]">
                             <CardBody className="p-4">
-                              <p className="text-xs uppercase tracking-wide text-campus-text-secondary">In Queue</p>
-                              <p className="mt-2 text-3xl font-black text-[#0f766e]">{selectedStudents.length}</p>
+                              <p className="text-xs uppercase tracking-wide text-campus-text-secondary">
+                                In Queue
+                              </p>
+                              <p className="mt-2 text-3xl font-black text-[#0f766e]">
+                                {selectedStudents.length}
+                              </p>
                             </CardBody>
                           </Card>
                         </div>
 
                         <div className="rounded-2xl border bg-[#fcfbf8] p-4">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-campus-text-secondary">Selection Preview</p>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-campus-text-secondary">
+                            Selection Preview
+                          </p>
                           <div className="mt-3 space-y-2">
                             {selectedStudents.slice(0, 5).map((student) => (
-                              <div key={student.uid} className="flex items-center justify-between gap-3 rounded-xl border bg-white px-3 py-2">
+                              <div
+                                key={student.uid}
+                                className="flex items-center justify-between gap-3 rounded-xl border bg-white px-3 py-2"
+                              >
                                 <div className="min-w-0">
-                                  <p className="truncate font-medium text-campus-text-primary">{student.name}</p>
+                                  <p className="truncate font-medium text-campus-text-primary">
+                                    {student.name}
+                                  </p>
                                   <p className="truncate text-xs text-campus-text-secondary">
-                                    {student.id} | {student.course} | {student.year}
+                                    {student.id} | {student.course} |{" "}
+                                    {student.year}
                                   </p>
                                 </div>
-                                <Chip size="sm" color={student.status === "Active" ? "success" : "default"} variant="flat">
+                                <Chip
+                                  size="sm"
+                                  color={
+                                    student.status === "Active"
+                                      ? "success"
+                                      : "default"
+                                  }
+                                  variant="flat"
+                                >
                                   {student.status}
                                 </Chip>
                               </div>
                             ))}
                             {!selectedStudents.length && (
-                              <p className="text-sm text-campus-text-secondary">
-                                Pick one or more students from the table to prepare an enrollment session.
-                              </p>
+                              <CampusEmptyState
+                                compact
+                                title="No students selected"
+                                description="Pick one or more students from the table to prepare an enrollment session."
+                                className="border-none bg-transparent px-0 py-2"
+                              />
                             )}
                             {selectedStudents.length > 5 && (
                               <p className="text-xs text-campus-text-secondary">
-                                +{selectedStudents.length - 5} more students will be included.
+                                +{selectedStudents.length - 5} more students
+                                will be included.
                               </p>
                             )}
                           </div>
@@ -654,58 +851,77 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                     <Card shadow="sm" className="border">
                       <CardHeader className="px-5 pt-5">
                         <div>
-                          <h3 className="text-lg font-semibold text-campus-text-primary">Recent Sessions</h3>
-                          <p className="text-sm text-campus-text-secondary">Live status updates keep this in sync with the portable device.</p>
+                          <h3 className="text-lg font-semibold text-campus-text-primary">
+                            Recent Sessions
+                          </h3>
+                          <p className="text-sm text-campus-text-secondary">
+                            Live status updates keep this in sync with the
+                            portable device.
+                          </p>
                         </div>
                       </CardHeader>
                       <CardBody className="space-y-3 p-5 pt-3">
                         {sessionsLoading ? (
-                          <div className="flex items-center gap-3 rounded-2xl border bg-[#faf7f3] px-4 py-5 text-sm text-campus-text-secondary">
-                            <Spinner size="sm" />
-                            Loading sessions...
-                          </div>
+                          <CampusCardListSkeleton rows={2} />
                         ) : sessionsError ? (
-                          <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
-                            {sessionsError}
-                          </div>
+                          <Alert
+                            color="danger"
+                            variant="flat"
+                            title="Unable to load sessions"
+                            description={sessionsError}
+                          />
                         ) : sessions.length ? (
                           sessions.slice(0, 4).map((session) => (
-                            <button
+                            <Button
                               key={session.id}
-                              type="button"
-                              onClick={() => {
+                              variant="bordered"
+                              onPress={() => {
                                 setActiveSessionId(session.id);
                                 setActiveTab("sessions");
                               }}
                               className={[
-                                "w-full rounded-2xl border px-4 py-3 text-left transition",
+                                "h-auto w-full justify-start rounded-2xl px-4 py-3 text-left transition",
                                 session.id === activeSessionId
                                   ? "border-[#7b0000] bg-[#fff5f0]"
                                   : "border-default-200 bg-white hover:border-[#d6b39b]",
                               ].join(" ")}
                             >
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div>
-                                  <p className="font-semibold text-campus-text-primary">
-                                    Session {session.id.slice(0, 8).toUpperCase()}
-                                  </p>
-                                  <p className="text-xs text-campus-text-secondary">
-                                    {session.createdByName || session.createdBySchoolId || session.createdBy || "EC Member"}
-                                  </p>
+                              <div className="w-full">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div>
+                                    <p className="font-semibold text-campus-text-primary">
+                                      Session{" "}
+                                      {session.id.slice(0, 8).toUpperCase()}
+                                    </p>
+                                    <p className="text-xs text-campus-text-secondary">
+                                      {session.createdByName ||
+                                        session.createdBySchoolId ||
+                                        session.createdBy ||
+                                        "EC Member"}
+                                    </p>
+                                  </div>
+                                  <Chip
+                                    color={sessionStatusColor(session.status)}
+                                    variant="flat"
+                                  >
+                                    {statusLabel(session.status)}
+                                  </Chip>
                                 </div>
-                                <Chip color={sessionStatusColor(session.status)} variant="flat">
-                                  {statusLabel(session.status)}
-                                </Chip>
+                                <p className="mt-2 text-xs text-campus-text-secondary">
+                                  {session.totalStudents} students |{" "}
+                                  {session.syncedCount} synced |{" "}
+                                  {session.failedCount} failed
+                                </p>
                               </div>
-                              <p className="mt-2 text-xs text-campus-text-secondary">
-                                {session.totalStudents} students | {session.syncedCount} synced | {session.failedCount} failed
-                              </p>
-                            </button>
+                            </Button>
                           ))
                         ) : (
-                          <p className="rounded-2xl border bg-[#faf7f3] px-4 py-5 text-sm text-campus-text-secondary">
-                            No enrollment sessions yet. Create the first one from the left panel.
-                          </p>
+                          <CampusEmptyState
+                            compact
+                            title="No enrollment sessions yet"
+                            description="Create the first fingerprint session from the left panel."
+                            className="bg-[#faf7f3]"
+                          />
                         )}
                       </CardBody>
                     </Card>
@@ -718,53 +934,84 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                   <Card shadow="sm" className="border">
                     <CardHeader className="px-5 pt-5">
                       <div>
-                        <h3 className="text-lg font-semibold text-campus-text-primary">Enrollment Sessions</h3>
-                        <p className="text-sm text-campus-text-secondary">Pending, paired, downloading, enrolling, and completed states update live here.</p>
+                        <h3 className="text-lg font-semibold text-campus-text-primary">
+                          Enrollment Sessions
+                        </h3>
+                        <p className="text-sm text-campus-text-secondary">
+                          Pending, paired, downloading, enrolling, and completed
+                          states update live here.
+                        </p>
                       </div>
                     </CardHeader>
                     <CardBody className="space-y-3 p-5 pt-3">
                       {sessionsLoading ? (
-                        <div className="flex items-center gap-3 rounded-2xl border bg-[#faf7f3] px-4 py-5 text-sm text-campus-text-secondary">
-                          <Spinner size="sm" />
-                          Loading sessions...
-                        </div>
+                        <CampusCardListSkeleton rows={3} />
+                      ) : sessionsError ? (
+                        <Alert
+                          color="danger"
+                          variant="flat"
+                          title="Unable to load sessions"
+                          description={sessionsError}
+                        />
                       ) : sessions.length ? (
                         sessions.map((session) => (
-                          <button
+                          <Button
                             key={session.id}
-                            type="button"
-                            onClick={() => setActiveSessionId(session.id)}
+                            variant="bordered"
+                            onPress={() => setActiveSessionId(session.id)}
                             className={[
-                              "w-full rounded-2xl border px-4 py-3 text-left transition",
+                              "h-auto w-full justify-start rounded-2xl px-4 py-3 text-left transition",
                               session.id === activeSessionId
                                 ? "border-[#7b0000] bg-[#fff5f0]"
                                 : "border-default-200 bg-white hover:border-[#d6b39b]",
                             ].join(" ")}
                           >
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <p className="font-semibold text-campus-text-primary">
-                                {session.id.slice(0, 8).toUpperCase()}
+                            <div className="w-full">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="font-semibold text-campus-text-primary">
+                                  {session.id.slice(0, 8).toUpperCase()}
+                                </p>
+                                <Chip
+                                  color={sessionStatusColor(session.status)}
+                                  variant="flat"
+                                >
+                                  {statusLabel(session.status)}
+                                </Chip>
+                              </div>
+                              <p className="mt-2 text-xs text-campus-text-secondary">
+                                Created {formatDateTime(session.createdAtMs)}
                               </p>
-                              <Chip color={sessionStatusColor(session.status)} variant="flat">
-                                {statusLabel(session.status)}
-                              </Chip>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <Chip size="sm" variant="flat" color="default">
+                                  {session.pendingCount} pending
+                                </Chip>
+                                <Chip
+                                  size="sm"
+                                  variant="flat"
+                                  color="secondary"
+                                >
+                                  {session.downloadedCount} downloaded
+                                </Chip>
+                                <Chip size="sm" variant="flat" color="primary">
+                                  {session.enrolledCount} enrolled
+                                </Chip>
+                                <Chip size="sm" variant="flat" color="success">
+                                  {session.syncedCount} synced
+                                </Chip>
+                                <Chip size="sm" variant="flat" color="danger">
+                                  {session.failedCount} failed
+                                </Chip>
+                              </div>
                             </div>
-                            <p className="mt-2 text-xs text-campus-text-secondary">
-                              Created {formatDateTime(session.createdAtMs)}
-                            </p>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              <Chip size="sm" variant="flat" color="default">{session.pendingCount} pending</Chip>
-                              <Chip size="sm" variant="flat" color="secondary">{session.downloadedCount} downloaded</Chip>
-                              <Chip size="sm" variant="flat" color="primary">{session.enrolledCount} enrolled</Chip>
-                              <Chip size="sm" variant="flat" color="success">{session.syncedCount} synced</Chip>
-                              <Chip size="sm" variant="flat" color="danger">{session.failedCount} failed</Chip>
-                            </div>
-                          </button>
+                          </Button>
                         ))
                       ) : (
-                        <p className="rounded-2xl border bg-[#faf7f3] px-4 py-5 text-sm text-campus-text-secondary">
-                          No fingerprint enrollment sessions have been created yet.
-                        </p>
+                        <CampusEmptyState
+                          compact
+                          title="No fingerprint sessions yet"
+                          description="Start a session from the Create Session tab to begin monitoring portable-device enrollment."
+                          className="bg-[#faf7f3]"
+                        />
                       )}
                     </CardBody>
                   </Card>
@@ -772,9 +1019,12 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                   <Card shadow="sm" className="border">
                     <CardHeader className="flex flex-col gap-3 px-5 pt-5 sm:flex-row sm:items-start sm:justify-between">
                       <div>
-                        <h3 className="text-lg font-semibold text-campus-text-primary">Session Detail</h3>
+                        <h3 className="text-lg font-semibold text-campus-text-primary">
+                          Session Detail
+                        </h3>
                         <p className="text-sm text-campus-text-secondary">
-                          Watch which students are pending, downloaded, enrolled, synced, or failed.
+                          Watch which students are pending, downloaded,
+                          enrolled, synced, or failed.
                         </p>
                       </div>
                       {activeSession && (
@@ -785,23 +1035,34 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                           isLoading={closingSessionId === activeSession.id}
                           isDisabled={activeSession.status === "closed"}
                         >
-                          {activeSession.status === "closed" ? "Session Closed" : "Mark Session Closed"}
+                          {activeSession.status === "closed"
+                            ? "Session Closed"
+                            : "Mark Session Closed"}
                         </Button>
                       )}
                     </CardHeader>
                     <CardBody className="space-y-4 p-5 pt-3">
                       {!activeSession ? (
-                        <div className="rounded-2xl border bg-[#faf7f3] px-4 py-5 text-sm text-campus-text-secondary">
-                          Select a session from the left to inspect its enrollment queue.
-                        </div>
+                        <CampusEmptyState
+                          title="No session selected"
+                          description="Choose a fingerprint session from the left to inspect its portable-device enrollment queue."
+                          className="bg-[#faf7f3]"
+                        />
                       ) : (
                         <>
                           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                             <Card shadow="none" className="border bg-[#faf7f3]">
                               <CardBody className="p-4">
-                                <p className="text-xs uppercase tracking-wide text-campus-text-secondary">Status</p>
+                                <p className="text-xs uppercase tracking-wide text-campus-text-secondary">
+                                  Status
+                                </p>
                                 <div className="mt-2">
-                                  <Chip color={sessionStatusColor(activeSession.status)} variant="flat">
+                                  <Chip
+                                    color={sessionStatusColor(
+                                      activeSession.status,
+                                    )}
+                                    variant="flat"
+                                  >
                                     {statusLabel(activeSession.status)}
                                   </Chip>
                                 </div>
@@ -809,25 +1070,37 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                             </Card>
                             <Card shadow="none" className="border bg-[#faf7f3]">
                               <CardBody className="p-4">
-                                <p className="text-xs uppercase tracking-wide text-campus-text-secondary">Paired Device</p>
+                                <p className="text-xs uppercase tracking-wide text-campus-text-secondary">
+                                  Paired Device
+                                </p>
                                 <p className="mt-2 font-semibold text-campus-text-primary">
-                                  {activeSession.pairedDeviceId || "Waiting for module"}
+                                  {activeSession.pairedDeviceId ||
+                                    "Waiting for module"}
                                 </p>
                               </CardBody>
                             </Card>
                             <Card shadow="none" className="border bg-[#faf7f3]">
                               <CardBody className="p-4">
-                                <p className="text-xs uppercase tracking-wide text-campus-text-secondary">Created By</p>
+                                <p className="text-xs uppercase tracking-wide text-campus-text-secondary">
+                                  Created By
+                                </p>
                                 <p className="mt-2 font-semibold text-campus-text-primary">
-                                  {activeSession.createdByName || activeSession.createdBySchoolId || activeSession.createdBy}
+                                  {activeSession.createdByName ||
+                                    activeSession.createdBySchoolId ||
+                                    activeSession.createdBy}
                                 </p>
                               </CardBody>
                             </Card>
                             <Card shadow="none" className="border bg-[#faf7f3]">
                               <CardBody className="p-4">
-                                <p className="text-xs uppercase tracking-wide text-campus-text-secondary">Last Updated</p>
+                                <p className="text-xs uppercase tracking-wide text-campus-text-secondary">
+                                  Last Updated
+                                </p>
                                 <p className="mt-2 font-semibold text-campus-text-primary">
-                                  {formatDateTime(activeSession.updatedAtMs || activeSession.createdAtMs)}
+                                  {formatDateTime(
+                                    activeSession.updatedAtMs ||
+                                      activeSession.createdAtMs,
+                                  )}
                                 </p>
                               </CardBody>
                             </Card>
@@ -836,9 +1109,13 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                           <div className="rounded-2xl border bg-[#fcfbf8] p-4">
                             <div className="flex flex-wrap items-center justify-between gap-3">
                               <div>
-                                <p className="text-sm font-semibold text-campus-text-primary">Sync Progress</p>
+                                <p className="text-sm font-semibold text-campus-text-primary">
+                                  Sync Progress
+                                </p>
                                 <p className="text-xs text-campus-text-secondary">
-                                  {activeSession.syncedCount} synced and {activeSession.failedCount} failed out of {activeSession.totalStudents} students.
+                                  {activeSession.syncedCount} synced and{" "}
+                                  {activeSession.failedCount} failed out of{" "}
+                                  {activeSession.totalStudents} students.
                                 </p>
                               </div>
                               <Chip color="primary" variant="flat">
@@ -853,59 +1130,92 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
                             />
                           </div>
 
-                          {sessionStudentsLoading ? (
-                            <div className="flex items-center gap-3 rounded-2xl border bg-[#faf7f3] px-4 py-5 text-sm text-campus-text-secondary">
-                              <Spinner size="sm" />
-                              Loading session students...
-                            </div>
-                          ) : (
-                            <Table aria-label="Enrollment session students" removeWrapper classNames={{ th: "bg-[#f8f4ef] text-[#6b5f56]" }}>
-                              <TableHeader>
-                                <TableColumn>STUDENT</TableColumn>
-                                <TableColumn>COURSE / YEAR</TableColumn>
-                                <TableColumn>STATUS</TableColumn>
-                                <TableColumn>SYNC</TableColumn>
-                                <TableColumn>TEMPLATE</TableColumn>
-                                <TableColumn>DEVICE</TableColumn>
-                              </TableHeader>
-                              <TableBody emptyContent="This session has no queued students.">
-                                {activeSessionStudents.map((student) => (
-                                  <TableRow key={student.id}>
-                                    <TableCell>
-                                      <div>
-                                        <p className="font-semibold text-campus-text-primary">{student.fullName || student.studentId}</p>
-                                        <p className="text-xs text-campus-text-secondary">
-                                          {student.schoolId || student.studentId}
-                                        </p>
-                                      </div>
-                                    </TableCell>
-                                    <TableCell>
-                                      <div>
-                                        <p className="font-medium text-campus-text-primary">{student.course}</p>
-                                        <p className="text-xs text-campus-text-secondary">{student.yearLevel}</p>
-                                      </div>
-                                    </TableCell>
-                                    <TableCell>
-                                      <Chip color={studentStatusColor(student.status)} variant="flat">
-                                        {studentStatusLabel(student.status)}
-                                      </Chip>
-                                    </TableCell>
-                                    <TableCell>
-                                      <Chip color={syncStatusColor(student.syncStatus)} variant="flat">
-                                        {student.syncStatus.charAt(0).toUpperCase() + student.syncStatus.slice(1)}
-                                      </Chip>
-                                    </TableCell>
-                                    <TableCell className="font-medium text-campus-text-primary">
-                                      {(student.fingerprintTemplateId ?? 0) > 0 ? student.fingerprintTemplateId : "-"}
-                                    </TableCell>
-                                    <TableCell className="text-campus-text-secondary">
-                                      {student.enrolledByDevice || student.assignedDeviceId || "-"}
-                                    </TableCell>
-                                  </TableRow>
-                                ))}
-                              </TableBody>
-                            </Table>
-                          )}
+                          <CampusDataTable
+                            ariaLabel="Enrollment session students"
+                            columns={sessionStudentColumns}
+                            items={activeSessionStudents}
+                            getRowKey={(student) => student.id}
+                            isLoading={sessionStudentsLoading}
+                            loadingContent={
+                              <CampusTableBodySkeleton rows={4} columns={6} />
+                            }
+                            emptyTitle="No queued students"
+                            emptyDescription="This enrollment session does not have any students queued yet."
+                            wrapperClassName="border-[#f0e7df]"
+                            tableClassName="min-w-[760px]"
+                            renderCell={(student, columnKey) => {
+                              if (columnKey === "student") {
+                                return (
+                                  <div>
+                                    <p className="font-semibold text-campus-text-primary">
+                                      {student.fullName || student.studentId}
+                                    </p>
+                                    <p className="text-xs text-campus-text-secondary">
+                                      {student.schoolId || student.studentId}
+                                    </p>
+                                  </div>
+                                );
+                              }
+
+                              if (columnKey === "courseYear") {
+                                return (
+                                  <div>
+                                    <p className="font-medium text-campus-text-primary">
+                                      {student.course}
+                                    </p>
+                                    <p className="text-xs text-campus-text-secondary">
+                                      {student.yearLevel}
+                                    </p>
+                                  </div>
+                                );
+                              }
+
+                              if (columnKey === "status") {
+                                return (
+                                  <Chip
+                                    color={studentStatusColor(student.status)}
+                                    variant="flat"
+                                  >
+                                    {studentStatusLabel(student.status)}
+                                  </Chip>
+                                );
+                              }
+
+                              if (columnKey === "sync") {
+                                return (
+                                  <Chip
+                                    color={syncStatusColor(student.syncStatus)}
+                                    variant="flat"
+                                  >
+                                    {student.syncStatus.charAt(0).toUpperCase() +
+                                      student.syncStatus.slice(1)}
+                                  </Chip>
+                                );
+                              }
+
+                              if (columnKey === "template") {
+                                return (
+                                  <span className="font-medium text-campus-text-primary">
+                                    {(student.fingerprintTemplateId ?? 0) > 0
+                                      ? student.fingerprintTemplateId
+                                      : "-"}
+                                  </span>
+                                );
+                              }
+
+                              if (columnKey === "device") {
+                                return (
+                                  <span className="text-campus-text-secondary">
+                                    {student.enrolledByDevice ||
+                                      student.assignedDeviceId ||
+                                      "-"}
+                                  </span>
+                                );
+                              }
+
+                              return null;
+                            }}
+                          />
                         </>
                       )}
                     </CardBody>
@@ -915,16 +1225,16 @@ export function FingerprintEnrollmentManager({ students }: { students: StudentRo
             </Tabs>
 
             {notice && (
-              <div
-                className={[
-                  "rounded-2xl border px-4 py-3 text-sm",
+              <Alert
+                color={notice.type === "ok" ? "success" : "danger"}
+                variant="flat"
+                title={
                   notice.type === "ok"
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                    : "border-red-200 bg-red-50 text-red-900",
-                ].join(" ")}
-              >
-                {notice.msg}
-              </div>
+                    ? "Fingerprint session updated"
+                    : "Fingerprint session issue"
+                }
+                description={notice.msg}
+              />
             )}
           </ModalBody>
         </ModalContent>

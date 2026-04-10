@@ -18,9 +18,20 @@ import { app, auth, db } from "@/lib/firebase";
 import { Button } from "@heroui/button";
 import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
-import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
+import {
+  Dropdown,
+  DropdownItem,
+  DropdownMenu,
+  DropdownTrigger,
+} from "@heroui/dropdown";
 import { Input, Textarea } from "@heroui/input";
 import { Select, SelectItem } from "@heroui/select";
+import {
+  CampusCardListSkeleton,
+  CampusDataTable,
+  type CampusTableColumn,
+} from "@/components/ui";
+import { campusToast } from "@/lib/toast";
 
 type PaymentStudentStatus = "Paid" | "Unpaid";
 
@@ -75,6 +86,16 @@ type SelectOption = {
 type SortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
 type StudentStatusSortMode = "paid" | "unpaid";
 
+const paymentStudentColumns: CampusTableColumn<PaymentStudent>[] = [
+  { key: "schoolId", label: "Student ID" },
+  { key: "name", label: "Name" },
+  { key: "course", label: "Course" },
+  { key: "year", label: "Year Level" },
+  { key: "section", label: "Section" },
+  { key: "status", label: "Status" },
+  { key: "actions", label: "Action" },
+];
+
 function normalizeYear(raw: unknown) {
   const value = String(raw ?? "").trim();
   if (!value) return "Unassigned";
@@ -91,7 +112,8 @@ function normalizeYear(raw: unknown) {
 function toErrorMessage(error: unknown, fallback: string) {
   if (typeof error === "object" && error !== null) {
     const maybe = error as { code?: unknown; message?: unknown };
-    const message = typeof maybe.message === "string" ? maybe.message : fallback;
+    const message =
+      typeof maybe.message === "string" ? maybe.message : fallback;
     if (typeof maybe.code === "string" && maybe.code) {
       return `${maybe.code}: ${message}`;
     }
@@ -138,10 +160,18 @@ function formatDate(value: string) {
 }
 
 function toMillis(value: unknown) {
-  if (value && typeof value === "object" && typeof (value as { toMillis?: () => number }).toMillis === "function") {
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as { toMillis?: () => number }).toMillis === "function"
+  ) {
     return (value as { toMillis: () => number }).toMillis();
   }
-  if (value && typeof value === "object" && typeof (value as { seconds?: number }).seconds === "number") {
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as { seconds?: number }).seconds === "number"
+  ) {
     return Number((value as { seconds: number }).seconds) * 1000;
   }
   const parsed = new Date(value as string | number | Date).getTime();
@@ -182,11 +212,14 @@ export default function PaymentDashboard() {
 
   const [queryText, setQueryText] = useState("");
   const [dateFilter, setDateFilter] = useState("");
-  const [paymentSortMode, setPaymentSortMode] = useState<SortMode>("latest_to_oldest");
+  const [paymentSortMode, setPaymentSortMode] =
+    useState<SortMode>("latest_to_oldest");
 
   const [title, setTitle] = useState("");
   const [amount, setAmount] = useState("");
-  const [paymentDate, setPaymentDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paymentDate, setPaymentDate] = useState(() =>
+    new Date().toISOString().slice(0, 10),
+  );
   const [yearLevel, setYearLevel] = useState("All Years");
   const [course, setCourse] = useState("All Courses");
   const [details, setDetails] = useState("");
@@ -197,14 +230,19 @@ export default function PaymentDashboard() {
   const [paymentsLoading, setPaymentsLoading] = useState(true);
   const [expandedStudentsLoading, setExpandedStudentsLoading] = useState(false);
   const [savingPayment, setSavingPayment] = useState(false);
-  const [updatingStatusKey, setUpdatingStatusKey] = useState<string | null>(null);
+  const [updatingStatusKey, setUpdatingStatusKey] = useState<string | null>(
+    null,
+  );
   const [studentSearchText, setStudentSearchText] = useState("");
   const [studentYearFilter, setStudentYearFilter] = useState<string>("");
   const [studentCourseFilter, setStudentCourseFilter] = useState<string>("");
-  const [studentStatusSortMode, setStudentStatusSortMode] = useState<StudentStatusSortMode>("paid");
+  const [studentStatusSortMode, setStudentStatusSortMode] =
+    useState<StudentStatusSortMode>("paid");
 
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [paymentStudents, setPaymentStudents] = useState<Record<string, PaymentStudent[]>>({});
+  const [paymentStudents, setPaymentStudents] = useState<
+    Record<string, PaymentStudent[]>
+  >({});
 
   useEffect(() => {
     let mounted = true;
@@ -213,19 +251,29 @@ export default function PaymentDashboard() {
       setStudentsLoading(true);
 
       try {
-        const fn = httpsCallable<{ limit: number }, { students?: RemoteStudent[] }>(functions, "ecListStudents");
+        const fn = httpsCallable<
+          { limit: number },
+          { students?: RemoteStudent[] }
+        >(functions, "ecListStudents");
         const res = await fn({ limit: 2000 });
         if (!mounted) return;
 
         const list = (res.data?.students ?? [])
           .map(mapRemoteStudent)
           .filter((item) => item.uid)
-          .sort((a, b) => a.name.localeCompare(b.name) || a.schoolId.localeCompare(b.schoolId));
+          .sort(
+            (a, b) =>
+              a.name.localeCompare(b.name) ||
+              a.schoolId.localeCompare(b.schoolId),
+          );
         setStudents(list);
       } catch (error: unknown) {
         if (!mounted) return;
         setStudents([]);
-        setNotice({ type: "err", msg: toErrorMessage(error, "Failed to load students.") });
+        setNotice({
+          type: "err",
+          msg: toErrorMessage(error, "Failed to load students."),
+        });
       } finally {
         if (mounted) setStudentsLoading(false);
       }
@@ -265,8 +313,11 @@ export default function PaymentDashboard() {
       (error) => {
         setPayments([]);
         setPaymentsLoading(false);
-        setNotice({ type: "err", msg: toErrorMessage(error, "Failed to load payments.") });
-      }
+        setNotice({
+          type: "err",
+          msg: toErrorMessage(error, "Failed to load payments."),
+        });
+      },
     );
 
     return () => unsub();
@@ -276,7 +327,10 @@ export default function PaymentDashboard() {
     if (!expandedPayment) return;
 
     setExpandedStudentsLoading(true);
-    const qy = query(collection(db, "payments", expandedPayment, "students"), orderBy("name", "asc"));
+    const qy = query(
+      collection(db, "payments", expandedPayment, "students"),
+      orderBy("name", "asc"),
+    );
 
     const unsub = onSnapshot(
       qy,
@@ -284,7 +338,8 @@ export default function PaymentDashboard() {
         const list: PaymentStudent[] = snap.docs.map((d) => {
           const data = d.data() as Partial<PaymentStudent>;
           const rawStatus = String(data.status ?? "Unpaid");
-          const status: PaymentStudentStatus = rawStatus === "Paid" ? "Paid" : "Unpaid";
+          const status: PaymentStudentStatus =
+            rawStatus === "Paid" ? "Paid" : "Unpaid";
 
           return {
             uid: String(data.uid ?? d.id),
@@ -302,8 +357,11 @@ export default function PaymentDashboard() {
       },
       (error) => {
         setExpandedStudentsLoading(false);
-        setNotice({ type: "err", msg: toErrorMessage(error, "Failed to load payment students.") });
-      }
+        setNotice({
+          type: "err",
+          msg: toErrorMessage(error, "Failed to load payment students."),
+        });
+      },
     );
 
     return () => unsub();
@@ -337,15 +395,18 @@ export default function PaymentDashboard() {
       { key: "All Years", label: "All Years" },
       ...yearOptions.map((yearName) => ({ key: yearName, label: yearName })),
     ],
-    [yearOptions]
+    [yearOptions],
   );
 
   const paymentCourseSelectItems = useMemo<SelectOption[]>(
     () => [
       { key: "All Courses", label: "All Courses" },
-      ...courseOptions.map((courseName) => ({ key: courseName, label: courseName })),
+      ...courseOptions.map((courseName) => ({
+        key: courseName,
+        label: courseName,
+      })),
     ],
-    [courseOptions]
+    [courseOptions],
   );
 
   const filteredPayments = useMemo(() => {
@@ -368,7 +429,9 @@ export default function PaymentDashboard() {
   const sortedFilteredPayments = useMemo(() => {
     const list = [...filteredPayments];
     if (paymentSortMode === "alphabetical") {
-      list.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+      list.sort((a, b) =>
+        a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
+      );
       return list;
     }
 
@@ -388,12 +451,16 @@ export default function PaymentDashboard() {
 
   const studentStatusSortLabel = useMemo(
     () => (studentStatusSortMode === "paid" ? "Paid" : "Unpaid"),
-    [studentStatusSortMode]
+    [studentStatusSortMode],
   );
 
   const dashboardCounts = useMemo(() => {
-    const pending = payments.filter((payment) => payment.totalStudents > 0 && payment.unpaidCount > 0).length;
-    const completed = payments.filter((payment) => payment.totalStudents > 0 && payment.unpaidCount === 0).length;
+    const pending = payments.filter(
+      (payment) => payment.totalStudents > 0 && payment.unpaidCount > 0,
+    ).length;
+    const completed = payments.filter(
+      (payment) => payment.totalStudents > 0 && payment.unpaidCount === 0,
+    ).length;
     return { total: payments.length, pending, completed };
   }, [payments]);
 
@@ -429,13 +496,18 @@ export default function PaymentDashboard() {
     }
 
     if (studentsLoading) {
-      setNotice({ type: "err", msg: "Students are still loading. Please wait." });
+      setNotice({
+        type: "err",
+        msg: "Students are still loading. Please wait.",
+      });
       return;
     }
 
     const targets = students.filter((student) => {
-      const matchesYear = yearLevel === "All Years" || student.year === yearLevel;
-      const matchesCourse = course === "All Courses" || student.course === course;
+      const matchesYear =
+        yearLevel === "All Years" || student.year === yearLevel;
+      const matchesCourse =
+        course === "All Courses" || student.course === course;
       return matchesYear && matchesCourse;
     });
 
@@ -449,7 +521,10 @@ export default function PaymentDashboard() {
 
     const currentUser = auth.currentUser;
     if (!currentUser) {
-      setNotice({ type: "err", msg: "You must be signed in to create payments." });
+      setNotice({
+        type: "err",
+        msg: "You must be signed in to create payments.",
+      });
       return;
     }
 
@@ -482,7 +557,13 @@ export default function PaymentDashboard() {
         const chunk = targets.slice(i, i + chunkSize);
 
         chunk.forEach((student) => {
-          const studentRef = doc(db, "payments", paymentRef.id, "students", student.uid);
+          const studentRef = doc(
+            db,
+            "payments",
+            paymentRef.id,
+            "students",
+            student.uid,
+          );
           batch.set(studentRef, {
             uid: student.uid,
             schoolId: student.schoolId,
@@ -505,15 +586,30 @@ export default function PaymentDashboard() {
         type: "ok",
         msg: `Payment created and assigned to ${totalStudents} student(s).`,
       });
+      campusToast.success({
+        title: "Payment created",
+        description: `Assigned to ${totalStudents} student(s).`,
+        dedupeKey: `ec-payments:create:${paymentRef.id}`,
+      });
     } catch (error: unknown) {
-      setNotice({ type: "err", msg: toErrorMessage(error, "Failed to save payment.") });
+      const message = toErrorMessage(error, "Failed to save payment.");
+      setNotice({ type: "err", msg: message });
+      campusToast.error({
+        title: "Save payment failed",
+        description: message,
+        dedupeKey: "ec-payments:create-error",
+      });
     } finally {
       setSavingPayment(false);
     }
   }
 
-  async function toggleStudentStatus(paymentId: string, student: PaymentStudent) {
-    const nextStatus: PaymentStudentStatus = student.status === "Paid" ? "Unpaid" : "Paid";
+  async function toggleStudentStatus(
+    paymentId: string,
+    student: PaymentStudent,
+  ) {
+    const nextStatus: PaymentStudentStatus =
+      student.status === "Paid" ? "Unpaid" : "Paid";
     const paidDelta = nextStatus === "Paid" ? 1 : -1;
     const unpaidDelta = nextStatus === "Unpaid" ? 1 : -1;
     const key = `${paymentId}:${student.uid}`;
@@ -530,7 +626,7 @@ export default function PaymentDashboard() {
           status: nextStatus,
           updatedAt: serverTimestamp(),
         },
-        { merge: true }
+        { merge: true },
       );
 
       batch.set(
@@ -540,14 +636,25 @@ export default function PaymentDashboard() {
           unpaidCount: increment(unpaidDelta),
           updatedAt: serverTimestamp(),
         },
-        { merge: true }
+        { merge: true },
       );
 
       await batch.commit();
+      campusToast.success({
+        title: "Payment status updated",
+        description: `${student.name} marked ${nextStatus}.`,
+        dedupeKey: `ec-payments:status:${paymentId}:${student.uid}:${nextStatus}`,
+      });
     } catch (error: unknown) {
+      const message = toErrorMessage(error, "Failed to update payment status.");
       setNotice({
         type: "err",
-        msg: toErrorMessage(error, "Failed to update payment status."),
+        msg: message,
+      });
+      campusToast.error({
+        title: "Status update failed",
+        description: message,
+        dedupeKey: `ec-payments:status-error:${paymentId}:${student.uid}`,
       });
     } finally {
       setUpdatingStatusKey(null);
@@ -558,6 +665,11 @@ export default function PaymentDashboard() {
     const rows = paymentStudents[payment.id] ?? [];
     if (!rows.length) {
       setNotice({ type: "err", msg: "No student rows loaded to export." });
+      campusToast.warning({
+        title: "Nothing to export",
+        description: "No student rows are loaded for this payment yet.",
+        dedupeKey: `ec-payments:export-empty:${payment.id}`,
+      });
       return;
     }
 
@@ -569,11 +681,20 @@ export default function PaymentDashboard() {
       "",
       toCsvLine(["Student ID", "Name", "Course", "Year", "Section", "Status"]),
       ...rows.map((item) =>
-        toCsvLine([item.schoolId || item.uid, item.name, item.course, item.year, item.section, item.status])
+        toCsvLine([
+          item.schoolId || item.uid,
+          item.name,
+          item.course,
+          item.year,
+          item.section,
+          item.status,
+        ]),
       ),
     ];
 
-    const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob([csvRows.join("\n")], {
+      type: "text/csv;charset=utf-8;",
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -582,21 +703,57 @@ export default function PaymentDashboard() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    campusToast.success({
+      title: "Export started",
+      description: `${payment.ref || payment.id}-report.csv is being downloaded.`,
+      dedupeKey: `ec-payments:export:${payment.id}`,
+    });
   }
 
   return (
     <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
-      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b61f1f] to-[#f09a4a] text-white">
+      <Card
+        shadow="sm"
+        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b61f1f] to-[#f09a4a] text-white"
+      >
         <CardBody className="space-y-4 p-5 sm:p-8">
           <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">EC Payments</p>
-            <h1 className="text-3xl font-black sm:text-4xl">Campus Payment Management</h1>
-            <p className="max-w-2xl text-sm text-white/80 sm:text-base">Track, verify, and manage student payments with a layout that stays usable on smaller screens.</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
+              EC Payments
+            </p>
+            <h1 className="text-3xl font-black sm:text-4xl">
+              Campus Payment Management
+            </h1>
+            <p className="max-w-2xl text-sm text-white/80 sm:text-base">
+              Track, verify, and manage student payments with a layout that
+              stays usable on smaller screens.
+            </p>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Total Payments</p><h2 className="mt-2 text-3xl font-black text-white">{dashboardCounts.total}</h2></CardBody></Card>
-            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Pending</p><h2 className="mt-2 text-3xl font-black text-white">{dashboardCounts.pending}</h2></CardBody></Card>
-            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Completed</p><h2 className="mt-2 text-3xl font-black text-white">{dashboardCounts.completed}</h2></CardBody></Card>
+            <Card shadow="none" className="border border-white/20 bg-white/10">
+              <CardBody className="p-4">
+                <p className="text-sm text-white/70">Total Payments</p>
+                <h2 className="mt-2 text-3xl font-black text-white">
+                  {dashboardCounts.total}
+                </h2>
+              </CardBody>
+            </Card>
+            <Card shadow="none" className="border border-white/20 bg-white/10">
+              <CardBody className="p-4">
+                <p className="text-sm text-white/70">Pending</p>
+                <h2 className="mt-2 text-3xl font-black text-white">
+                  {dashboardCounts.pending}
+                </h2>
+              </CardBody>
+            </Card>
+            <Card shadow="none" className="border border-white/20 bg-white/10">
+              <CardBody className="p-4">
+                <p className="text-sm text-white/70">Completed</p>
+                <h2 className="mt-2 text-3xl font-black text-white">
+                  {dashboardCounts.completed}
+                </h2>
+              </CardBody>
+            </Card>
           </div>
         </CardBody>
       </Card>
@@ -637,7 +794,10 @@ export default function PaymentDashboard() {
           <div className="flex flex-col gap-3 sm:flex-row xl:justify-end">
             <Dropdown placement="bottom-start">
               <DropdownTrigger>
-                <Button variant="bordered" className="justify-between font-medium">
+                <Button
+                  variant="bordered"
+                  className="justify-between font-medium"
+                >
                   <span>Sort: {paymentSortLabel}</span>
                   <FiChevronDown className="ml-1" />
                 </Button>
@@ -649,13 +809,23 @@ export default function PaymentDashboard() {
                 selectedKeys={new Set([paymentSortMode])}
                 onAction={(key) => setPaymentSortMode(String(key) as SortMode)}
               >
-                <DropdownItem key="latest_to_oldest">Date, new to old</DropdownItem>
-                <DropdownItem key="oldest_to_latest">Date, old to new</DropdownItem>
-                <DropdownItem key="alphabetical">Alphabetically, A-Z</DropdownItem>
+                <DropdownItem key="latest_to_oldest">
+                  Date, new to old
+                </DropdownItem>
+                <DropdownItem key="oldest_to_latest">
+                  Date, old to new
+                </DropdownItem>
+                <DropdownItem key="alphabetical">
+                  Alphabetically, A-Z
+                </DropdownItem>
               </DropdownMenu>
             </Dropdown>
 
-            <Button onPress={() => setShowAddPaymentForm(true)} className="text-white" style={{ backgroundColor: "#7b0000" }}>
+            <Button
+              onPress={() => setShowAddPaymentForm(true)}
+              className="text-white"
+              style={{ backgroundColor: "#7b0000" }}
+            >
               + Add Payment
             </Button>
           </div>
@@ -665,121 +835,123 @@ export default function PaymentDashboard() {
       {showAddPaymentForm && (
         <Card shadow="sm" className="border animate-slideDown">
           <CardBody className="space-y-4 p-4 sm:p-6">
-          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-            <h2 className="text-xl font-semibold text-primary-900">Add New Payment</h2>
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+              <h2 className="text-xl font-semibold text-primary-900">
+                Add New Payment
+              </h2>
+
+              <Button
+                variant="flat"
+                onPress={() => setShowAddPaymentForm(false)}
+                className="w-full sm:w-auto px-3 text-sm"
+              >
+                Close
+              </Button>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium">Payment Title</label>
+              <Input
+                aria-label="Payment title"
+                type="text"
+                value={title}
+                onValueChange={setTitle}
+                className="w-full mt-1"
+                placeholder="e.g., Acquaintance Party"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium">Amount</label>
+              <Input
+                aria-label="Payment amount"
+                type="number"
+                min={0}
+                step="0.01"
+                value={amount}
+                onValueChange={setAmount}
+                className="w-full mt-1"
+                placeholder="Enter amount"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium">Date</label>
+              <Input
+                aria-label="Payment date"
+                type="date"
+                value={paymentDate}
+                onValueChange={setPaymentDate}
+                className="w-full mt-1"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium">Year Level</label>
+              <Select
+                aria-label="Payment year level"
+                selectedKeys={new Set([yearLevel])}
+                onSelectionChange={(keys) => {
+                  if (keys === "all") return;
+                  const selected = Array.from(keys)[0];
+                  if (typeof selected === "string") {
+                    setYearLevel(selected);
+                  }
+                }}
+                disallowEmptySelection
+                className="w-full mt-1"
+                items={paymentYearSelectItems}
+              >
+                {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+              </Select>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium">Course</label>
+              <Select
+                aria-label="Payment course"
+                selectedKeys={new Set([course])}
+                onSelectionChange={(keys) => {
+                  if (keys === "all") return;
+                  const selected = Array.from(keys)[0];
+                  if (typeof selected === "string") {
+                    setCourse(selected);
+                  }
+                }}
+                disallowEmptySelection
+                className="w-full mt-1"
+                items={paymentCourseSelectItems}
+              >
+                {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+              </Select>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium">Details</label>
+              <Textarea
+                aria-label="Payment details"
+                value={details}
+                onValueChange={setDetails}
+                minRows={4}
+                className="w-full mt-1"
+                placeholder="Additional notes..."
+              />
+            </div>
+
+            <p className="text-xs text-campus-text-secondary">
+              {studentsLoading
+                ? "Loading student roster..."
+                : "This payment will be assigned to students matching the selected course/year."}
+            </p>
 
             <Button
-              variant="flat"
-              onPress={() => setShowAddPaymentForm(false)}
-              className="w-full sm:w-auto px-3 text-sm"
+              color="primary"
+              onPress={handleSavePayment}
+              isDisabled={savingPayment || studentsLoading}
+              className="w-full"
             >
-              Close
+              {savingPayment ? "Saving..." : "Save Payment"}
             </Button>
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Payment Title</label>
-            <Input
-              aria-label="Payment title"
-              type="text"
-              value={title}
-              onValueChange={setTitle}
-              className="w-full mt-1"
-              placeholder="e.g., Acquaintance Party"
-            />
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Amount</label>
-            <Input
-              aria-label="Payment amount"
-              type="number"
-              min={0}
-              step="0.01"
-              value={amount}
-              onValueChange={setAmount}
-              className="w-full mt-1"
-              placeholder="Enter amount"
-            />
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Date</label>
-            <Input
-              aria-label="Payment date"
-              type="date"
-              value={paymentDate}
-              onValueChange={setPaymentDate}
-              className="w-full mt-1"
-            />
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Year Level</label>
-            <Select
-              aria-label="Payment year level"
-              selectedKeys={new Set([yearLevel])}
-              onSelectionChange={(keys) => {
-                if (keys === "all") return;
-                const selected = Array.from(keys)[0];
-                if (typeof selected === "string") {
-                  setYearLevel(selected);
-                }
-              }}
-              disallowEmptySelection
-              className="w-full mt-1"
-              items={paymentYearSelectItems}
-            >
-              {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
-            </Select>
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Course</label>
-            <Select
-              aria-label="Payment course"
-              selectedKeys={new Set([course])}
-              onSelectionChange={(keys) => {
-                if (keys === "all") return;
-                const selected = Array.from(keys)[0];
-                if (typeof selected === "string") {
-                  setCourse(selected);
-                }
-              }}
-              disallowEmptySelection
-              className="w-full mt-1"
-              items={paymentCourseSelectItems}
-            >
-              {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
-            </Select>
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Details</label>
-            <Textarea
-              aria-label="Payment details"
-              value={details}
-              onValueChange={setDetails}
-              minRows={4}
-              className="w-full mt-1"
-              placeholder="Additional notes..."
-            />
-          </div>
-
-          <p className="text-xs text-campus-text-secondary">
-            {studentsLoading
-              ? "Loading student roster..."
-              : "This payment will be assigned to students matching the selected course/year."}
-          </p>
-
-          <Button
-            color="primary"
-            onPress={handleSavePayment}
-            isDisabled={savingPayment || studentsLoading}
-            className="w-full"
-          >
-            {savingPayment ? "Saving..." : "Save Payment"}
-          </Button>
           </CardBody>
         </Card>
       )}
@@ -787,262 +959,343 @@ export default function PaymentDashboard() {
       <Card shadow="sm" className="border">
         <CardHeader className="px-5 pt-5">
           <div>
-            <h3 className="text-lg font-semibold text-campus-text-primary">Payment List</h3>
-            <p className="text-sm text-campus-text-secondary">Each payment card expands into responsive student assignments.</p>
+            <h3 className="text-lg font-semibold text-campus-text-primary">
+              Payment List
+            </h3>
+            <p className="text-sm text-campus-text-secondary">
+              Each payment card expands into responsive student assignments.
+            </p>
           </div>
         </CardHeader>
         <CardBody className="p-4 sm:p-6 pt-3">
+          {paymentsLoading ? (
+            <CampusCardListSkeleton rows={3} />
+          ) : sortedFilteredPayments.length === 0 ? (
+            <p className="text-sm text-campus-text-secondary">
+              No payments found.
+            </p>
+          ) : (
+            sortedFilteredPayments.map((p) => {
+              const rows = paymentStudents[p.id] ?? [];
+              const paid = rows.length
+                ? rows.filter((s) => s.status === "Paid").length
+                : p.paidCount;
+              const unpaid = rows.length
+                ? rows.filter((s) => s.status === "Unpaid").length
+                : p.unpaidCount;
+              const statusLabel =
+                p.totalStudents === 0
+                  ? "No Students"
+                  : unpaid > 0
+                    ? "Pending"
+                    : "Completed";
+              const statusClass =
+                statusLabel === "Completed"
+                  ? "bg-green-100 text-green-700"
+                  : statusLabel === "Pending"
+                    ? "bg-amber-100 text-amber-800"
+                    : "bg-gray-100 text-campus-text-primary";
+              const studentYearOptions = Array.from(
+                new Set(
+                  rows
+                    .map((student) => student.year)
+                    .filter((year) => Boolean(year) && year !== "Unassigned"),
+                ),
+              ).sort((a, b) => a.localeCompare(b));
+              const studentCourseOptions = Array.from(
+                new Set(
+                  rows
+                    .map((student) => student.course)
+                    .filter(
+                      (courseName) =>
+                        Boolean(courseName) && courseName !== "Unassigned",
+                    ),
+                ),
+              ).sort((a, b) => a.localeCompare(b));
+              const filteredSortedStudentRows = rows
+                .filter((student) => {
+                  const search = studentSearchText.trim().toLowerCase();
+                  const matchesSearch =
+                    !search ||
+                    student.schoolId.toLowerCase().includes(search) ||
+                    student.name.toLowerCase().includes(search) ||
+                    student.course.toLowerCase().includes(search) ||
+                    student.year.toLowerCase().includes(search) ||
+                    student.section.toLowerCase().includes(search);
+                  const matchesYear =
+                    !studentYearFilter || student.year === studentYearFilter;
+                  const matchesCourse =
+                    !studentCourseFilter ||
+                    student.course === studentCourseFilter;
+                  return matchesSearch && matchesYear && matchesCourse;
+                })
+                .sort((a, b) => {
+                  if (a.status !== b.status) {
+                    if (studentStatusSortMode === "paid")
+                      return a.status === "Paid" ? -1 : 1;
+                    return a.status === "Unpaid" ? -1 : 1;
+                  }
 
-        {paymentsLoading ? (
-          <p className="text-sm text-campus-text-secondary">Loading payments...</p>
-        ) : sortedFilteredPayments.length === 0 ? (
-          <p className="text-sm text-campus-text-secondary">No payments found.</p>
-        ) : (
-          sortedFilteredPayments.map((p) => {
-            const rows = paymentStudents[p.id] ?? [];
-            const paid = rows.length ? rows.filter((s) => s.status === "Paid").length : p.paidCount;
-            const unpaid = rows.length ? rows.filter((s) => s.status === "Unpaid").length : p.unpaidCount;
-            const statusLabel = p.totalStudents === 0 ? "No Students" : unpaid > 0 ? "Pending" : "Completed";
-            const statusClass =
-              statusLabel === "Completed"
-                ? "bg-green-100 text-green-700"
-                : statusLabel === "Pending"
-                  ? "bg-amber-100 text-amber-800"
-                  : "bg-gray-100 text-campus-text-primary";
-            const studentYearOptions = Array.from(
-              new Set(rows.map((student) => student.year).filter((year) => Boolean(year) && year !== "Unassigned"))
-            ).sort((a, b) => a.localeCompare(b));
-            const studentCourseOptions = Array.from(
-              new Set(rows.map((student) => student.course).filter((courseName) => Boolean(courseName) && courseName !== "Unassigned"))
-            ).sort((a, b) => a.localeCompare(b));
-            const filteredSortedStudentRows = rows
-              .filter((student) => {
-                const search = studentSearchText.trim().toLowerCase();
-                const matchesSearch =
-                  !search ||
-                  student.schoolId.toLowerCase().includes(search) ||
-                  student.name.toLowerCase().includes(search) ||
-                  student.course.toLowerCase().includes(search) ||
-                  student.year.toLowerCase().includes(search) ||
-                  student.section.toLowerCase().includes(search);
-                const matchesYear = !studentYearFilter || student.year === studentYearFilter;
-                const matchesCourse = !studentCourseFilter || student.course === studentCourseFilter;
-                return matchesSearch && matchesYear && matchesCourse;
-              })
-              .sort((a, b) => {
-                if (a.status !== b.status) {
-                  if (studentStatusSortMode === "paid") return a.status === "Paid" ? -1 : 1;
-                  return a.status === "Unpaid" ? -1 : 1;
-                }
+                  return (
+                    a.name.localeCompare(b.name) ||
+                    a.schoolId.localeCompare(b.schoolId)
+                  );
+                });
 
-                return a.name.localeCompare(b.name) || a.schoolId.localeCompare(b.schoolId);
-              });
+              return (
+                <Card key={p.id} shadow="sm" className="mb-4 border">
+                  <CardBody className="space-y-4 p-4 sm:p-5">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <h4 className="font-semibold text-campus-text-primary">
+                          {p.title}
+                        </h4>
+                        <p className="text-sm text-campus-text-secondary">
+                          Reference: {p.ref}
+                        </p>
 
-            return (
-              <Card key={p.id} shadow="sm" className="mb-4 border">
-                <CardBody className="space-y-4 p-4 sm:p-5">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <h4 className="font-semibold text-campus-text-primary">{p.title}</h4>
-                    <p className="text-sm text-campus-text-secondary">Reference: {p.ref}</p>
+                        <div className="mt-2 flex flex-wrap items-center gap-4 text-sm text-campus-text-secondary">
+                          <span>Date: {formatDate(p.date)}</span>
+                          <span>Amount: {formatCurrency(p.amount)}</span>
+                          <span>Target: {p.totalStudents} student(s)</span>
+                        </div>
+                      </div>
 
-                    <div className="mt-2 flex flex-wrap items-center gap-4 text-sm text-campus-text-secondary">
-                      <span>Date: {formatDate(p.date)}</span>
-                      <span>Amount: {formatCurrency(p.amount)}</span>
-                      <span>Target: {p.totalStudents} student(s)</span>
-                    </div>
-                  </div>
+                      <div className="flex flex-col items-start sm:items-end gap-2">
+                        <Chip className={statusClass}>{statusLabel}</Chip>
 
-                  <div className="flex flex-col items-start sm:items-end gap-2">
-                    <Chip className={statusClass}>{statusLabel}</Chip>
-
-                    <Button
-                      size="sm"
-                      variant="flat"
-                      onPress={() => setExpandedPayment(expandedPayment === p.id ? null : p.id)}
-                      className="px-4 text-xs"
-                    >
-                      {expandedPayment === p.id ? "Hide Info" : "Info"}
-                    </Button>
-                  </div>
-                </div>
-
-                {expandedPayment === p.id && (
-                  <div className="mt-4 border-t pt-3">
-                    <div className="flex justify-start sm:justify-end mb-3">
-                      <Button
-                        variant="flat"
-                        color="primary"
-                        onPress={() => exportCsv(p)}
-                        className="px-4 font-semibold"
-                      >
-                        Export Report
-                      </Button>
-                    </div>
-
-                    <div className="flex flex-wrap gap-2 sm:gap-4 mb-4">
-                      <Chip color="success" variant="flat" className="font-semibold">
-                        Paid: {paid}
-                      </Chip>
-
-                      <Chip color="danger" variant="flat" className="font-semibold">
-                        Unpaid: {unpaid}
-                      </Chip>
-                    </div>
-
-                    <h4 className="font-semibold text-campus-text-primary mb-2">Students</h4>
-
-                    <div className="mb-3 grid grid-cols-1 md:grid-cols-4 gap-2">
-                      <Input
-                        aria-label="Search students in payment"
-                        type="text"
-                        placeholder="Search students..."
-                        value={studentSearchText}
-                        onValueChange={setStudentSearchText}
-                        className="w-full md:col-span-2"
-                      />
-
-                      <Select
-                        aria-label="Filter students by year"
-                        selectedKeys={new Set([studentYearFilter || "__all_years__"])}
-                        onSelectionChange={(keys) => {
-                          if (keys === "all") return;
-                          const selected = Array.from(keys)[0];
-                          if (typeof selected === "string") {
-                            setStudentYearFilter(selected === "__all_years__" ? "" : selected);
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          onPress={() =>
+                            setExpandedPayment(
+                              expandedPayment === p.id ? null : p.id,
+                            )
                           }
-                        }}
-                        disallowEmptySelection
-                        className="w-full"
-                        items={[
-                          { key: "__all_years__", label: "All Years" },
-                          ...studentYearOptions.map((yearName) => ({ key: yearName, label: yearName })),
-                        ] satisfies SelectOption[]}
-                      >
-                        {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
-                      </Select>
-
-                      <Select
-                        aria-label="Filter students by course"
-                        selectedKeys={new Set([studentCourseFilter || "__all_courses__"])}
-                        onSelectionChange={(keys) => {
-                          if (keys === "all") return;
-                          const selected = Array.from(keys)[0];
-                          if (typeof selected === "string") {
-                            setStudentCourseFilter(selected === "__all_courses__" ? "" : selected);
-                          }
-                        }}
-                        disallowEmptySelection
-                        className="w-full"
-                        items={[
-                          { key: "__all_courses__", label: "All Courses" },
-                          ...studentCourseOptions.map((courseName) => ({ key: courseName, label: courseName })),
-                        ] satisfies SelectOption[]}
-                      >
-                        {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
-                      </Select>
-                    </div>
-
-                    <div className="mb-3 flex justify-start sm:justify-end">
-                      <Dropdown placement="bottom-end">
-                        <DropdownTrigger>
-                          <Button
-                            variant="bordered"
-                            className="w-full sm:w-auto justify-between min-w-[150px]"
-                          >
-                            <span>Sort by: {studentStatusSortLabel}</span>
-                            <FiChevronDown className="ml-2" />
-                          </Button>
-                        </DropdownTrigger>
-                        <DropdownMenu
-                          aria-label="Sort students by payment status"
-                          disallowEmptySelection
-                          selectionMode="single"
-                          selectedKeys={new Set([studentStatusSortMode])}
-                          onAction={(key) => setStudentStatusSortMode(String(key) as StudentStatusSortMode)}
+                          className="px-4 text-xs"
                         >
-                          <DropdownItem key="paid">Paid</DropdownItem>
-                          <DropdownItem key="unpaid">Unpaid</DropdownItem>
-                        </DropdownMenu>
-                      </Dropdown>
+                          {expandedPayment === p.id ? "Hide Info" : "Info"}
+                        </Button>
+                      </div>
                     </div>
 
-                    {expandedStudentsLoading && rows.length === 0 ? (
-                      <p className="text-sm text-campus-text-secondary">Loading student assignments...</p>
-                    ) : rows.length === 0 ? (
-                      <p className="text-sm text-campus-text-secondary">No student assignments yet.</p>
-                    ) : (
-                      <div className="overflow-x-auto">
-                        <table className="w-full min-w-[760px] text-sm">
-                          <thead className="bg-gray-100 text-campus-text-secondary">
-                            <tr>
-                              <th className="p-2 text-left">Student ID</th>
-                              <th className="p-2 text-left">Name</th>
-                              <th className="p-2 text-left">Course</th>
-                              <th className="p-2 text-left">Year Level</th>
-                              <th className="p-2 text-left">Section</th>
-                              <th className="p-2 text-left">Status</th>
-                              <th className="p-2 text-left">Action</th>
-                            </tr>
-                          </thead>
+                    {expandedPayment === p.id && (
+                      <div className="mt-4 border-t pt-3">
+                        <div className="flex justify-start sm:justify-end mb-3">
+                          <Button
+                            variant="flat"
+                            color="primary"
+                            onPress={() => exportCsv(p)}
+                            className="px-4 font-semibold"
+                          >
+                            Export Report
+                          </Button>
+                        </div>
 
-                          <tbody>
-                            {filteredSortedStudentRows.map((student) => {
-                              const actionKey = `${p.id}:${student.uid}`;
-                              const nextStatusLabel = student.status === "Paid" ? "Mark Unpaid" : "Mark Paid";
+                        <div className="flex flex-wrap gap-2 sm:gap-4 mb-4">
+                          <Chip
+                            color="success"
+                            variant="flat"
+                            className="font-semibold"
+                          >
+                            Paid: {paid}
+                          </Chip>
 
-                              return (
-                                <tr key={student.uid} className="border-b hover:bg-gray-50">
-                                  <td className="p-2">{student.schoolId || student.uid}</td>
-                                  <td className="p-2">{student.name}</td>
-                                  <td className="p-2">{student.course}</td>
-                                  <td className="p-2">{student.year}</td>
-                                  <td className="p-2">{student.section}</td>
+                          <Chip
+                            color="danger"
+                            variant="flat"
+                            className="font-semibold"
+                          >
+                            Unpaid: {unpaid}
+                          </Chip>
+                        </div>
 
-                                  <td className="p-2">
-                                    <span
-                                      className={`px-2 py-1 rounded-lg text-xs ${
-                                        student.status === "Paid"
-                                          ? "bg-green-100 text-green-700"
-                                          : "bg-red-100 text-red-700"
-                                      }`}
-                                    >
-                                      {student.status}
-                                    </span>
-                                  </td>
+                        <h4 className="font-semibold text-campus-text-primary mb-2">
+                          Students
+                        </h4>
 
-                                  <td className="p-2">
-                                    <Button
-                                      size="sm"
-                                      color="primary"
-                                      onPress={() => toggleStudentStatus(p.id, student)}
-                                      isDisabled={updatingStatusKey === actionKey}
-                                      className="px-3 text-xs"
-                                    >
-                                      {updatingStatusKey === actionKey ? "Saving..." : nextStatusLabel}
-                                    </Button>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                            {filteredSortedStudentRows.length === 0 && (
-                              <tr>
-                                <td colSpan={7} className="p-3 text-center text-sm text-campus-text-secondary">
-                                  No students match your search/filter.
-                                </td>
-                              </tr>
+                        <div className="mb-3 grid grid-cols-1 md:grid-cols-4 gap-2">
+                          <Input
+                            aria-label="Search students in payment"
+                            type="text"
+                            placeholder="Search students..."
+                            value={studentSearchText}
+                            onValueChange={setStudentSearchText}
+                            className="w-full md:col-span-2"
+                          />
+
+                          <Select
+                            aria-label="Filter students by year"
+                            selectedKeys={
+                              new Set([studentYearFilter || "__all_years__"])
+                            }
+                            onSelectionChange={(keys) => {
+                              if (keys === "all") return;
+                              const selected = Array.from(keys)[0];
+                              if (typeof selected === "string") {
+                                setStudentYearFilter(
+                                  selected === "__all_years__" ? "" : selected,
+                                );
+                              }
+                            }}
+                            disallowEmptySelection
+                            className="w-full"
+                            items={
+                              [
+                                { key: "__all_years__", label: "All Years" },
+                                ...studentYearOptions.map((yearName) => ({
+                                  key: yearName,
+                                  label: yearName,
+                                })),
+                              ] satisfies SelectOption[]
+                            }
+                          >
+                            {(item) => (
+                              <SelectItem key={item.key}>
+                                {item.label}
+                              </SelectItem>
                             )}
-                          </tbody>
-                        </table>
+                          </Select>
+
+                          <Select
+                            aria-label="Filter students by course"
+                            selectedKeys={
+                              new Set([
+                                studentCourseFilter || "__all_courses__",
+                              ])
+                            }
+                            onSelectionChange={(keys) => {
+                              if (keys === "all") return;
+                              const selected = Array.from(keys)[0];
+                              if (typeof selected === "string") {
+                                setStudentCourseFilter(
+                                  selected === "__all_courses__"
+                                    ? ""
+                                    : selected,
+                                );
+                              }
+                            }}
+                            disallowEmptySelection
+                            className="w-full"
+                            items={
+                              [
+                                {
+                                  key: "__all_courses__",
+                                  label: "All Courses",
+                                },
+                                ...studentCourseOptions.map((courseName) => ({
+                                  key: courseName,
+                                  label: courseName,
+                                })),
+                              ] satisfies SelectOption[]
+                            }
+                          >
+                            {(item) => (
+                              <SelectItem key={item.key}>
+                                {item.label}
+                              </SelectItem>
+                            )}
+                          </Select>
+                        </div>
+
+                        <div className="mb-3 flex justify-start sm:justify-end">
+                          <Dropdown placement="bottom-end">
+                            <DropdownTrigger>
+                              <Button
+                                variant="bordered"
+                                className="w-full sm:w-auto justify-between min-w-[150px]"
+                              >
+                                <span>Sort by: {studentStatusSortLabel}</span>
+                                <FiChevronDown className="ml-2" />
+                              </Button>
+                            </DropdownTrigger>
+                            <DropdownMenu
+                              aria-label="Sort students by payment status"
+                              disallowEmptySelection
+                              selectionMode="single"
+                              selectedKeys={new Set([studentStatusSortMode])}
+                              onAction={(key) =>
+                                setStudentStatusSortMode(
+                                  String(key) as StudentStatusSortMode,
+                                )
+                              }
+                            >
+                              <DropdownItem key="paid">Paid</DropdownItem>
+                              <DropdownItem key="unpaid">Unpaid</DropdownItem>
+                            </DropdownMenu>
+                          </Dropdown>
+                        </div>
+
+                        {expandedStudentsLoading && rows.length === 0 ? (
+                          <CampusCardListSkeleton rows={2} />
+                        ) : rows.length === 0 ? (
+                          <p className="text-sm text-campus-text-secondary">
+                            No student assignments yet.
+                          </p>
+                        ) : (
+                          <CampusDataTable
+                            ariaLabel={`Students assigned to ${p.title}`}
+                            columns={paymentStudentColumns}
+                            items={filteredSortedStudentRows}
+                            emptyTitle="No students match your search"
+                            emptyDescription="Adjust the filters or search query to see assigned students."
+                            renderCell={(student, columnKey) => {
+                              if (columnKey === "status") {
+                                return (
+                                  <Chip
+                                    color={
+                                      student.status === "Paid"
+                                        ? "success"
+                                        : "danger"
+                                    }
+                                    variant="flat"
+                                  >
+                                    {student.status}
+                                  </Chip>
+                                );
+                              }
+
+                              if (columnKey === "actions") {
+                                const actionKey = `${p.id}:${student.uid}`;
+                                const nextStatusLabel =
+                                  student.status === "Paid"
+                                    ? "Mark Unpaid"
+                                    : "Mark Paid";
+
+                                return (
+                                  <Button
+                                    size="sm"
+                                    color="primary"
+                                    onPress={() =>
+                                      toggleStudentStatus(p.id, student)
+                                    }
+                                    isDisabled={updatingStatusKey === actionKey}
+                                    className="px-3 text-xs"
+                                  >
+                                    {updatingStatusKey === actionKey
+                                      ? "Saving..."
+                                      : nextStatusLabel}
+                                  </Button>
+                                );
+                              }
+
+                              if (columnKey === "schoolId") {
+                                return student.schoolId || student.uid;
+                              }
+
+                              return student[
+                                columnKey as keyof PaymentStudent
+                              ] as string;
+                            }}
+                          />
+                        )}
                       </div>
                     )}
-                  </div>
-                )}
-                </CardBody>
-              </Card>
-            );
-          })
-        )}
+                  </CardBody>
+                </Card>
+              );
+            })
+          )}
         </CardBody>
       </Card>
     </div>

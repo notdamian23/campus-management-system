@@ -37,6 +37,7 @@ type PortableEventSummary = {
   title: string;
   date: string;
   scheduledTime: string;
+  scheduledTimeEnd: string;
   location: string;
   status: string;
   yearLevels: string[];
@@ -290,6 +291,71 @@ function parseEventStartMs(date: string, time: string): number {
   const mm = String(minutes % 60).padStart(2, "0");
   const parsed = Date.parse(`${date}T${hh}:${mm}:00+08:00`);
   return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed;
+}
+
+function hasSupportedTimeFormat(raw: string): boolean {
+  const value = normalizeText(raw);
+  if (!value) {
+    return false;
+  }
+
+  return /^(\d{1,2}):(\d{2})\s*([AaPp][Mm])$/.test(value) ||
+    /^(\d{1,2}):(\d{2})$/.test(value);
+}
+
+function parseEventEndMs(date: string, startTime: string, endTime: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !hasSupportedTimeFormat(startTime)) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  const startMinutes = parseTimeToMinutes(startTime);
+  let endMinutes = hasSupportedTimeFormat(endTime) ?
+    parseTimeToMinutes(endTime) :
+    startMinutes;
+
+  if (endMinutes < startMinutes) {
+    endMinutes = startMinutes + 60;
+  }
+
+  const hh = String(Math.floor(endMinutes / 60)).padStart(2, "0");
+  const mm = String(endMinutes % 60).padStart(2, "0");
+  const parsed = Date.parse(`${date}T${hh}:${mm}:00+08:00`);
+  return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed;
+}
+
+function hasEventEnded(event: PortableEventSummary, nowMs = Date.now()): boolean {
+  const eventEndMs = parseEventEndMs(
+    event.date,
+    event.scheduledTime,
+    event.scheduledTimeEnd
+  );
+  if (eventEndMs === Number.MAX_SAFE_INTEGER) {
+    return false;
+  }
+
+  return nowMs > eventEndMs;
+}
+
+function normalizeScheduledWindow(startValue: unknown, endValue: unknown): {
+  scheduledTime: string;
+  scheduledTimeEnd: string;
+} {
+  let scheduledTime = normalizeText(startValue);
+  let scheduledTimeEnd = normalizeText(endValue);
+
+  if (!scheduledTimeEnd) {
+    const dashIndex = scheduledTime.indexOf("-");
+    if (dashIndex > 0) {
+      const start = scheduledTime.slice(0, dashIndex).trim();
+      const end = scheduledTime.slice(dashIndex + 1).trim();
+      if (start && end) {
+        scheduledTime = start;
+        scheduledTimeEnd = end;
+      }
+    }
+  }
+
+  return {scheduledTime, scheduledTimeEnd};
 }
 
 function normalizeYearLevel(value: unknown): string {
@@ -603,7 +669,14 @@ function eventSummaryFromSnapshot(
 ): PortableEventSummary {
   const data = snap.data() ?? {};
   const date = normalizeText(data.date);
-  const scheduledTime = normalizeText(data.scheduledTime) || normalizeText(data.timeStart);
+  const schedule = normalizeScheduledWindow(
+    normalizeText(data.scheduledTimeStart) ||
+      normalizeText(data.scheduledTime) ||
+      normalizeText(data.timeStart),
+    normalizeText(data.scheduledTimeEnd) ||
+      normalizeText(data.endTime) ||
+      normalizeText(data.timeEnd)
+  );
   const yearLevels = normalizeTargetList(data.yearLevels);
   const courses = normalizeTargetList(data.courses);
 
@@ -611,7 +684,8 @@ function eventSummaryFromSnapshot(
     eventId: snap.id,
     title: normalizeText(data.title) || "Untitled Event",
     date,
-    scheduledTime,
+    scheduledTime: schedule.scheduledTime,
+    scheduledTimeEnd: schedule.scheduledTimeEnd,
     location: normalizeText(data.location) || "TBA",
     status: normalizeText(data.status) || "upcoming",
     yearLevels,
@@ -620,13 +694,17 @@ function eventSummaryFromSnapshot(
     isPreReg: data.isPreReg === true,
     requiresRegistration: data.isPreReg === true,
     createdAtMs: toMillis(data.createdAt),
-    sortMs: parseEventStartMs(date, scheduledTime),
+    sortMs: parseEventStartMs(date, schedule.scheduledTime),
   };
 }
 
 function isActiveEvent(event: PortableEventSummary): boolean {
   const status = normalizeLower(event.status);
-  return status !== "completed" && status !== "cancelled" && status !== "archived";
+  if (status === "completed" || status === "cancelled" || status === "archived") {
+    return false;
+  }
+
+  return !hasEventEnded(event);
 }
 
 async function listAvailableEvents(limit: number): Promise<PortableEventSummary[]> {
@@ -1347,6 +1425,63 @@ function resolveRecordedTimestamp(record: Record<string, unknown>) {
   };
 }
 
+function resolveAttendanceMoment(
+  epochValue: unknown,
+  isoValue: unknown,
+  timestampValue?: unknown
+) {
+  const epochSeconds = toPositiveInt(epochValue);
+  const iso = normalizeText(isoValue);
+
+  if (epochSeconds > 0) {
+    return {
+      hasValue: true,
+      timestamp: admin.firestore.Timestamp.fromMillis(epochSeconds * 1000),
+      epochSeconds,
+      iso,
+    };
+  }
+
+  const timestampMs = toMillis(timestampValue);
+  if (timestampMs > 0) {
+    return {
+      hasValue: true,
+      timestamp: admin.firestore.Timestamp.fromMillis(timestampMs),
+      epochSeconds: Math.floor(timestampMs / 1000),
+      iso,
+    };
+  }
+
+  if (iso) {
+    const parsed = Date.parse(iso);
+    if (!Number.isNaN(parsed)) {
+      return {
+        hasValue: true,
+        timestamp: admin.firestore.Timestamp.fromMillis(parsed),
+        epochSeconds: Math.floor(parsed / 1000),
+        iso,
+      };
+    }
+  }
+
+  return {
+    hasValue: false,
+    timestamp: null,
+    epochSeconds: 0,
+    iso,
+  };
+}
+
+function deriveAttendanceStatus(hasTimeIn: boolean, hasTimeOut: boolean): string {
+  if (hasTimeIn && hasTimeOut) {
+    return "Present";
+  }
+  if (hasTimeIn) {
+    return "Timed In";
+  }
+  return "";
+}
+
 async function syncEnrollmentResult(
   device: DeviceContext,
   record: Record<string, unknown>
@@ -1614,6 +1749,7 @@ async function pairDeviceToEvent(device: DeviceContext, eventId: string) {
       eventTitle: event.title,
       eventDate: event.date,
       eventScheduledTime: event.scheduledTime,
+      eventScheduledTimeEnd: event.scheduledTimeEnd,
       eventLocation: event.location,
       status: "paired",
       source: "portable-device",
@@ -1627,6 +1763,7 @@ async function pairDeviceToEvent(device: DeviceContext, eventId: string) {
         title: event.title,
         date: event.date,
         scheduledTime: event.scheduledTime,
+        scheduledTimeEnd: event.scheduledTimeEnd,
         location: event.location,
         status: event.status,
       },
@@ -1711,6 +1848,14 @@ async function syncAttendanceRecord(
   const profileRef = db.doc(`profiles/${studentId}`);
   const event = await getEventSummary(eventId);
   const recordedTimestamp = resolveRecordedTimestamp(record);
+  const incomingTimeIn = resolveAttendanceMoment(
+    record.timeInEpoch ?? record.timestampEpoch ?? record.capturedAtEpoch,
+    record.timeInIso ?? record.timestampIso ?? record.capturedAtIso
+  );
+  const incomingTimeOut = resolveAttendanceMoment(record.timeOutEpoch, record.timeOutIso);
+  const incomingTimeInSource =
+    normalizeText(record.timeInSource ?? record.timeSource) || "unknown";
+  const incomingTimeOutSource = normalizeText(record.timeOutSource) || "unknown";
 
   let resultStatus: AttendanceResponseStatus = "failed";
   let resultMessage = "Failed to sync attendance.";
@@ -1721,20 +1866,24 @@ async function syncAttendanceRecord(
       throw new ApiError(404, "Event not found.");
     }
 
-    const existingSyncLog = await transaction.get(syncLogRef);
-    if (existingSyncLog.exists) {
-      const data = existingSyncLog.data() ?? {};
-      resultStatus = normalizeLower(data.syncStatus) === "uploaded" ? "uploaded" :
-        normalizeLower(data.syncStatus) === "duplicate" ? "duplicate" :
-        "failed";
-      resultMessage = normalizeText(data.message) || "Attendance already processed.";
-      return;
-    }
-
     const attendanceSnap = await transaction.get(attendanceRef);
-    if (attendanceSnap.exists) {
-      resultStatus = "duplicate";
-      resultMessage = "Attendance already exists for this student.";
+    const existingAttendance = attendanceSnap.exists ? attendanceSnap.data() ?? {} : {};
+    const existingTimeIn = resolveAttendanceMoment(
+      existingAttendance.timeInEpoch ?? existingAttendance.deviceTimestampEpoch,
+      existingAttendance.timeInIso ?? existingAttendance.deviceTimestampIso,
+      existingAttendance.timeIn ?? existingAttendance.timestamp
+    );
+    const existingTimeOut = resolveAttendanceMoment(
+      existingAttendance.timeOutEpoch,
+      existingAttendance.timeOutIso,
+      existingAttendance.timeOut
+    );
+    const mergedTimeIn = incomingTimeIn.hasValue ? incomingTimeIn : existingTimeIn;
+    const mergedTimeOut = incomingTimeOut.hasValue ? incomingTimeOut : existingTimeOut;
+
+    if (incomingTimeOut.hasValue && !mergedTimeIn.hasValue) {
+      resultStatus = "failed";
+      resultMessage = "No Time in record. Cannot Time out.";
 
       transaction.set(
         syncLogRef,
@@ -1743,7 +1892,53 @@ async function syncAttendanceRecord(
           eventId,
           studentId,
           deviceId: device.deviceId,
-          syncStatus: "duplicate",
+          syncStatus: "failed",
+          message: resultMessage,
+          attemptedAt: serverTimestamp(),
+          processedAt: serverTimestamp(),
+          source: "portable-device",
+        },
+        {merge: true}
+      );
+      return;
+    }
+
+    const addsNewTimeIn = incomingTimeIn.hasValue && !existingTimeIn.hasValue;
+    const addsNewTimeOut = incomingTimeOut.hasValue && !existingTimeOut.hasValue;
+    if (attendanceSnap.exists) {
+      if (!addsNewTimeIn && !addsNewTimeOut) {
+        resultStatus = "duplicate";
+        resultMessage = "Attendance already up to date.";
+
+        transaction.set(
+          syncLogRef,
+          {
+            recordId,
+            eventId,
+            studentId,
+            deviceId: device.deviceId,
+            syncStatus: "duplicate",
+            message: resultMessage,
+            attemptedAt: serverTimestamp(),
+            processedAt: serverTimestamp(),
+            source: "portable-device",
+          },
+          {merge: true}
+        );
+        return;
+      }
+    } else if (!mergedTimeIn.hasValue) {
+      resultStatus = "failed";
+      resultMessage = "Time In data is required.";
+
+      transaction.set(
+        syncLogRef,
+        {
+          recordId,
+          eventId,
+          studentId,
+          deviceId: device.deviceId,
+          syncStatus: "failed",
           message: resultMessage,
           attemptedAt: serverTimestamp(),
           processedAt: serverTimestamp(),
@@ -1760,10 +1955,15 @@ async function syncAttendanceRecord(
       ...(profileSnap.exists ? profileSnap.data() : {}),
       ...(studentSnap.exists ? studentSnap.data() : {}),
     };
+    const attendanceStatus = deriveAttendanceStatus(
+      mergedTimeIn.hasValue,
+      mergedTimeOut.hasValue
+    );
 
     const attendanceDoc = {
       eventId,
-      eventTitle: event.title,
+      eventTitle: normalizeText(record.eventTitle) || event.title,
+      eventDate: normalizeText(record.eventDate) || event.date,
       studentId,
       uid: studentId,
       studentUid: studentId,
@@ -1786,8 +1986,8 @@ async function syncAttendanceRecord(
         normalizeYearLevel(record.yearLevel ?? record.year) ||
         normalizeYearLevel(mergedStudent.yearLevel ?? mergedStudent.year) ||
         "Unassigned",
-      timestamp: recordedTimestamp.timestamp,
-      recordedAt: serverTimestamp(),
+      timestamp: mergedTimeIn.timestamp ?? recordedTimestamp.timestamp,
+      recordedAt: existingAttendance.recordedAt ?? serverTimestamp(),
       recordedByDevice: true,
       recordedByDeviceId: device.deviceId,
       deviceId: normalizeText(record.deviceId) || device.deviceId,
@@ -1806,10 +2006,35 @@ async function syncAttendanceRecord(
       deviceTimestampEpoch: recordedTimestamp.epochSeconds,
       deviceTimestampIso: recordedTimestamp.iso,
       timeSource: normalizeText(record.timeSource) || "unknown",
-      status: "Present",
-      createdAt: serverTimestamp(),
+      scheduledTime: normalizeText(record.scheduledTimeStart) || event.scheduledTime,
+      scheduledTimeStart: normalizeText(record.scheduledTimeStart) || event.scheduledTime,
+      scheduledTimeEnd:
+        normalizeText(record.scheduledTimeEnd) || event.scheduledTimeEnd,
+      location: normalizeText(record.location ?? record.eventLocation) || event.location,
+      attendanceStatus,
+      status: attendanceStatus,
+      timeInEpoch: mergedTimeIn.epochSeconds,
+      timeInIso: mergedTimeIn.iso,
+      timeInSource:
+        existingTimeIn.hasValue && !incomingTimeIn.hasValue ?
+          normalizeText(existingAttendance.timeInSource ?? existingAttendance.timeSource) || "unknown" :
+          incomingTimeInSource,
+      timeOutEpoch: mergedTimeOut.epochSeconds,
+      timeOutIso: mergedTimeOut.iso,
+      timeOutSource:
+        existingTimeOut.hasValue && !incomingTimeOut.hasValue ?
+          normalizeText(existingAttendance.timeOutSource) || "unknown" :
+          incomingTimeOutSource,
+      createdAt: existingAttendance.createdAt ?? serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
+
+    if (mergedTimeIn.timestamp) {
+      Object.assign(attendanceDoc, {timeIn: mergedTimeIn.timestamp});
+    }
+    if (mergedTimeOut.timestamp) {
+      Object.assign(attendanceDoc, {timeOut: mergedTimeOut.timestamp});
+    }
 
     transaction.set(attendanceRef, attendanceDoc, {merge: true});
     transaction.set(
@@ -1822,7 +2047,7 @@ async function syncAttendanceRecord(
         studentName: attendanceDoc.studentName,
         deviceId: device.deviceId,
         syncStatus: "uploaded",
-        message: "Attendance saved.",
+        message: mergedTimeOut.hasValue ? "Attendance updated." : "Attendance saved.",
         attemptedAt: serverTimestamp(),
         processedAt: serverTimestamp(),
         source: "portable-device",
@@ -1839,7 +2064,7 @@ async function syncAttendanceRecord(
     );
 
     resultStatus = "uploaded";
-    resultMessage = "Attendance saved.";
+    resultMessage = mergedTimeOut.hasValue ? "Attendance updated." : "Attendance saved.";
   });
 
   return {
@@ -2026,6 +2251,7 @@ export const campusDeviceListEvents = deviceEndpoint(
         title: event.title,
         date: event.date,
         scheduledTime: event.scheduledTime,
+        scheduledTimeEnd: event.scheduledTimeEnd,
         location: event.location,
         status: event.status,
       })),
@@ -2052,6 +2278,7 @@ export const campusDevicePairEvent = deviceEndpoint(
         title: context.event.title,
         date: context.event.date,
         scheduledTime: context.event.scheduledTime,
+        scheduledTimeEnd: context.event.scheduledTimeEnd,
         location: context.event.location,
         status: context.event.status,
       },
@@ -2101,6 +2328,7 @@ export const campusDevicePairedEventContext = deviceEndpoint(
         title: context.event.title,
         date: context.event.date,
         scheduledTime: context.event.scheduledTime,
+        scheduledTimeEnd: context.event.scheduledTimeEnd,
         location: context.event.location,
         status: context.event.status,
       },
@@ -2508,6 +2736,7 @@ export const campusDeviceLatestEvent = deviceEndpoint(
         title: event.title,
         date: event.date,
         scheduledTime: event.scheduledTime,
+        scheduledTimeEnd: event.scheduledTimeEnd,
         location: event.location,
         status: event.status,
       },

@@ -4,12 +4,14 @@ import { useMemo, useState } from "react";
 import { Button } from "@heroui/button";
 import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Select, SelectItem } from "@heroui/select";
+import { CampusCardListSkeleton, CampusMetricSkeleton } from "@/components/ui";
 import { CampusBadge, CampusButton } from "@/components/heroui";
 import {
   StudentEvent,
   StudentEventStatus,
   useStudentPortal,
 } from "@/components/student/StudentPortalProvider";
+import { campusToast } from "@/lib/toast";
 
 type Notice = {
   type: "ok" | "err";
@@ -26,9 +28,12 @@ type EventSortMode = "oldest_to_latest" | "latest_to_oldest";
 type EventStatusFilter = "all" | "upcoming" | "attended" | "missed";
 
 function eventStatusChip(status: StudentEventStatus) {
-  if (status === "Upcoming") return <CampusBadge status="upcoming">Upcoming</CampusBadge>;
-  if (status === "Attended") return <CampusBadge status="completed">Attended</CampusBadge>;
-  if (status === "Missed") return <CampusBadge status="missed">Missed</CampusBadge>;
+  if (status === "Upcoming")
+    return <CampusBadge status="upcoming">Upcoming</CampusBadge>;
+  if (status === "Attended")
+    return <CampusBadge status="completed">Attended</CampusBadge>;
+  if (status === "Missed")
+    return <CampusBadge status="missed">Missed</CampusBadge>;
 
   if (status === "Payment Due") {
     return (
@@ -96,26 +101,31 @@ export default function StudentEvents() {
 
   const registeredSet = useMemo(
     () => new Set(registeredEventIds),
-    [registeredEventIds]
+    [registeredEventIds],
   );
 
   const eventOnlyItems = useMemo(
     () => events.filter((item) => item.status !== "Payment Due"),
-    [events]
+    [events],
   );
 
   const filteredEvents = useMemo(
-    () => eventOnlyItems.filter((item) => matchesStatusFilter(item, statusFilter)),
-    [eventOnlyItems, statusFilter]
+    () =>
+      eventOnlyItems.filter((item) => matchesStatusFilter(item, statusFilter)),
+    [eventOnlyItems, statusFilter],
   );
 
   const eventCounts = useMemo(
     () => ({
-      upcoming: eventOnlyItems.filter((item) => item.status === "Upcoming" || item.status === "Pre-registration").length,
-      attended: eventOnlyItems.filter((item) => item.status === "Attended").length,
+      upcoming: eventOnlyItems.filter(
+        (item) =>
+          item.status === "Upcoming" || item.status === "Pre-registration",
+      ).length,
+      attended: eventOnlyItems.filter((item) => item.status === "Attended")
+        .length,
       missed: eventOnlyItems.filter((item) => item.status === "Missed").length,
     }),
-    [eventOnlyItems]
+    [eventOnlyItems],
   );
 
   const groupedEvents = useMemo<EventGroup[]>(() => {
@@ -134,7 +144,7 @@ export default function StudentEvents() {
         ? new Date(
             eventDate.getFullYear(),
             eventDate.getMonth(),
-            eventDate.getDate()
+            eventDate.getDate(),
           ).getTime()
         : Number.MAX_SAFE_INTEGER;
 
@@ -174,6 +184,19 @@ export default function StudentEvents() {
     setNotice(null);
 
     const result = await registerForEvent(eventId);
+    if (result.ok) {
+      campusToast.success({
+        title: "Registration submitted",
+        description: result.msg,
+        dedupeKey: `student-events:register:${eventId}`,
+      });
+    } else {
+      campusToast.error({
+        title: "Registration failed",
+        description: result.msg,
+        dedupeKey: `student-events:register-error:${eventId}`,
+      });
+    }
     setNotice({
       type: result.ok ? "ok" : "err",
       msg: result.msg,
@@ -183,25 +206,72 @@ export default function StudentEvents() {
 
   return (
     <div className="space-y-4 sm:space-y-6 text-campus-text-primary">
-      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#bb2020] to-[#f19b4c] text-white">
+      <Card
+        shadow="sm"
+        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#bb2020] to-[#f19b4c] text-white"
+      >
         <CardBody className="space-y-4 p-5 sm:p-6">
           <div>
             <h1 className="text-2xl font-black sm:text-3xl">Events</h1>
-            <p className="text-sm text-white/80 sm:text-base">Browse your timeline, open details, and register when pre-registration is available.</p>
+            <p className="text-sm text-white/80 sm:text-base">
+              Browse your timeline, open details, and register when
+              pre-registration is available.
+            </p>
           </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Upcoming</p><h2 className="mt-2 text-3xl font-black text-white">{eventCounts.upcoming}</h2></CardBody></Card>
-            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Attended</p><h2 className="mt-2 text-3xl font-black text-white">{eventCounts.attended}</h2></CardBody></Card>
-            <Card shadow="none" className="border border-white/20 bg-white/10"><CardBody className="p-4"><p className="text-sm text-white/70">Missed</p><h2 className="mt-2 text-3xl font-black text-white">{eventCounts.missed}</h2></CardBody></Card>
-          </div>
+          {loading ? (
+            <CampusMetricSkeleton
+              count={3}
+              className="sm:grid-cols-3 xl:grid-cols-3"
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <Card
+                shadow="none"
+                className="border border-white/20 bg-white/10"
+              >
+                <CardBody className="p-4">
+                  <p className="text-sm text-white/70">Upcoming</p>
+                  <h2 className="mt-2 text-3xl font-black text-white">
+                    {eventCounts.upcoming}
+                  </h2>
+                </CardBody>
+              </Card>
+              <Card
+                shadow="none"
+                className="border border-white/20 bg-white/10"
+              >
+                <CardBody className="p-4">
+                  <p className="text-sm text-white/70">Attended</p>
+                  <h2 className="mt-2 text-3xl font-black text-white">
+                    {eventCounts.attended}
+                  </h2>
+                </CardBody>
+              </Card>
+              <Card
+                shadow="none"
+                className="border border-white/20 bg-white/10"
+              >
+                <CardBody className="p-4">
+                  <p className="text-sm text-white/70">Missed</p>
+                  <h2 className="mt-2 text-3xl font-black text-white">
+                    {eventCounts.missed}
+                  </h2>
+                </CardBody>
+              </Card>
+            </div>
+          )}
         </CardBody>
       </Card>
 
       <Card shadow="sm" className="border">
         <CardHeader className="px-5 pt-5">
           <div>
-            <h2 className="text-lg font-semibold text-campus-text-primary">Filters</h2>
-            <p className="text-sm text-campus-text-secondary">Sort the timeline and narrow it by event status.</p>
+            <h2 className="text-lg font-semibold text-campus-text-primary">
+              Filters
+            </h2>
+            <p className="text-sm text-campus-text-secondary">
+              Sort the timeline and narrow it by event status.
+            </p>
           </div>
         </CardHeader>
         <CardBody className="grid grid-cols-1 gap-3 p-5 pt-3 sm:grid-cols-2">
@@ -223,7 +293,9 @@ export default function StudentEvents() {
             label="Status"
             size="sm"
             selectedKeys={[statusFilter]}
-            onChange={(e) => setStatusFilter(e.target.value as EventStatusFilter)}
+            onChange={(e) =>
+              setStatusFilter(e.target.value as EventStatusFilter)
+            }
             disallowEmptySelection
             className="w-full"
           >
@@ -255,7 +327,7 @@ export default function StudentEvents() {
       )}
 
       {loading ? (
-        <p className="text-sm text-campus-text-secondary">Loading events...</p>
+        <CampusCardListSkeleton rows={3} />
       ) : groupedEvents.length === 0 ? (
         <p className="text-sm text-campus-text-secondary">
           No events match the current sort/filter options.
@@ -337,7 +409,11 @@ export default function StudentEvents() {
                                 <CampusButton
                                   variant="secondary"
                                   className="w-full sm:w-auto"
-                                  disabled={registered || registeringId === item.id || accountInactive}
+                                  disabled={
+                                    registered ||
+                                    registeringId === item.id ||
+                                    accountInactive
+                                  }
                                   onClick={() => handleRegister(item.id)}
                                 >
                                   {registered

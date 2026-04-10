@@ -7,9 +7,31 @@ import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
+import {
+  CampusDataTable,
+  type CampusTableColumn,
+  CampusDetailSkeleton,
+  CampusMetricSkeleton,
+} from "@/components/ui";
 import { useTeacherPortal } from "@/components/teacher/TeacherPortalProvider";
 
 const FILES_PER_PAGE = 10;
+
+const teacherDocumentColumns: CampusTableColumn<{
+  id: string;
+  name: string;
+  kind: "docs" | "images";
+  eventId: string;
+  size: number;
+  createdAtMs: number;
+}>[] = [
+  { key: "name", label: "File" },
+  { key: "kind", label: "Type" },
+  { key: "event", label: "Event" },
+  { key: "size", label: "Size" },
+  { key: "createdAtMs", label: "Uploaded" },
+  { key: "actions", label: "Actions", align: "end", className: "text-right" },
+];
 
 type SelectOption = {
   key: string;
@@ -58,7 +80,7 @@ export default function TeacherDocumentsPage() {
 
   const eventMap = useMemo(
     () => new Map(events.map((event) => [event.id, event])),
-    [events]
+    [events],
   );
 
   const eventOptions = useMemo<SelectOption[]>(
@@ -69,7 +91,7 @@ export default function TeacherDocumentsPage() {
         .sort((a, b) => a.title.localeCompare(b.title))
         .map((event) => ({ key: event.id, label: event.title })),
     ],
-    [events]
+    [events],
   );
 
   const filteredFiles = useMemo(() => {
@@ -90,7 +112,10 @@ export default function TeacherDocumentsPage() {
       .sort((a, b) => b.createdAtMs - a.createdAtMs);
   }, [eventFilter, eventMap, files, searchText, typeFilter]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredFiles.length / FILES_PER_PAGE));
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredFiles.length / FILES_PER_PAGE),
+  );
 
   const paginatedFiles = useMemo(() => {
     const start = (page - 1) * FILES_PER_PAGE;
@@ -99,11 +124,11 @@ export default function TeacherDocumentsPage() {
 
   const selectedFile = useMemo(
     () => files.find((file) => file.id === selectedFileId) ?? null,
-    [files, selectedFileId]
+    [files, selectedFileId],
   );
 
   const selectedFileEvent = selectedFile
-    ? eventMap.get(selectedFile.eventId) ?? null
+    ? (eventMap.get(selectedFile.eventId) ?? null)
     : null;
 
   useEffect(() => {
@@ -120,7 +145,10 @@ export default function TeacherDocumentsPage() {
       return;
     }
 
-    if (!selectedFileId || !filteredFiles.some((file) => file.id === selectedFileId)) {
+    if (
+      !selectedFileId ||
+      !filteredFiles.some((file) => file.id === selectedFileId)
+    ) {
       setSelectedFileId(filteredFiles[0].id);
     }
   }, [filteredFiles, selectedFileId]);
@@ -144,28 +172,32 @@ export default function TeacherDocumentsPage() {
         </CardBody>
       </Card>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard
-          label="Total Files"
-          value={loading ? "-" : String(files.length)}
-          tone="text-blue-700"
-        />
-        <MetricCard
-          label="Documents"
-          value={loading ? "-" : String(documentCount)}
-          tone="text-emerald-700"
-        />
-        <MetricCard
-          label="Images"
-          value={loading ? "-" : String(imageCount)}
-          tone="text-amber-700"
-        />
-        <MetricCard
-          label="Storage"
-          value={loading ? "-" : toMegabytes(totalStorageBytes)}
-          tone="text-fuchsia-700"
-        />
-      </div>
+      {loading ? (
+        <CampusMetricSkeleton />
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard
+            label="Total Files"
+            value={String(files.length)}
+            tone="text-blue-700"
+          />
+          <MetricCard
+            label="Documents"
+            value={String(documentCount)}
+            tone="text-emerald-700"
+          />
+          <MetricCard
+            label="Images"
+            value={String(imageCount)}
+            tone="text-amber-700"
+          />
+          <MetricCard
+            label="Storage"
+            value={toMegabytes(totalStorageBytes)}
+            tone="text-fuchsia-700"
+          />
+        </div>
+      )}
 
       <Card shadow="sm">
         <CardBody className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -220,54 +252,77 @@ export default function TeacherDocumentsPage() {
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,1fr)]">
         <Card shadow="sm">
-          <CardBody className="space-y-3 p-4 sm:p-5">
-            {loading ? (
-              <p className="text-sm text-campus-text-secondary">Loading files...</p>
-            ) : paginatedFiles.length === 0 ? (
-              <p className="text-sm text-campus-text-secondary">
-                No files match the current filters.
-              </p>
-            ) : (
-              paginatedFiles.map((file) => {
-                const event = eventMap.get(file.eventId);
-                const isSelected = selectedFileId === file.id;
-
-                return (
-                  <button
-                    key={file.id}
-                    type="button"
-                    className={`w-full rounded-2xl border p-4 text-left transition ${
-                      isSelected
-                        ? "border-primary-500 bg-primary-50"
-                        : "border-border bg-white hover:bg-gray-50"
-                    }`}
-                    onClick={() => setSelectedFileId(file.id)}
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-semibold text-campus-text-primary">
+          <CardBody className="p-4 sm:p-5">
+            <CampusDataTable
+              ariaLabel="Teacher event files"
+              columns={teacherDocumentColumns}
+              items={paginatedFiles}
+              isLoading={loading}
+              emptyTitle="No files match the current filters"
+              emptyDescription="Try another search term, type, or event."
+              renderCell={(file, columnKey) => {
+                if (columnKey === "name") {
+                  return (
+                    <div className="space-y-1">
+                      <p className="max-w-[280px] truncate font-semibold text-campus-text-primary">
                         {file.name}
                       </p>
-                      <Chip
-                        size="sm"
-                        className={
-                          file.kind === "images"
-                            ? "bg-amber-100 text-amber-700"
-                            : "bg-blue-100 text-blue-700"
-                        }
-                      >
-                        {file.kind === "images" ? "Image" : "Document"}
-                      </Chip>
+                      {selectedFileId === file.id ? (
+                        <Chip size="sm" color="primary" variant="flat">
+                          Selected
+                        </Chip>
+                      ) : null}
                     </div>
-                    <p className="mt-1 text-sm text-campus-text-secondary">
-                      {event?.title || "Unknown event"}
-                    </p>
-                    <p className="mt-1 text-xs text-campus-text-secondary">
-                      {formatDate(file.createdAtMs)} | {toMegabytes(file.size)}
-                    </p>
-                  </button>
-                );
-              })
-            )}
+                  );
+                }
+
+                if (columnKey === "kind") {
+                  return (
+                    <Chip
+                      size="sm"
+                      className={
+                        file.kind === "images"
+                          ? "bg-amber-100 text-amber-700"
+                          : "bg-blue-100 text-blue-700"
+                      }
+                    >
+                      {file.kind === "images" ? "Image" : "Document"}
+                    </Chip>
+                  );
+                }
+
+                if (columnKey === "event") {
+                  return eventMap.get(file.eventId)?.title || "Unknown event";
+                }
+
+                if (columnKey === "size") {
+                  return toMegabytes(file.size);
+                }
+
+                if (columnKey === "createdAtMs") {
+                  return formatDate(file.createdAtMs);
+                }
+
+                if (columnKey === "actions") {
+                  return (
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        variant={
+                          selectedFileId === file.id ? "flat" : "bordered"
+                        }
+                        color="primary"
+                        onPress={() => setSelectedFileId(file.id)}
+                      >
+                        {selectedFileId === file.id ? "Viewing" : "Open"}
+                      </Button>
+                    </div>
+                  );
+                }
+
+                return null;
+              }}
+            />
           </CardBody>
         </Card>
 
@@ -277,7 +332,9 @@ export default function TeacherDocumentsPage() {
               File Details
             </h2>
 
-            {selectedFile ? (
+            {loading ? (
+              <CampusDetailSkeleton rows={5} />
+            ) : selectedFile ? (
               <>
                 <div className="space-y-3">
                   <DetailRow label="Name" value={selectedFile.name} />
@@ -287,13 +344,18 @@ export default function TeacherDocumentsPage() {
                   />
                   <DetailRow
                     label="Type"
-                    value={selectedFile.kind === "images" ? "Image" : "Document"}
+                    value={
+                      selectedFile.kind === "images" ? "Image" : "Document"
+                    }
                   />
                   <DetailRow
                     label="Uploaded"
                     value={formatDate(selectedFile.createdAtMs)}
                   />
-                  <DetailRow label="Size" value={toMegabytes(selectedFile.size)} />
+                  <DetailRow
+                    label="Size"
+                    value={toMegabytes(selectedFile.size)}
+                  />
                   <DetailRow
                     label="Content Type"
                     value={selectedFile.contentType || "Unknown"}
@@ -306,7 +368,7 @@ export default function TeacherDocumentsPage() {
                   onPress={() =>
                     downloadTeacherFile(
                       selectedFile.downloadURL,
-                      selectedFile.name
+                      selectedFile.name,
                     )
                   }
                   isDisabled={!selectedFile.downloadURL}
@@ -362,7 +424,9 @@ function DetailRow({ label, value }: { label: string; value: string }) {
       <p className="text-xs uppercase tracking-wide text-campus-text-secondary">
         {label}
       </p>
-      <p className="mt-1 break-words text-sm text-campus-text-primary">{value}</p>
+      <p className="mt-1 break-words text-sm text-campus-text-primary">
+        {value}
+      </p>
     </div>
   );
 }

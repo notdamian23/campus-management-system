@@ -3,7 +3,14 @@
 import { Chip, ChipProps } from "@heroui/chip";
 
 interface CampusBadgeProps extends Omit<ChipProps, "color"> {
-  status?: "upcoming" | "completed" | "ongoing" | "missed" | "paid" | "unpaid" | "active";
+  status?:
+    | "upcoming"
+    | "completed"
+    | "ongoing"
+    | "missed"
+    | "paid"
+    | "unpaid"
+    | "active";
 }
 
 export function CampusBadge({ status, ...props }: CampusBadgeProps) {
@@ -17,5 +24,7 @@ export function CampusBadge({ status, ...props }: CampusBadgeProps) {
     active: "success" as const,
   };
 
-  return <Chip color={status ? colorMap[status] : "default"} size="sm" {...props} />;
+  return (
+    <Chip color={status ? colorMap[status] : "default"} size="sm" {...props} />
+  );
 }

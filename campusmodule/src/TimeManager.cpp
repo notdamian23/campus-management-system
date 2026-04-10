@@ -34,32 +34,58 @@ bool TimeManager::begin(StorageManager &storage) {
   return true;
 }
 
-bool TimeManager::syncWithNetwork(String &error) {
+void TimeManager::beginNetworkSync(uint32_t timeoutMs) {
   configTime(0, 0, CampusConfig::kNtpServerPrimary,
              CampusConfig::kNtpServerSecondary);
+  networkSyncPending_ = true;
+  networkSyncStartedAtMs_ = millis();
+  networkSyncTimeoutMs_ = timeoutMs;
+}
 
-  const uint32_t startedAt = millis();
-  while ((millis() - startedAt) < 10000) {
-    time_t nowValue = time(nullptr);
-    if (nowValue > 1704067200) {
-      lastEpoch_ = static_cast<uint64_t>(nowValue);
-      epochCapturedAtMs_ = millis();
-      networkSynced_ = true;
-      if (storage_ != nullptr) {
-        storage_->setLastKnownEpoch(lastEpoch_);
-      }
-#if CAMPUS_USE_RTC
-      if (rtcAvailable_) {
-        g_rtc.adjust(DateTime(static_cast<uint32_t>(lastEpoch_)));
-      }
-#endif
-      return true;
-    }
-    delay(250);
+TimeSyncResult TimeManager::pollNetworkSync(String &error) {
+  if (!networkSyncPending_) {
+    return TimeSyncResult::Idle;
   }
 
-  error = "Time sync failed";
-  return false;
+  time_t nowValue = time(nullptr);
+  if (nowValue > 1704067200) {
+    lastEpoch_ = static_cast<uint64_t>(nowValue);
+    epochCapturedAtMs_ = millis();
+    networkSynced_ = true;
+    networkSyncPending_ = false;
+    if (storage_ != nullptr) {
+      storage_->setLastKnownEpoch(lastEpoch_);
+    }
+#if CAMPUS_USE_RTC
+    if (rtcAvailable_) {
+      g_rtc.adjust(DateTime(static_cast<uint32_t>(lastEpoch_)));
+    }
+#endif
+    error = "";
+    return TimeSyncResult::Synced;
+  }
+
+  if ((millis() - networkSyncStartedAtMs_) >= networkSyncTimeoutMs_) {
+    networkSyncPending_ = false;
+    error = "Time sync failed";
+    return TimeSyncResult::Failed;
+  }
+
+  return TimeSyncResult::InProgress;
+}
+
+bool TimeManager::syncWithNetwork(String &error) {
+  beginNetworkSync(CampusConfig::kNtpSyncTimeoutMs);
+  while (true) {
+    const TimeSyncResult result = pollNetworkSync(error);
+    if (result == TimeSyncResult::Synced) {
+      return true;
+    }
+    if (result == TimeSyncResult::Failed) {
+      return false;
+    }
+    delay(100);
+  }
 }
 
 TimeSnapshot TimeManager::now() {
@@ -91,6 +117,10 @@ TimeSnapshot TimeManager::now() {
 
 bool TimeManager::hasRtc() const {
   return rtcAvailable_;
+}
+
+bool TimeManager::isNetworkSynced() const {
+  return networkSynced_;
 }
 
 uint64_t TimeManager::estimatedEpoch() const {

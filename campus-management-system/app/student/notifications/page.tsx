@@ -3,11 +3,18 @@
 import { useMemo, useState } from "react";
 import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
-import { Dropdown, DropdownItem, DropdownMenu, DropdownTrigger } from "@heroui/dropdown";
+import {
+  Dropdown,
+  DropdownItem,
+  DropdownMenu,
+  DropdownTrigger,
+} from "@heroui/dropdown";
+import { CampusCardListSkeleton } from "@/components/ui";
 import {
   StudentNotificationType,
   useStudentPortal,
 } from "@/components/student/StudentPortalProvider";
+import { campusToast } from "@/lib/toast";
 
 function getCardClasses(type: StudentNotificationType) {
   if (type === "upcoming") {
@@ -84,7 +91,14 @@ export default function NotificationsPage() {
         <div className="mt-3">
           <Button
             className="bg-[#7b0000] text-white"
-            onPress={markAllNotificationsRead}
+            onPress={() => {
+              markAllNotificationsRead();
+              campusToast.info({
+                title: "Notifications updated",
+                description: "All visible notifications were marked as read.",
+                dedupeKey: "student-notifications:mark-all-read",
+              });
+            }}
             isDisabled={unreadNotificationsCount === 0}
           >
             Mark All As Read
@@ -99,7 +113,7 @@ export default function NotificationsPage() {
       )}
 
       {loading ? (
-        <p className="text-sm text-campus-text-secondary">Loading notifications...</p>
+        <CampusCardListSkeleton rows={4} />
       ) : sortedNotifications.length === 0 ? (
         <p className="text-sm text-campus-text-secondary">
           No notifications available.

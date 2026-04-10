@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
@@ -178,7 +172,7 @@ type ProfileDocData = {
 };
 
 const TeacherPortalContext = createContext<TeacherPortalContextValue | null>(
-  null
+  null,
 );
 
 function toErrorMessage(error: unknown, fallback: string) {
@@ -197,7 +191,9 @@ function toErrorMessage(error: unknown, fallback: string) {
 }
 
 function normalizeText(value: unknown) {
-  return String(value ?? "").trim().toLowerCase();
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
 }
 
 function normalizeYear(raw: unknown) {
@@ -269,7 +265,7 @@ function toDateWithMinutes(baseDate: Date, minutes: number) {
 function computeLifecycle(
   date: string,
   scheduledTime: string,
-  timeEnd: string
+  timeEnd: string,
 ): TeacherLifecycle {
   const baseDate = parseDateOnly(date);
   if (!baseDate) return "upcoming";
@@ -315,7 +311,7 @@ function toEventDate(date: string, scheduledTime: string) {
 
 function normalizeAttendanceStatus(
   rawStatus: unknown,
-  rawPresent: unknown
+  rawPresent: unknown,
 ): TeacherAttendanceStatus {
   const normalized = normalizeText(rawStatus);
   if (normalized === "present" || normalized === "attended") return "Present";
@@ -419,7 +415,7 @@ export function TeacherPortalProvider({
           snap.docs.map((eventDoc) => ({
             id: eventDoc.id,
             data: eventDoc.data() as TeacherEventDoc,
-          }))
+          })),
         );
         setLoadingEvents(false);
       },
@@ -427,7 +423,7 @@ export function TeacherPortalProvider({
         setRawEvents([]);
         setLoadingEvents(false);
         setError(toErrorMessage(nextError, "Failed to load events."));
-      }
+      },
     );
 
     return () => unsub();
@@ -464,7 +460,7 @@ export function TeacherPortalProvider({
             .map((attendanceDoc) => {
               const data = attendanceDoc.data() as TeacherAttendanceDoc;
               const uid = String(
-                data.uid ?? data.studentUid ?? attendanceDoc.id
+                data.uid ?? data.studentUid ?? attendanceDoc.id,
               ).trim();
               if (!uid) return null;
 
@@ -482,7 +478,7 @@ export function TeacherPortalProvider({
                 year: normalizeYear(data.year),
                 status: normalizeAttendanceStatus(
                   data.status ?? data.attendanceStatus,
-                  data.present
+                  data.present,
                 ),
                 createdAtMs: toMillis(data.createdAt),
                 updatedAtMs:
@@ -500,10 +496,10 @@ export function TeacherPortalProvider({
           ready.add(eventId);
           syncAttendance();
           setError(
-            toErrorMessage(nextError, "Failed to load attendance records.")
+            toErrorMessage(nextError, "Failed to load attendance records."),
           );
-        }
-      )
+        },
+      ),
     );
 
     return () => {
@@ -542,7 +538,7 @@ export function TeacherPortalProvider({
           id: string;
           data: () => TeacherFileDoc;
         }>;
-      }
+      },
     ) =>
       snap.docs
         .map((fileDoc) => {
@@ -555,7 +551,7 @@ export function TeacherPortalProvider({
             name:
               String(
                 data.name ??
-                  (kind === "images" ? "Untitled image" : "Untitled file")
+                  (kind === "images" ? "Untitled image" : "Untitled file"),
               ).trim() ||
               (kind === "images" ? "Untitled image" : "Untitled file"),
             path: String(data.path ?? "").trim(),
@@ -569,7 +565,10 @@ export function TeacherPortalProvider({
 
     const unsubs = eventIds.flatMap((eventId) => [
       onSnapshot(
-        query(collection(db, "events", eventId, "docs"), orderBy("createdAt", "desc")),
+        query(
+          collection(db, "events", eventId, "docs"),
+          orderBy("createdAt", "desc"),
+        ),
         (snap) => {
           fileBuckets.set(`docs:${eventId}`, toFileRows(eventId, "docs", snap));
           ready.add(`docs:${eventId}`);
@@ -579,16 +578,21 @@ export function TeacherPortalProvider({
           fileBuckets.set(`docs:${eventId}`, []);
           ready.add(`docs:${eventId}`);
           syncFiles();
-          setError(toErrorMessage(nextError, "Failed to load event documents."));
-        }
+          setError(
+            toErrorMessage(nextError, "Failed to load event documents."),
+          );
+        },
       ),
       onSnapshot(
         query(
           collection(db, "events", eventId, "images"),
-          orderBy("createdAt", "desc")
+          orderBy("createdAt", "desc"),
         ),
         (snap) => {
-          fileBuckets.set(`images:${eventId}`, toFileRows(eventId, "images", snap));
+          fileBuckets.set(
+            `images:${eventId}`,
+            toFileRows(eventId, "images", snap),
+          );
           ready.add(`images:${eventId}`);
           syncFiles();
         },
@@ -597,7 +601,7 @@ export function TeacherPortalProvider({
           ready.add(`images:${eventId}`);
           syncFiles();
           setError(toErrorMessage(nextError, "Failed to load event images."));
-        }
+        },
       ),
     ]);
 
@@ -613,18 +617,18 @@ export function TeacherPortalProvider({
     attendance.forEach((item) => {
       attendanceCounts.set(
         item.eventId,
-        (attendanceCounts.get(item.eventId) ?? 0) + 1
+        (attendanceCounts.get(item.eventId) ?? 0) + 1,
       );
 
       if (item.status === "Present") {
         presentCounts.set(
           item.eventId,
-          (presentCounts.get(item.eventId) ?? 0) + 1
+          (presentCounts.get(item.eventId) ?? 0) + 1,
         );
       } else if (item.status === "Absent") {
         absentCounts.set(
           item.eventId,
-          (absentCounts.get(item.eventId) ?? 0) + 1
+          (absentCounts.get(item.eventId) ?? 0) + 1,
         );
       }
     });
@@ -637,7 +641,7 @@ export function TeacherPortalProvider({
       } else {
         documentCounts.set(
           file.eventId,
-          (documentCounts.get(file.eventId) ?? 0) + 1
+          (documentCounts.get(file.eventId) ?? 0) + 1,
         );
       }
     });
@@ -649,10 +653,14 @@ export function TeacherPortalProvider({
           String(data.scheduledTime ?? data.timeStart ?? "").trim() || "TBA";
         const timeEnd = String(data.timeEnd ?? "").trim();
         const courseTargets = Array.isArray(data.courses)
-          ? data.courses.map((item) => String(item ?? "").trim()).filter(Boolean)
+          ? data.courses
+              .map((item) => String(item ?? "").trim())
+              .filter(Boolean)
           : [];
         const yearTargets = Array.isArray(data.yearLevels)
-          ? data.yearLevels.map((item) => String(item ?? "").trim()).filter(Boolean)
+          ? data.yearLevels
+              .map((item) => String(item ?? "").trim())
+              .filter(Boolean)
           : [];
 
         const course =
@@ -664,7 +672,8 @@ export function TeacherPortalProvider({
 
         return {
           id: eventItem.id,
-          title: String(data.title ?? "Untitled Event").trim() || "Untitled Event",
+          title:
+            String(data.title ?? "Untitled Event").trim() || "Untitled Event",
           location: String(data.location ?? "").trim() || "TBA",
           date: String(data.date ?? "").trim(),
           scheduledTime,
@@ -681,7 +690,7 @@ export function TeacherPortalProvider({
           lifecycle: computeLifecycle(
             String(data.date ?? "").trim(),
             scheduledTime,
-            timeEnd
+            timeEnd,
           ),
           eventDate: toEventDate(String(data.date ?? "").trim(), scheduledTime),
           createdAtMs: toMillis(data.createdAt),
@@ -709,7 +718,7 @@ export function TeacherPortalProvider({
       schoolId: string,
       studentName: string,
       course: string,
-      year: string
+      year: string,
     ) => {
       const existing = byUid.get(uid);
       if (existing) {
@@ -723,11 +732,7 @@ export function TeacherPortalProvider({
         ) {
           existing.course = course;
         }
-        if (
-          existing.year === "Unassigned" &&
-          year &&
-          year !== "Unassigned"
-        ) {
+        if (existing.year === "Unassigned" && year && year !== "Unassigned") {
           existing.year = year;
         }
         return existing;
@@ -756,7 +761,7 @@ export function TeacherPortalProvider({
         item.schoolId,
         item.studentName,
         item.course,
-        item.year
+        item.year,
       );
 
       if (!student.trackedEventIds.includes(item.eventId)) {
@@ -764,13 +769,13 @@ export function TeacherPortalProvider({
       }
 
       const existingRecord = student.attendanceRecords.find(
-        (record) => record.eventId === item.eventId
+        (record) => record.eventId === item.eventId,
       );
       if (existingRecord) {
         existingRecord.status = item.status;
         existingRecord.updatedAtMs = Math.max(
           existingRecord.updatedAtMs,
-          item.updatedAtMs
+          item.updatedAtMs,
         );
       } else {
         student.attendanceRecords.push({
@@ -785,7 +790,7 @@ export function TeacherPortalProvider({
       if (item.status === "Absent") student.absentCount += 1;
       student.lastActivityMs = Math.max(
         student.lastActivityMs,
-        item.updatedAtMs || item.createdAtMs
+        item.updatedAtMs || item.createdAtMs,
       );
     });
 
@@ -828,7 +833,7 @@ export function TeacherPortalProvider({
       loadingFiles,
       profile,
       students,
-    ]
+    ],
   );
 
   return (
@@ -842,7 +847,7 @@ export function useTeacherPortal() {
   const ctx = useContext(TeacherPortalContext);
   if (!ctx) {
     throw new Error(
-      "useTeacherPortal must be used within TeacherPortalProvider."
+      "useTeacherPortal must be used within TeacherPortalProvider.",
     );
   }
   return ctx;

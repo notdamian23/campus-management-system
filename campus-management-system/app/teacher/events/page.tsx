@@ -5,18 +5,31 @@ import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
-import {
-  Modal,
-  ModalBody,
-  ModalContent,
-  ModalHeader,
-} from "@heroui/modal";
+import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
-import { useTeacherPortal } from "@/components/teacher/TeacherPortalProvider";
+import {
+  CampusCardListSkeleton,
+  CampusDataTable,
+  type CampusTableColumn,
+  CampusMetricSkeleton,
+} from "@/components/ui";
+import {
+  type TeacherEvent,
+  useTeacherPortal,
+} from "@/components/teacher/TeacherPortalProvider";
 
 const EVENTS_PER_PAGE = 6;
+
+const teacherEventColumns: CampusTableColumn<TeacherEvent>[] = [
+  { key: "title", label: "Event" },
+  { key: "lifecycle", label: "Status" },
+  { key: "date", label: "Schedule" },
+  { key: "audience", label: "Audience" },
+  { key: "summary", label: "Summary" },
+  { key: "actions", label: "Actions", align: "end", className: "text-right" },
+];
 
 type EventTabKey = "overview" | "participants" | "files";
 
@@ -81,8 +94,7 @@ function downloadTeacherFile(url: string, name: string) {
 }
 
 export default function TeacherEventsPage() {
-  const { attendance, events, files, loading, error } =
-    useTeacherPortal();
+  const { attendance, events, files, loading, error } = useTeacherPortal();
 
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
@@ -108,13 +120,18 @@ export default function TeacherEventsPage() {
         event.location.toLowerCase().includes(search) ||
         event.course.toLowerCase().includes(search) ||
         event.yearLevel.toLowerCase().includes(search);
-      const matchesStatus = statusFilter ? event.lifecycle === statusFilter : true;
+      const matchesStatus = statusFilter
+        ? event.lifecycle === statusFilter
+        : true;
       const matchesDate = dateFilter ? event.date === dateFilter : true;
       return matchesSearch && matchesStatus && matchesDate;
     });
   }, [dateFilter, events, searchText, statusFilter]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredEvents.length / EVENTS_PER_PAGE));
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredEvents.length / EVENTS_PER_PAGE),
+  );
 
   const paginatedEvents = useMemo(() => {
     const start = (page - 1) * EVENTS_PER_PAGE;
@@ -123,7 +140,7 @@ export default function TeacherEventsPage() {
 
   const selectedEvent = useMemo(
     () => events.find((event) => event.id === selectedEventId) ?? null,
-    [events, selectedEventId]
+    [events, selectedEventId],
   );
 
   const selectedParticipants = useMemo(() => {
@@ -132,18 +149,18 @@ export default function TeacherEventsPage() {
     return attendance
       .filter((item) => item.eventId === selectedEvent.id)
       .map((item) => ({
-          uid: item.uid,
-          schoolId: item.schoolId || item.uid,
-          studentName: item.studentName || item.schoolId || item.uid,
-          course: item.course || "Unassigned",
-          year: item.year || "Unassigned",
-          attendanceStatus: item.status,
+        uid: item.uid,
+        schoolId: item.schoolId || item.uid,
+        studentName: item.studentName || item.schoolId || item.uid,
+        course: item.course || "Unassigned",
+        year: item.year || "Unassigned",
+        attendanceStatus: item.status,
       }))
       .sort((a, b) => {
-      const byName = a.studentName.localeCompare(b.studentName);
-      if (byName !== 0) return byName;
-      return a.schoolId.localeCompare(b.schoolId);
-    });
+        const byName = a.studentName.localeCompare(b.studentName);
+        if (byName !== 0) return byName;
+        return a.schoolId.localeCompare(b.schoolId);
+      });
   }, [attendance, selectedEvent]);
 
   const selectedFiles = useMemo(() => {
@@ -153,7 +170,9 @@ export default function TeacherEventsPage() {
       .sort((a, b) => b.createdAtMs - a.createdAtMs);
   }, [files, selectedEvent]);
 
-  const selectedDocuments = selectedFiles.filter((file) => file.kind === "docs");
+  const selectedDocuments = selectedFiles.filter(
+    (file) => file.kind === "docs",
+  );
   const selectedImages = selectedFiles.filter((file) => file.kind === "images");
 
   useEffect(() => {
@@ -170,9 +189,15 @@ export default function TeacherEventsPage() {
     }
   }, [selectedEvent]);
 
-  const upcomingCount = events.filter((event) => event.lifecycle === "upcoming").length;
-  const ongoingCount = events.filter((event) => event.lifecycle === "ongoing").length;
-  const completedCount = events.filter((event) => event.lifecycle === "completed").length;
+  const upcomingCount = events.filter(
+    (event) => event.lifecycle === "upcoming",
+  ).length;
+  const ongoingCount = events.filter(
+    (event) => event.lifecycle === "ongoing",
+  ).length;
+  const completedCount = events.filter(
+    (event) => event.lifecycle === "completed",
+  ).length;
 
   return (
     <div className="space-y-5 sm:space-y-6">
@@ -190,28 +215,32 @@ export default function TeacherEventsPage() {
         </CardBody>
       </Card>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard
-          label="Total Events"
-          value={loading ? "-" : String(events.length)}
-          tone="text-blue-700"
-        />
-        <MetricCard
-          label="Upcoming"
-          value={loading ? "-" : String(upcomingCount)}
-          tone="text-cyan-700"
-        />
-        <MetricCard
-          label="Ongoing"
-          value={loading ? "-" : String(ongoingCount)}
-          tone="text-amber-700"
-        />
-        <MetricCard
-          label="Completed"
-          value={loading ? "-" : String(completedCount)}
-          tone="text-emerald-700"
-        />
-      </div>
+      {loading ? (
+        <CampusMetricSkeleton />
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard
+            label="Total Events"
+            value={String(events.length)}
+            tone="text-blue-700"
+          />
+          <MetricCard
+            label="Upcoming"
+            value={String(upcomingCount)}
+            tone="text-cyan-700"
+          />
+          <MetricCard
+            label="Ongoing"
+            value={String(ongoingCount)}
+            tone="text-amber-700"
+          />
+          <MetricCard
+            label="Completed"
+            value={String(completedCount)}
+            tone="text-emerald-700"
+          />
+        </div>
+      )}
 
       <Card shadow="sm">
         <CardBody className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -254,41 +283,71 @@ export default function TeacherEventsPage() {
         </CardBody>
       </Card>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {loading ? (
-          <Card shadow="sm" className="xl:col-span-2">
-            <CardBody className="p-6 text-sm text-campus-text-secondary">
-              Loading events...
-            </CardBody>
-          </Card>
-        ) : paginatedEvents.length === 0 ? (
-          <Card shadow="sm" className="xl:col-span-2">
-            <CardBody className="p-6 text-sm text-campus-text-secondary">
-              No events match the current filters.
-            </CardBody>
-          </Card>
-        ) : (
-          paginatedEvents.map((event) => (
-            <Card key={event.id} shadow="sm">
-              <CardBody className="space-y-4 p-5">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="text-lg font-semibold text-campus-text-primary">
-                        {event.title}
-                      </h2>
-                      <Chip size="sm" className={lifecycleChipClass(event.lifecycle)}>
-                        {event.lifecycle}
-                      </Chip>
-                    </div>
-                    <p className="text-sm text-campus-text-secondary">
-                      {formatEventDate(event.eventDate, event.date)}
-                    </p>
-                    <p className="text-xs text-campus-text-secondary">
-                      {event.location}
-                    </p>
-                  </div>
+      {loading ? (
+        <CampusCardListSkeleton rows={4} />
+      ) : (
+        <CampusDataTable
+          ariaLabel="Teacher event records"
+          columns={teacherEventColumns}
+          items={paginatedEvents}
+          emptyTitle="No events match the current filters"
+          emptyDescription="Try another search term, status, or date."
+          renderCell={(event, columnKey) => {
+            if (columnKey === "title") {
+              return (
+                <div className="space-y-1">
+                  <p className="font-semibold text-campus-text-primary">
+                    {event.title}
+                  </p>
+                  <p className="text-xs text-campus-text-secondary">
+                    {event.location}
+                  </p>
+                </div>
+              );
+            }
 
+            if (columnKey === "lifecycle") {
+              return (
+                <Chip size="sm" className={lifecycleChipClass(event.lifecycle)}>
+                  {event.lifecycle}
+                </Chip>
+              );
+            }
+
+            if (columnKey === "date") {
+              return formatEventDate(event.eventDate, event.date);
+            }
+
+            if (columnKey === "audience") {
+              return (
+                <span className="text-sm text-campus-text-secondary">
+                  {audienceLabel(event)}
+                </span>
+              );
+            }
+
+            if (columnKey === "summary") {
+              return (
+                <div className="flex flex-wrap gap-2">
+                  <Chip size="sm" className="bg-blue-100 text-blue-700">
+                    Pre-Reg: {event.registrationCount}
+                  </Chip>
+                  <Chip size="sm" className="bg-emerald-100 text-emerald-700">
+                    Present: {event.presentCount}
+                  </Chip>
+                  <Chip size="sm" className="bg-red-100 text-red-700">
+                    Missed: {event.absentCount}
+                  </Chip>
+                  <Chip size="sm" className="bg-fuchsia-100 text-fuchsia-700">
+                    Files: {event.documentCount + event.imageCount}
+                  </Chip>
+                </div>
+              );
+            }
+
+            if (columnKey === "actions") {
+              return (
+                <div className="flex justify-end">
                   <Button
                     color="primary"
                     variant="flat"
@@ -298,25 +357,13 @@ export default function TeacherEventsPage() {
                     Details
                   </Button>
                 </div>
+              );
+            }
 
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  <MiniStat label="Pre-Reg" value={event.registrationCount} />
-                  <MiniStat label="Present" value={event.presentCount} />
-                  <MiniStat label="Missed" value={event.absentCount} />
-                  <MiniStat
-                    label="Files"
-                    value={event.documentCount + event.imageCount}
-                  />
-                </div>
-
-                <p className="text-xs text-campus-text-secondary">
-                  Audience: {audienceLabel(event)}
-                </p>
-              </CardBody>
-            </Card>
-          ))
-        )}
-      </div>
+            return null;
+          }}
+        />
+      )}
 
       {!loading && filteredEvents.length > EVENTS_PER_PAGE && (
         <div className="flex justify-center">
@@ -349,7 +396,10 @@ export default function TeacherEventsPage() {
                 </span>
                 <span className="text-sm font-normal text-campus-text-secondary">
                   {selectedEvent
-                    ? formatEventDate(selectedEvent.eventDate, selectedEvent.date)
+                    ? formatEventDate(
+                        selectedEvent.eventDate,
+                        selectedEvent.date,
+                      )
                     : "-"}{" "}
                   | {selectedEvent?.location || "-"}
                 </span>
@@ -401,7 +451,9 @@ export default function TeacherEventsPage() {
                         <CardBody className="space-y-3 p-4">
                           <InfoRow
                             label="Audience"
-                            value={selectedEvent ? audienceLabel(selectedEvent) : "-"}
+                            value={
+                              selectedEvent ? audienceLabel(selectedEvent) : "-"
+                            }
                           />
                           <InfoRow
                             label="Schedule"
@@ -440,7 +492,8 @@ export default function TeacherEventsPage() {
                             Event Details
                           </p>
                           <p className="text-sm text-campus-text-secondary">
-                            {selectedEvent?.details || "No event description provided."}
+                            {selectedEvent?.details ||
+                              "No event description provided."}
                           </p>
                         </CardBody>
                       </Card>
@@ -451,19 +504,24 @@ export default function TeacherEventsPage() {
                     <div className="space-y-3 pt-2">
                       {selectedParticipants.length === 0 ? (
                         <p className="text-sm text-campus-text-secondary">
-                          No teacher-visible attendance records found for this event.
+                          No teacher-visible attendance records found for this
+                          event.
                         </p>
                       ) : (
                         selectedParticipants.map((participant) => (
-                          <Card key={participant.uid} shadow="none" className="border">
+                          <Card
+                            key={participant.uid}
+                            shadow="none"
+                            className="border"
+                          >
                             <CardBody className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
                               <div className="min-w-0">
                                 <p className="font-semibold text-campus-text-primary">
                                   {participant.studentName}
                                 </p>
                                 <p className="text-xs text-campus-text-secondary">
-                                  {participant.schoolId} | {participant.course} |{" "}
-                                  {participant.year}
+                                  {participant.schoolId} | {participant.course}{" "}
+                                  | {participant.year}
                                 </p>
                               </div>
                               <Chip
@@ -472,8 +530,8 @@ export default function TeacherEventsPage() {
                                   participant.attendanceStatus === "Present"
                                     ? "bg-emerald-100 text-emerald-700"
                                     : participant.attendanceStatus === "Absent"
-                                    ? "bg-red-100 text-red-700"
-                                    : "bg-blue-100 text-blue-700"
+                                      ? "bg-red-100 text-red-700"
+                                      : "bg-blue-100 text-blue-700"
                                 }
                               >
                                 {participant.attendanceStatus}
@@ -492,7 +550,10 @@ export default function TeacherEventsPage() {
                           <h3 className="font-semibold text-campus-text-primary">
                             Documents
                           </h3>
-                          <Chip size="sm" className="bg-slate-100 text-slate-700">
+                          <Chip
+                            size="sm"
+                            className="bg-slate-100 text-slate-700"
+                          >
                             {selectedDocuments.length}
                           </Chip>
                         </div>
@@ -512,7 +573,10 @@ export default function TeacherEventsPage() {
                           <h3 className="font-semibold text-campus-text-primary">
                             Images
                           </h3>
-                          <Chip size="sm" className="bg-slate-100 text-slate-700">
+                          <Chip
+                            size="sm"
+                            className="bg-slate-100 text-slate-700"
+                          >
                             {selectedImages.length}
                           </Chip>
                         </div>
@@ -554,15 +618,6 @@ function MetricCard({
         <h2 className={`mt-2 text-3xl font-bold ${tone}`}>{value}</h2>
       </CardBody>
     </Card>
-  );
-}
-
-function MiniStat({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-2xl border bg-white px-3 py-4 text-center">
-      <p className="text-2xl font-bold text-campus-text-primary">{value}</p>
-      <p className="text-xs text-campus-text-secondary">{label}</p>
-    </div>
   );
 }
 

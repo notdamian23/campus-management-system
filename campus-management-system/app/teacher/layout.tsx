@@ -2,7 +2,7 @@
 
 import { ReactNode, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Spinner } from "@heroui/spinner";
+import { CampusLayoutLoadingState } from "@/components/ui";
 import { Sidebar, NavItem } from "@/components/Sidebar";
 import {
   TeacherPortalProvider,
@@ -32,11 +32,7 @@ const teacherNavItems: NavItem[] = [
   },
 ];
 
-export default function TeacherLayout({
-  children,
-}: {
-  children: ReactNode;
-}) {
+export default function TeacherLayout({ children }: { children: ReactNode }) {
   return (
     <TeacherPortalProvider>
       <TeacherLayoutShell>{children}</TeacherLayoutShell>
@@ -61,19 +57,10 @@ function TeacherLayoutShell({ children }: { children: ReactNode }) {
 
   if (accessState !== "authorized") {
     return (
-      <div className="min-h-[100dvh] bg-[#f2f2f2] flex items-center justify-center px-4">
-        <div className="flex flex-col items-center gap-3 rounded-2xl border border-border bg-bg-main px-6 py-8 text-center shadow-sm">
-          <Spinner color="primary" />
-          <div>
-            <p className="text-sm font-semibold text-campus-text-primary">
-              Loading teacher portal
-            </p>
-            <p className="text-xs text-campus-text-secondary">
-              Checking your account access and syncing records.
-            </p>
-          </div>
-        </div>
-      </div>
+      <CampusLayoutLoadingState
+        title="Loading teacher portal"
+        description="Checking your account access and syncing records."
+      />
     );
   }
 

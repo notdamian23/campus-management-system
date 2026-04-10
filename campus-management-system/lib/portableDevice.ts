@@ -15,10 +15,7 @@ export type PortableDeviceEnrollmentStatus =
   | "enrolled"
   | "cancelled";
 
-export type PortableDeviceSyncStatus =
-  | "uploaded"
-  | "duplicate"
-  | "failed";
+export type PortableDeviceSyncStatus = "uploaded" | "duplicate" | "failed";
 
 export type PortableDeviceEnrollmentSessionStatus =
   | "pending"
@@ -212,7 +209,9 @@ export type PortableDeviceSessionResponse = {
 };
 
 export function isEngineeringCouncilRole(role: unknown): boolean {
-  const value = String(role ?? "").trim().toLowerCase();
+  const value = String(role ?? "")
+    .trim()
+    .toLowerCase();
   return value === "admin" || value === "ec";
 }
 
@@ -246,7 +245,7 @@ export function portableEnrollmentSessionStudentsPath(sessionId: string) {
 }
 
 export function createEnrollmentQueueDraft(
-  input: Omit<PortableDeviceEnrollmentQueueDoc, "status">
+  input: Omit<PortableDeviceEnrollmentQueueDoc, "status">,
 ): PortableDeviceEnrollmentQueueDoc {
   return {
     ...input,
@@ -256,9 +255,11 @@ export function createEnrollmentQueueDraft(
 }
 
 export function normalizePortableEnrollmentSessionStatus(
-  value: unknown
+  value: unknown,
 ): PortableDeviceEnrollmentSessionStatus {
-  const raw = String(value ?? "").trim().toLowerCase();
+  const raw = String(value ?? "")
+    .trim()
+    .toLowerCase();
   if (raw === "paired") return "paired";
   if (raw === "downloading") return "downloading";
   if (raw === "enrolling") return "enrolling";
@@ -271,9 +272,11 @@ export function normalizePortableEnrollmentSessionStatus(
 }
 
 export function normalizePortableEnrollmentStudentStatus(
-  value: unknown
+  value: unknown,
 ): PortableDeviceEnrollmentStudentStatus {
-  const raw = String(value ?? "").trim().toLowerCase();
+  const raw = String(value ?? "")
+    .trim()
+    .toLowerCase();
   if (raw === "downloaded") return "downloaded";
   if (raw === "enrolled") return "enrolled";
   if (raw === "synced") return "synced";

@@ -175,7 +175,7 @@ type StudentProjectionDocData = {
 };
 
 const StudentPortalContext = createContext<StudentPortalContextValue | null>(
-  null
+  null,
 );
 
 function toErrorMessage(error: unknown, fallback: string) {
@@ -194,7 +194,9 @@ function toErrorMessage(error: unknown, fallback: string) {
 }
 
 function normalizeText(value: unknown) {
-  return String(value ?? "").trim().toLowerCase();
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
 }
 
 function normalizeYear(raw: unknown) {
@@ -252,7 +254,11 @@ function toDateWithMinutes(baseDate: Date, minutes: number) {
   return date;
 }
 
-function computeLifecycle(date: string, scheduledTime: string, timeEnd: string) {
+function computeLifecycle(
+  date: string,
+  scheduledTime: string,
+  timeEnd: string,
+) {
   const baseDate = parseDateOnly(date);
   if (!baseDate) return "upcoming" as LifecycleStatus;
 
@@ -317,9 +323,7 @@ function toMillis(value: unknown) {
 
 function toTargetList(value: unknown) {
   if (Array.isArray(value)) {
-    return value
-      .map((item) => String(item ?? "").trim())
-      .filter(Boolean);
+    return value.map((item) => String(item ?? "").trim()).filter(Boolean);
   }
 
   const eventTarget = String(value ?? "").trim();
@@ -331,21 +335,29 @@ function toTargetList(value: unknown) {
     .filter(Boolean);
 }
 
-function matchesTarget(eventValue: unknown, studentValue: string, allLabel: string) {
+function matchesTarget(
+  eventValue: unknown,
+  studentValue: string,
+  allLabel: string,
+) {
   const eventTargets = toTargetList(eventValue);
   const studentTarget = String(studentValue ?? "").trim();
 
   if (eventTargets.length === 0) return true;
-  if (eventTargets.some((item) => normalizeText(item) === normalizeText(allLabel))) {
+  if (
+    eventTargets.some((item) => normalizeText(item) === normalizeText(allLabel))
+  ) {
     return true;
   }
-  return eventTargets.some((item) => normalizeText(item) === normalizeText(studentTarget));
+  return eventTargets.some(
+    (item) => normalizeText(item) === normalizeText(studentTarget),
+  );
 }
 
 function matchesSpecificStudentTarget(
   targetValue: string,
   schoolId: string,
-  studentName: string
+  studentName: string,
 ) {
   const rawTarget = String(targetValue ?? "").trim();
   if (!rawTarget) return true;
@@ -366,7 +378,13 @@ function matchesSpecificStudentTarget(
 
     if (normalized === sid || normalized === name) return true;
     if (insideParen && insideParen === sid) return true;
-    if (withoutParens && (withoutParens === name || name.includes(withoutParens) || withoutParens.includes(name))) return true;
+    if (
+      withoutParens &&
+      (withoutParens === name ||
+        name.includes(withoutParens) ||
+        withoutParens.includes(name))
+    )
+      return true;
 
     if (sid && normalized.includes(sid)) return true;
     if (name && normalized.includes(name)) return true;
@@ -441,7 +459,7 @@ export function StudentPortalProvider({
           course: String(data.course ?? "").trim() || "Unassigned",
           year: normalizeYear(data.year),
           accountStatus: normalizeStudentAccountStatus(
-            studentData?.status ?? data.status
+            studentData?.status ?? data.status,
           ),
         });
       } catch (e: unknown) {
@@ -502,17 +520,17 @@ export function StudentPortalProvider({
             const courseMatch = matchesTarget(
               event.courses.length > 0 ? event.courses : event.course,
               profile.course,
-              "All Courses"
+              "All Courses",
             );
             const yearMatch = matchesTarget(
               event.yearLevels.length > 0 ? event.yearLevels : event.yearLevel,
               profile.year,
-              "All Years"
+              "All Years",
             );
             const studentMatch = matchesSpecificStudentTarget(
               event.targetStudent,
               profile.schoolId,
-              profile.studentName
+              profile.studentName,
             );
             return courseMatch && yearMatch && studentMatch;
           });
@@ -524,7 +542,7 @@ export function StudentPortalProvider({
         setRawEvents([]);
         setLoadingEvents(false);
         setError(toErrorMessage(e, "Failed to load events."));
-      }
+      },
     );
 
     return () => unsub();
@@ -551,15 +569,13 @@ export function StudentPortalProvider({
             snap.docs.map(async (paymentDoc) => {
               const paymentData = paymentDoc.data() as PaymentDocData;
               const assignmentSnap = await getDoc(
-                doc(db, "payments", paymentDoc.id, "students", uid)
+                doc(db, "payments", paymentDoc.id, "students", uid),
               );
               if (!assignmentSnap.exists()) return null;
 
               const assignment = assignmentSnap.data() as PaymentAssignmentData;
               const status =
-                normalizeText(assignment.status) === "paid"
-                  ? "PAID"
-                  : "UNPAID";
+                normalizeText(assignment.status) === "paid" ? "PAID" : "UNPAID";
 
               const createdAtMs = assignment.createdAt?.toMillis
                 ? assignment.createdAt.toMillis()
@@ -579,7 +595,7 @@ export function StudentPortalProvider({
                 createdAtMs,
                 updatedAtMs,
               } as StudentPayment;
-            })
+            }),
           );
 
           if (!active) return;
@@ -605,7 +621,7 @@ export function StudentPortalProvider({
         setPayments([]);
         setLoadingPayments(false);
         setError(toErrorMessage(e, "Failed to load student payments."));
-      }
+      },
     );
 
     return () => {
@@ -624,7 +640,7 @@ export function StudentPortalProvider({
     setLoadingProfileNotifications(true);
     const qy = query(
       collection(db, "profiles", profile.uid, "notifications"),
-      orderBy("createdAt", "desc")
+      orderBy("createdAt", "desc"),
     );
 
     const unsub = onSnapshot(
@@ -637,12 +653,12 @@ export function StudentPortalProvider({
             rawType === "announcement"
               ? "announcement"
               : rawType === "payment"
-              ? "payment"
-              : rawType === "missed"
-              ? "missed"
-              : rawType === "preregister"
-              ? "preregister"
-              : "upcoming";
+                ? "payment"
+                : rawType === "missed"
+                  ? "missed"
+                  : rawType === "preregister"
+                    ? "preregister"
+                    : "upcoming";
 
           return {
             id: d.id,
@@ -662,7 +678,7 @@ export function StudentPortalProvider({
         setProfileNotifications([]);
         setLoadingProfileNotifications(false);
         setError(toErrorMessage(e, "Failed to load notifications."));
-      }
+      },
     );
 
     return () => unsub();
@@ -686,7 +702,9 @@ export function StudentPortalProvider({
       try {
         const entries = await Promise.all(
           rawEvents.map(async (ev) => {
-            const snap = await getDoc(doc(db, "events", ev.id, "attendance", uid));
+            const snap = await getDoc(
+              doc(db, "events", ev.id, "attendance", uid),
+            );
 
             if (!snap.exists()) {
               return [ev.id, null] as const;
@@ -694,10 +712,10 @@ export function StudentPortalProvider({
 
             const data = snap.data() as AttendanceDocData;
             const raw = String(
-              data.status ?? data.attendanceStatus ?? ""
+              data.status ?? data.attendanceStatus ?? "",
             ).toLowerCase();
             return [ev.id, raw || null] as const;
-          })
+          }),
         );
 
         if (!active) return;
@@ -734,15 +752,15 @@ export function StudentPortalProvider({
       try {
         const checks = await Promise.all(
           rawEvents.map(async (ev) => {
-            const snap = await getDoc(doc(db, "events", ev.id, "registrations", uid));
+            const snap = await getDoc(
+              doc(db, "events", ev.id, "registrations", uid),
+            );
             return snap.exists() ? ev.id : null;
-          })
+          }),
         );
 
         if (!active) return;
-        setRegisteredEventIds(
-          checks.filter((id): id is string => Boolean(id))
-        );
+        setRegisteredEventIds(checks.filter((id): id is string => Boolean(id)));
       } catch {
         if (!active) return;
         setRegisteredEventIds([]);
@@ -770,7 +788,11 @@ export function StudentPortalProvider({
       .map((raw) => {
         const scheduledTime = raw.scheduledTime || raw.timeStart;
         const eventDate = toEventDate(raw.date, scheduledTime);
-        const lifecycle = computeLifecycle(raw.date, scheduledTime, raw.timeEnd);
+        const lifecycle = computeLifecycle(
+          raw.date,
+          scheduledTime,
+          raw.timeEnd,
+        );
         const attendanceRaw = normalizeText(attendanceByEvent[raw.id] ?? "");
         const paymentMatch = paymentByTitle.get(normalizeText(raw.title));
 
@@ -824,7 +846,7 @@ export function StudentPortalProvider({
 
     const pushItem = (
       key: string,
-      item: Omit<StudentNotification, "displayDate">
+      item: Omit<StudentNotification, "displayDate">,
     ) => {
       if (dedupe.has(key)) return;
       dedupe.add(key);
@@ -837,7 +859,8 @@ export function StudentPortalProvider({
     profileNotifications.forEach((note) => {
       const scheduledDate = toEventDate(note.date, note.scheduledTime);
       const createdAtMs = toMillis(note.createdAt);
-      const when = scheduledDate ?? (createdAtMs ? new Date(createdAtMs) : new Date());
+      const when =
+        scheduledDate ?? (createdAtMs ? new Date(createdAtMs) : new Date());
 
       pushItem(`profile-notification:${note.id}`, {
         id: `profile-notification:${note.id}`,
@@ -894,7 +917,7 @@ export function StudentPortalProvider({
         id: `payment:${payment.paymentId}`,
         title: `Payment Due: ${payment.title}`,
         description: `Reference ${payment.ref} | Amount ${payment.amount.toFixed(
-          2
+          2,
         )}`,
         type: "payment",
         date: paymentDate,
@@ -906,10 +929,8 @@ export function StudentPortalProvider({
 
   const notificationReadStorageKey = useMemo(
     () =>
-      profile?.uid
-        ? `campus_student_read_notifications:${profile.uid}`
-        : "",
-    [profile?.uid]
+      profile?.uid ? `campus_student_read_notifications:${profile.uid}` : "",
+    [profile?.uid],
   );
 
   useEffect(() => {
@@ -935,8 +956,8 @@ export function StudentPortalProvider({
         new Set(
           parsed
             .map((item) => String(item ?? "").trim())
-            .filter((item) => item.length > 0)
-        )
+            .filter((item) => item.length > 0),
+        ),
       );
       setReadNotificationIds(normalized);
     } catch {
@@ -950,7 +971,7 @@ export function StudentPortalProvider({
     try {
       window.localStorage.setItem(
         notificationReadStorageKey,
-        JSON.stringify(readNotificationIds)
+        JSON.stringify(readNotificationIds),
       );
     } catch {
       // Ignore storage quota/private mode errors.
@@ -969,16 +990,16 @@ export function StudentPortalProvider({
 
   const readNotificationSet = useMemo(
     () => new Set(readNotificationIds),
-    [readNotificationIds]
+    [readNotificationIds],
   );
 
   const unreadNotificationsCount = useMemo(
     () =>
       notifications.reduce(
         (total, item) => total + (readNotificationSet.has(item.id) ? 0 : 1),
-        0
+        0,
       ),
-    [notifications, readNotificationSet]
+    [notifications, readNotificationSet],
   );
 
   const markNotificationRead = useCallback((notificationId: string) => {
@@ -986,7 +1007,7 @@ export function StudentPortalProvider({
     if (!normalized) return;
 
     setReadNotificationIds((prev) =>
-      prev.includes(normalized) ? prev : [...prev, normalized]
+      prev.includes(normalized) ? prev : [...prev, normalized],
     );
   }, []);
 
@@ -1031,11 +1052,11 @@ export function StudentPortalProvider({
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           },
-          { merge: true }
+          { merge: true },
         );
 
         setRegisteredEventIds((prev) =>
-          prev.includes(eventId) ? prev : [...prev, eventId]
+          prev.includes(eventId) ? prev : [...prev, eventId],
         );
 
         return { ok: true, msg: "Registered successfully." };
@@ -1046,7 +1067,7 @@ export function StudentPortalProvider({
         };
       }
     },
-    [profile]
+    [profile],
   );
 
   const loading =
@@ -1087,7 +1108,7 @@ export function StudentPortalProvider({
       markNotificationRead,
       markAllNotificationsRead,
       registerForEvent,
-    ]
+    ],
   );
 
   return (
@@ -1101,7 +1122,7 @@ export function useStudentPortal() {
   const ctx = useContext(StudentPortalContext);
   if (!ctx) {
     throw new Error(
-      "useStudentPortal must be used within StudentPortalProvider."
+      "useStudentPortal must be used within StudentPortalProvider.",
     );
   }
   return ctx;

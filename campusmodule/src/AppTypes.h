@@ -7,9 +7,11 @@ struct EventInfo {
   String title;
   String date;
   String scheduledTime;
+  String scheduledTimeEnd;
   String location;
   String status;
   bool requiresRegistration = false;
+  bool timeOutFinalized = false;
 
   bool isValid() const {
     return !eventId.isEmpty();
@@ -68,6 +70,10 @@ struct AttendanceRecord {
   String recordId;
   String eventId;
   String eventTitle;
+  String eventDate;
+  String scheduledTimeStart;
+  String scheduledTimeEnd;
+  String eventLocation;
   String studentUid;
   String schoolId;
   String studentName;
@@ -78,11 +84,26 @@ struct AttendanceRecord {
   uint64_t capturedAtEpoch = 0;
   String capturedAtIso;
   String timeSource = "unknown";
+  uint64_t timeInEpoch = 0;
+  String timeInIso;
+  String timeInSource = "unknown";
+  uint64_t timeOutEpoch = 0;
+  String timeOutIso;
+  String timeOutSource = "unknown";
+  String attendanceStatus;
   String source = "portable-device";
   bool synced = false;
   bool remoteDuplicate = false;
   String syncError;
   uint32_t retryCount = 0;
+
+  bool hasTimeIn() const {
+    return timeInEpoch > 0 || !timeInIso.isEmpty();
+  }
+
+  bool hasTimeOut() const {
+    return timeOutEpoch > 0 || !timeOutIso.isEmpty();
+  }
 };
 
 struct SyncItemResult {

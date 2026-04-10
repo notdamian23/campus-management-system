@@ -1,10 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { FiBell, FiCalendar, FiCheckCircle, FiChevronRight } from "react-icons/fi";
+import {
+  FiBell,
+  FiCalendar,
+  FiCheckCircle,
+  FiChevronRight,
+} from "react-icons/fi";
 import { Button } from "@heroui/button";
 import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
+import { CampusCardListSkeleton, CampusMetricSkeleton } from "@/components/ui";
 import { CampusBadge } from "@/components/heroui";
 import {
   StudentEvent,
@@ -81,8 +87,12 @@ export default function StudentDashboard() {
     error,
   } = useStudentPortal();
 
-  const upcomingCount = events.filter((event) => event.lifecycle !== "completed").length;
-  const completedCount = events.filter((event) => event.lifecycle === "completed").length;
+  const upcomingCount = events.filter(
+    (event) => event.lifecycle !== "completed",
+  ).length;
+  const completedCount = events.filter(
+    (event) => event.lifecycle === "completed",
+  ).length;
 
   const eventOverview = [...events]
     .sort((left, right) => {
@@ -101,7 +111,10 @@ export default function StudentDashboard() {
 
   return (
     <div className="space-y-5 sm:space-y-8">
-      <Card shadow="sm" className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#bb2020] to-[#f19b4c] text-white">
+      <Card
+        shadow="sm"
+        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#bb2020] to-[#f19b4c] text-white"
+      >
         <CardBody className="flex flex-col gap-5 p-5 sm:p-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-4">
             <div className="space-y-2">
@@ -109,7 +122,8 @@ export default function StudentDashboard() {
                 Student Dashboard
               </p>
               <h1 className="text-2xl font-black sm:text-3xl">
-                Welcome back{profile?.studentName ? `, ${profile.studentName}` : ""}!
+                Welcome back
+                {profile?.studentName ? `, ${profile.studentName}` : ""}!
               </h1>
               <p className="text-sm text-white/80 sm:text-base">
                 Here is what is happening today.
@@ -125,56 +139,78 @@ export default function StudentDashboard() {
               </Chip>
               <Chip
                 variant="flat"
-                className={profile?.accountStatus === "Inactive" ? "bg-white text-[#7b0000]" : "bg-emerald-100 text-emerald-900"}
+                className={
+                  profile?.accountStatus === "Inactive"
+                    ? "bg-white text-[#7b0000]"
+                    : "bg-emerald-100 text-emerald-900"
+                }
               >
                 Account: {profile?.accountStatus || "Active"}
               </Chip>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:min-w-[420px]">
-            <Card shadow="none" className="border border-white/20 bg-white/10 text-white">
-              <CardBody className="p-4">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15">
-                    <FiCalendar size={18} />
+          {loading ? (
+            <CampusMetricSkeleton
+              count={3}
+              className="sm:grid-cols-3 xl:grid-cols-3 lg:min-w-[420px]"
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:min-w-[420px]">
+              <Card
+                shadow="none"
+                className="border border-white/20 bg-white/10 text-white"
+              >
+                <CardBody className="p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15">
+                      <FiCalendar size={18} />
+                    </div>
+                    <div>
+                      <p className="text-sm text-white/70">Upcoming Events</p>
+                      <h2 className="text-3xl font-black">{upcomingCount}</h2>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-sm text-white/70">Upcoming Events</p>
-                    <h2 className="text-3xl font-black">{loading ? "-" : upcomingCount}</h2>
+                </CardBody>
+              </Card>
+              <Card
+                shadow="none"
+                className="border border-white/20 bg-white/10 text-white"
+              >
+                <CardBody className="p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15">
+                      <FiCheckCircle size={18} />
+                    </div>
+                    <div>
+                      <p className="text-sm text-white/70">Completed Events</p>
+                      <h2 className="text-3xl font-black">{completedCount}</h2>
+                    </div>
                   </div>
-                </div>
-              </CardBody>
-            </Card>
-
-            <Card shadow="none" className="border border-white/20 bg-white/10 text-white">
-              <CardBody className="p-4">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15">
-                    <FiCheckCircle size={18} />
+                </CardBody>
+              </Card>
+              <Card
+                shadow="none"
+                className="border border-white/20 bg-white/10 text-white"
+              >
+                <CardBody className="p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15">
+                      <FiBell size={18} />
+                    </div>
+                    <div>
+                      <p className="text-sm text-white/70">
+                        Unread Notifications
+                      </p>
+                      <h2 className="text-3xl font-black">
+                        {unreadNotificationsCount}
+                      </h2>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-sm text-white/70">Completed Events</p>
-                    <h2 className="text-3xl font-black">{loading ? "-" : completedCount}</h2>
-                  </div>
-                </div>
-              </CardBody>
-            </Card>
-
-            <Card shadow="none" className="border border-white/20 bg-white/10 text-white">
-              <CardBody className="p-4">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15">
-                    <FiBell size={18} />
-                  </div>
-                  <div>
-                    <p className="text-sm text-white/70">Unread Notifications</p>
-                    <h2 className="text-3xl font-black">{loading ? "-" : unreadNotificationsCount}</h2>
-                  </div>
-                </div>
-              </CardBody>
-            </Card>
-          </div>
+                </CardBody>
+              </Card>
+            </div>
+          )}
         </CardBody>
       </Card>
 
@@ -208,7 +244,7 @@ export default function StudentDashboard() {
 
         <CardBody className="space-y-4 p-5 pt-3">
           {loading ? (
-            <p className="text-sm text-campus-text-secondary">Loading events...</p>
+            <CampusCardListSkeleton rows={3} />
           ) : eventOverview.length === 0 ? (
             <p className="text-sm text-campus-text-secondary">
               No events available for your course/year yet.
@@ -232,7 +268,10 @@ export default function StudentDashboard() {
                     </p>
                   </div>
 
-                  <Chip variant="bordered" className="font-medium text-campus-text-secondary">
+                  <Chip
+                    variant="bordered"
+                    className="font-medium text-campus-text-secondary"
+                  >
                     {event.course || "All Courses"}
                   </Chip>
                 </CardBody>
@@ -249,7 +288,10 @@ export default function StudentDashboard() {
               <h3 className="text-lg font-semibold text-campus-text-primary">
                 Recent Notifications
               </h3>
-              <Chip color={unreadNotificationsCount > 0 ? "danger" : "success"} variant="flat">
+              <Chip
+                color={unreadNotificationsCount > 0 ? "danger" : "success"}
+                variant="flat"
+              >
                 {loading ? "-" : unreadNotificationsCount} unread
               </Chip>
             </div>
@@ -270,7 +312,7 @@ export default function StudentDashboard() {
 
         <CardBody className="space-y-3 p-5 pt-3">
           {loading ? (
-            <p className="text-sm text-campus-text-secondary">Loading notifications...</p>
+            <CampusCardListSkeleton rows={3} />
           ) : recentNotifications.length === 0 ? (
             <p className="text-sm text-campus-text-secondary">
               You are all caught up.
@@ -288,7 +330,10 @@ export default function StudentDashboard() {
                     </p>
                   </div>
 
-                  <Chip variant="bordered" className="font-medium text-campus-text-secondary">
+                  <Chip
+                    variant="bordered"
+                    className="font-medium text-campus-text-secondary"
+                  >
                     {toRelativeTime(item.date)}
                   </Chip>
                 </CardBody>

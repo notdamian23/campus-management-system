@@ -1,165 +1,210 @@
 "use client";
 
-import Image from "next/image";
-import { Poppins } from "next/font/google";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { Alert } from "@heroui/alert";
+import { Button } from "@heroui/button";
+import { Input } from "@heroui/input";
 
-import { updatePassword } from "firebase/auth";
+import {
+  sendEmailVerification,
+  updatePassword,
+  verifyBeforeUpdateEmail,
+} from "firebase/auth";
 import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { campusToast } from "@/lib/toast";
+import { CampusAuthShell } from "@/components/ui";
 import { auth, db } from "@/lib/firebase";
 
-const poppins = Poppins({
-    subsets: ["latin"],
-    weight: ["400", "600", "700", "800"],
-});
-
-type Role = "teacher" | "student" | "ec";
+type Role = "teacher" | "student" | "ec" | "admin";
 
 function setCampusCookies(role: Role, mustChangePassword: boolean) {
-    const maxAge = 60 * 60 * 24 * 7;
-    document.cookie = `campus_logged_in=1; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
-    document.cookie = `campus_role=${role}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
-    document.cookie = `campus_must_change=${mustChangePassword ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  const maxAge = 60 * 60 * 24 * 7;
+  document.cookie = `campus_logged_in=1; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  document.cookie = `campus_role=${role}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  document.cookie = `campus_must_change=${mustChangePassword ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
 }
 
 export default function ChangePasswordPage() {
-    const router = useRouter();
+  const router = useRouter();
 
-    const [newPass, setNewPass] = useState("");
-    const [confirm, setConfirm] = useState("");
-    const [showPass, setShowPass] = useState(false);
+  const [newPass, setNewPass] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [verifiedEmail, setVerifiedEmail] = useState("");
+  const [showPass, setShowPass] = useState(false);
 
-    const [loading, setLoading] = useState(false);
-    const [errMsg, setErrMsg] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [errMsg, setErrMsg] = useState("");
 
-    const onSave = async () => {
-        setErrMsg("");
+  const onSave = async () => {
+    setErrMsg("");
+    const normalizedEmail = verifiedEmail.trim().toLowerCase();
 
-        if (newPass.length < 6) return setErrMsg("Password must be at least 6 characters.");
-        if (newPass !== confirm) return setErrMsg("Passwords do not match.");
+    if (newPass.length < 6)
+      return setErrMsg("Password must be at least 6 characters.");
+    if (newPass !== confirm) return setErrMsg("Passwords do not match.");
+    if (!normalizedEmail) return setErrMsg("Verified email is required.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail))
+      return setErrMsg("Please enter a valid email address.");
 
-        const user = auth.currentUser;
-        if (!user) {
-            setErrMsg("Not logged in. Please log in again.");
-            router.replace("/login");
-            return;
-        }
+    const user = auth.currentUser;
+    if (!user) {
+      setErrMsg("Not logged in. Please log in again.");
+      router.replace("/login");
+      return;
+    }
 
-        setLoading(true);
-        try {
-            // 1) Update Auth password
-            await updatePassword(user, newPass);
+    setLoading(true);
+    try {
+      // 1) Update Auth password
+      await updatePassword(user, newPass);
 
-            // 2) Turn off mustChangePassword
-            await updateDoc(doc(db, "profiles", user.uid), { mustChangePassword: false });
+      const actionCodeSettings = {
+        url: `${window.location.origin}/login`,
+        handleCodeInApp: false,
+      };
 
-            // 3) Refresh role and update cookies
-            const snap = await getDoc(doc(db, "profiles", user.uid));
-            const role = snap.data()?.role as Role | undefined;
+      if ((user.email ?? "").toLowerCase() === normalizedEmail) {
+        await sendEmailVerification(user, actionCodeSettings);
+      } else {
+        await verifyBeforeUpdateEmail(
+          user,
+          normalizedEmail,
+          actionCodeSettings,
+        );
+      }
 
-            if (!role) {
-                router.replace("/");
-                return;
-            }
+      // 2) Turn off mustChangePassword
+      await updateDoc(doc(db, "profiles", user.uid), {
+        mustChangePassword: false,
+      });
 
-            setCampusCookies(role, false);
+      // 3) Refresh role and update cookies
+      const snap = await getDoc(doc(db, "profiles", user.uid));
+      const role = snap.data()?.role as Role | undefined;
 
-            // 4) Redirect
-            if (role === "ec") router.replace("/ecmember");
-            else if (role === "teacher") router.replace("/teacher");
-            else if (role === "student") router.replace("/student");
-            else router.replace("/");
-        } catch (e: any) {
-            const code = e?.code as string | undefined;
-            if (code === "auth/requires-recent-login") {
-                setErrMsg("Please log in again, then try changing your password.");
-                router.replace("/login?next=/change-password");
-            } else {
-                setErrMsg(e?.message ?? "Failed to update password.");
-            }
-        } finally {
-            setLoading(false);
-        }
-    };
+      if (!role) {
+        router.replace("/");
+        return;
+      }
 
-    return (
-        <div className="min-h-[100dvh] w-full bg-primary-500 flex items-center justify-center px-4 py-8">
-            <div className="bg-white w-full max-w-md rounded-2xl shadow-xl px-6 sm:px-10 py-8 flex flex-col items-center">
-                <div className="w-28 h-28 sm:w-36 sm:h-36 rounded-full overflow-hidden flex items-center justify-center mb-4 border-4 border-primary-500">
-                    <Image
-                        src="/new campus-logo.jpg"
-                        alt="Campus Logo"
-                        width={220}
-                        height={220}
-                        className="object-cover"
-                        priority
-                    />
-                </div>
+      setCampusCookies(role, false);
+      campusToast.success({
+        title: "Verification email sent",
+        description: `Check ${normalizedEmail} for your Firebase verification link.`,
+        dedupeKey: `change-password:verification:${normalizedEmail}`,
+      });
 
-                <h1 className={`text-4xl font-extrabold text-center text-primary-900 tracking-tight ${poppins.className}`}>
-                    CAMPUS
-                </h1>
+      // 4) Redirect
+      if (role === "ec") router.replace("/ecmember");
+      else if (role === "teacher") router.replace("/teacher");
+      else if (role === "student") router.replace("/student");
+      else if (role === "admin") router.replace("/admin");
+      else router.replace("/");
+    } catch (e: unknown) {
+      const error = e as { code?: string; message?: string };
+      const code = error?.code as string | undefined;
+      if (code === "auth/requires-recent-login") {
+        setErrMsg("Please log in again, then try changing your password.");
+        router.replace("/login?next=/change-password");
+      } else if (code === "auth/email-already-in-use") {
+        setErrMsg("That email is already being used by another account.");
+      } else if (code === "auth/invalid-email") {
+        setErrMsg("Please enter a valid email address.");
+      } else {
+        setErrMsg(error?.message ?? "Failed to update password.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
-                <p className="text-gray-500 text-center mb-6 text-sm sm:text-base">
-                    First login detected. Please set a new password.
-                </p>
+  return (
+    <CampusAuthShell
+      title="CAMPUS"
+      description="First login detected. Set a new password and verify your email before entering the portal."
+      eyebrow="First Sign-In Setup"
+      footer="Tip: Use a strong password you can remember."
+      cardClassName="max-w-[520px]"
+    >
+      <div className="space-y-5">
+        {errMsg ? (
+          <Alert
+            color="danger"
+            variant="flat"
+            title="Unable to save changes"
+            description={errMsg}
+          />
+        ) : null}
 
-                {errMsg && (
-                    <div className="w-full mb-4 p-3 rounded-lg bg-red-50 text-red-700 text-sm">
-                        {errMsg}
-                    </div>
-                )}
+        <Input
+          label="New Password"
+          labelPlacement="outside"
+          placeholder="Enter new password"
+          type={showPass ? "text" : "password"}
+          value={newPass}
+          onValueChange={setNewPass}
+          autoComplete="new-password"
+          startContent={
+            <span className="material-icons pointer-events-none text-xl text-text-muted">
+              lock
+            </span>
+          }
+          endContent={
+            <Button
+              type="button"
+              size="sm"
+              variant="light"
+              className="h-auto min-w-0 px-2 text-xs font-semibold text-text-muted"
+              onPress={() => setShowPass((value) => !value)}
+            >
+              {showPass ? "Hide" : "Show"}
+            </Button>
+          }
+          description="Use at least 6 characters."
+        />
 
-                <div className="w-full mb-4">
-                    <label className="text-sm font-medium text-gray-700">New Password</label>
-                    <div className="flex items-center border rounded-lg px-3 py-2 bg-gray-50 mt-1">
-                        <span className="material-icons text-gray-400 mr-2">lock</span>
-                        <input
-                            type={showPass ? "text" : "password"}
-                            value={newPass}
-                            onChange={(e) => setNewPass(e.target.value)}
-                            className="w-full bg-gray-50 outline-none text-gray-800 text-base"
-                            placeholder="Enter new password"
-                            autoComplete="new-password"
-                        />
-                        <button
-                            type="button"
-                            onClick={() => setShowPass((v) => !v)}
-                            className="ml-2 text-sm text-gray-600 hover:text-gray-900"
-                        >
-                            {showPass ? "Hide" : "Show"}
-                        </button>
-                    </div>
-                </div>
+        <Input
+          label="Confirm Password"
+          labelPlacement="outside"
+          placeholder="Confirm new password"
+          type={showPass ? "text" : "password"}
+          value={confirm}
+          onValueChange={setConfirm}
+          autoComplete="new-password"
+          startContent={
+            <span className="material-icons pointer-events-none text-xl text-text-muted">
+              lock
+            </span>
+          }
+        />
 
-                <div className="w-full mb-6">
-                    <label className="text-sm font-medium text-gray-700">Confirm Password</label>
-                    <div className="flex items-center border rounded-lg px-3 py-2 bg-gray-50 mt-1">
-                        <span className="material-icons text-gray-400 mr-2">lock</span>
-                        <input
-                            type={showPass ? "text" : "password"}
-                            value={confirm}
-                            onChange={(e) => setConfirm(e.target.value)}
-                            className="w-full bg-gray-50 outline-none text-gray-800 text-base"
-                            placeholder="Confirm new password"
-                            autoComplete="new-password"
-                        />
-                    </div>
-                </div>
+        <Input
+          label="Verified Email"
+          labelPlacement="outside"
+          placeholder="Enter your email address"
+          type="email"
+          value={verifiedEmail}
+          onValueChange={setVerifiedEmail}
+          autoComplete="email"
+          startContent={
+            <span className="material-icons pointer-events-none text-xl text-text-muted">
+              email
+            </span>
+          }
+          description="We&apos;ll send a Firebase verification link to this address."
+        />
 
-                <button
-                    onClick={onSave}
-                    disabled={loading}
-                    className="w-full bg-primary-500 text-white py-3 rounded-lg font-semibold hover:bg-primary-600 transition disabled:opacity-60"
-                >
-                    {loading ? "Saving..." : "Save password"}
-                </button>
-
-                <div className="mt-6 text-sm text-gray-600 text-center">
-                    Tip: Use a strong password you can remember.
-                </div>
-            </div>
-        </div>
-    );
+        <Button
+          onPress={() => {
+            void onSave();
+          }}
+          isLoading={loading}
+          className="h-14 w-full bg-primary-500 font-semibold text-white shadow-lg"
+        >
+          Save and Send Verification
+        </Button>
+      </div>
+    </CampusAuthShell>
+  );
 }
