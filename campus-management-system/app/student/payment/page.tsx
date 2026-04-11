@@ -1,40 +1,57 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Card, CardBody, CardHeader } from "@heroui/card";
+import type { Selection } from "@react-types/shared";
+import { Button } from "@heroui/button";
 import { Chip } from "@heroui/chip";
 import { Select, SelectItem } from "@heroui/select";
-import { CampusCardListSkeleton, CampusMetricSkeleton } from "@/components/ui";
-import { CampusBadge } from "@/components/heroui";
+import { CheckCircle2, CreditCard, RotateCcw, TriangleAlert } from "lucide-react";
+import { CampusMetricSkeleton } from "@/components/ui";
 import {
-  StudentPayment,
+  type StudentPayment,
+  StudentCardStackSkeleton,
+  StudentEmptyState,
+  StudentFilterBar,
+  StudentFilterBarSkeleton,
+  StudentPageHeader,
+  StudentPaymentCard,
+  StudentStatsGrid,
+  formatStudentCurrency,
+  formatStudentDateLabel,
+  isStudentPaymentOverdue,
+  studentPaymentFooter,
+  useStudentPageErrorToast,
   useStudentPortal,
-} from "@/components/student/StudentPortalProvider";
+} from "@/components/student";
 
 type PaymentSortMode = "latest_to_oldest" | "oldest_to_latest";
 type PaymentStatusFilter = "all" | "paid" | "unpaid";
 
 type PaymentGroup = {
-  date: string;
+  label: string;
   dateMs: number;
+  count: number;
   items: StudentPayment[];
 };
 
-function getPaymentDateMs(payment: StudentPayment) {
-  const rawDate = String(payment.date ?? "").trim();
-  if (rawDate) {
-    const parsed = new Date(`${rawDate}T00:00:00`).getTime();
-    if (!Number.isNaN(parsed)) return parsed;
-  }
-  return payment.updatedAtMs || payment.createdAtMs || 0;
+function getSingleSelectionValue(keys: Selection) {
+  if (keys === "all") return null;
+
+  const selected = Array.from(keys)[0];
+  return typeof selected === "string" ? selected : null;
 }
 
-function getPaymentDateLabel(payment: StudentPayment) {
-  const rawDate = String(payment.date ?? "").trim();
+function getPaymentDateMs(dateLabel: string, fallbackMs: number) {
+  const parsed = new Date(`${dateLabel}T00:00:00`).getTime();
+  if (!Number.isNaN(parsed)) return parsed;
+  return fallbackMs;
+}
+
+function getPaymentGroupLabel(rawDate: string, fallbackMs: number) {
   if (rawDate) {
-    const date = new Date(`${rawDate}T00:00:00`);
-    if (!Number.isNaN(date.getTime())) {
-      return date.toLocaleDateString(undefined, {
+    const parsed = new Date(`${rawDate}T00:00:00`);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toLocaleDateString(undefined, {
         weekday: "long",
         month: "long",
         day: "numeric",
@@ -42,67 +59,74 @@ function getPaymentDateLabel(payment: StudentPayment) {
     }
   }
 
-  if (payment.updatedAtMs || payment.createdAtMs) {
-    return new Date(
-      payment.updatedAtMs || payment.createdAtMs,
-    ).toLocaleDateString(undefined, {
+  if (fallbackMs) {
+    return new Date(fallbackMs).toLocaleDateString(undefined, {
       weekday: "long",
       month: "long",
       day: "numeric",
     });
   }
 
-  return "No Date";
-}
-
-function formatAmount(value: number) {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(Number(value) || 0);
+  return "No due date";
 }
 
 export default function StudentPaymentsPage() {
   const { payments, loading, error } = useStudentPortal();
+
+  useStudentPageErrorToast(error, "student payments");
+
   const [sortMode, setSortMode] = useState<PaymentSortMode>("latest_to_oldest");
   const [statusFilter, setStatusFilter] = useState<PaymentStatusFilter>("all");
 
   const filteredPayments = useMemo(() => {
     if (statusFilter === "all") return payments;
-    if (statusFilter === "paid")
+    if (statusFilter === "paid") {
       return payments.filter((item) => item.status === "PAID");
+    }
+
     return payments.filter((item) => item.status === "UNPAID");
   }, [payments, statusFilter]);
 
-  const groupedPayments = useMemo<PaymentGroup[]>(() => {
-    const map = new Map<string, PaymentGroup>();
+  const groupedPayments = useMemo(() => {
     const direction = sortMode === "latest_to_oldest" ? -1 : 1;
+    const groups = new Map<string, PaymentGroup>();
 
     filteredPayments.forEach((item) => {
-      const dateLabel = getPaymentDateLabel(item);
-      const dateMs = getPaymentDateMs(item);
+      const fallbackMs = item.updatedAtMs || item.createdAtMs || 0;
+      const label = getPaymentGroupLabel(item.date, fallbackMs);
+      const dateMs = getPaymentDateMs(item.date, fallbackMs);
 
-      if (!map.has(dateLabel)) {
-        map.set(dateLabel, {
-          date: dateLabel,
+      if (!groups.has(label)) {
+        groups.set(label, {
+          label,
           dateMs,
+          count: 0,
           items: [],
         });
       }
 
-      map.get(dateLabel)!.items.push(item);
+      const group = groups.get(label);
+      if (!group) return;
+      group.items.push(item);
+      group.count += 1;
     });
 
-    return Array.from(map.values())
+    return Array.from(groups.values())
       .sort((left, right) => (left.dateMs - right.dateMs) * direction)
       .map((group) => ({
         ...group,
-        items: group.items.sort(
-          (left, right) =>
-            (getPaymentDateMs(left) - getPaymentDateMs(right)) * direction,
-        ),
+        items: [...group.items].sort((left, right) => {
+          const leftMs = getPaymentDateMs(
+            left.date,
+            left.updatedAtMs || left.createdAtMs || 0,
+          );
+          const rightMs = getPaymentDateMs(
+            right.date,
+            right.updatedAtMs || right.createdAtMs || 0,
+          );
+
+          return (leftMs - rightMs) * direction;
+        }),
       }));
   }, [filteredPayments, sortMode]);
 
@@ -114,6 +138,10 @@ export default function StudentPaymentsPage() {
     () => payments.filter((item) => item.status === "UNPAID").length,
     [payments],
   );
+  const overdueCount = useMemo(
+    () => payments.filter((item) => isStudentPaymentOverdue(item)).length,
+    [payments],
+  );
   const totalOutstanding = useMemo(
     () =>
       payments
@@ -122,212 +150,215 @@ export default function StudentPaymentsPage() {
     [payments],
   );
 
+  const hasFilterOverrides =
+    sortMode !== "latest_to_oldest" || statusFilter !== "all";
+
   return (
-    <div className="space-y-5 sm:space-y-6 text-campus-text-primary">
-      <Card
-        shadow="sm"
-        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#bb2020] to-[#f19b4c] text-white"
-      >
-        <CardBody className="space-y-4 p-5 sm:p-6">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
-              Student Payments
-            </p>
-            <h1 className="text-2xl font-black sm:text-3xl">Payments</h1>
-            <p className="text-sm text-white/80 sm:text-base">
-              Track balances, review due dates, and keep the same payment
-              timeline format.
-            </p>
-          </div>
+    <div className="space-y-5 text-campus-text-primary sm:space-y-6">
+      <StudentPageHeader
+        variant="hero"
+        icon={CreditCard}
+        title="Student Payments"
+        description="Review due dates, understand what is already settled, and spot outstanding records faster from a cleaner mobile-ready payment workspace."
+        meta={
+          <>
+            <Chip className="border border-white/20 bg-white/10 text-white">
+              {unpaidCount} unpaid
+            </Chip>
+            <Chip className="border border-white/20 bg-white/10 text-white">
+              {overdueCount} overdue
+            </Chip>
+          </>
+        }
+      />
 
-          {loading ? (
-            <CampusMetricSkeleton
-              count={3}
-              className="sm:grid-cols-3 xl:grid-cols-3"
-            />
-          ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <Card
-                shadow="none"
-                className="border border-white/20 bg-white/10 text-white"
-              >
-                <CardBody className="p-4">
-                  <p className="text-sm text-white/70">Total Records</p>
-                  <h2 className="mt-2 text-3xl font-black">
-                    {payments.length}
-                  </h2>
-                </CardBody>
-              </Card>
-              <Card
-                shadow="none"
-                className="border border-white/20 bg-white/10 text-white"
-              >
-                <CardBody className="p-4">
-                  <p className="text-sm text-white/70">Paid</p>
-                  <h2 className="mt-2 text-3xl font-black">{paidCount}</h2>
-                </CardBody>
-              </Card>
-              <Card
-                shadow="none"
-                className="border border-white/20 bg-white/10 text-white"
-              >
-                <CardBody className="p-4">
-                  <p className="text-sm text-white/70">Outstanding</p>
-                  <h2 className="mt-2 text-2xl font-black">
-                    {formatAmount(totalOutstanding)}
-                  </h2>
-                </CardBody>
-              </Card>
-            </div>
-          )}
-        </CardBody>
-      </Card>
-
-      <Card shadow="sm" className="border">
-        <CardHeader className="px-5 pt-5">
-          <div>
-            <h2 className="text-lg font-semibold text-campus-text-primary">
-              Filters
-            </h2>
-            <p className="text-sm text-campus-text-secondary">
-              Keep the same payment timeline while sorting and filtering faster.
-            </p>
-          </div>
-        </CardHeader>
-
-        <CardBody className="grid grid-cols-1 gap-3 p-5 pt-3 sm:grid-cols-2">
-          <Select
-            aria-label="Sort payments"
-            label="Sort"
-            size="sm"
-            selectedKeys={[sortMode]}
-            onChange={(event) =>
-              setSortMode(event.target.value as PaymentSortMode)
-            }
-            disallowEmptySelection
-            className="w-full"
-          >
-            <SelectItem key="latest_to_oldest">Latest to Oldest</SelectItem>
-            <SelectItem key="oldest_to_latest">Oldest to Latest</SelectItem>
-          </Select>
-
-          <Select
-            aria-label="Filter payments by status"
-            label="Status"
-            size="sm"
-            selectedKeys={[statusFilter]}
-            onChange={(event) =>
-              setStatusFilter(event.target.value as PaymentStatusFilter)
-            }
-            disallowEmptySelection
-            className="w-full"
-          >
-            <SelectItem key="all">All</SelectItem>
-            <SelectItem key="paid">Paid</SelectItem>
-            <SelectItem key="unpaid">Unpaid</SelectItem>
-          </Select>
-        </CardBody>
-      </Card>
-
-      <div className="flex flex-wrap gap-2">
-        <Chip color="success" variant="flat">
-          {loading ? "-" : paidCount} paid
-        </Chip>
-        <Chip color="danger" variant="flat">
-          {loading ? "-" : unpaidCount} unpaid
-        </Chip>
-        <Chip variant="bordered">
-          {loading ? "-" : filteredPayments.length} shown
-        </Chip>
-      </div>
-
-      {error && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          {error}
-        </div>
+      {loading ? (
+        <CampusMetricSkeleton count={3} className="sm:grid-cols-3 xl:grid-cols-3" />
+      ) : (
+        <StudentStatsGrid
+          items={[
+            {
+              label: "Total Records",
+              value: payments.length,
+              description: "Payment records currently assigned to your student account.",
+              tone: "blue",
+              icon: CreditCard,
+            },
+            {
+              label: "Paid",
+              value: paidCount,
+              description: "Records already settled and reflected in the system.",
+              tone: "green",
+              icon: CheckCircle2,
+            },
+            {
+              label: "Outstanding",
+              value: formatStudentCurrency(totalOutstanding),
+              description: "Current unpaid amount based on visible student records.",
+              tone: overdueCount > 0 ? "red" : "amber",
+              icon: TriangleAlert,
+            },
+          ]}
+          className="xl:grid-cols-3"
+        />
       )}
 
       {loading ? (
-        <CampusCardListSkeleton rows={4} />
-      ) : groupedPayments.length === 0 ? (
-        <p className="text-sm text-campus-text-secondary">
-          No payments match the current sort/filter options.
-        </p>
+        <StudentFilterBarSkeleton filters={3} />
       ) : (
-        <div className="space-y-8 sm:space-y-10">
+        <StudentFilterBar>
+          <Select
+            aria-label="Sort payment records"
+            label="Sort"
+            disallowEmptySelection
+            selectedKeys={new Set([sortMode])}
+            onSelectionChange={(keys) => {
+              const selected = getSingleSelectionValue(keys);
+              if (selected) setSortMode(selected as PaymentSortMode);
+            }}
+          >
+            <SelectItem key="latest_to_oldest">Latest to oldest</SelectItem>
+            <SelectItem key="oldest_to_latest">Oldest to latest</SelectItem>
+          </Select>
+
+          <Select
+            aria-label="Filter payment records by status"
+            label="Status"
+            disallowEmptySelection
+            selectedKeys={new Set([statusFilter])}
+            onSelectionChange={(keys) => {
+              const selected = getSingleSelectionValue(keys);
+              if (selected) setStatusFilter(selected as PaymentStatusFilter);
+            }}
+          >
+            <SelectItem key="all">All records</SelectItem>
+            <SelectItem key="paid">Paid</SelectItem>
+            <SelectItem key="unpaid">Unpaid</SelectItem>
+          </Select>
+
+          <div className="flex flex-col justify-between rounded-[22px] border border-border/70 bg-slate-50/70 p-3">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-campus-text-primary">
+                Quick actions
+              </p>
+              <p className="text-xs leading-5 text-campus-text-secondary">
+                Return to the default payment view whenever you need the full list again.
+              </p>
+            </div>
+
+            <Button
+              variant="flat"
+              startContent={<RotateCcw size={16} />}
+              onPress={() => {
+                setSortMode("latest_to_oldest");
+                setStatusFilter("all");
+              }}
+              isDisabled={!hasFilterOverrides}
+              className="mt-3 w-full sm:w-auto"
+            >
+              Reset filters
+            </Button>
+          </div>
+        </StudentFilterBar>
+      )}
+
+      {loading ? (
+        <StudentCardStackSkeleton rows={4} />
+      ) : groupedPayments.length === 0 ? (
+        <StudentEmptyState
+          title="No payment records found"
+          description="Try another filter or reset the payment view to see all records assigned to your account."
+          icon={CreditCard}
+          tone="blue"
+          action={
+            hasFilterOverrides ? (
+              <Button
+                color="primary"
+                variant="flat"
+                onPress={() => {
+                  setSortMode("latest_to_oldest");
+                  setStatusFilter("all");
+                }}
+              >
+                Reset filters
+              </Button>
+            ) : null
+          }
+        />
+      ) : (
+        <div className="space-y-6">
           {groupedPayments.map((group) => (
-            <div key={`${group.date}-${group.dateMs}`}>
-              <div className="mb-4 flex items-center justify-between gap-3">
-                <h2 className="text-lg font-semibold text-campus-text-primary">
-                  {group.date}
-                </h2>
-                <Chip variant="bordered">
-                  {group.items.length} item{group.items.length === 1 ? "" : "s"}
+            <section key={`${group.label}-${group.dateMs}`} className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-campus-text-primary">
+                    {group.label}
+                  </h2>
+                  <p className="text-sm text-campus-text-secondary">
+                    {group.count} payment record{group.count === 1 ? "" : "s"} in this due date group.
+                  </p>
+                </div>
+
+                <Chip size="sm" className="bg-slate-100 text-slate-700">
+                  {group.count} shown
                 </Chip>
               </div>
 
-              <div className="space-y-4">
-                {group.items.map((item) => (
-                  <Card
-                    key={item.paymentId}
-                    shadow="sm"
-                    isPressable
-                    className="w-full border"
-                  >
-                    <CardBody className="w-full p-4 sm:p-5">
-                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                        <div className="min-w-0 flex-1 space-y-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <h3 className="text-lg font-semibold leading-snug break-words">
-                              {item.title}
-                            </h3>
-                            <CampusBadge
-                              status={
-                                item.status === "PAID" ? "paid" : "unpaid"
-                              }
-                            >
-                              {item.status}
-                            </CampusBadge>
-                          </div>
+              <div className="space-y-3">
+                {group.items.map((item) => {
+                  const overdue = isStudentPaymentOverdue(item);
 
-                          <p className="text-sm text-campus-text-secondary break-words">
-                            Ref: {item.ref}
-                          </p>
+                  return (
+                    <StudentPaymentCard
+                      key={item.paymentId}
+                      title={item.title}
+                      ref={item.ref}
+                      amount={item.amount}
+                      dateLabel={formatStudentDateLabel(
+                        item.date,
+                        item.updatedAtMs || item.createdAtMs,
+                      )}
+                      status={item.status}
+                      details={item.details}
+                      className={overdue ? "border-rose-200 bg-rose-50/30" : undefined}
+                      footer={
+                        <div className="space-y-3">
+                          {studentPaymentFooter(item)}
 
                           <div className="flex flex-wrap gap-2">
-                            <Chip
-                              variant="flat"
-                              className="text-campus-text-primary"
-                            >
-                              Due: {item.date || "-"}
-                            </Chip>
-                            <Chip
-                              variant="flat"
-                              className={
-                                item.status === "PAID"
-                                  ? "bg-emerald-50 text-emerald-800"
-                                  : "bg-red-50 text-red-800"
-                              }
-                            >
-                              Amount: {formatAmount(item.amount)}
-                            </Chip>
+                            {overdue ? (
+                              <Chip size="sm" className="bg-rose-100 text-rose-700">
+                                Overdue
+                              </Chip>
+                            ) : item.status === "UNPAID" ? (
+                              <Chip size="sm" className="bg-amber-100 text-amber-700">
+                                Outstanding
+                              </Chip>
+                            ) : null}
                           </div>
-                        </div>
 
-                        <div className="shrink-0 text-right">
-                          <p className="text-xs uppercase tracking-wide text-campus-text-tertiary">
-                            Amount
-                          </p>
-                          <p className="text-xl font-black text-campus-text-primary">
-                            {formatAmount(item.amount)}
+                          <p
+                            className={`text-sm ${
+                              overdue
+                                ? "text-rose-700"
+                                : item.status === "PAID"
+                                  ? "text-emerald-700"
+                                  : "text-amber-700"
+                            }`}
+                          >
+                            {overdue
+                              ? "This unpaid record is already past its due date."
+                              : item.status === "PAID"
+                                ? "This payment is already marked as settled."
+                                : "This record is still outstanding on your account."}
                           </p>
                         </div>
-                      </div>
-                    </CardBody>
-                  </Card>
-                ))}
+                      }
+                    />
+                  );
+                })}
               </div>
-            </div>
+            </section>
           ))}
         </div>
       )}

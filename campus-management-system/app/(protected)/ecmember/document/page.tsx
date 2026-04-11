@@ -41,12 +41,21 @@ import {
 import { Progress } from "@heroui/progress";
 import { Select, SelectItem } from "@heroui/select";
 import {
-  CampusDataTable,
-  CampusEmptyState,
   type CampusTableColumn,
-  CampusDetailSkeleton,
   CampusTableBodySkeleton,
 } from "@/components/ui";
+import { FileStack, FolderKanban, HardDriveUpload, Upload } from "lucide-react";
+import {
+  ECDataTable,
+  ECDocumentDetailsDrawer,
+  ECDocumentDetailsPanel,
+  ECFilterBar,
+  ECPageHeader,
+  ECStatsGrid,
+  type ECStatItem,
+  useECPageErrorToast,
+  useIsBelowBreakpoint,
+} from "@/components/ecmember";
 import { auth, db, storage } from "@/lib/firebase";
 import { campusToast } from "@/lib/toast";
 
@@ -310,6 +319,7 @@ const uploadWithTimeout = async (
 };
 
 export default function DocumentsPage() {
+  const isCompactViewport = useIsBelowBreakpoint(1280);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(true);
   const [documentsError, setDocumentsError] = useState("");
@@ -317,6 +327,7 @@ export default function DocumentsPage() {
   const [activeUid, setActiveUid] = useState<string | null>(null);
 
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
+  const [documentDrawerOpen, setDocumentDrawerOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<DocType | "All Types">(
     "All Types",
@@ -478,11 +489,43 @@ export default function DocumentsPage() {
     return documents.find((docItem) => docItem.id === selectedDocId) ?? null;
   }, [documents, selectedDocId]);
 
+  useECPageErrorToast(documentsError || null, "documents");
+
   const storagePercent = Math.min(
     (totalStorageBytes / MEMBER_STORAGE_LIMIT_BYTES) * 100,
     100,
   );
   const formatMB = (bytes: number) => (bytes / ONE_MB_IN_BYTES).toFixed(2);
+  const remainingStorageMB = Math.max(
+    0,
+    (MEMBER_STORAGE_LIMIT_BYTES - totalStorageBytes) / ONE_MB_IN_BYTES,
+  );
+  const documentSummaryItems = useMemo<ECStatItem[]>(
+    () => [
+      {
+        label: "Total Documents",
+        value: documents.length,
+        description: "All EC files in the shared library",
+        tone: "blue",
+        icon: FileStack,
+      },
+      {
+        label: "Recent Uploads",
+        value: recentUploads,
+        description: "Files added in the last 7 days",
+        tone: "green",
+        icon: Upload,
+      },
+      {
+        label: "Storage Used",
+        value: `${totalStorageMB.toFixed(2)} MB`,
+        description: "Current shared EC storage usage",
+        tone: "amber",
+        icon: HardDriveUpload,
+      },
+    ],
+    [documents.length, recentUploads, totalStorageMB],
+  );
 
   const handleUploadClick = () => {
     if (!activeUid) {
@@ -858,24 +901,15 @@ export default function DocumentsPage() {
   };
 
   return (
-    <div className="space-y-5 p-3 sm:p-6">
-      <Card
-        shadow="sm"
-        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b72020] to-[#f39b52] text-white"
-      >
-        <CardBody className="space-y-4 p-5 sm:p-8">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
-              EC Documents
-            </p>
-            <h1 className="text-3xl font-black sm:text-4xl">
-              Manage and Access Documents
-            </h1>
-            <p className="max-w-2xl text-sm text-white/80 sm:text-base">
-              Upload, organize, and review shared EC files from one place.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
+    <div className="space-y-5 sm:space-y-6">
+      <ECPageHeader
+        title="Manage and Access Documents"
+        description="Upload, organize, and review shared EC files from one place while keeping download and delete actions clear on both desktop and mobile."
+        eyebrow="EC Documents"
+        icon={FolderKanban}
+        variant="hero"
+        meta={
+          <>
             <Chip variant="flat" className="bg-white/15 text-white">
               {documents.length} files
             </Chip>
@@ -885,44 +919,14 @@ export default function DocumentsPage() {
             <Chip variant="flat" className="bg-white/15 text-white">
               {totalStorageMB.toFixed(2)} MB used
             </Chip>
-          </div>
-          {documentsError ? (
-            <p className="text-sm text-white">{documentsError}</p>
-          ) : null}
-        </CardBody>
-      </Card>
+          </>
+        }
+      />
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <Card shadow="sm" className="border">
-          <CardBody className="p-5">
-            <p className="text-sm text-campus-text-secondary">
-              Total Documents
-            </p>
-            <h2 className="mt-2 text-3xl font-black text-blue-600">
-              {documents.length}
-            </h2>
-          </CardBody>
-        </Card>
-        <Card shadow="sm" className="border">
-          <CardBody className="p-5">
-            <p className="text-sm text-campus-text-secondary">Recent Uploads</p>
-            <h2 className="mt-2 text-3xl font-black text-emerald-600">
-              {recentUploads}
-            </h2>
-          </CardBody>
-        </Card>
-        <Card shadow="sm" className="border">
-          <CardBody className="p-5">
-            <p className="text-sm text-campus-text-secondary">Storage Used</p>
-            <h2 className="mt-2 text-3xl font-black text-amber-600">
-              {totalStorageMB.toFixed(2)} MB
-            </h2>
-          </CardBody>
-        </Card>
-      </div>
+      <ECStatsGrid items={documentSummaryItems} />
 
-      <Card shadow="sm" className="border">
-        <CardBody className="grid grid-cols-1 gap-4 p-5 xl:grid-cols-[minmax(0,1.3fr)_200px_200px_180px] xl:items-end">
+      <ECFilterBar controlsClassName="grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="xl:col-span-2">
           <Input
             aria-label="Search documents"
             label="Search"
@@ -930,61 +934,61 @@ export default function DocumentsPage() {
             onValueChange={setSearch}
             placeholder="Document name or keyword"
           />
-          <Select
-            aria-label="Filter by type"
-            label="Type"
-            selectedKeys={[typeFilter]}
-            onSelectionChange={(keys) => {
-              const selected = Array.from(keys as Set<string>)[0];
-              if (typeof selected === "string")
-                setTypeFilter(selected as DocType | "All Types");
-            }}
-            disallowEmptySelection
+        </div>
+        <Select
+          aria-label="Filter by type"
+          label="Type"
+          selectedKeys={[typeFilter]}
+          onSelectionChange={(keys) => {
+            const selected = Array.from(keys as Set<string>)[0];
+            if (typeof selected === "string")
+              setTypeFilter(selected as DocType | "All Types");
+          }}
+          disallowEmptySelection
+        >
+          <SelectItem key="All Types">All Types</SelectItem>
+          <SelectItem key="PDF">PDF</SelectItem>
+          <SelectItem key="Images">Images</SelectItem>
+          <SelectItem key="Word Files">Word Files</SelectItem>
+          <SelectItem key="Spreadsheets">Spreadsheets</SelectItem>
+        </Select>
+        <Select
+          aria-label="Filter by category"
+          label="Category"
+          selectedKeys={[categoryFilter]}
+          onSelectionChange={(keys) => {
+            const selected = Array.from(keys as Set<string>)[0];
+            if (typeof selected === "string")
+              setCategoryFilter(selected as DocCategory | "All Categories");
+          }}
+          disallowEmptySelection
+        >
+          <SelectItem key="All Categories">All Categories</SelectItem>
+          <SelectItem key="Events">Events</SelectItem>
+          <SelectItem key="Payments">Payments</SelectItem>
+          <SelectItem key="Clearance">Clearance</SelectItem>
+          <SelectItem key="General">General</SelectItem>
+        </Select>
+        <div className="space-y-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            multiple
+            accept={ACCEPTED_FILE_TYPES}
+            onChange={handleFilesSelected}
+          />
+          <Button
+            className="min-h-12 w-full bg-[#7b0000] font-semibold text-white"
+            onPress={handleUploadClick}
+            isDisabled={uploading || !activeUid}
           >
-            <SelectItem key="All Types">All Types</SelectItem>
-            <SelectItem key="PDF">PDF</SelectItem>
-            <SelectItem key="Images">Images</SelectItem>
-            <SelectItem key="Word Files">Word Files</SelectItem>
-            <SelectItem key="Spreadsheets">Spreadsheets</SelectItem>
-          </Select>
-          <Select
-            aria-label="Filter by category"
-            label="Category"
-            selectedKeys={[categoryFilter]}
-            onSelectionChange={(keys) => {
-              const selected = Array.from(keys as Set<string>)[0];
-              if (typeof selected === "string")
-                setCategoryFilter(selected as DocCategory | "All Categories");
-            }}
-            disallowEmptySelection
-          >
-            <SelectItem key="All Categories">All Categories</SelectItem>
-            <SelectItem key="Events">Events</SelectItem>
-            <SelectItem key="Payments">Payments</SelectItem>
-            <SelectItem key="Clearance">Clearance</SelectItem>
-            <SelectItem key="General">General</SelectItem>
-          </Select>
-          <div className="space-y-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="hidden"
-              multiple
-              accept={ACCEPTED_FILE_TYPES}
-              onChange={handleFilesSelected}
-            />
-            <Button
-              className="w-full bg-[#7b0000] font-semibold text-white"
-              onPress={handleUploadClick}
-              isDisabled={uploading || !activeUid}
-            >
-              {uploading ? "Uploading..." : "Upload Document"}
-            </Button>
-          </div>
-        </CardBody>
-      </Card>
+            {uploading ? "Uploading..." : "Upload Document"}
+          </Button>
+        </div>
+      </ECFilterBar>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.2fr)_360px]">
         <Card shadow="sm" className="border">
           <CardHeader className="flex items-center justify-between px-5 pt-5">
             <div>
@@ -1024,7 +1028,7 @@ export default function DocumentsPage() {
             </Dropdown>
           </CardHeader>
           <CardBody className="p-5 pt-3">
-            <CampusDataTable
+            <ECDataTable
               ariaLabel="EC document library"
               columns={documentColumns}
               items={sortedFilteredDocuments}
@@ -1072,9 +1076,12 @@ export default function DocumentsPage() {
                         selectedDocId === docItem.id ? "flat" : "bordered"
                       }
                       color="primary"
-                      onPress={() => setSelectedDocId(docItem.id)}
+                      onPress={() => {
+                        setSelectedDocId(docItem.id);
+                        if (isCompactViewport) setDocumentDrawerOpen(true);
+                      }}
                     >
-                      {selectedDocId === docItem.id ? "Viewing" : "Open"}
+                      {selectedDocId === docItem.id ? "Viewing" : "View details"}
                     </Button>
                   );
                 }
@@ -1085,77 +1092,57 @@ export default function DocumentsPage() {
           </CardBody>
         </Card>
 
-        <Card shadow="sm" className="border">
-          <CardHeader className="px-5 pt-5">
-            <div>
-              <h2 className="font-semibold text-gray-800">Document Details</h2>
-              <p className="text-sm text-campus-text-secondary">
-                Preview file metadata and actions.
-              </p>
-            </div>
-          </CardHeader>
-          <CardBody className="p-5 pt-3">
-            {documentsLoading ? (
-              <CampusDetailSkeleton rows={5} className="h-80" />
-            ) : selectedDocument ? (
-              <div className="flex h-80 flex-col rounded-2xl border p-4">
-                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-                  <div>
-                    <p className="text-xs text-campus-text-secondary">Name</p>
-                    <p className="break-words font-medium text-gray-900">
-                      {selectedDocument.name}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Chip color="primary" variant="flat">
-                      {selectedDocument.type}
-                    </Chip>
-                    <Chip variant="bordered">{selectedDocument.category}</Chip>
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <div>
-                      <p className="text-xs text-campus-text-secondary">
-                        Uploaded At
-                      </p>
-                      <p className="text-sm text-gray-900">
-                        {selectedDocument.uploadedAt || "-"}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-campus-text-secondary">Size</p>
-                      <p className="text-sm text-gray-900">
-                        {formatMB(selectedDocument.sizeBytes)} MB
-                      </p>
-                    </div>
-                  </div>
-                </div>
-                <Button
-                  color="warning"
-                  className="mt-3 w-full"
-                  onPress={() => handleDownload(selectedDocument)}
-                  isDisabled={!selectedDocument.downloadUrl}
-                >
-                  Download Document
-                </Button>
-                <Button
-                  color="danger"
-                  className="mt-2 w-full"
-                  onPress={() => setPendingDeleteDocument(selectedDocument)}
-                  isDisabled={deleteSubmitting}
-                >
-                  Delete Document
-                </Button>
-              </div>
-            ) : (
-              <CampusEmptyState
-                title="No document selected"
-                description="Choose a file from the shared library to inspect its metadata and actions."
-                className="h-80 border-dashed"
-              />
-            )}
-          </CardBody>
-        </Card>
+        <ECDocumentDetailsPanel
+          className="hidden border border-border/70 bg-white/95 shadow-[var(--shadow-soft)] xl:block"
+          isLoading={documentsLoading}
+          document={
+            selectedDocument
+              ? {
+                  name: selectedDocument.name,
+                  type: selectedDocument.type,
+                  category: selectedDocument.category,
+                  uploadedLabel: selectedDocument.uploadedAt || "-",
+                  sizeLabel: `${formatMB(selectedDocument.sizeBytes)} MB`,
+                  downloadUrl: selectedDocument.downloadUrl,
+                }
+              : null
+          }
+          onDownload={() => {
+            if (selectedDocument) void handleDownload(selectedDocument);
+          }}
+          onDelete={() => {
+            if (selectedDocument) setPendingDeleteDocument(selectedDocument);
+          }}
+          deleteDisabled={deleteSubmitting}
+          deleting={deleteSubmitting}
+        />
       </div>
+
+      <ECDocumentDetailsDrawer
+        isOpen={documentDrawerOpen}
+        onOpenChange={setDocumentDrawerOpen}
+        isLoading={documentsLoading}
+        document={
+          selectedDocument
+            ? {
+                name: selectedDocument.name,
+                type: selectedDocument.type,
+                category: selectedDocument.category,
+                uploadedLabel: selectedDocument.uploadedAt || "-",
+                sizeLabel: `${formatMB(selectedDocument.sizeBytes)} MB`,
+                downloadUrl: selectedDocument.downloadUrl,
+              }
+            : null
+        }
+        onDownload={() => {
+          if (selectedDocument) void handleDownload(selectedDocument);
+        }}
+        onDelete={() => {
+          if (selectedDocument) setPendingDeleteDocument(selectedDocument);
+        }}
+        deleteDisabled={deleteSubmitting}
+        deleting={deleteSubmitting}
+      />
 
       <Card shadow="sm" className="border">
         <CardHeader className="px-5 pt-5">
@@ -1173,9 +1160,17 @@ export default function DocumentsPage() {
             color="primary"
             className="max-w-full"
           />
+          <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+            <p className="font-medium text-campus-text-primary">
+              {totalStorageMB.toFixed(2)} MB used
+            </p>
+            <p className="text-campus-text-secondary">
+              {remainingStorageMB.toFixed(2)} MB remaining
+            </p>
+          </div>
           <p className="text-sm text-campus-text-secondary">
             {totalStorageMB.toFixed(2)} MB of 1024 MB (1 GB) shared EC storage
-            used
+            used.
           </p>
         </CardBody>
       </Card>

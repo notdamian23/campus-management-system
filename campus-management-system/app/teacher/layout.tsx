@@ -72,10 +72,13 @@ function TeacherLayoutShell({ children }: { children: ReactNode }) {
           enableMobileDrawer
           titleSize="sm"
           logoSize={80}
+          contextLabel="Teacher Portal"
           showLogout
         />
 
-        <main className="flex-1 min-w-0 p-3 sm:p-6 lg:p-10">{children}</main>
+        <main className="min-w-0 flex-1 p-4 sm:p-6 lg:p-8 xl:p-10">
+          {children}
+        </main>
       </div>
     </div>
   );

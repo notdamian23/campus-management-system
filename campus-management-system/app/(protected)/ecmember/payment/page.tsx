@@ -28,9 +28,23 @@ import { Input, Textarea } from "@heroui/input";
 import { Select, SelectItem } from "@heroui/select";
 import {
   CampusCardListSkeleton,
-  CampusDataTable,
   type CampusTableColumn,
 } from "@/components/ui";
+import {
+  CircleDollarSign,
+  CreditCard,
+  Hourglass,
+  ReceiptText,
+} from "lucide-react";
+import {
+  ECDataTable,
+  ECEmptyState,
+  ECFilterBar,
+  ECPageHeader,
+  ECStatsGrid,
+  ECStatusChipGroup,
+  type ECStatItem,
+} from "@/components/ecmember";
 import { campusToast } from "@/lib/toast";
 
 type PaymentStudentStatus = "Paid" | "Unpaid";
@@ -464,6 +478,45 @@ export default function PaymentDashboard() {
     return { total: payments.length, pending, completed };
   }, [payments]);
 
+  const totalPaymentValue = useMemo(
+    () => payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
+    [payments],
+  );
+
+  const paymentSummaryItems = useMemo<ECStatItem[]>(
+    () => [
+      {
+        label: "Total Payments",
+        value: dashboardCounts.total,
+        description: "All payment records in view",
+        tone: "blue",
+        icon: CreditCard,
+      },
+      {
+        label: "Pending",
+        value: dashboardCounts.pending,
+        description: "Still waiting on unpaid assignments",
+        tone: "amber",
+        icon: Hourglass,
+      },
+      {
+        label: "Completed",
+        value: dashboardCounts.completed,
+        description: "Fully settled payment records",
+        tone: "green",
+        icon: ReceiptText,
+      },
+      {
+        label: "Total Value",
+        value: formatCurrency(totalPaymentValue),
+        description: "Sum of configured payment amounts",
+        tone: "purple",
+        icon: CircleDollarSign,
+      },
+    ],
+    [dashboardCounts.completed, dashboardCounts.pending, dashboardCounts.total, totalPaymentValue],
+  );
+
   function resetForm() {
     setTitle("");
     setAmount("");
@@ -711,52 +764,26 @@ export default function PaymentDashboard() {
   }
 
   return (
-    <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
-      <Card
-        shadow="sm"
-        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b61f1f] to-[#f09a4a] text-white"
-      >
-        <CardBody className="space-y-4 p-5 sm:p-8">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
-              EC Payments
-            </p>
-            <h1 className="text-3xl font-black sm:text-4xl">
-              Campus Payment Management
-            </h1>
-            <p className="max-w-2xl text-sm text-white/80 sm:text-base">
-              Track, verify, and manage student payments with a layout that
-              stays usable on smaller screens.
-            </p>
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <Card shadow="none" className="border border-white/20 bg-white/10">
-              <CardBody className="p-4">
-                <p className="text-sm text-white/70">Total Payments</p>
-                <h2 className="mt-2 text-3xl font-black text-white">
-                  {dashboardCounts.total}
-                </h2>
-              </CardBody>
-            </Card>
-            <Card shadow="none" className="border border-white/20 bg-white/10">
-              <CardBody className="p-4">
-                <p className="text-sm text-white/70">Pending</p>
-                <h2 className="mt-2 text-3xl font-black text-white">
-                  {dashboardCounts.pending}
-                </h2>
-              </CardBody>
-            </Card>
-            <Card shadow="none" className="border border-white/20 bg-white/10">
-              <CardBody className="p-4">
-                <p className="text-sm text-white/70">Completed</p>
-                <h2 className="mt-2 text-3xl font-black text-white">
-                  {dashboardCounts.completed}
-                </h2>
-              </CardBody>
-            </Card>
-          </div>
-        </CardBody>
-      </Card>
+    <div className="space-y-5 sm:space-y-6">
+      <ECPageHeader
+        title="Campus Payment Management"
+        description="Track, verify, and manage student payments from one EC view that keeps search, filters, and payment actions reachable on smaller screens."
+        eyebrow="EC Payments"
+        icon={CreditCard}
+        variant="hero"
+        meta={
+          <>
+            <Chip variant="flat" className="bg-white/15 text-white">
+              {payments.length} payment records
+            </Chip>
+            <Chip variant="flat" className="bg-white/15 text-white">
+              {students.length} students in roster scope
+            </Chip>
+          </>
+        }
+      />
+
+      <ECStatsGrid items={paymentSummaryItems} />
 
       {notice && (
         <div
@@ -771,70 +798,71 @@ export default function PaymentDashboard() {
         </div>
       )}
 
-      <Card shadow="sm" className="border">
-        <CardBody className="grid grid-cols-1 gap-4 p-5 xl:grid-cols-[minmax(0,1fr)_190px_auto] xl:items-end">
+      <ECFilterBar controlsClassName="grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="xl:col-span-2">
           <Input
             aria-label="Search payments"
             type="text"
-            placeholder="Search by title, reference, course, or year..."
+            label="Search"
+            placeholder="Search by title, reference, course, or year"
             value={queryText}
             onValueChange={setQueryText}
             className="w-full"
           />
+        </div>
 
-          <Input
-            aria-label="Filter by date"
-            type="date"
-            value={dateFilter}
-            onValueChange={setDateFilter}
-            startContent={<FiCalendar />}
-            className="w-full"
-          />
+        <Input
+          aria-label="Filter by date"
+          type="date"
+          label="Date"
+          value={dateFilter}
+          onValueChange={setDateFilter}
+          startContent={<FiCalendar />}
+          className="w-full"
+        />
 
-          <div className="flex flex-col gap-3 sm:flex-row xl:justify-end">
-            <Dropdown placement="bottom-start">
-              <DropdownTrigger>
-                <Button
-                  variant="bordered"
-                  className="justify-between font-medium"
-                >
-                  <span>Sort: {paymentSortLabel}</span>
-                  <FiChevronDown className="ml-1" />
-                </Button>
-              </DropdownTrigger>
-              <DropdownMenu
-                aria-label="Sort payments"
-                disallowEmptySelection
-                selectionMode="single"
-                selectedKeys={new Set([paymentSortMode])}
-                onAction={(key) => setPaymentSortMode(String(key) as SortMode)}
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Dropdown placement="bottom-start">
+            <DropdownTrigger>
+              <Button
+                variant="bordered"
+                className="min-h-12 w-full justify-between font-medium"
               >
-                <DropdownItem key="latest_to_oldest">
-                  Date, new to old
-                </DropdownItem>
-                <DropdownItem key="oldest_to_latest">
-                  Date, old to new
-                </DropdownItem>
-                <DropdownItem key="alphabetical">
-                  Alphabetically, A-Z
-                </DropdownItem>
-              </DropdownMenu>
-            </Dropdown>
-
-            <Button
-              onPress={() => setShowAddPaymentForm(true)}
-              className="text-white"
-              style={{ backgroundColor: "#7b0000" }}
+                <span>Sort: {paymentSortLabel}</span>
+                <FiChevronDown className="ml-1" />
+              </Button>
+            </DropdownTrigger>
+            <DropdownMenu
+              aria-label="Sort payments"
+              disallowEmptySelection
+              selectionMode="single"
+              selectedKeys={new Set([paymentSortMode])}
+              onAction={(key) => setPaymentSortMode(String(key) as SortMode)}
             >
-              + Add Payment
-            </Button>
-          </div>
-        </CardBody>
-      </Card>
+              <DropdownItem key="latest_to_oldest">
+                Date, new to old
+              </DropdownItem>
+              <DropdownItem key="oldest_to_latest">
+                Date, old to new
+              </DropdownItem>
+              <DropdownItem key="alphabetical">
+                Alphabetically, A-Z
+              </DropdownItem>
+            </DropdownMenu>
+          </Dropdown>
+
+          <Button
+            onPress={() => setShowAddPaymentForm(true)}
+            className="min-h-12 w-full bg-[#7b0000] text-white"
+          >
+            Add Payment
+          </Button>
+        </div>
+      </ECFilterBar>
 
       {showAddPaymentForm && (
-        <Card shadow="sm" className="border animate-slideDown">
-          <CardBody className="space-y-4 p-4 sm:p-6">
+      <Card shadow="sm" className="border animate-slideDown">
+        <CardBody className="space-y-4 p-4 sm:p-6">
             <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
               <h2 className="text-xl font-semibold text-primary-900">
                 Add New Payment
@@ -963,7 +991,8 @@ export default function PaymentDashboard() {
               Payment List
             </h3>
             <p className="text-sm text-campus-text-secondary">
-              Each payment card expands into responsive student assignments.
+              Review payment status, then open each record for assigned students
+              and exportable reporting.
             </p>
           </div>
         </CardHeader>
@@ -971,9 +1000,11 @@ export default function PaymentDashboard() {
           {paymentsLoading ? (
             <CampusCardListSkeleton rows={3} />
           ) : sortedFilteredPayments.length === 0 ? (
-            <p className="text-sm text-campus-text-secondary">
-              No payments found.
-            </p>
+            <ECEmptyState
+              title="No payments found"
+              description="Try another keyword or date filter, or create a new payment record."
+              compact
+            />
           ) : (
             sortedFilteredPayments.map((p) => {
               const rows = paymentStudents[p.id] ?? [];
@@ -1043,22 +1074,41 @@ export default function PaymentDashboard() {
                 });
 
               return (
-                <Card key={p.id} shadow="sm" className="mb-4 border">
+                <Card
+                  key={p.id}
+                  shadow="none"
+                  className="mb-4 border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+                >
                   <CardBody className="space-y-4 p-4 sm:p-5">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div>
-                        <h4 className="font-semibold text-campus-text-primary">
+                        <h4 className="text-lg font-semibold text-campus-text-primary">
                           {p.title}
                         </h4>
                         <p className="text-sm text-campus-text-secondary">
                           Reference: {p.ref}
                         </p>
 
-                        <div className="mt-2 flex flex-wrap items-center gap-4 text-sm text-campus-text-secondary">
-                          <span>Date: {formatDate(p.date)}</span>
-                          <span>Amount: {formatCurrency(p.amount)}</span>
-                          <span>Target: {p.totalStudents} student(s)</span>
-                        </div>
+                        <ECStatusChipGroup
+                          className="mt-3"
+                          items={[
+                            {
+                              label: "Date",
+                              value: formatDate(p.date),
+                              tone: "blue",
+                            },
+                            {
+                              label: "Amount",
+                              value: formatCurrency(p.amount),
+                              tone: "purple",
+                            },
+                            {
+                              label: "Targets",
+                              value: `${p.totalStudents} student(s)`,
+                              tone: "slate",
+                            },
+                          ]}
+                        />
                       </div>
 
                       <div className="flex flex-col items-start sm:items-end gap-2">
@@ -1074,7 +1124,9 @@ export default function PaymentDashboard() {
                           }
                           className="px-4 text-xs"
                         >
-                          {expandedPayment === p.id ? "Hide Info" : "Info"}
+                          {expandedPayment === p.id
+                            ? "Hide details"
+                            : "Open payment"}
                         </Button>
                       </div>
                     </div>
@@ -1229,11 +1281,13 @@ export default function PaymentDashboard() {
                         {expandedStudentsLoading && rows.length === 0 ? (
                           <CampusCardListSkeleton rows={2} />
                         ) : rows.length === 0 ? (
-                          <p className="text-sm text-campus-text-secondary">
-                            No student assignments yet.
-                          </p>
+                          <ECEmptyState
+                            title="No student assignments yet"
+                            description="This payment currently has no matching students under the selected filters."
+                            compact
+                          />
                         ) : (
-                          <CampusDataTable
+                          <ECDataTable
                             ariaLabel={`Students assigned to ${p.title}`}
                             columns={paymentStudentColumns}
                             items={filteredSortedStudentRows}

@@ -2,12 +2,49 @@
 
 import { useRouter } from "next/navigation";
 import { Button } from "@heroui/button";
-import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Chip } from "@heroui/chip";
+import {
+  CreditCard,
+  FileStack,
+  LayoutDashboard,
+  Search,
+} from "lucide-react";
+import {
+  ECPageHeader,
+  ECQuickActionCard,
+  ECStatsGrid,
+  type ECStatItem,
+} from "@/components/ecmember";
 
-const DASHBOARD_METRICS = [
-  { label: "Total Students", value: 0, tone: "text-blue-600" },
-  { label: "Upcoming Events", value: 0, tone: "text-emerald-600" },
-  { label: "Pending Payments", value: 0, tone: "text-amber-600" },
+const DASHBOARD_METRICS: ECStatItem[] = [
+  {
+    label: "Total Students",
+    value: 0,
+    description: "No live data yet",
+    tone: "blue",
+    icon: Search,
+  },
+  {
+    label: "Upcoming Events",
+    value: 0,
+    description: "Waiting for sync",
+    tone: "amber",
+    icon: LayoutDashboard,
+  },
+  {
+    label: "Pending Payments",
+    value: 0,
+    description: "No records available",
+    tone: "red",
+    icon: CreditCard,
+  },
+  {
+    label: "Shared Documents",
+    value: 0,
+    description: "Waiting for sync",
+    tone: "purple",
+    icon: FileStack,
+  },
 ];
 
 const QUICK_LINKS = [
@@ -15,21 +52,29 @@ const QUICK_LINKS = [
     title: "Student Lookup",
     text: "Find student profiles and inspect individual status records.",
     href: "/ecmember/students",
+    cta: "Open student lookup",
+    icon: Search,
   },
   {
-    title: "Event Management",
+    title: "Events",
     text: "Create events, monitor files, and manage notifications.",
     href: "/ecmember/event",
+    cta: "Open events",
+    icon: LayoutDashboard,
   },
   {
     title: "Payments",
     text: "Track collection status and export reports for assigned students.",
     href: "/ecmember/payment",
+    cta: "Open payments",
+    icon: CreditCard,
   },
   {
     title: "Documents",
     text: "Upload, sort, and share the EC document library from one place.",
     href: "/ecmember/document",
+    cta: "Open documents",
+    icon: FileStack,
   },
 ];
 
@@ -38,79 +83,78 @@ export default function ECMemberDashboard() {
 
   return (
     <div className="space-y-5 sm:space-y-6">
-      <Card
-        shadow="sm"
-        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b32020] to-[#f18f4e] text-white"
-      >
-        <CardBody className="space-y-4 p-5 sm:p-8">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
-              EC Member
-            </p>
-            <h1 className="text-3xl font-black sm:text-4xl">
-              Operations Dashboard
-            </h1>
-            <p className="max-w-2xl text-sm text-white/80 sm:text-base">
-              Keep student operations, events, payments, and shared documents in
-              sync from one mobile-friendly workspace.
-            </p>
-          </div>
-        </CardBody>
-      </Card>
+      <ECPageHeader
+        title="Operations Dashboard"
+        description="Keep student operations, events, payments, and shared documents moving from one EC workspace that stays usable on phones, tablets, and desktop."
+        eyebrow="EC Member"
+        icon={LayoutDashboard}
+        variant="hero"
+        meta={
+          <>
+            <Chip variant="flat" className="bg-white/15 text-white">
+              Student lookup
+            </Chip>
+            <Chip variant="flat" className="bg-white/15 text-white">
+              Event workflow
+            </Chip>
+            <Chip variant="flat" className="bg-white/15 text-white">
+              Document sharing
+            </Chip>
+          </>
+        }
+      />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {DASHBOARD_METRICS.map((metric) => (
-          <Card key={metric.label} shadow="sm" className="border">
-            <CardBody className="p-5">
-              <p className="text-sm text-campus-text-secondary">
-                {metric.label}
-              </p>
-              <h2 className={`mt-2 text-3xl font-black ${metric.tone}`}>
-                {metric.value}
-              </h2>
-              <p className="mt-3 text-sm text-campus-text-secondary">
-                This tile is ready for live data whenever the backend feed is
-                wired in.
-              </p>
-            </CardBody>
-          </Card>
-        ))}
-      </div>
+      <ECStatsGrid items={DASHBOARD_METRICS} />
 
-      <Card shadow="sm" className="border">
-        <CardHeader className="px-5 pt-5">
-          <div>
-            <h2 className="text-xl font-bold text-campus-text-primary">
-              Quick access
-            </h2>
-            <p className="text-sm text-campus-text-secondary">
-              Jump into the modules EC members use most often.
-            </p>
-          </div>
-        </CardHeader>
-        <CardBody className="grid gap-4 p-5 md:grid-cols-2">
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold text-campus-text-primary">
+            Quick Access
+          </h2>
+          <p className="text-sm text-campus-text-secondary">
+            Jump into the EC modules you use most often.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {QUICK_LINKS.map((item) => (
-            <Card key={item.href} shadow="none" className="border bg-white">
-              <CardBody className="space-y-4 p-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-campus-text-primary">
-                    {item.title}
-                  </h3>
-                  <p className="mt-2 text-sm text-campus-text-secondary">
-                    {item.text}
-                  </p>
-                </div>
+            <ECQuickActionCard
+              key={item.href}
+              title={item.title}
+              description={item.text}
+              icon={item.icon}
+              meta={
+                item.href === "/ecmember/event" ? (
+                  <Chip size="sm" className="bg-blue-50 text-blue-700">
+                    Includes notifications
+                  </Chip>
+                ) : item.href === "/ecmember/document" ? (
+                  <Chip size="sm" className="bg-violet-50 text-violet-700">
+                    Shared file library
+                  </Chip>
+                ) : item.href === "/ecmember/payment" ? (
+                  <Chip size="sm" className="bg-amber-50 text-amber-700">
+                    Export-ready reports
+                  </Chip>
+                ) : (
+                  <Chip size="sm" className="bg-emerald-50 text-emerald-700">
+                    Student records
+                  </Chip>
+                )
+              }
+              action={
                 <Button
-                  className="w-full bg-[#7b0000] font-semibold text-white sm:w-auto"
+                  color={item.href === "/ecmember/event" ? "primary" : "default"}
+                  className="w-full sm:w-auto"
                   onPress={() => router.push(item.href)}
                 >
-                  Open module
+                  {item.cta}
                 </Button>
-              </CardBody>
-            </Card>
+              }
+            />
           ))}
-        </CardBody>
-      </Card>
+        </div>
+      </section>
     </div>
   );
 }

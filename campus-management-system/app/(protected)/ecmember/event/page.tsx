@@ -32,7 +32,7 @@ import {
 } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { Button } from "@heroui/button";
-import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { DatePicker } from "@heroui/date-picker";
 import { TimeInput } from "@heroui/date-input";
@@ -55,6 +55,23 @@ import { Select, SelectItem } from "@heroui/select";
 import { Switch } from "@heroui/switch";
 import { Tab, Tabs } from "@heroui/tabs";
 import { CampusCardListSkeleton } from "@/components/ui";
+import {
+  BellRing,
+  CalendarClock,
+  ClipboardList,
+  FileStack,
+  Users,
+} from "lucide-react";
+import {
+  ECEmptyState,
+  ECFilterBar,
+  ECPageHeader,
+  ECQuickActionCard,
+  ECStatsGrid,
+  ECStatusChipGroup,
+  type ECStatItem,
+  useIsBelowBreakpoint,
+} from "@/components/ecmember";
 import {
   deleteObject,
   getDownloadURL,
@@ -590,23 +607,9 @@ async function compressImageForUpload(file: File, maxBytes: number) {
   });
 }
 
-function StatMini({ label, value }: { label: string; value: number }) {
-  return (
-    <Card shadow="none" className="border bg-white/10 backdrop-blur">
-      <CardBody className="p-4 text-center">
-        <div className="text-2xl font-black leading-none text-white">
-          {value}
-        </div>
-        <div className="mt-2 text-xs font-medium uppercase tracking-wide text-white/70">
-          {label}
-        </div>
-      </CardBody>
-    </Card>
-  );
-}
-
 export default function EventDashboard() {
   const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
+  const isCompactViewport = useIsBelowBreakpoint(768);
   const [showAddEventForm, setShowAddEventForm] = useState(false);
   const [showNotificationForm, setShowNotificationForm] = useState(false);
   const [listTab, setListTab] = useState<"events" | "notifications">("events");
@@ -1476,6 +1479,40 @@ export default function EventDashboard() {
         0,
       ),
     [eventRegistrations],
+  );
+
+  const eventSummaryItems = useMemo<ECStatItem[]>(
+    () => [
+      {
+        label: "Total Events",
+        value: summary.total,
+        description: "All tracked EC events",
+        tone: "blue",
+        icon: CalendarClock,
+      },
+      {
+        label: "Upcoming",
+        value: summary.upcoming,
+        description: "Ready for preparation",
+        tone: "amber",
+        icon: ClipboardList,
+      },
+      {
+        label: "Ongoing",
+        value: summary.ongoing,
+        description: "Currently active",
+        tone: "green",
+        icon: Users,
+      },
+      {
+        label: "Completed",
+        value: summary.completed,
+        description: "Ready for review and cleanup",
+        tone: "slate",
+        icon: FileStack,
+      },
+    ],
+    [summary.completed, summary.ongoing, summary.total, summary.upcoming],
   );
   const isEditingEvent = Boolean(editingEventId);
   const isEditingNotification = Boolean(editingNotificationDispatchId);
@@ -2964,101 +3001,101 @@ export default function EventDashboard() {
   };
 
   return (
-    <div className="px-3 py-4 sm:p-6 space-y-4 sm:space-y-6">
-      <Card
-        shadow="sm"
-        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b81f1f] to-[#f09b4c] text-white"
-      >
-        <CardBody className="space-y-4 p-5 sm:p-8">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
-              EC Events
-            </p>
-            <h1 className="text-2xl font-black leading-tight sm:text-4xl">
-              Campus Event Management System
-            </h1>
-            <p className="max-w-2xl text-sm text-white/80 sm:text-base">
-              Organize, manage, and track campus events with a layout that still
-              works comfortably on a phone screen.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
+    <div className="space-y-5 sm:space-y-6">
+      <ECPageHeader
+        title="Campus Event Management System"
+        description="Organize events, manage notices, and review event files from an EC workspace that stays comfortable on phones, tablets, and desktop."
+        eyebrow="EC Events"
+        icon={CalendarClock}
+        variant="hero"
+        meta={
+          <>
             <Chip variant="flat" className="bg-white/15 text-white">
               {summary.total} events tracked
             </Chip>
             <Chip variant="flat" className="bg-white/15 text-white">
               {totalParticipants} participants
             </Chip>
-          </div>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-            <StatMini label="Total" value={summary.total} />
-            <StatMini label="Upcoming" value={summary.upcoming} />
-            <StatMini label="Ongoing" value={summary.ongoing} />
-            <StatMini label="Completed" value={summary.completed} />
-            <StatMini label="Participants" value={totalParticipants} />
-          </div>
-        </CardBody>
-      </Card>
+            <Chip variant="flat" className="bg-white/15 text-white">
+              {notifications.length} notices
+            </Chip>
+          </>
+        }
+      />
 
-      <Card shadow="sm" className="border">
-        <CardHeader className="px-5 pt-5">
-          <div>
-            <h2 className="text-lg font-semibold text-campus-text-primary">
-              Quick Actions
-            </h2>
-            <p className="text-sm text-campus-text-secondary">
-              Create events and notifications without losing context.
-            </p>
-          </div>
-        </CardHeader>
-        <CardBody className="p-4 pt-3">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <Button
-              className="text-sm font-semibold text-white"
-              style={{ backgroundColor: "#006FEE" }}
-              onPress={() =>
-                setShowNotificationForm((v) => {
-                  const next = !v;
-                  if (next) {
-                    setNotifError("");
-                    setNotifMsg("");
-                    resetNotificationComposer();
-                    setShowAddEventForm(false);
-                    setEditingEventId(null);
-                  }
-                  return next;
-                })
-              }
-            >
-              Create notification
-            </Button>
+      <ECStatsGrid items={eventSummaryItems} />
 
-            <Button
-              className="text-sm font-semibold text-white"
-              style={{ backgroundColor: "#7b0000" }}
-              onPress={() =>
-                setShowAddEventForm((v) => {
-                  const next = !v;
-                  if (next) {
-                    setEditingEventId(null);
-                    setEditingNotificationDispatchId(null);
-                    setSaveError("");
-                    setSaveMsg("");
-                    resetEventComposer();
-                    setShowNotificationForm(false);
-                  } else {
-                    setEditingEventId(null);
-                    setEditingNotificationDispatchId(null);
-                  }
-                  return next;
-                })
-              }
-            >
-              Create Event
-            </Button>
-          </div>
-        </CardBody>
-      </Card>
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-lg font-semibold text-campus-text-primary">
+            Quick Actions
+          </h2>
+          <p className="text-sm text-campus-text-secondary">
+            Keep the main creation flows visible without burying the lists
+            underneath.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <ECQuickActionCard
+            title="Create Event"
+            description="Open the event composer to schedule a new EC activity, set audience rules, and manage pre-registration settings."
+            icon={CalendarClock}
+            action={
+              <Button
+                className="w-full bg-[#7b0000] text-white sm:w-auto"
+                onPress={() =>
+                  setShowAddEventForm((v) => {
+                    const next = !v;
+                    if (next) {
+                      setEditingEventId(null);
+                      setEditingNotificationDispatchId(null);
+                      setSaveError("");
+                      setSaveMsg("");
+                      resetEventComposer();
+                      setShowNotificationForm(false);
+                    } else {
+                      setEditingEventId(null);
+                      setEditingNotificationDispatchId(null);
+                    }
+                    return next;
+                  })
+                }
+              >
+                Create Event
+              </Button>
+            }
+          />
+
+          <ECQuickActionCard
+            title="Create Notification"
+            description="Open the notification composer to schedule or update an EC notice without losing your event list context."
+            icon={BellRing}
+            action={
+              <Button
+                color="primary"
+                variant="flat"
+                className="w-full sm:w-auto"
+                onPress={() =>
+                  setShowNotificationForm((v) => {
+                    const next = !v;
+                    if (next) {
+                      setNotifError("");
+                      setNotifMsg("");
+                      resetNotificationComposer();
+                      setShowAddEventForm(false);
+                      setEditingEventId(null);
+                    }
+                    return next;
+                  })
+                }
+              >
+                Create Notification
+              </Button>
+            }
+          />
+        </div>
+      </section>
 
       {/* ADD EVENT FORM */}
       {showAddEventForm && (
@@ -4270,7 +4307,11 @@ export default function EventDashboard() {
       )}
 
       {/* LIST TABS */}
-      <div className="bg-white border rounded-xl shadow-sm p-4 sm:p-6">
+      <Card
+        shadow="none"
+        className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+      >
+        <CardBody className="p-4 sm:p-6">
         <Tabs
           aria-label="Dashboard lists"
           fullWidth
@@ -4279,9 +4320,11 @@ export default function EventDashboard() {
             setListTab(String(key) as "events" | "notifications")
           }
           classNames={{
-            tabList: "mb-4 w-full grid grid-cols-2",
-            tab: "w-full min-w-0 px-2",
-            tabContent: "truncate text-xs sm:text-sm",
+            tabList:
+              "mb-4 grid w-full grid-cols-2 rounded-2xl bg-slate-100 p-1",
+            cursor: "rounded-[14px] bg-white shadow-sm",
+            tab: "min-h-11 w-full min-w-0 rounded-[14px] px-2",
+            tabContent: "truncate text-xs font-medium sm:text-sm",
           }}
         >
           <Tab
@@ -4294,18 +4337,22 @@ export default function EventDashboard() {
             }
           >
             <div className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                <Input
-                  type="text"
-                  placeholder="Search events..."
-                  value={searchText}
-                  onValueChange={setSearchText}
-                  size="sm"
-                  className="w-full"
-                />
+              <ECFilterBar controlsClassName="grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="xl:col-span-2">
+                  <Input
+                    type="text"
+                    label="Search"
+                    placeholder="Search by title, venue, or audience"
+                    value={searchText}
+                    onValueChange={setSearchText}
+                    size="sm"
+                    className="w-full"
+                  />
+                </div>
 
                 <Select
                   aria-label="Filter events by status"
+                  label="Status"
                   selectedKeys={new Set([statusFilter])}
                   onSelectionChange={(keys) => {
                     if (keys === "all") return;
@@ -4332,6 +4379,7 @@ export default function EventDashboard() {
                 <Input
                   aria-label="Filter events by date"
                   type="date"
+                  label="Date"
                   value={eventDateFilter}
                   onValueChange={setEventDateFilter}
                   startContent={
@@ -4340,19 +4388,14 @@ export default function EventDashboard() {
                   size="sm"
                   className="w-full"
                 />
-              </div>
 
-              <div className="flex items-center">
                 <Dropdown placement="bottom-start">
                   <DropdownTrigger>
                     <Button
-                      variant="light"
-                      className="h-auto min-w-0 px-0 text-sm font-medium text-campus-text-primary data-[hover=true]:bg-transparent"
+                      variant="bordered"
+                      className="min-h-12 w-full justify-between text-sm font-medium"
                     >
-                      <span className="text-campus-text-secondary mr-1">
-                        Sort by:
-                      </span>
-                      <span>{eventSortLabel}</span>
+                      <span>Sort: {eventSortLabel}</span>
                       <FiChevronDown className="ml-1" />
                     </Button>
                   </DropdownTrigger>
@@ -4376,7 +4419,7 @@ export default function EventDashboard() {
                     </DropdownItem>
                   </DropdownMenu>
                 </Dropdown>
-              </div>
+              </ECFilterBar>
 
               {exportError && (
                 <p className="text-sm text-red-600">{exportError}</p>
@@ -4388,9 +4431,11 @@ export default function EventDashboard() {
               {eventsLoading ? (
                 <CampusCardListSkeleton rows={3} />
               ) : sortedFilteredEvents.length === 0 ? (
-                <p className="text-sm text-campus-text-secondary">
-                  No events match your filter/search.
-                </p>
+                <ECEmptyState
+                  title="No events found"
+                  description="Try another search term, lifecycle status, or exact event date."
+                  compact
+                />
               ) : (
                 <div className="space-y-3">
                   {paginatedEvents.map((ev) => {
@@ -4427,7 +4472,7 @@ export default function EventDashboard() {
                     return (
                       <div
                         key={ev.id}
-                        className="border rounded-lg p-3 sm:p-4 shadow-sm hover:bg-gray-50 transition cursor-pointer"
+                        className="cursor-pointer rounded-[24px] border border-border/70 bg-white/95 p-4 shadow-[var(--shadow-soft)] transition hover:bg-slate-50/80"
                         onClick={toggleEventDetails}
                       >
                         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -4462,7 +4507,7 @@ export default function EventDashboard() {
                                 toggleEventDetails();
                               }}
                             >
-                              {isEventExpanded ? "Hide Info" : "Info"}
+                              {isEventExpanded ? "Hide details" : "Open event"}
                             </Button>
                             {liveStatus === "completed" ? (
                               <Button
@@ -4517,7 +4562,24 @@ export default function EventDashboard() {
                           </p>
                         )}
 
-                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 mt-3 text-sm text-campus-text-secondary">
+                        <ECStatusChipGroup
+                          className="mt-3"
+                          items={[
+                            { label: "Date", value: ev.date, tone: "blue" },
+                            {
+                              label: "Time",
+                              value: `${ev.scheduledTime || ev.timeStart || "—"}${ev.timeEnd ? ` - ${ev.timeEnd}` : ""}`,
+                              tone: "amber",
+                            },
+                            {
+                              label: "Venue",
+                              value: ev.location || "—",
+                              tone: "slate",
+                            },
+                          ]}
+                        />
+
+                        <div className="hidden mt-3 flex-col gap-2 text-sm text-campus-text-secondary sm:flex-row sm:items-center sm:gap-4">
                           <span>📅 {ev.date}</span>
                           <span>
                             ⏰ {ev.scheduledTime || ev.timeStart || "—"}
@@ -4963,18 +5025,22 @@ export default function EventDashboard() {
             }
           >
             <div className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                <Input
-                  type="text"
-                  placeholder="Search notifications..."
-                  value={notificationSearchText}
-                  onValueChange={setNotificationSearchText}
-                  size="sm"
-                  className="w-full"
-                />
+              <ECFilterBar controlsClassName="grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="xl:col-span-2">
+                  <Input
+                    type="text"
+                    label="Search"
+                    placeholder="Search notifications..."
+                    value={notificationSearchText}
+                    onValueChange={setNotificationSearchText}
+                    size="sm"
+                    className="w-full"
+                  />
+                </div>
 
                 <Select
                   aria-label="Filter notifications by status"
+                  label="Status"
                   selectedKeys={new Set([notificationStatusFilter])}
                   onSelectionChange={(keys) => {
                     if (keys === "all") return;
@@ -4999,6 +5065,7 @@ export default function EventDashboard() {
                 <Input
                   aria-label="Filter notifications by date"
                   type="date"
+                  label="Date"
                   value={notificationDateFilter}
                   onValueChange={setNotificationDateFilter}
                   startContent={
@@ -5007,19 +5074,14 @@ export default function EventDashboard() {
                   size="sm"
                   className="w-full"
                 />
-              </div>
 
-              <div className="flex items-center">
                 <Dropdown placement="bottom-start">
                   <DropdownTrigger>
                     <Button
-                      variant="light"
-                      className="h-auto min-w-0 px-0 text-sm font-medium text-campus-text-primary data-[hover=true]:bg-transparent"
+                      variant="bordered"
+                      className="min-h-12 w-full justify-between text-sm font-medium"
                     >
-                      <span className="text-campus-text-secondary mr-1">
-                        Sort by:
-                      </span>
-                      <span>{notificationSortLabel}</span>
+                      <span>Sort: {notificationSortLabel}</span>
                       <FiChevronDown className="ml-1" />
                     </Button>
                   </DropdownTrigger>
@@ -5043,14 +5105,16 @@ export default function EventDashboard() {
                     </DropdownItem>
                   </DropdownMenu>
                 </Dropdown>
-              </div>
+              </ECFilterBar>
 
               {notificationsLoading ? (
                 <CampusCardListSkeleton rows={3} />
               ) : sortedFilteredNotifications.length === 0 ? (
-                <p className="text-sm text-campus-text-secondary">
-                  No notifications match your filter/search.
-                </p>
+                <ECEmptyState
+                  title="No notifications found"
+                  description="Try another search term, status filter, or exact date."
+                  compact
+                />
               ) : (
                 <div className="space-y-3">
                   {paginatedNotifications.map((item) => {
@@ -5065,7 +5129,7 @@ export default function EventDashboard() {
                     return (
                       <div
                         key={item.dispatchId}
-                        className="border rounded-lg p-3 sm:p-4 shadow-sm hover:bg-gray-50 transition cursor-pointer"
+                        className="cursor-pointer rounded-[24px] border border-border/70 bg-white/95 p-4 shadow-[var(--shadow-soft)] transition hover:bg-slate-50/80"
                         onClick={toggleNotificationDetails}
                       >
                         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -5097,7 +5161,7 @@ export default function EventDashboard() {
                                 toggleNotificationDetails();
                               }}
                             >
-                              {isExpanded ? "Hide Info" : "Info"}
+                              {isExpanded ? "Hide details" : "Open notice"}
                             </Button>
                             <Button
                               size="sm"
@@ -5156,14 +5220,15 @@ export default function EventDashboard() {
             </div>
           </Tab>
         </Tabs>
-      </div>
+        </CardBody>
+      </Card>
 
       <Modal
         isOpen={viewAllFilesModal.open}
         onOpenChange={(open) => {
           if (!open) closeViewAllFilesModal();
         }}
-        size="5xl"
+        size={isCompactViewport ? "full" : "5xl"}
         scrollBehavior="inside"
       >
         <ModalContent>

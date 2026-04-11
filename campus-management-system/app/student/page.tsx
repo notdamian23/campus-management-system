@@ -1,80 +1,39 @@
 "use client";
 
 import Link from "next/link";
-import {
-  FiBell,
-  FiCalendar,
-  FiCheckCircle,
-  FiChevronRight,
-} from "react-icons/fi";
-import { Button } from "@heroui/button";
-import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
-import { CampusCardListSkeleton, CampusMetricSkeleton } from "@/components/ui";
-import { CampusBadge } from "@/components/heroui";
+import { Button } from "@heroui/button";
 import {
-  StudentEvent,
-  StudentEventStatus,
+  BellRing,
+  CalendarRange,
+  CheckCircle2,
+  CreditCard,
+  GraduationCap,
+} from "lucide-react";
+import { CampusMetricSkeleton } from "@/components/ui";
+import {
+  StudentAccountStatusChip,
+  StudentCardStackSkeleton,
+  StudentEmptyState,
+  StudentEventCard,
+  StudentPageHeader,
+  StudentPageHeaderSkeleton,
+  StudentStatsGrid,
+  StudentNotificationCard,
+  buildStudentAudienceLabel,
+  formatStudentEventDate,
+  formatStudentRelativeTime,
+  useStudentPageErrorToast,
   useStudentPortal,
-} from "@/components/student/StudentPortalProvider";
+} from "@/components/student";
 
-function statusPill(status: StudentEventStatus) {
-  if (status === "Upcoming") {
-    return <CampusBadge status="upcoming">Upcoming</CampusBadge>;
+function getNotificationHref(type: string) {
+  if (type === "payment") return "/student/payment";
+  if (type === "upcoming" || type === "missed" || type === "preregister") {
+    return "/student/event";
   }
-  if (status === "Attended") {
-    return <CampusBadge status="completed">Attended</CampusBadge>;
-  }
-  if (status === "Missed") {
-    return <CampusBadge status="missed">Missed</CampusBadge>;
-  }
-  if (status === "Payment Due") {
-    return (
-      <Chip color="warning" variant="flat" className="font-semibold">
-        Payment Due
-      </Chip>
-    );
-  }
-
-  return (
-    <Chip variant="flat" className="font-semibold text-campus-text-primary">
-      Pre-registration
-    </Chip>
-  );
-}
-
-function formatEventDate(event: StudentEvent) {
-  if (event.eventDate) {
-    return event.eventDate.toLocaleString(undefined, {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  }
-  return event.date || "No date";
-}
-
-function toRelativeTime(date: Date) {
-  const diffMs = date.getTime() - Date.now();
-  const diffMin = Math.round(diffMs / 60000);
-
-  if (Math.abs(diffMin) < 60) {
-    if (diffMin === 0) return "just now";
-    if (diffMin > 0) return `in ${diffMin}m`;
-    return `${Math.abs(diffMin)}m ago`;
-  }
-
-  const diffHour = Math.round(diffMin / 60);
-  if (Math.abs(diffHour) < 24) {
-    if (diffHour > 0) return `in ${diffHour}h`;
-    return `${Math.abs(diffHour)}h ago`;
-  }
-
-  const diffDay = Math.round(diffHour / 24);
-  if (diffDay > 0) return `in ${diffDay}d`;
-  return `${Math.abs(diffDay)}d ago`;
+  return "/student/notifications";
 }
 
 export default function StudentDashboard() {
@@ -82,14 +41,17 @@ export default function StudentDashboard() {
     profile,
     events,
     notifications,
+    readNotificationIds,
     unreadNotificationsCount,
     loading,
     error,
   } = useStudentPortal();
 
-  const upcomingCount = events.filter(
-    (event) => event.lifecycle !== "completed",
-  ).length;
+  useStudentPageErrorToast(error, "student dashboard");
+
+  const readSet = new Set(readNotificationIds);
+
+  const upcomingCount = events.filter((event) => event.lifecycle !== "completed").length;
   const completedCount = events.filter(
     (event) => event.lifecycle === "completed",
   ).length;
@@ -110,238 +72,201 @@ export default function StudentDashboard() {
   const recentNotifications = notifications.slice(0, 3);
 
   return (
-    <div className="space-y-5 sm:space-y-8">
-      <Card
-        shadow="sm"
-        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#bb2020] to-[#f19b4c] text-white"
-      >
-        <CardBody className="flex flex-col gap-5 p-5 sm:p-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
-                Student Dashboard
-              </p>
-              <h1 className="text-2xl font-black sm:text-3xl">
-                Welcome back
-                {profile?.studentName ? `, ${profile.studentName}` : ""}!
-              </h1>
-              <p className="text-sm text-white/80 sm:text-base">
-                Here is what is happening today.
-              </p>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <Chip variant="flat" className="bg-white/15 text-white">
+    <div className="space-y-5 sm:space-y-6">
+      {loading && !profile ? (
+        <StudentPageHeaderSkeleton hero />
+      ) : (
+        <StudentPageHeader
+          variant="hero"
+          icon={GraduationCap}
+          title={`Welcome back${profile?.studentName ? `, ${profile.studentName}` : ""}.`}
+          description="Track your events, payments, and notices in one mobile-friendly CAMPUS student portal designed for quick daily check-ins."
+          meta={
+            <>
+              <Chip className="border border-white/20 bg-white/10 text-white">
                 {profile?.course || "Unassigned"}
               </Chip>
-              <Chip variant="flat" className="bg-white/15 text-white">
+              <Chip className="border border-white/20 bg-white/10 text-white">
                 {profile?.year || "Unassigned"}
               </Chip>
-              <Chip
-                variant="flat"
-                className={
+              <StudentAccountStatusChip
+                status={profile?.accountStatus || "Active"}
+                helperText={
                   profile?.accountStatus === "Inactive"
-                    ? "bg-white text-[#7b0000]"
-                    : "bg-emerald-100 text-emerald-900"
+                    ? "Approach EC member to make your account active."
+                    : "Your account is active and can access current student features."
                 }
-              >
-                Account: {profile?.accountStatus || "Active"}
-              </Chip>
-            </div>
-          </div>
-
-          {loading ? (
-            <CampusMetricSkeleton
-              count={3}
-              className="sm:grid-cols-3 xl:grid-cols-3 lg:min-w-[420px]"
-            />
-          ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:min-w-[420px]">
-              <Card
-                shadow="none"
-                className="border border-white/20 bg-white/10 text-white"
-              >
-                <CardBody className="p-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15">
-                      <FiCalendar size={18} />
-                    </div>
-                    <div>
-                      <p className="text-sm text-white/70">Upcoming Events</p>
-                      <h2 className="text-3xl font-black">{upcomingCount}</h2>
-                    </div>
-                  </div>
-                </CardBody>
-              </Card>
-              <Card
-                shadow="none"
-                className="border border-white/20 bg-white/10 text-white"
-              >
-                <CardBody className="p-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15">
-                      <FiCheckCircle size={18} />
-                    </div>
-                    <div>
-                      <p className="text-sm text-white/70">Completed Events</p>
-                      <h2 className="text-3xl font-black">{completedCount}</h2>
-                    </div>
-                  </div>
-                </CardBody>
-              </Card>
-              <Card
-                shadow="none"
-                className="border border-white/20 bg-white/10 text-white"
-              >
-                <CardBody className="p-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15">
-                      <FiBell size={18} />
-                    </div>
-                    <div>
-                      <p className="text-sm text-white/70">
-                        Unread Notifications
-                      </p>
-                      <h2 className="text-3xl font-black">
-                        {unreadNotificationsCount}
-                      </h2>
-                    </div>
-                  </div>
-                </CardBody>
-              </Card>
-            </div>
-          )}
-        </CardBody>
-      </Card>
-
-      {error && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          {error}
-        </div>
+              />
+            </>
+          }
+        />
       )}
 
-      <Card shadow="sm" className="border">
-        <CardHeader className="flex flex-col items-start gap-3 px-5 pt-5 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-campus-text-primary">
-              Events Overview
-            </h2>
-            <p className="text-sm text-campus-text-secondary">
-              Your next and most recent event updates in one place.
-            </p>
-          </div>
+      {loading ? (
+        <CampusMetricSkeleton />
+      ) : (
+        <StudentStatsGrid
+          items={[
+            {
+              label: "Upcoming Events",
+              value: upcomingCount,
+              description: "Visible activities that still need your attention.",
+              tone: "amber",
+              icon: CalendarRange,
+            },
+            {
+              label: "Completed Events",
+              value: completedCount,
+              description: "Finished events still available in your history.",
+              tone: "green",
+              icon: CheckCircle2,
+            },
+            {
+              label: "Unread Notifications",
+              value: unreadNotificationsCount,
+              description: "New notices from events, payments, and EC updates.",
+              tone: unreadNotificationsCount > 0 ? "red" : "blue",
+              icon: BellRing,
+            },
+            {
+              label: "Payment Notices",
+              value: notifications.filter((item) => item.type === "payment").length,
+              description: "Payment-related notices surfaced in your portal.",
+              tone: "blue",
+              icon: CreditCard,
+            },
+          ]}
+        />
+      )}
 
-          <Link href="/student/event">
-            <Button
-              variant="flat"
-              className="bg-[#7b0000] font-semibold text-white"
-              endContent={<FiChevronRight size={16} />}
-            >
-              View All
-            </Button>
-          </Link>
-        </CardHeader>
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,1fr)]">
+        <Card
+          shadow="none"
+          className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+        >
+          <CardBody className="space-y-4 p-5">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1">
+                <h2 className="text-lg font-semibold text-campus-text-primary">
+                  Events Overview
+                </h2>
+                <p className="text-sm text-campus-text-secondary">
+                  Your next and most recent event updates in one place.
+                </p>
+              </div>
 
-        <CardBody className="space-y-4 p-5 pt-3">
-          {loading ? (
-            <CampusCardListSkeleton rows={3} />
-          ) : eventOverview.length === 0 ? (
-            <p className="text-sm text-campus-text-secondary">
-              No events available for your course/year yet.
-            </p>
-          ) : (
-            eventOverview.map((event) => (
-              <Card key={event.id} shadow="none" className="border bg-gray-50">
-                <CardBody className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="text-base font-semibold text-campus-text-primary">
-                        {event.title}
-                      </h3>
-                      {statusPill(event.status)}
-                    </div>
-                    <p className="mt-2 text-sm text-campus-text-secondary">
-                      {formatEventDate(event)}
-                    </p>
-                    <p className="mt-1 text-xs text-campus-text-tertiary">
-                      {event.location || "TBA"}
-                    </p>
-                  </div>
-
-                  <Chip
-                    variant="bordered"
-                    className="font-medium text-campus-text-secondary"
-                  >
-                    {event.course || "All Courses"}
-                  </Chip>
-                </CardBody>
-              </Card>
-            ))
-          )}
-        </CardBody>
-      </Card>
-
-      <Card shadow="sm" className="border">
-        <CardHeader className="flex flex-col items-start gap-3 px-5 pt-5 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-lg font-semibold text-campus-text-primary">
-                Recent Notifications
-              </h3>
-              <Chip
-                color={unreadNotificationsCount > 0 ? "danger" : "success"}
-                variant="flat"
-              >
-                {loading ? "-" : unreadNotificationsCount} unread
-              </Chip>
+              <Link href="/student/event">
+                <Button color="primary" variant="flat">
+                  Open events
+                </Button>
+              </Link>
             </div>
-            <p className="text-sm text-campus-text-secondary">
-              Latest updates from your events, payments, and EC notices.
-            </p>
-          </div>
 
-          <Link href="/student/notifications">
-            <Button
-              variant="flat"
-              className="bg-gray-100 font-semibold text-campus-text-primary"
-            >
-              Open Notifications
-            </Button>
-          </Link>
-        </CardHeader>
+            {loading ? (
+              <StudentCardStackSkeleton rows={3} />
+            ) : eventOverview.length === 0 ? (
+              <StudentEmptyState
+                title="No upcoming events yet"
+                description="When events become available for your course, year, or account, they will appear here."
+                icon={CalendarRange}
+                compact
+              />
+            ) : (
+              <div className="space-y-3">
+                {eventOverview.map((event) => (
+                  <StudentEventCard
+                    key={event.id}
+                    title={event.title}
+                    description={event.description}
+                    dateLabel={formatStudentEventDate(event.eventDate, event.date)}
+                    timeLabel={event.scheduledTime}
+                    location={event.location}
+                    status={event.status}
+                    audienceLabel={buildStudentAudienceLabel(
+                      event.course,
+                      event.yearLevel,
+                    )}
+                    action={
+                      <Link href="/student/event">
+                        <Button color="primary" variant="light" size="sm">
+                          View details
+                        </Button>
+                      </Link>
+                    }
+                  />
+                ))}
+              </div>
+            )}
+          </CardBody>
+        </Card>
 
-        <CardBody className="space-y-3 p-5 pt-3">
-          {loading ? (
-            <CampusCardListSkeleton rows={3} />
-          ) : recentNotifications.length === 0 ? (
-            <p className="text-sm text-campus-text-secondary">
-              You are all caught up.
-            </p>
-          ) : (
-            recentNotifications.map((item) => (
-              <Card key={item.id} shadow="none" className="border bg-white">
-                <CardBody className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <p className="font-semibold text-campus-text-primary">
-                      {item.title}
-                    </p>
-                    <p className="mt-1 text-sm text-campus-text-secondary">
-                      {item.description}
-                    </p>
-                  </div>
-
+        <Card
+          shadow="none"
+          className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+        >
+          <CardBody className="space-y-4 p-5">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-lg font-semibold text-campus-text-primary">
+                    Recent Notifications
+                  </h2>
                   <Chip
-                    variant="bordered"
-                    className="font-medium text-campus-text-secondary"
+                    size="sm"
+                    className={
+                      unreadNotificationsCount > 0
+                        ? "bg-rose-100 text-rose-700"
+                        : "bg-emerald-100 text-emerald-700"
+                    }
                   >
-                    {toRelativeTime(item.date)}
+                    {unreadNotificationsCount} unread
                   </Chip>
-                </CardBody>
-              </Card>
-            ))
-          )}
-        </CardBody>
-      </Card>
+                </div>
+                <p className="text-sm text-campus-text-secondary">
+                  Latest updates from events, payments, and EC notices.
+                </p>
+              </div>
+
+              <Link href="/student/notifications">
+                <Button variant="light">Open notifications</Button>
+              </Link>
+            </div>
+
+            {loading ? (
+              <StudentCardStackSkeleton rows={3} />
+            ) : recentNotifications.length === 0 ? (
+              <StudentEmptyState
+                title="No notifications right now"
+                description="You are all caught up. New event, payment, and EC updates will appear here."
+                icon={BellRing}
+                tone="green"
+                compact
+              />
+            ) : (
+              <div className="space-y-3">
+                {recentNotifications.map((item) => (
+                  <StudentNotificationCard
+                    key={item.id}
+                    title={item.title}
+                    description={item.description}
+                    type={item.type}
+                    displayDate={item.displayDate}
+                    relativeDate={formatStudentRelativeTime(item.date)}
+                    unread={!readSet.has(item.id)}
+                    primaryAction={
+                      <Link href={getNotificationHref(item.type)}>
+                        <Button color="primary" variant="flat" size="sm">
+                          Open
+                        </Button>
+                      </Link>
+                    }
+                  />
+                ))}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      </div>
     </div>
   );
 }

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FiChevronDown, FiPlus } from "react-icons/fi";
 import { Button } from "@heroui/button";
-import { Card, CardBody, CardHeader } from "@heroui/card";
+import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import {
   Dropdown,
@@ -17,8 +17,16 @@ import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
 import {
+  BookMarked,
+  BookOpenText,
+  Fingerprint,
+  GraduationCap,
+  ShieldCheck,
+  UserRoundSearch,
+  Users,
+} from "lucide-react";
+import {
   CampusCardListSkeleton,
-  CampusDataTable,
   type CampusTableColumn,
 } from "@/components/ui";
 import { getFunctions, httpsCallable } from "firebase/functions";
@@ -35,7 +43,17 @@ import {
   setDoc,
   where,
 } from "firebase/firestore";
-import { FingerprintEnrollmentManager } from "@/components/ecmember/FingerprintEnrollmentManager";
+import {
+  ECDataTable,
+  ECEmptyState,
+  ECFilterBar,
+  ECPageHeader,
+  ECStatsGrid,
+  type ECStatItem,
+  FingerprintEnrollmentManager,
+  useECPageErrorToast,
+  useIsBelowBreakpoint,
+} from "@/components/ecmember";
 import { app, db } from "@/lib/firebase";
 import { campusToast } from "@/lib/toast";
 
@@ -169,8 +187,8 @@ const PHONE_BREAKPOINT_PX = 768;
 const STATUS_ITEMS_PER_PAGE = 4;
 
 const studentColumns: CampusTableColumn<Student>[] = [
-  { key: "id", label: "Student ID" },
   { key: "name", label: "Name" },
+  { key: "id", label: "Student ID" },
   { key: "course", label: "Course" },
   { key: "year", label: "Year Level" },
   { key: "status", label: "Status" },
@@ -472,6 +490,7 @@ function formatEventDate(date: Date | null, fallback: string) {
 
 export default function ECStudentLookup() {
   const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
+  const isCompactViewport = useIsBelowBreakpoint(1024);
 
   const [queryText, setQueryText] = useState<string>("");
   const [courseFilter, setCourseFilter] = useState<string>("");
@@ -1072,6 +1091,8 @@ export default function ECStudentLookup() {
     updateStudentState,
   ]);
 
+  useECPageErrorToast(loadError, "student lookup");
+
   const summaryCards = useMemo(
     () => [
       { label: "Total Students", count: students.length },
@@ -1102,6 +1123,43 @@ export default function ECStudentLookup() {
       },
     ],
     [students],
+  );
+
+  const summaryItems = useMemo<ECStatItem[]>(
+    () =>
+      summaryCards.map((item, index) => ({
+        label: item.label,
+        value: item.count,
+        description:
+          item.label === "Total Students"
+            ? "Engineering roster visibility"
+            : "Active roster count",
+        tone:
+          index === 0
+            ? "blue"
+            : index === 1
+              ? "amber"
+              : index === 2
+                ? "green"
+                : index === 3
+                  ? "purple"
+                  : index === 4
+                    ? "blue"
+                    : "slate",
+        icon:
+          item.label === "Total Students"
+            ? Users
+            : item.label === "Mechanical"
+              ? BookMarked
+              : item.label === "Electrical"
+                ? ShieldCheck
+                : item.label === "Electronics"
+                  ? Fingerprint
+                  : item.label === "Computer"
+                    ? BookOpenText
+                    : GraduationCap,
+      })),
+    [summaryCards],
   );
 
   const clearFilters = () => {
@@ -1288,71 +1346,56 @@ export default function ECStudentLookup() {
   }
 
   return (
-    <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
-      <Card
-        shadow="sm"
-        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b71f1f] to-[#f09a4a] text-white"
-      >
-        <CardBody className="space-y-4 p-5 sm:p-8">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
-              EC Students
-            </p>
-            <h1 className="text-3xl font-black sm:text-4xl">
-              Engineering Student Management System
-            </h1>
-            <p className="max-w-2xl text-sm text-white/80 sm:text-base">
-              Search the roster, filter by program or year, and open each
-              student profile without losing mobile usability.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
+    <div className="space-y-5 sm:space-y-6">
+      <ECPageHeader
+        title="Engineering Student Management System"
+        description="Search the roster, narrow the view by course or year, and open each student record from a layout that stays readable on desktop and mobile."
+        eyebrow="EC Students"
+        icon={UserRoundSearch}
+        variant="hero"
+        meta={
+          <>
             <Chip variant="flat" className="bg-white/15 text-white">
               {students.length} students loaded
             </Chip>
             <Chip variant="flat" className="bg-white/15 text-white">
-              {filtered.length} matching current filters
+              {filtered.length} matching filters
             </Chip>
-          </div>
-        </CardBody>
-      </Card>
+          </>
+        }
+      />
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        {summaryCards.map((item) => (
-          <Card key={item.label} shadow="sm" className="border">
-            <CardBody className="p-4 text-center">
-              <div className="text-2xl font-black text-campus-text-primary">
-                {item.count}
-              </div>
-              <p className="text-sm text-campus-text-secondary">{item.label}</p>
-            </CardBody>
-          </Card>
-        ))}
-      </div>
+      <ECStatsGrid items={summaryItems} />
 
-      <Card shadow="sm" className="border">
-        <CardHeader className="px-5 pt-5">
-          <div>
-            <h2 className="text-lg font-semibold text-campus-text-primary">
-              Roster Filters
-            </h2>
-            <p className="text-sm text-campus-text-secondary">
-              Built to stay readable on both desktop and phone screens.
-            </p>
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-lg font-semibold text-campus-text-primary">
+            Roster Filters
+          </h2>
+          <p className="text-sm text-campus-text-secondary">
+            Search is kept visually primary, while course and year filters stay
+            touch-friendly on smaller screens.
+          </p>
+        </div>
+
+        <ECFilterBar
+          controlsClassName="grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6"
+        >
+          <div className="xl:col-span-2">
+            <Input
+              aria-label="Search students"
+              type="text"
+              label="Search"
+              placeholder="Search student name, school ID, or email"
+              value={queryText}
+              onValueChange={setQueryText}
+              className="w-full"
+            />
           </div>
-        </CardHeader>
-        <CardBody className="grid grid-cols-1 gap-3 p-5 pt-3 xl:grid-cols-[minmax(0,1.3fr)_220px_180px_auto_auto_auto] xl:items-end">
-          <Input
-            aria-label="Search students"
-            type="text"
-            placeholder="Search student name, student ID, or email..."
-            value={queryText}
-            onValueChange={setQueryText}
-            className="w-full"
-          />
 
           <Select
             aria-label="Filter by course"
+            label="Course"
             selectedKeys={new Set([courseFilter || "__all_courses__"])}
             onSelectionChange={(keys) => {
               if (keys === "all") return;
@@ -1370,6 +1413,7 @@ export default function ECStudentLookup() {
 
           <Select
             aria-label="Filter by year"
+            label="Year Level"
             selectedKeys={new Set([yearFilter || "__all_years__"])}
             onSelectionChange={(keys) => {
               if (keys === "all") return;
@@ -1388,17 +1432,19 @@ export default function ECStudentLookup() {
           <Button
             variant="bordered"
             onPress={clearFilters}
-            className="w-full xl:w-auto"
+            className="min-h-12 w-full font-medium"
           >
             Clear Filters
           </Button>
 
-          <FingerprintEnrollmentManager students={students} />
+          <div className="flex items-end">
+            <FingerprintEnrollmentManager students={students} />
+          </div>
 
           <Button
             onPress={() => setShowAddForm((prev) => !prev)}
             className={[
-              "w-full justify-center gap-2 text-sm font-medium text-white xl:w-auto",
+              "min-h-12 w-full justify-center gap-2 text-sm font-medium text-white",
               showAddForm
                 ? "bg-gray-600 hover:bg-gray-700"
                 : "bg-[#7b0000] hover:opacity-95",
@@ -1407,8 +1453,8 @@ export default function ECStudentLookup() {
             <FiPlus size={16} />
             {showAddForm ? "Cancel Add Student" : "Add Student"}
           </Button>
-        </CardBody>
-      </Card>
+        </ECFilterBar>
+      </section>
 
       {notice && (
         <div
@@ -1424,11 +1470,18 @@ export default function ECStudentLookup() {
       )}
 
       {showAddForm && (
-        <div className="bg-white rounded-lg shadow border p-5 space-y-4">
+        <Card
+          shadow="none"
+          className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+        >
+          <CardBody className="space-y-4 p-5">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">
+              <h2 className="text-lg font-semibold text-gray-900">
               Add Student Account
-            </h2>
+              </h2>
+              <p className="mt-1 text-sm text-campus-text-secondary">
+                Create a new student profile without leaving the roster view.
+              </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -1524,7 +1577,7 @@ export default function ECStudentLookup() {
             onPress={createStudentAccount}
             isDisabled={creating}
             className={[
-              "inline-flex items-center justify-center rounded-lg px-4 text-sm font-semibold",
+                "inline-flex items-center justify-center rounded-lg px-4 text-sm font-semibold",
               creating
                 ? "bg-gray-300 text-gray-700"
                 : "bg-[#7b0000] text-white hover:opacity-95",
@@ -1532,16 +1585,22 @@ export default function ECStudentLookup() {
           >
             {creating ? "Creating..." : "Create Student"}
           </Button>
-        </div>
+          </CardBody>
+        </Card>
       )}
 
       <div className="space-y-3 md:hidden">
         {loading && <CampusCardListSkeleton rows={3} />}
 
         {!loading && loadError && (
-          <Card shadow="sm" className="border border-red-200 bg-red-50">
-            <CardBody className="p-4 text-center text-sm text-red-700">
-              {loadError}
+          <Card shadow="none" className="border border-red-100 bg-red-50/80">
+            <CardBody className="p-4">
+              <ECEmptyState
+                title="Unable to load students"
+                description={loadError}
+                tone="red"
+                compact
+              />
             </CardBody>
           </Card>
         )}
@@ -1549,14 +1608,18 @@ export default function ECStudentLookup() {
         {!loading &&
           !loadError &&
           paginatedStudents.map((student) => (
-            <Card key={student.uid} shadow="sm" className="border">
-              <CardBody className="p-4 space-y-3">
+            <Card
+              key={student.uid}
+              shadow="none"
+              className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+            >
+              <CardBody className="space-y-3 p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-xs text-campus-text-secondary">
-                      Student ID
+                    <p className="text-base font-semibold text-campus-text-primary break-words">
+                      {student.name}
                     </p>
-                    <p className="text-sm font-semibold text-campus-text-primary break-all">
+                    <p className="text-xs text-campus-text-secondary break-all">
                       {student.id}
                     </p>
                   </div>
@@ -1567,21 +1630,19 @@ export default function ECStudentLookup() {
                     className="px-4 text-xs shrink-0"
                     aria-label={`Open status for ${student.name}`}
                   >
-                    Info
+                    Open profile
                   </Button>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="min-w-0">
-                    <p className="text-xs text-campus-text-secondary">Name</p>
+                    <p className="text-xs text-campus-text-secondary">Course</p>
                     <p className="text-sm text-campus-text-primary truncate">
-                      {student.name}
+                      {student.course}
                     </p>
                   </div>
                   <div className="min-w-0">
-                    <p className="text-xs text-campus-text-secondary">
-                      Year Level
-                    </p>
+                    <p className="text-xs text-campus-text-secondary">Year Level</p>
                     <p className="text-sm text-campus-text-primary">
                       {student.year}
                     </p>
@@ -1612,16 +1673,20 @@ export default function ECStudentLookup() {
           ))}
 
         {!loading && !loadError && filtered.length === 0 && (
-          <Card shadow="sm" className="border">
-            <CardBody className="p-4 text-center text-sm text-gray-500">
-              No students found.
+          <Card shadow="none" className="border border-border/70 bg-white/95">
+            <CardBody className="p-4">
+              <ECEmptyState
+                title="No students found"
+                description="Try another keyword, course, or year filter."
+                compact
+              />
             </CardBody>
           </Card>
         )}
       </div>
 
       <div className="hidden md:block">
-        <CampusDataTable
+        <ECDataTable
           ariaLabel="Engineering student roster"
           columns={studentColumns}
           items={loadError ? [] : paginatedStudents}
@@ -1633,6 +1698,27 @@ export default function ECStudentLookup() {
             loadError || "No students match the current filters."
           }
           renderCell={(student, columnKey) => {
+            if (columnKey === "name") {
+              return (
+                <div className="space-y-1">
+                  <p className="font-semibold text-campus-text-primary">
+                    {student.name}
+                  </p>
+                  <p className="text-xs text-campus-text-secondary">
+                    {student.email || "No email on record"}
+                  </p>
+                </div>
+              );
+            }
+
+            if (columnKey === "id") {
+              return (
+                <span className="text-sm text-campus-text-secondary">
+                  {student.id}
+                </span>
+              );
+            }
+
             if (columnKey === "course") {
               return (
                 <Chip
@@ -1670,7 +1756,7 @@ export default function ECStudentLookup() {
                     className="px-4 text-xs"
                     aria-label={`Open status for ${student.name}`}
                   >
-                    Info
+                    Open profile
                   </Button>
                 </div>
               );
@@ -1713,7 +1799,7 @@ export default function ECStudentLookup() {
             setUpdatingStudentUid(null);
           }
         }}
-        size="5xl"
+        size={isCompactViewport ? "full" : "5xl"}
         scrollBehavior="inside"
       >
         <ModalContent>
@@ -1808,9 +1894,11 @@ export default function ECStudentLookup() {
                   }
                   fullWidth
                   classNames={{
-                    tabList: "w-full grid grid-cols-3",
-                    tab: "w-full min-w-0 px-2",
-                    tabContent: "truncate text-xs sm:text-sm",
+                    tabList:
+                      "grid w-full grid-cols-3 rounded-2xl bg-slate-100 p-1",
+                    cursor: "rounded-[14px] bg-white shadow-sm",
+                    tab: "min-h-11 w-full min-w-0 rounded-[14px] px-2",
+                    tabContent: "truncate text-xs font-medium sm:text-sm",
                   }}
                 >
                   <Tab key="attended" title="Events Attended">

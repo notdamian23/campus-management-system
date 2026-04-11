@@ -5,7 +5,7 @@ import { Sidebar, NavItem } from "@/components/Sidebar";
 import {
   StudentPortalProvider,
   useStudentPortal,
-} from "@/components/student/StudentPortalProvider";
+} from "@/components/student";
 
 export default function StudentLayout({ children }: { children: ReactNode }) {
   return (
@@ -77,13 +77,16 @@ function StudentLayoutShell({ children }: { children: ReactNode }) {
           enableMobileDrawer
           titleSize="sm"
           logoSize={80}
+          contextLabel="Student Portal"
           showLogout
           showStudentAccountSwitch={canSwitchToEc}
           studentAccountHref="/ecmember"
           studentAccountLabel="EC Account"
         />
 
-        <main className="flex-1 min-w-0 p-3 sm:p-6 lg:p-10">{children}</main>
+        <main className="min-w-0 flex-1 p-4 sm:p-6 lg:p-8 xl:p-10">
+          {children}
+        </main>
       </div>
     </div>
   );

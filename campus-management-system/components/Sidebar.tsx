@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import clsx from "clsx";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
@@ -40,6 +41,7 @@ interface SidebarProps {
   enableMobileDrawer?: boolean;
   logoSize?: number;
   titleSize?: "sm" | "md" | "lg";
+  contextLabel?: string;
   showLogout?: boolean;
   showStudentAccountSwitch?: boolean;
   studentAccountHref?: string;
@@ -51,6 +53,7 @@ export function Sidebar({
   enableMobileDrawer = false,
   logoSize = 96,
   titleSize = "lg",
+  contextLabel,
   showLogout = false,
   showStudentAccountSwitch = false,
   studentAccountHref = "/student",
@@ -65,6 +68,11 @@ export function Sidebar({
     setMobileOpen(false);
   }, [pathname]);
 
+  const activeItem =
+    navItems.find(
+      (item) => pathname === item.href || pathname.startsWith(`${item.href}/`),
+    ) ?? navItems[0];
+
   const titleClasses = {
     sm: "text-3xl",
     md: "text-4xl",
@@ -72,33 +80,53 @@ export function Sidebar({
   };
 
   const NavLinks = () => (
-    <nav className="flex flex-col gap-2 px-4 mt-4">
+    <nav className="mt-4 flex flex-col gap-1.5 px-3">
       {navItems.map((item) => {
-        const isActive = pathname === item.href;
+        const isActive =
+          pathname === item.href || pathname.startsWith(`${item.href}/`);
 
         return (
           <Link
             key={item.href}
             href={item.href}
-            className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+            className={clsx(
+              "group flex items-center gap-3 rounded-2xl px-3 py-3.5 transition-all",
               isActive
-                ? "bg-primary-100 text-primary-600 font-semibold shadow-sm"
-                : "text-text-secondary hover:bg-bg-muted hover:text-text-primary"
-            }`}
-          >
-            {item.badge ? (
-              <Badge
-                content={item.badge.content}
-                color={item.badge.color || "danger"}
-                size="sm"
-                placement="top-right"
-              >
-                <span className="material-icons">{item.icon}</span>
-              </Badge>
-            ) : (
-              <span className="material-icons">{item.icon}</span>
+                ? "bg-primary-50 text-primary-700 shadow-sm ring-1 ring-primary-100"
+                : "text-campus-text-secondary hover:bg-white hover:text-campus-text-primary",
             )}
-            {item.label}
+          >
+            <span
+              className={clsx(
+                "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl transition-colors",
+                isActive
+                  ? "bg-primary-100 text-primary-700"
+                  : "bg-slate-100 text-campus-text-secondary group-hover:bg-slate-200 group-hover:text-campus-text-primary",
+              )}
+            >
+              {item.badge ? (
+                <Badge
+                  content={item.badge.content}
+                  color={item.badge.color || "danger"}
+                  size="sm"
+                  placement="top-right"
+                >
+                  <span className="material-icons">{item.icon}</span>
+                </Badge>
+              ) : (
+                <span className="material-icons">{item.icon}</span>
+              )}
+            </span>
+
+            <div className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-semibold">
+                {item.label}
+              </span>
+            </div>
+
+            {isActive ? (
+              <span className="h-2.5 w-2.5 rounded-full bg-primary-500" />
+            ) : null}
           </Link>
         );
       })}
@@ -106,8 +134,8 @@ export function Sidebar({
   );
 
   const LogoSection = ({ size = logoSize }: { size?: number }) => (
-    <div className="w-full flex justify-center mt-6 mb-4">
-      <div className="flex flex-col items-center gap-3">
+    <div className="mb-4 mt-6 flex w-full justify-center px-4">
+      <div className="flex flex-col items-center gap-3 text-center">
         <Image
           src="/new campus-logo.jpg"
           alt="Campus Logo"
@@ -120,6 +148,11 @@ export function Sidebar({
         >
           CAMPUS
         </h2>
+        {contextLabel ? (
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-campus-text-secondary">
+            {contextLabel}
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -160,7 +193,7 @@ export function Sidebar({
     <>
       {/* Mobile Top Bar (only if drawer enabled) */}
       {enableMobileDrawer && (
-        <div className="sticky top-0 z-40 flex items-center justify-between bg-bg-main border-b border-border shadow-sm px-4 py-3 lg:hidden">
+        <div className="sticky top-0 z-40 flex items-center gap-3 border-b border-border/70 bg-white/90 px-3 py-3 shadow-sm backdrop-blur lg:hidden">
           <Button
             isIconOnly
             variant="bordered"
@@ -171,14 +204,27 @@ export function Sidebar({
             <FiMenu className="text-lg" />
           </Button>
 
-          <div className="font-black text-primary-500 text-xl">CAMPUS</div>
-          <div className="w-8" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
+              {contextLabel || "Campus Portal"}
+            </p>
+            <p className="truncate text-sm font-semibold text-campus-text-primary">
+              {activeItem?.label || "Workspace"}
+            </p>
+          </div>
+
+          <div className="rounded-2xl bg-primary-50 px-3 py-2 text-xs font-black uppercase tracking-[0.18em] text-primary-700">
+            CAMPUS
+          </div>
         </div>
       )}
 
       {/* Desktop Sidebar */}
       <aside
-        className={`${enableMobileDrawer ? "hidden lg:block" : ""} w-64 bg-bg-main shadow-lg border-r border-border min-h-[100dvh] flex flex-col relative`}
+        className={clsx(
+          enableMobileDrawer ? "hidden lg:flex" : "flex",
+          "relative min-h-[100dvh] w-[18.5rem] flex-col border-r border-border/70 bg-white/90 shadow-lg backdrop-blur",
+        )}
       >
         <LogoSection />
         <ScrollShadow hideScrollBar className="min-h-0 flex-1">
@@ -186,8 +232,13 @@ export function Sidebar({
           <AccountSwitchSection />
         </ScrollShadow>
         {showLogout && (
-          <div className="mt-auto px-4 pt-3 lg:absolute lg:bottom-2 lg:left-0 lg:right-0 lg:mt-0">
-            <LogoutButton className="w-full font-semibold" />
+          <div className="mt-auto border-t border-border/70 p-4">
+            <div className="rounded-[22px] bg-slate-50/80 p-3">
+              <p className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
+                Account
+              </p>
+              <LogoutButton className="w-full font-semibold" />
+            </div>
           </div>
         )}
       </aside>
@@ -201,12 +252,17 @@ export function Sidebar({
           hideCloseButton
           className="lg:hidden"
         >
-          <DrawerContent className="max-w-72">
+          <DrawerContent className="max-w-80">
             {(onClose) => (
               <>
-                <DrawerHeader className="flex items-center justify-between border-b border-border">
-                  <div className="font-black text-primary-500 text-2xl">
-                    CAMPUS
+                <DrawerHeader className="flex items-center justify-between border-b border-border/70">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
+                      {contextLabel || "Campus Portal"}
+                    </p>
+                    <div className="font-black text-2xl text-primary-500">
+                      CAMPUS
+                    </div>
                   </div>
                   <Button
                     isIconOnly
@@ -225,7 +281,7 @@ export function Sidebar({
                       paddingBottom: "max(8px, env(safe-area-inset-bottom))",
                     }}
                   >
-                    <div className="w-full flex justify-center mt-6 mb-2">
+                    <div className="mb-2 mt-6 flex w-full justify-center">
                       <Image
                         src="/new campus-logo.jpg"
                         alt="CAMPUS Logo"
@@ -240,11 +296,16 @@ export function Sidebar({
                       <AccountSwitchSection />
                     </ScrollShadow>
 
-                    {showLogout && (
-                      <div className="mt-auto px-4 pt-3">
-                        <LogoutButton className="w-full font-semibold" />
+                    {showLogout ? (
+                      <div className="mt-auto border-t border-border/70 px-4 pb-4 pt-3">
+                        <div className="rounded-[22px] bg-slate-50/80 p-3">
+                          <p className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
+                            Account
+                          </p>
+                          <LogoutButton className="w-full font-semibold" />
+                        </div>
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 </DrawerBody>
               </>

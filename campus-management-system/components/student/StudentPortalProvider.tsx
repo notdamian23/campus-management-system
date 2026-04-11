@@ -91,6 +91,7 @@ type StudentPortalContextValue = {
   events: StudentEvent[];
   payments: StudentPayment[];
   notifications: StudentNotification[];
+  readNotificationIds: string[];
   unreadNotificationsCount: number;
   registeredEventIds: string[];
   loading: boolean;
@@ -1082,6 +1083,7 @@ export function StudentPortalProvider({
       events,
       payments,
       notifications,
+      readNotificationIds,
       unreadNotificationsCount,
       registeredEventIds,
       loading,
@@ -1098,6 +1100,7 @@ export function StudentPortalProvider({
       events,
       payments,
       notifications,
+      readNotificationIds,
       unreadNotificationsCount,
       registeredEventIds,
       loading,

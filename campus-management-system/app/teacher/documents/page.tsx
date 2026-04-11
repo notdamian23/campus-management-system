@@ -2,18 +2,39 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@heroui/button";
-import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
+import { Tooltip } from "@heroui/tooltip";
 import {
-  CampusDataTable,
-  type CampusTableColumn,
-  CampusDetailSkeleton,
-  CampusMetricSkeleton,
-} from "@/components/ui";
-import { useTeacherPortal } from "@/components/teacher/TeacherPortalProvider";
+  FileImage,
+  FileStack,
+  FileText,
+  HardDrive,
+  ImageIcon,
+  Search,
+} from "lucide-react";
+import type { CampusTableColumn } from "@/components/ui";
+import { CampusMetricSkeleton } from "@/components/ui";
+import {
+  TeacherDataTable,
+  TeacherDetailPanelSkeleton,
+  TeacherFilterBar,
+  TeacherFilterBarSkeleton,
+  TeacherFileDetailsDrawer,
+  TeacherFileDetailsPanel,
+  TeacherPageHeader,
+  TeacherStatsGrid,
+  formatTeacherBytes,
+  formatTeacherDateTime,
+  getTeacherFileTone,
+  getTeacherToneClasses,
+  teacherFileKindLabel,
+  useIsBelowBreakpoint,
+  useTeacherPageErrorToast,
+  useTeacherPortal,
+} from "@/components/teacher";
 
 const FILES_PER_PAGE = 10;
 
@@ -22,14 +43,15 @@ const teacherDocumentColumns: CampusTableColumn<{
   name: string;
   kind: "docs" | "images";
   eventId: string;
+  contentType: string;
   size: number;
   createdAtMs: number;
 }>[] = [
-  { key: "name", label: "File" },
+  { key: "file", label: "File" },
   { key: "kind", label: "Type" },
   { key: "event", label: "Event" },
   { key: "size", label: "Size" },
-  { key: "createdAtMs", label: "Uploaded" },
+  { key: "uploaded", label: "Uploaded" },
   { key: "actions", label: "Actions", align: "end", className: "text-right" },
 ];
 
@@ -38,39 +60,11 @@ type SelectOption = {
   label: string;
 };
 
-function formatDate(ms: number) {
-  if (!ms) return "Unknown date";
-  return new Date(ms).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function toMegabytes(bytes: number) {
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
-
-function downloadTeacherFile(url: string, name: string) {
-  if (!url) return;
-
-  const params = new URLSearchParams({
-    url,
-    name: name || "event-file",
-  });
-  const anchor = document.createElement("a");
-  anchor.href = `/api/download?${params.toString()}`;
-  anchor.download = name || "event-file";
-  anchor.style.display = "none";
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-}
-
 export default function TeacherDocumentsPage() {
   const { events, files, loading, error } = useTeacherPortal();
+  const isCompactView = useIsBelowBreakpoint(1280);
+
+  useTeacherPageErrorToast(error, "teacher documents");
 
   const [searchText, setSearchText] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
@@ -85,7 +79,7 @@ export default function TeacherDocumentsPage() {
 
   const eventOptions = useMemo<SelectOption[]>(
     () => [
-      { key: "__all_events__", label: "All Events" },
+      { key: "__all_events__", label: "All events" },
       ...events
         .slice()
         .sort((a, b) => a.title.localeCompare(b.title))
@@ -107,15 +101,13 @@ export default function TeacherDocumentsPage() {
           eventTitle.toLowerCase().includes(search);
         const matchesType = typeFilter ? file.kind === typeFilter : true;
         const matchesEvent = eventFilter ? file.eventId === eventFilter : true;
+
         return matchesSearch && matchesType && matchesEvent;
       })
       .sort((a, b) => b.createdAtMs - a.createdAtMs);
   }, [eventFilter, eventMap, files, searchText, typeFilter]);
 
-  const totalPages = Math.max(
-    1,
-    Math.ceil(filteredFiles.length / FILES_PER_PAGE),
-  );
+  const totalPages = Math.max(1, Math.ceil(filteredFiles.length / FILES_PER_PAGE));
 
   const paginatedFiles = useMemo(() => {
     const start = (page - 1) * FILES_PER_PAGE;
@@ -131,6 +123,19 @@ export default function TeacherDocumentsPage() {
     ? (eventMap.get(selectedFile.eventId) ?? null)
     : null;
 
+  const totalStorageBytes = useMemo(
+    () => files.reduce((sum, file) => sum + file.size, 0),
+    [files],
+  );
+  const imageCount = useMemo(
+    () => files.filter((file) => file.kind === "images").length,
+    [files],
+  );
+  const documentCount = useMemo(
+    () => files.filter((file) => file.kind === "docs").length,
+    [files],
+  );
+
   useEffect(() => {
     setPage(1);
   }, [eventFilter, searchText, typeFilter]);
@@ -145,67 +150,80 @@ export default function TeacherDocumentsPage() {
       return;
     }
 
+    if (isCompactView) {
+      if (
+        selectedFileId &&
+        !filteredFiles.some((file) => file.id === selectedFileId)
+      ) {
+        setSelectedFileId(null);
+      }
+      return;
+    }
+
     if (
       !selectedFileId ||
       !filteredFiles.some((file) => file.id === selectedFileId)
     ) {
       setSelectedFileId(filteredFiles[0].id);
     }
-  }, [filteredFiles, selectedFileId]);
-
-  const totalStorageBytes = files.reduce((sum, file) => sum + file.size, 0);
-  const imageCount = files.filter((file) => file.kind === "images").length;
-  const documentCount = files.filter((file) => file.kind === "docs").length;
+  }, [filteredFiles, isCompactView, selectedFileId]);
 
   return (
     <div className="space-y-5 sm:space-y-6">
-      <Card shadow="sm">
-        <CardBody className="space-y-2 p-5 sm:p-6">
-          <h1 className="text-2xl font-bold text-primary-900 sm:text-3xl">
-            Event Documents
-          </h1>
-          <p className="text-sm text-campus-text-secondary">
-            Teachers can browse and download the files attached to campus
-            events, including event documents and photo documentation.
-          </p>
-          {error && <p className="text-sm text-red-600">{error}</p>}
-        </CardBody>
-      </Card>
+      <TeacherPageHeader
+        variant="hero"
+        icon={FileStack}
+        title="Event Documents"
+        description="Browse teacher-visible event files, including documents and photo evidence, with a cleaner review panel for metadata and downloads."
+      />
 
       {loading ? (
         <CampusMetricSkeleton />
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard
-            label="Total Files"
-            value={String(files.length)}
-            tone="text-blue-700"
-          />
-          <MetricCard
-            label="Documents"
-            value={String(documentCount)}
-            tone="text-emerald-700"
-          />
-          <MetricCard
-            label="Images"
-            value={String(imageCount)}
-            tone="text-amber-700"
-          />
-          <MetricCard
-            label="Storage"
-            value={toMegabytes(totalStorageBytes)}
-            tone="text-fuchsia-700"
-          />
-        </div>
+        <TeacherStatsGrid
+          items={[
+            {
+              label: "Total Files",
+              value: files.length,
+              description: "Documents and images attached to teacher-visible events.",
+              tone: "blue",
+              icon: FileStack,
+            },
+            {
+              label: "Documents",
+              value: documentCount,
+              description: "Event paperwork, reports, and other document uploads.",
+              tone: "green",
+              icon: FileText,
+            },
+            {
+              label: "Images",
+              value: imageCount,
+              description: "Photo evidence and image uploads tied to events.",
+              tone: "amber",
+              icon: ImageIcon,
+            },
+            {
+              label: "Storage",
+              value: formatTeacherBytes(totalStorageBytes),
+              description: "Combined storage footprint of teacher-visible event files.",
+              tone: "purple",
+              icon: HardDrive,
+            },
+          ]}
+        />
       )}
 
-      <Card shadow="sm">
-        <CardBody className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
+      {loading ? (
+        <TeacherFilterBarSkeleton />
+      ) : (
+        <TeacherFilterBar>
           <Input
             aria-label="Search event files"
             value={searchText}
             onValueChange={setSearchText}
-            placeholder="Search file name, type, or event..."
+            placeholder="Search file name, type, or event"
+            startContent={<Search size={16} className="text-campus-text-secondary" />}
           />
 
           <Select
@@ -220,7 +238,7 @@ export default function TeacherDocumentsPage() {
               }
             }}
           >
-            <SelectItem key="__all_types__">All Types</SelectItem>
+            <SelectItem key="__all_types__">All types</SelectItem>
             <SelectItem key="docs">Documents</SelectItem>
             <SelectItem key="images">Images</SelectItem>
           </Select>
@@ -240,193 +258,135 @@ export default function TeacherDocumentsPage() {
           >
             {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
           </Select>
+        </TeacherFilterBar>
+      )}
 
-          <div className="flex items-center justify-between rounded-xl border border-dashed border-border px-4 py-3 text-sm text-campus-text-secondary">
-            <span>Visible files</span>
-            <span className="font-semibold text-campus-text-primary">
-              {loading ? "-" : filteredFiles.length}
-            </span>
-          </div>
-        </CardBody>
-      </Card>
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(340px,0.95fr)]">
+        <div className="space-y-4">
+          <TeacherDataTable
+            ariaLabel="Teacher event files"
+            columns={teacherDocumentColumns}
+            items={paginatedFiles}
+            getRowKey={(file) => file.id}
+            emptyTitle="No files found"
+            emptyDescription="Try another search term, file type, or event filter to widen the teacher-visible file list."
+            selectionMode="single"
+            selectedKeys={selectedFileId ? new Set([selectedFileId]) : new Set([])}
+            onSelectionChange={(keys) => {
+              if (keys === "all") return;
+              const selected = Array.from(keys)[0];
+              setSelectedFileId(typeof selected === "string" ? selected : null);
+            }}
+            isLoading={loading}
+            renderCell={(file, columnKey) => {
+              if (columnKey === "file") {
+                const FileIcon = file.kind === "images" ? FileImage : FileText;
 
-      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,1fr)]">
-        <Card shadow="sm">
-          <CardBody className="p-4 sm:p-5">
-            <CampusDataTable
-              ariaLabel="Teacher event files"
-              columns={teacherDocumentColumns}
-              items={paginatedFiles}
-              isLoading={loading}
-              emptyTitle="No files match the current filters"
-              emptyDescription="Try another search term, type, or event."
-              renderCell={(file, columnKey) => {
-                if (columnKey === "name") {
-                  return (
-                    <div className="space-y-1">
-                      <p className="max-w-[280px] truncate font-semibold text-campus-text-primary">
-                        {file.name}
+                return (
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">
+                      <FileIcon size={16} />
+                    </div>
+                    <div className="min-w-0">
+                      <Tooltip content={file.name} placement="top-start">
+                        <p className="max-w-[260px] truncate font-semibold text-campus-text-primary">
+                          {file.name}
+                        </p>
+                      </Tooltip>
+                      <p className="text-xs text-campus-text-secondary">
+                        {file.contentType || "Unknown content type"}
                       </p>
-                      {selectedFileId === file.id ? (
-                        <Chip size="sm" color="primary" variant="flat">
-                          Selected
-                        </Chip>
-                      ) : null}
                     </div>
-                  );
-                }
+                  </div>
+                );
+              }
 
-                if (columnKey === "kind") {
-                  return (
-                    <Chip
+              if (columnKey === "kind") {
+                const toneClasses = getTeacherToneClasses(
+                  getTeacherFileTone(file.kind),
+                );
+
+                return (
+                  <Chip size="sm" className={toneClasses.chip}>
+                    {teacherFileKindLabel(file.kind)}
+                  </Chip>
+                );
+              }
+
+              if (columnKey === "event") {
+                return (
+                  <p className="max-w-[220px] truncate text-sm text-campus-text-secondary">
+                    {eventMap.get(file.eventId)?.title || "Unknown event"}
+                  </p>
+                );
+              }
+
+              if (columnKey === "size") {
+                return formatTeacherBytes(file.size);
+              }
+
+              if (columnKey === "uploaded") {
+                return formatTeacherDateTime(file.createdAtMs);
+              }
+
+              if (columnKey === "actions") {
+                const isSelected = selectedFileId === file.id;
+
+                return (
+                  <div className="flex justify-end">
+                    <Button
                       size="sm"
-                      className={
-                        file.kind === "images"
-                          ? "bg-amber-100 text-amber-700"
-                          : "bg-blue-100 text-blue-700"
-                      }
+                      color="primary"
+                      variant={isSelected ? "flat" : "light"}
+                      onPress={() => setSelectedFileId(file.id)}
                     >
-                      {file.kind === "images" ? "Image" : "Document"}
-                    </Chip>
-                  );
-                }
+                      {isCompactView ? "View file" : "View details"}
+                    </Button>
+                  </div>
+                );
+              }
 
-                if (columnKey === "event") {
-                  return eventMap.get(file.eventId)?.title || "Unknown event";
-                }
+              return null;
+            }}
+          />
 
-                if (columnKey === "size") {
-                  return toMegabytes(file.size);
-                }
+          {!loading && filteredFiles.length > FILES_PER_PAGE ? (
+            <div className="flex justify-center sm:justify-end">
+              <Pagination
+                showControls
+                page={page}
+                total={totalPages}
+                onChange={(nextPage) => setPage(nextPage)}
+              />
+            </div>
+          ) : null}
+        </div>
 
-                if (columnKey === "createdAtMs") {
-                  return formatDate(file.createdAtMs);
-                }
-
-                if (columnKey === "actions") {
-                  return (
-                    <div className="flex justify-end">
-                      <Button
-                        size="sm"
-                        variant={
-                          selectedFileId === file.id ? "flat" : "bordered"
-                        }
-                        color="primary"
-                        onPress={() => setSelectedFileId(file.id)}
-                      >
-                        {selectedFileId === file.id ? "Viewing" : "Open"}
-                      </Button>
-                    </div>
-                  );
-                }
-
-                return null;
-              }}
+        {loading ? (
+          <div className="hidden xl:block">
+            <TeacherDetailPanelSkeleton />
+          </div>
+        ) : (
+          <div className="hidden xl:block">
+            <TeacherFileDetailsPanel
+              file={selectedFile}
+              event={selectedFileEvent}
+              className="xl:sticky xl:top-6"
             />
-          </CardBody>
-        </Card>
-
-        <Card shadow="sm">
-          <CardBody className="space-y-4 p-5">
-            <h2 className="text-lg font-semibold text-campus-text-primary">
-              File Details
-            </h2>
-
-            {loading ? (
-              <CampusDetailSkeleton rows={5} />
-            ) : selectedFile ? (
-              <>
-                <div className="space-y-3">
-                  <DetailRow label="Name" value={selectedFile.name} />
-                  <DetailRow
-                    label="Event"
-                    value={selectedFileEvent?.title || "Unknown event"}
-                  />
-                  <DetailRow
-                    label="Type"
-                    value={
-                      selectedFile.kind === "images" ? "Image" : "Document"
-                    }
-                  />
-                  <DetailRow
-                    label="Uploaded"
-                    value={formatDate(selectedFile.createdAtMs)}
-                  />
-                  <DetailRow
-                    label="Size"
-                    value={toMegabytes(selectedFile.size)}
-                  />
-                  <DetailRow
-                    label="Content Type"
-                    value={selectedFile.contentType || "Unknown"}
-                  />
-                </div>
-
-                <Button
-                  color="primary"
-                  className="w-full"
-                  onPress={() =>
-                    downloadTeacherFile(
-                      selectedFile.downloadURL,
-                      selectedFile.name,
-                    )
-                  }
-                  isDisabled={!selectedFile.downloadURL}
-                >
-                  Download File
-                </Button>
-              </>
-            ) : (
-              <div className="rounded-2xl border border-dashed border-border px-4 py-10 text-center text-sm text-campus-text-secondary">
-                Select a file to review its details.
-              </div>
-            )}
-          </CardBody>
-        </Card>
+          </div>
+        )}
       </div>
 
-      {!loading && filteredFiles.length > FILES_PER_PAGE && (
-        <div className="flex justify-center">
-          <Pagination
-            showControls
-            page={page}
-            total={totalPages}
-            onChange={(nextPage) => setPage(nextPage)}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MetricCard({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: string;
-}) {
-  return (
-    <Card shadow="sm">
-      <CardBody className="p-5">
-        <p className="text-sm text-campus-text-secondary">{label}</p>
-        <h2 className={`mt-2 text-3xl font-bold ${tone}`}>{value}</h2>
-      </CardBody>
-    </Card>
-  );
-}
-
-function DetailRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-xs uppercase tracking-wide text-campus-text-secondary">
-        {label}
-      </p>
-      <p className="mt-1 break-words text-sm text-campus-text-primary">
-        {value}
-      </p>
+      <TeacherFileDetailsDrawer
+        file={selectedFile}
+        event={selectedFileEvent}
+        isOpen={isCompactView && Boolean(selectedFile)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedFileId(null);
+          }
+        }}
+      />
     </div>
   );
 }

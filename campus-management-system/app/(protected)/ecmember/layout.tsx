@@ -116,13 +116,18 @@ export default function ECLayout({ children }: Props) {
           enableMobileDrawer
           titleSize="sm"
           logoSize={80}
+          contextLabel={
+            viewerRole === "admin" ? "Admin Student Lookup" : "EC Workspace"
+          }
           showLogout
           showStudentAccountSwitch={viewerRole === "ec"}
           studentAccountHref="/student"
-          studentAccountLabel="Student Account"
+          studentAccountLabel="Student Portal"
         />
 
-        <main className="flex-1 min-w-0 p-3 sm:p-6 lg:p-10">{children}</main>
+        <main className="min-w-0 flex-1 p-4 sm:p-6 lg:p-8 xl:p-10">
+          {children}
+        </main>
       </div>
     </div>
   );

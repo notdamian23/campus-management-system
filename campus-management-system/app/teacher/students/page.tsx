@@ -2,24 +2,37 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@heroui/button";
-import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
-import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
-import { Tab, Tabs } from "@heroui/tabs";
 import {
-  CampusCardListSkeleton,
-  CampusDataTable,
-  type CampusTableColumn,
-  CampusMetricSkeleton,
-} from "@/components/ui";
-import { useTeacherPortal } from "@/components/teacher/TeacherPortalProvider";
+  ClipboardCheck,
+  GraduationCap,
+  Search,
+  TriangleAlert,
+  Users,
+} from "lucide-react";
+import type { CampusTableColumn } from "@/components/ui";
+import {
+  TeacherActivityChipGroup,
+  TeacherDataTable,
+  TeacherDetailPanelSkeleton,
+  TeacherFilterBar,
+  TeacherFilterBarSkeleton,
+  TeacherPageHeader,
+  TeacherStatsGrid,
+  TeacherStudentDetailPanel,
+  TeacherStudentDrawer,
+  useIsBelowBreakpoint,
+  useTeacherPageErrorToast,
+  useTeacherPortal,
+} from "@/components/teacher";
+import { CampusMetricSkeleton } from "@/components/ui";
 
 const STUDENTS_PER_PAGE = 8;
 
-const teacherStudentColumns: CampusTableColumn<{
+type TeacherStudentRow = {
   uid: string;
   schoolId: string;
   studentName: string;
@@ -28,12 +41,14 @@ const teacherStudentColumns: CampusTableColumn<{
   trackedEventIds: string[];
   presentCount: number;
   absentCount: number;
-}>[] = [
-  { key: "schoolId", label: "Student ID" },
-  { key: "studentName", label: "Name" },
+  recordedCount: number;
+};
+
+const teacherStudentColumns: CampusTableColumn<TeacherStudentRow>[] = [
+  { key: "student", label: "Student" },
   { key: "course", label: "Course" },
   { key: "year", label: "Year" },
-  { key: "summary", label: "Activity" },
+  { key: "activity", label: "Activity" },
   { key: "actions", label: "Actions", align: "end", className: "text-right" },
 ];
 
@@ -42,27 +57,11 @@ type SelectOption = {
   label: string;
 };
 
-type StudentTabKey = "tracked" | "present" | "absent";
-
-function formatEventDate(date: Date | null, fallback: string) {
-  if (!date) return fallback || "Date TBA";
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function statusChipClass(status: "Present" | "Absent") {
-  return status === "Present"
-    ? "bg-emerald-100 text-emerald-700"
-    : "bg-red-100 text-red-700";
-}
-
 export default function TeacherStudentsPage() {
   const { events, students, loading, error } = useTeacherPortal();
+  const isCompactView = useIsBelowBreakpoint(1280);
+
+  useTeacherPageErrorToast(error, "teacher student records");
 
   const [searchText, setSearchText] = useState("");
   const [courseFilter, setCourseFilter] = useState("");
@@ -71,11 +70,10 @@ export default function TeacherStudentsPage() {
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(
     null,
   );
-  const [selectedTab, setSelectedTab] = useState<StudentTabKey>("tracked");
 
   const courseOptions = useMemo<SelectOption[]>(
     () => [
-      { key: "__all_courses__", label: "All Courses" },
+      { key: "__all_courses__", label: "All courses" },
       ...Array.from(
         new Set(
           students
@@ -91,7 +89,7 @@ export default function TeacherStudentsPage() {
 
   const yearOptions = useMemo<SelectOption[]>(
     () => [
-      { key: "__all_years__", label: "All Years" },
+      { key: "__all_years__", label: "All years" },
       ...Array.from(
         new Set(
           students
@@ -118,6 +116,7 @@ export default function TeacherStudentsPage() {
         ? student.course === courseFilter
         : true;
       const matchesYear = yearFilter ? student.year === yearFilter : true;
+
       return matchesSearch && matchesCourse && matchesYear;
     });
   }, [courseFilter, searchText, students, yearFilter]);
@@ -142,25 +141,27 @@ export default function TeacherStudentsPage() {
     [events],
   );
 
-  const selectedStudentRegistered = useMemo(() => {
+  const selectedStudentEvents = useMemo(() => {
     if (!selectedStudent) return [];
-    const rows = selectedStudent.trackedEventIds
-      .map((eventId) => eventMap.get(eventId))
-      .filter((event): event is (typeof events)[number] => Boolean(event));
 
-    return rows.sort((a, b) => {
-      const aMs = a.eventDate?.getTime() ?? a.createdAtMs;
-      const bMs = b.eventDate?.getTime() ?? b.createdAtMs;
-      return bMs - aMs;
-    });
+    return selectedStudent.trackedEventIds
+      .map((eventId) => eventMap.get(eventId))
+      .filter((event): event is (typeof events)[number] => Boolean(event))
+      .sort((a, b) => {
+        const aMs = a.eventDate?.getTime() ?? a.createdAtMs;
+        const bMs = b.eventDate?.getTime() ?? b.createdAtMs;
+        return bMs - aMs;
+      });
   }, [eventMap, selectedStudent]);
 
   const selectedStudentAttendance = useMemo(() => {
     if (!selectedStudent) return [];
+
     return selectedStudent.attendanceRecords
       .map((record) => {
         const event = eventMap.get(record.eventId);
         if (!event) return null;
+
         return {
           event,
           status: record.status,
@@ -171,7 +172,7 @@ export default function TeacherStudentsPage() {
         (
           item,
         ): item is {
-          event: (typeof selectedStudentRegistered)[number];
+          event: (typeof selectedStudentEvents)[number];
           status: "Present" | "Absent" | "Recorded";
           updatedAtMs: number;
         } => Boolean(item),
@@ -179,16 +180,22 @@ export default function TeacherStudentsPage() {
       .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
   }, [eventMap, selectedStudent]);
 
-  const selectedStudentPresent = selectedStudentAttendance.filter(
-    (item) => item.status === "Present",
+  const totalMissed = useMemo(
+    () => students.reduce((sum, student) => sum + student.absentCount, 0),
+    [students],
   );
-  const selectedStudentAbsent = selectedStudentAttendance.filter(
-    (item) => item.status === "Absent",
+  const totalCourses = useMemo(
+    () =>
+      new Set(
+        students
+          .map((student) => student.course)
+          .filter((course) => course && course !== "Unassigned"),
+      ).size,
+    [students],
   );
-
-  const totalMissed = students.reduce(
-    (sum, student) => sum + student.absentCount,
-    0,
+  const totalRecords = useMemo(
+    () => students.reduce((sum, student) => sum + student.recordedCount, 0),
+    [students],
   );
 
   useEffect(() => {
@@ -200,68 +207,85 @@ export default function TeacherStudentsPage() {
   }, [totalPages]);
 
   useEffect(() => {
-    if (!selectedStudent) {
-      setSelectedTab("tracked");
+    if (filteredStudents.length === 0) {
+      setSelectedStudentId(null);
+      return;
     }
-  }, [selectedStudent]);
+
+    if (isCompactView) {
+      if (
+        selectedStudentId &&
+        !filteredStudents.some((student) => student.uid === selectedStudentId)
+      ) {
+        setSelectedStudentId(null);
+      }
+      return;
+    }
+
+    if (
+      !selectedStudentId ||
+      !filteredStudents.some((student) => student.uid === selectedStudentId)
+    ) {
+      setSelectedStudentId(filteredStudents[0].uid);
+    }
+  }, [filteredStudents, isCompactView, selectedStudentId]);
 
   return (
     <div className="space-y-5 sm:space-y-6">
-      <Card shadow="sm">
-        <CardBody className="space-y-2 p-5 sm:p-6">
-          <h1 className="text-2xl font-bold text-primary-900 sm:text-3xl">
-            Student Activity Monitor
-          </h1>
-          <p className="text-sm text-campus-text-secondary">
-            Teachers can review the students that appear in teacher-visible
-            attendance records, along with their recent event activity.
-          </p>
-          {error && <p className="text-sm text-red-600">{error}</p>}
-        </CardBody>
-      </Card>
+      <TeacherPageHeader
+        variant="hero"
+        icon={Users}
+        title="Student Activity Monitor"
+        description="Review the students appearing in teacher-visible attendance records, then drill into attendance history and linked event activity without leaving the teacher workspace."
+      />
 
       {loading ? (
         <CampusMetricSkeleton />
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatCard
-            label="Tracked Students"
-            value={String(students.length)}
-            tone="text-blue-700"
-          />
-          <StatCard
-            label="Courses Seen"
-            value={String(
-              new Set(
-                students
-                  .map((student) => student.course)
-                  .filter((course) => course && course !== "Unassigned"),
-              ).size,
-            )}
-            tone="text-emerald-700"
-          />
-          <StatCard
-            label="Attendance Records"
-            value={String(
-              students.reduce((sum, student) => sum + student.recordedCount, 0),
-            )}
-            tone="text-amber-700"
-          />
-          <StatCard
-            label="Missed Records"
-            value={String(totalMissed)}
-            tone="text-red-700"
-          />
-        </div>
+        <TeacherStatsGrid
+          items={[
+            {
+              label: "Tracked Students",
+              value: students.length,
+              description: "Students currently visible in teacher attendance data.",
+              tone: "blue",
+              icon: Users,
+            },
+            {
+              label: "Courses Seen",
+              value: totalCourses,
+              description: "Distinct courses represented across tracked students.",
+              tone: "green",
+              icon: GraduationCap,
+            },
+            {
+              label: "Attendance Records",
+              value: totalRecords,
+              description: "Teacher-visible attendance entries linked to students.",
+              tone: "amber",
+              icon: ClipboardCheck,
+            },
+            {
+              label: "Missed Records",
+              value: totalMissed,
+              description: "Attendance entries marked absent or missed.",
+              tone: "red",
+              icon: TriangleAlert,
+            },
+          ]}
+        />
       )}
 
-      <Card shadow="sm">
-        <CardBody className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
+      {loading ? (
+        <TeacherFilterBarSkeleton />
+      ) : (
+        <TeacherFilterBar>
           <Input
             aria-label="Search students"
             value={searchText}
             onValueChange={setSearchText}
-            placeholder="Search by name, ID, or course..."
+            placeholder="Search by name, ID, or course"
+            startContent={<Search size={16} className="text-campus-text-secondary" />}
           />
 
           <Select
@@ -295,289 +319,132 @@ export default function TeacherStudentsPage() {
           >
             {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
           </Select>
+        </TeacherFilterBar>
+      )}
 
-          <div className="flex items-center justify-between rounded-xl border border-dashed border-border px-4 py-3 text-sm text-campus-text-secondary">
-            <span>Visible results</span>
-            <span className="font-semibold text-campus-text-primary">
-              {loading ? "-" : filteredStudents.length}
-            </span>
-          </div>
-        </CardBody>
-      </Card>
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.5fr)_minmax(340px,0.95fr)]">
+        <div className="space-y-4">
+          <TeacherDataTable
+            ariaLabel="Teacher student activity records"
+            columns={teacherStudentColumns}
+            items={paginatedStudents}
+            getRowKey={(student) => student.uid}
+            emptyTitle="No students found"
+            emptyDescription="Try another name, ID, course, or year filter to widen the teacher-visible results."
+            selectionMode="single"
+            selectedKeys={selectedStudentId ? new Set([selectedStudentId]) : new Set([])}
+            onSelectionChange={(keys) => {
+              if (keys === "all") return;
+              const selected = Array.from(keys)[0];
+              setSelectedStudentId(typeof selected === "string" ? selected : null);
+            }}
+            isLoading={loading}
+            renderCell={(student, columnKey) => {
+              if (columnKey === "student") {
+                return (
+                  <div className="space-y-1">
+                    <p className="font-semibold text-campus-text-primary">
+                      {student.studentName}
+                    </p>
+                    <p className="text-xs text-campus-text-secondary">
+                      {student.schoolId}
+                    </p>
+                  </div>
+                );
+              }
 
-      {loading ? (
-        <CampusCardListSkeleton rows={4} />
-      ) : (
-        <CampusDataTable
-          ariaLabel="Teacher student activity records"
-          columns={teacherStudentColumns}
-          items={paginatedStudents}
-          emptyTitle="No students match the current filters"
-          emptyDescription="Try another search, year, or course filter."
-          renderCell={(student, columnKey) => {
-            if (columnKey === "course") {
-              return (
-                <Chip size="sm" className="bg-blue-100 text-blue-700">
-                  {student.course}
-                </Chip>
-              );
-            }
+              if (columnKey === "course") {
+                return (
+                  <Chip size="sm" className="bg-blue-100 text-blue-700">
+                    {student.course}
+                  </Chip>
+                );
+              }
 
-            if (columnKey === "summary") {
-              return (
-                <div className="flex flex-wrap gap-2">
+              if (columnKey === "year") {
+                return (
                   <Chip size="sm" className="bg-slate-100 text-slate-700">
-                    Tracked: {student.trackedEventIds.length}
+                    {student.year}
                   </Chip>
-                  <Chip size="sm" className="bg-emerald-100 text-emerald-700">
-                    Present: {student.presentCount}
-                  </Chip>
-                  <Chip size="sm" className="bg-red-100 text-red-700">
-                    Missed: {student.absentCount}
-                  </Chip>
-                </div>
-              );
-            }
+                );
+              }
 
-            if (columnKey === "actions") {
-              return (
-                <div className="flex justify-end">
-                  <Button
-                    color="primary"
-                    variant="flat"
-                    size="sm"
-                    onPress={() => setSelectedStudentId(student.uid)}
-                  >
-                    Open
-                  </Button>
-                </div>
-              );
-            }
+              if (columnKey === "activity") {
+                return (
+                  <TeacherActivityChipGroup
+                    items={[
+                      {
+                        label: "Tracked",
+                        value: student.trackedEventIds.length,
+                        tone: "blue",
+                      },
+                      { label: "Present", value: student.presentCount, tone: "green" },
+                      { label: "Missed", value: student.absentCount, tone: "red" },
+                    ]}
+                  />
+                );
+              }
 
-            return student[columnKey as keyof typeof student] as string;
-          }}
-        />
-      )}
+              if (columnKey === "actions") {
+                const isSelected = selectedStudentId === student.uid;
 
-      {!loading && filteredStudents.length > STUDENTS_PER_PAGE && (
-        <div className="flex justify-center">
-          <Pagination
-            showControls
-            page={page}
-            total={totalPages}
-            onChange={(nextPage) => setPage(nextPage)}
+                return (
+                  <div className="flex justify-end">
+                    <Button
+                      color="primary"
+                      variant={isSelected ? "flat" : "light"}
+                      size="sm"
+                      onPress={() => setSelectedStudentId(student.uid)}
+                    >
+                      {isCompactView ? "View student" : "Review activity"}
+                    </Button>
+                  </div>
+                );
+              }
+
+              return null;
+            }}
           />
-        </div>
-      )}
 
-      <Modal
-        isOpen={Boolean(selectedStudent)}
+          {!loading && filteredStudents.length > STUDENTS_PER_PAGE ? (
+            <div className="flex justify-center sm:justify-end">
+              <Pagination
+                showControls
+                page={page}
+                total={totalPages}
+                onChange={(nextPage) => setPage(nextPage)}
+              />
+            </div>
+          ) : null}
+        </div>
+
+        {loading ? (
+          <div className="hidden xl:block">
+            <TeacherDetailPanelSkeleton />
+          </div>
+        ) : (
+          <div className="hidden xl:block">
+            <TeacherStudentDetailPanel
+              student={selectedStudent}
+              trackedEvents={selectedStudentEvents}
+              attendanceItems={selectedStudentAttendance}
+              className="xl:sticky xl:top-6"
+            />
+          </div>
+        )}
+      </div>
+
+      <TeacherStudentDrawer
+        student={selectedStudent}
+        trackedEvents={selectedStudentEvents}
+        attendanceItems={selectedStudentAttendance}
+        isOpen={isCompactView && Boolean(selectedStudent)}
         onOpenChange={(open) => {
           if (!open) {
             setSelectedStudentId(null);
-            setSelectedTab("tracked");
           }
         }}
-        size="4xl"
-        scrollBehavior="inside"
-      >
-        <ModalContent>
-          {() => (
-            <>
-              <ModalHeader className="flex flex-col gap-1">
-                <span className="text-xl font-semibold text-campus-text-primary">
-                  {selectedStudent?.studentName || "Student details"}
-                </span>
-                <span className="text-sm font-normal text-campus-text-secondary">
-                  {selectedStudent?.schoolId || "-"} |{" "}
-                  {selectedStudent?.course || "-"} |{" "}
-                  {selectedStudent?.year || "-"}
-                </span>
-              </ModalHeader>
-
-              <ModalBody className="space-y-5 pb-6">
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <MiniCard
-                    label="Tracked Events"
-                    value={selectedStudent?.trackedEventIds.length ?? 0}
-                    tone="text-blue-700"
-                  />
-                  <MiniCard
-                    label="Present"
-                    value={selectedStudent?.presentCount ?? 0}
-                    tone="text-emerald-700"
-                  />
-                  <MiniCard
-                    label="Missed"
-                    value={selectedStudent?.absentCount ?? 0}
-                    tone="text-red-700"
-                  />
-                </div>
-
-                <Tabs
-                  aria-label="Student detail tabs"
-                  selectedKey={selectedTab}
-                  onSelectionChange={(key) =>
-                    setSelectedTab(String(key) as StudentTabKey)
-                  }
-                  fullWidth
-                  classNames={{
-                    tabList: "w-full grid grid-cols-3",
-                    tab: "w-full min-w-0 px-2",
-                    tabContent: "truncate text-xs sm:text-sm",
-                  }}
-                >
-                  <Tab key="tracked" title="Tracked">
-                    <div className="space-y-3 pt-2">
-                      {selectedStudentRegistered.length === 0 ? (
-                        <p className="text-sm text-campus-text-secondary">
-                          No teacher-visible event activity found for this
-                          student yet.
-                        </p>
-                      ) : (
-                        selectedStudentRegistered.map((event) => (
-                          <Card key={event.id} shadow="none" className="border">
-                            <CardBody className="space-y-1 p-4">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <p className="font-semibold text-campus-text-primary">
-                                  {event.title}
-                                </p>
-                                <Chip
-                                  size="sm"
-                                  className="bg-blue-100 text-blue-700"
-                                >
-                                  Tracked
-                                </Chip>
-                              </div>
-                              <p className="text-sm text-campus-text-secondary">
-                                {formatEventDate(event.eventDate, event.date)}
-                              </p>
-                              <p className="text-xs text-campus-text-secondary">
-                                {event.location}
-                              </p>
-                            </CardBody>
-                          </Card>
-                        ))
-                      )}
-                    </div>
-                  </Tab>
-
-                  <Tab key="present" title="Present">
-                    <div className="space-y-3 pt-2">
-                      {selectedStudentPresent.length === 0 ? (
-                        <p className="text-sm text-campus-text-secondary">
-                          No present attendance records found.
-                        </p>
-                      ) : (
-                        selectedStudentPresent.map((item) => (
-                          <AttendanceCard
-                            key={`${item.event.id}-present`}
-                            title={item.event.title}
-                            date={formatEventDate(
-                              item.event.eventDate,
-                              item.event.date,
-                            )}
-                            location={item.event.location}
-                            status="Present"
-                          />
-                        ))
-                      )}
-                    </div>
-                  </Tab>
-
-                  <Tab key="absent" title="Missed">
-                    <div className="space-y-3 pt-2">
-                      {selectedStudentAbsent.length === 0 ? (
-                        <p className="text-sm text-campus-text-secondary">
-                          No missed attendance records found.
-                        </p>
-                      ) : (
-                        selectedStudentAbsent.map((item) => (
-                          <AttendanceCard
-                            key={`${item.event.id}-absent`}
-                            title={item.event.title}
-                            date={formatEventDate(
-                              item.event.eventDate,
-                              item.event.date,
-                            )}
-                            location={item.event.location}
-                            status="Absent"
-                          />
-                        ))
-                      )}
-                    </div>
-                  </Tab>
-                </Tabs>
-              </ModalBody>
-            </>
-          )}
-        </ModalContent>
-      </Modal>
+      />
     </div>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: string;
-}) {
-  return (
-    <Card shadow="sm">
-      <CardBody className="p-5">
-        <p className="text-sm text-campus-text-secondary">{label}</p>
-        <h2 className={`mt-2 text-3xl font-bold ${tone}`}>{value}</h2>
-      </CardBody>
-    </Card>
-  );
-}
-
-function MiniCard({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: string;
-}) {
-  return (
-    <Card shadow="none" className="border">
-      <CardBody className="p-4">
-        <p className="text-sm text-campus-text-secondary">{label}</p>
-        <p className={`mt-2 text-2xl font-bold ${tone}`}>{value}</p>
-      </CardBody>
-    </Card>
-  );
-}
-
-function AttendanceCard({
-  title,
-  date,
-  location,
-  status,
-}: {
-  title: string;
-  date: string;
-  location: string;
-  status: "Present" | "Absent";
-}) {
-  return (
-    <Card shadow="none" className="border">
-      <CardBody className="space-y-1 p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="font-semibold text-campus-text-primary">{title}</p>
-          <Chip size="sm" className={statusChipClass(status)}>
-            {status}
-          </Chip>
-        </div>
-        <p className="text-sm text-campus-text-secondary">{date}</p>
-        <p className="text-xs text-campus-text-secondary">{location}</p>
-      </CardBody>
-    </Card>
   );
 }

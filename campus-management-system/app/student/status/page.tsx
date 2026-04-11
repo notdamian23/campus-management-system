@@ -2,74 +2,49 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@heroui/button";
-import { Card, CardBody, CardHeader } from "@heroui/card";
-import {
-  Modal,
-  ModalBody,
-  ModalContent,
-  ModalFooter,
-  ModalHeader,
-} from "@heroui/modal";
+import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
-import { Tab, Tabs } from "@heroui/tabs";
-import { CampusCardListSkeleton, CampusMetricSkeleton } from "@/components/ui";
-import { CampusBadge } from "@/components/heroui";
-import { useStudentPortal } from "@/components/student/StudentPortalProvider";
+import {
+  CheckCircle2,
+  CircleAlert,
+  CreditCard,
+  Landmark,
+  ShieldAlert,
+} from "lucide-react";
+import { CampusMetricSkeleton } from "@/components/ui";
+import {
+  StudentCardStackSkeleton,
+  StudentEmptyState,
+  StudentEventCard,
+  StudentPageHeader,
+  StudentPaymentCard,
+  StudentStatsGrid,
+  StudentStatusTabs,
+  buildStudentAudienceLabel,
+  formatStudentDateLabel,
+  formatStudentEventDate,
+  isStudentPaymentOverdue,
+  studentPaymentFooter,
+  studentStatusIcons,
+  useStudentPageErrorToast,
+  useStudentPortal,
+} from "@/components/student";
 
-const MOBILE_BREAKPOINT = 768;
-
-function initialsFromName(name: string) {
-  const parts = name
-    .split(" ")
-    .map((p) => p.trim())
-    .filter(Boolean);
-  if (parts.length === 0) return "ST";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
-}
-
-function formatEventDate(date: Date | null, fallback: string) {
-  if (!date) return fallback || "No date";
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+type StatusTab = "attended" | "missed" | "payments";
+type PaymentSortMode = "default" | "paid" | "unpaid";
 
 export default function StudentStatus() {
   const { profile, events, payments, loading, error } = useStudentPortal();
 
-  const [filter, setFilter] = useState<"attended" | "missed" | "payments">(
-    "attended",
-  );
-  const [sortMode, setSortMode] = useState("default");
-  const [isMobile, setIsMobile] = useState(false);
+  useStudentPageErrorToast(error, "student status");
+
+  const [selectedTab, setSelectedTab] = useState<StatusTab>("attended");
   const [inactiveModalOpen, setInactiveModalOpen] = useState(false);
+  const [paymentSort, setPaymentSort] = useState<PaymentSortMode>("default");
   const [attendedPage, setAttendedPage] = useState(1);
   const [missedPage, setMissedPage] = useState(1);
   const [paymentsPage, setPaymentsPage] = useState(1);
-  const statusTabs: Array<{
-    label: string;
-    value: "attended" | "missed" | "payments";
-  }> = [
-    { label: "Events Attended", value: "attended" },
-    { label: "Events Missed", value: "missed" },
-    { label: "Payments", value: "payments" },
-  ];
-
-  useEffect(() => {
-    const syncMobile = () => {
-      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
-    };
-
-    syncMobile();
-    window.addEventListener("resize", syncMobile);
-    return () => window.removeEventListener("resize", syncMobile);
-  }, []);
 
   const attendedEvents = useMemo(
     () =>
@@ -95,53 +70,57 @@ export default function StudentStatus() {
 
   const sortedPayments = useMemo(() => {
     const rows = [...payments];
+
     rows.sort((a, b) => {
-      if (sortMode === "paid") {
-        if (a.status === b.status) return 0;
+      if (paymentSort === "paid") {
+        if (a.status === b.status) return b.updatedAtMs - a.updatedAtMs;
         return a.status === "PAID" ? -1 : 1;
       }
-      if (sortMode === "unpaid") {
-        if (a.status === b.status) return 0;
+
+      if (paymentSort === "unpaid") {
+        if (a.status === b.status) return b.updatedAtMs - a.updatedAtMs;
         return a.status === "UNPAID" ? -1 : 1;
       }
+
       return b.updatedAtMs - a.updatedAtMs;
     });
+
     return rows;
-  }, [payments, sortMode]);
+  }, [paymentSort, payments]);
 
-  const attendedItemsPerPage = isMobile ? 5 : 6;
-  const missedItemsPerPage = isMobile ? 5 : 6;
-  const paymentsItemsPerPage = isMobile ? 4 : 8;
+  const attendedPerPage = 6;
+  const missedPerPage = 6;
+  const paymentsPerPage = 5;
 
-  const attendedTotalPages = useMemo(
-    () => Math.max(1, Math.ceil(attendedEvents.length / attendedItemsPerPage)),
-    [attendedEvents.length, attendedItemsPerPage],
+  const attendedTotalPages = Math.max(
+    1,
+    Math.ceil(attendedEvents.length / attendedPerPage),
+  );
+  const missedTotalPages = Math.max(
+    1,
+    Math.ceil(missedEvents.length / missedPerPage),
+  );
+  const paymentsTotalPages = Math.max(
+    1,
+    Math.ceil(sortedPayments.length / paymentsPerPage),
   );
 
-  const missedTotalPages = useMemo(
-    () => Math.max(1, Math.ceil(missedEvents.length / missedItemsPerPage)),
-    [missedEvents.length, missedItemsPerPage],
+  const paginatedAttendedEvents = attendedEvents.slice(
+    (attendedPage - 1) * attendedPerPage,
+    attendedPage * attendedPerPage,
+  );
+  const paginatedMissedEvents = missedEvents.slice(
+    (missedPage - 1) * missedPerPage,
+    missedPage * missedPerPage,
+  );
+  const paginatedPayments = sortedPayments.slice(
+    (paymentsPage - 1) * paymentsPerPage,
+    paymentsPage * paymentsPerPage,
   );
 
-  const paymentsTotalPages = useMemo(
-    () => Math.max(1, Math.ceil(sortedPayments.length / paymentsItemsPerPage)),
-    [sortedPayments.length, paymentsItemsPerPage],
-  );
-
-  const paginatedAttendedEvents = useMemo(() => {
-    const start = (attendedPage - 1) * attendedItemsPerPage;
-    return attendedEvents.slice(start, start + attendedItemsPerPage);
-  }, [attendedEvents, attendedItemsPerPage, attendedPage]);
-
-  const paginatedMissedEvents = useMemo(() => {
-    const start = (missedPage - 1) * missedItemsPerPage;
-    return missedEvents.slice(start, start + missedItemsPerPage);
-  }, [missedEvents, missedItemsPerPage, missedPage]);
-
-  const paginatedPayments = useMemo(() => {
-    const start = (paymentsPage - 1) * paymentsItemsPerPage;
-    return sortedPayments.slice(start, start + paymentsItemsPerPage);
-  }, [sortedPayments, paymentsItemsPerPage, paymentsPage]);
+  useEffect(() => {
+    setInactiveModalOpen(profile?.accountStatus === "Inactive");
+  }, [profile?.accountStatus]);
 
   useEffect(() => {
     setAttendedPage((prev) => Math.min(prev, attendedTotalPages));
@@ -157,24 +136,10 @@ export default function StudentStatus() {
 
   useEffect(() => {
     setPaymentsPage(1);
-  }, [sortMode]);
-
-  useEffect(() => {
-    if (filter === "attended") setAttendedPage(1);
-    if (filter === "missed") setMissedPage(1);
-    if (filter === "payments") setPaymentsPage(1);
-  }, [filter]);
-
-  useEffect(() => {
-    setInactiveModalOpen(profile?.accountStatus === "Inactive");
-  }, [profile?.accountStatus]);
-
-  const avatarLabel = profile?.studentName
-    ? initialsFromName(profile.studentName)
-    : "ST";
+  }, [paymentSort]);
 
   return (
-    <div className="space-y-6 sm:space-y-8">
+    <div className="space-y-5 sm:space-y-6">
       <Modal
         isOpen={inactiveModalOpen}
         onOpenChange={setInactiveModalOpen}
@@ -184,14 +149,14 @@ export default function StudentStatus() {
         <ModalContent>
           {(onClose) => (
             <>
-              <ModalHeader>Account Inactive</ModalHeader>
+              <ModalHeader>Account inactive</ModalHeader>
               <ModalBody>
-                <p className="text-sm text-campus-text-secondary">
-                  Approach ec member to make account active.
+                <p className="text-sm leading-6 text-campus-text-secondary">
+                  Approach EC member to make your account active before using event registration features.
                 </p>
               </ModalBody>
               <ModalFooter>
-                <Button className="bg-[#7b0000] text-white" onPress={onClose}>
+                <Button color="primary" onPress={onClose}>
                   Okay
                 </Button>
               </ModalFooter>
@@ -200,266 +165,248 @@ export default function StudentStatus() {
         </ModalContent>
       </Modal>
 
-      <Card
-        shadow="sm"
-        className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#b71f1f] to-[#f09a4a] text-white"
-      >
-        <CardBody className="flex flex-col gap-4 p-5 sm:p-6 sm:flex-row sm:items-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/15 text-lg font-bold">
-            {avatarLabel}
-          </div>
-          <div>
-            <h1 className="text-2xl font-black sm:text-3xl">Student Status</h1>
-            <p className="text-sm text-white/80 sm:text-base">
-              Overview of your attendance and payment standing.
-            </p>
-          </div>
-        </CardBody>
-      </Card>
-
-      {error && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          {error}
-        </div>
-      )}
+      <StudentPageHeader
+        variant="hero"
+        icon={Landmark}
+        title="Student Status"
+        description="Review your attended events, missed events, and current payment standing without losing track of what needs follow-up next."
+      />
 
       {loading ? (
-        <CampusMetricSkeleton
-          count={3}
-          className="sm:grid-cols-3 xl:grid-cols-3"
-        />
+        <CampusMetricSkeleton count={3} className="sm:grid-cols-3 xl:grid-cols-3" />
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <Card shadow="sm" className="border">
-            <CardBody className="p-5">
-              <p className="text-sm text-campus-text-secondary">Attended</p>
-              <h2 className="mt-2 text-3xl font-black text-emerald-600">
-                {attendedEvents.length}
-              </h2>
-            </CardBody>
-          </Card>
-          <Card shadow="sm" className="border">
-            <CardBody className="p-5">
-              <p className="text-sm text-campus-text-secondary">Missed</p>
-              <h2 className="mt-2 text-3xl font-black text-rose-600">
-                {missedEvents.length}
-              </h2>
-            </CardBody>
-          </Card>
-          <Card shadow="sm" className="border">
-            <CardBody className="p-5">
-              <p className="text-sm text-campus-text-secondary">Payments</p>
-              <h2 className="mt-2 text-3xl font-black text-amber-600">
-                {payments.length}
-              </h2>
-            </CardBody>
-          </Card>
-        </div>
+        <StudentStatsGrid
+          items={[
+            {
+              label: "Attended",
+              value: attendedEvents.length,
+              description: "Completed events where your attendance was marked present.",
+              tone: "green",
+              icon: CheckCircle2,
+            },
+            {
+              label: "Missed",
+              value: missedEvents.length,
+              description: "Completed events where attendance was not marked present.",
+              tone: "red",
+              icon: CircleAlert,
+            },
+            {
+              label: "Payments",
+              value: payments.length,
+              description: "Payment records currently assigned to your account.",
+              tone: "amber",
+              icon: CreditCard,
+            },
+          ]}
+        />
       )}
 
-      <Card shadow="sm" className="border">
-        <CardHeader className="px-5 pt-5">
-          <div>
-            <h2 className="text-lg font-semibold text-campus-text-primary">
-              Status Views
-            </h2>
-            <p className="text-sm text-campus-text-secondary">
-              Switch between attendance history and payment records.
-            </p>
-          </div>
-        </CardHeader>
-        <CardBody className="p-4 pt-2">
-          <Tabs
-            selectedKey={filter}
-            onSelectionChange={(key) =>
-              setFilter(String(key) as "attended" | "missed" | "payments")
-            }
-            fullWidth
-            classNames={{
-              tabList:
-                "grid w-full grid-cols-1 gap-2 rounded-2xl bg-gray-100 p-1 sm:grid-cols-3",
-              cursor: "bg-primary-500",
-              tab: "h-11",
-              tabContent:
-                "text-sm font-semibold group-data-[selected=true]:text-white",
-            }}
-          >
-            {statusTabs.map((item) => (
-              <Tab key={item.value} title={item.label} />
-            ))}
-          </Tabs>
-        </CardBody>
-      </Card>
+      <div className="space-y-4">
+        <StudentStatusTabs
+          items={[
+            {
+              key: "attended",
+              label: "Events Attended",
+              icon: studentStatusIcons.attended,
+            },
+            {
+              key: "missed",
+              label: "Events Missed",
+              icon: studentStatusIcons.missed,
+            },
+            {
+              key: "payments",
+              label: "Payments",
+              icon: studentStatusIcons.payments,
+            },
+          ]}
+          selectedKey={selectedTab}
+          onSelectionChange={setSelectedTab}
+        />
 
-      {filter === "attended" && (
-        <div>
-          <h2 className="font-semibold text-campus-text-primary mb-3 flex items-center gap-2">
-            <span className="text-green-600">+</span> Events Attended
-          </h2>
-
-          {loading ? (
-            <CampusCardListSkeleton rows={3} />
-          ) : attendedEvents.length === 0 ? (
-            <p className="text-sm text-campus-text-secondary">
-              No attended events found yet.
-            </p>
-          ) : (
-            <div className="space-y-4">
-              <div className="grid md:grid-cols-2 gap-4">
+        {selectedTab === "attended" ? (
+          <div className="space-y-4">
+            {loading ? (
+              <StudentCardStackSkeleton rows={3} />
+            ) : paginatedAttendedEvents.length === 0 ? (
+              <StudentEmptyState
+                title="No attended events yet"
+                description="Once your attendance is recorded as present, those events will appear here."
+                icon={CheckCircle2}
+                tone="green"
+                compact
+              />
+            ) : (
+              <div className="space-y-3">
                 {paginatedAttendedEvents.map((event) => (
-                  <Card key={event.id} shadow="sm" isPressable>
-                    <CardBody>
-                      <h3 className="font-semibold text-campus-text-primary">
-                        {event.title}
-                      </h3>
-                      <p className="text-sm text-campus-text-secondary">
-                        {formatEventDate(event.eventDate, event.date)} |{" "}
-                        {event.scheduledTime}
-                      </p>
-                      <p className="text-xs text-campus-text-secondary">
-                        {event.location || "TBA"}
-                      </p>
-                    </CardBody>
-                  </Card>
+                  <StudentEventCard
+                    key={event.id}
+                    title={event.title}
+                    description={event.description}
+                    dateLabel={formatStudentEventDate(event.eventDate, event.date)}
+                    timeLabel={event.scheduledTime}
+                    location={event.location}
+                    status={event.status}
+                    audienceLabel={buildStudentAudienceLabel(
+                      event.course,
+                      event.yearLevel,
+                    )}
+                  />
                 ))}
               </div>
+            )}
 
-              {attendedEvents.length > attendedItemsPerPage && (
-                <div className="flex justify-center pt-1">
-                  <Pagination
-                    showControls
-                    page={attendedPage}
-                    total={attendedTotalPages}
-                    onChange={(page) => setAttendedPage(page)}
-                  />
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {filter === "missed" && (
-        <div>
-          <h2 className="font-semibold text-campus-text-primary mb-3 flex items-center gap-2">
-            <span className="text-red-600">x</span> Events Missed
-          </h2>
-
-          {loading ? (
-            <CampusCardListSkeleton rows={3} />
-          ) : missedEvents.length === 0 ? (
-            <p className="text-sm text-campus-text-secondary">
-              No missed events found.
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {paginatedMissedEvents.map((event) => (
-                <Card
-                  key={event.id}
-                  shadow="sm"
-                  className="bg-red-50 border-red-100"
-                >
-                  <CardBody>
-                    <h3 className="font-semibold text-campus-text-primary">
-                      {event.title}
-                    </h3>
-                    <p className="text-sm text-campus-text-secondary">
-                      {formatEventDate(event.eventDate, event.date)} |{" "}
-                      {event.scheduledTime}
-                    </p>
-                    <p className="text-xs text-campus-text-secondary">
-                      {event.location || "TBA"}
-                    </p>
-                  </CardBody>
-                </Card>
-              ))}
-
-              {missedEvents.length > missedItemsPerPage && (
-                <div className="flex justify-center pt-1">
-                  <Pagination
-                    showControls
-                    page={missedPage}
-                    total={missedTotalPages}
-                    onChange={(page) => setMissedPage(page)}
-                  />
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {filter === "payments" && (
-        <div>
-          <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
-            <h2 className="font-semibold text-campus-text-primary text-lg">
-              Payments
-            </h2>
-
-            <Select
-              size="sm"
-              label="Sort by"
-              selectedKeys={[sortMode]}
-              onChange={(e) => setSortMode(e.target.value)}
-              className="w-full sm:w-48"
-            >
-              <SelectItem key="default">Default</SelectItem>
-              <SelectItem key="paid">PAID First</SelectItem>
-              <SelectItem key="unpaid">UNPAID First</SelectItem>
-            </Select>
+            {!loading && attendedEvents.length > attendedPerPage ? (
+              <div className="flex justify-center sm:justify-end">
+                <Pagination
+                  showControls
+                  page={attendedPage}
+                  total={attendedTotalPages}
+                  onChange={(page) => setAttendedPage(page)}
+                />
+              </div>
+            ) : null}
           </div>
+        ) : null}
 
-          {loading ? (
-            <CampusCardListSkeleton rows={3} />
-          ) : sortedPayments.length === 0 ? (
-            <p className="text-sm text-campus-text-secondary">
-              No payment records found for your account.
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {paginatedPayments.map((payment) => (
-                <Card
-                  key={payment.paymentId}
-                  shadow="sm"
-                  className={
-                    payment.status === "PAID"
-                      ? "bg-green-50 border-green-100"
-                      : "bg-red-50 border-red-100"
-                  }
-                >
-                  <CardBody className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <p className="font-medium text-campus-text-primary">
-                        {payment.title}
+        {selectedTab === "missed" ? (
+          <div className="space-y-4">
+            {loading ? (
+              <StudentCardStackSkeleton rows={3} />
+            ) : paginatedMissedEvents.length === 0 ? (
+              <StudentEmptyState
+                title="No missed events found"
+                description="Your missed event history will appear here when a completed event is marked absent or not attended."
+                icon={ShieldAlert}
+                tone="red"
+                compact
+              />
+            ) : (
+              <div className="space-y-3">
+                {paginatedMissedEvents.map((event) => (
+                  <StudentEventCard
+                    key={event.id}
+                    title={event.title}
+                    description={event.description}
+                    dateLabel={formatStudentEventDate(event.eventDate, event.date)}
+                    timeLabel={event.scheduledTime}
+                    location={event.location}
+                    status={event.status}
+                    audienceLabel={buildStudentAudienceLabel(
+                      event.course,
+                      event.yearLevel,
+                    )}
+                    footer={
+                      <p className="text-sm text-rose-700">
+                        This event was completed without a present attendance record.
                       </p>
-                      <p className="text-xs text-campus-text-secondary">
-                        Ref: {payment.ref} | Date: {payment.date || "-"}
-                      </p>
-                    </div>
-
-                    <CampusBadge
-                      status={payment.status === "PAID" ? "paid" : "unpaid"}
-                    >
-                      {payment.status}
-                    </CampusBadge>
-                  </CardBody>
-                </Card>
-              ))}
-
-              {sortedPayments.length > paymentsItemsPerPage && (
-                <div className="flex justify-center pt-1">
-                  <Pagination
-                    showControls
-                    page={paymentsPage}
-                    total={paymentsTotalPages}
-                    onChange={(page) => setPaymentsPage(page)}
+                    }
                   />
-                </div>
-              )}
+                ))}
+              </div>
+            )}
+
+            {!loading && missedEvents.length > missedPerPage ? (
+              <div className="flex justify-center sm:justify-end">
+                <Pagination
+                  showControls
+                  page={missedPage}
+                  total={missedTotalPages}
+                  onChange={(page) => setMissedPage(page)}
+                />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {selectedTab === "payments" ? (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-3 rounded-[24px] border border-border/70 bg-white/90 p-4 shadow-[var(--shadow-soft)] sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-campus-text-primary">
+                  Payment records
+                </p>
+                <p className="text-sm text-campus-text-secondary">
+                  Sort your assigned records to review what is paid and what still needs attention.
+                </p>
+              </div>
+
+              <Select
+                aria-label="Sort payments"
+                disallowEmptySelection
+                selectedKeys={new Set([paymentSort])}
+                onSelectionChange={(keys) => {
+                  if (keys === "all") return;
+                  const selected = Array.from(keys)[0];
+                  if (typeof selected === "string") {
+                    setPaymentSort(selected as PaymentSortMode);
+                  }
+                }}
+                className="w-full sm:w-56"
+              >
+                <SelectItem key="default">Most recent</SelectItem>
+                <SelectItem key="paid">Paid first</SelectItem>
+                <SelectItem key="unpaid">Unpaid first</SelectItem>
+              </Select>
             </div>
-          )}
-        </div>
-      )}
+
+            {loading ? (
+              <StudentCardStackSkeleton rows={3} />
+            ) : paginatedPayments.length === 0 ? (
+              <StudentEmptyState
+                title="No payment records found"
+                description="Assigned payment records will appear here when they are available for your account."
+                icon={CreditCard}
+                tone="blue"
+                compact
+              />
+            ) : (
+              <div className="space-y-3">
+                {paginatedPayments.map((payment) => {
+                  const overdue = isStudentPaymentOverdue(payment);
+
+                  return (
+                    <StudentPaymentCard
+                      key={payment.paymentId}
+                      title={payment.title}
+                      ref={payment.ref}
+                      amount={payment.amount}
+                      dateLabel={formatStudentDateLabel(
+                        payment.date,
+                        payment.updatedAtMs || payment.createdAtMs,
+                      )}
+                      status={payment.status}
+                      details={payment.details}
+                      footer={
+                        <div className="flex flex-wrap gap-2">
+                          {studentPaymentFooter(payment)}
+                          {overdue ? (
+                            <span className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700">
+                              Follow up soon
+                            </span>
+                          ) : null}
+                        </div>
+                      }
+                    />
+                  );
+                })}
+              </div>
+            )}
+
+            {!loading && sortedPayments.length > paymentsPerPage ? (
+              <div className="flex justify-center sm:justify-end">
+                <Pagination
+                  showControls
+                  page={paymentsPage}
+                  total={paymentsTotalPages}
+                  onChange={(page) => setPaymentsPage(page)}
+                />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
