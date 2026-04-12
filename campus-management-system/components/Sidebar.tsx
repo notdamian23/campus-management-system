@@ -247,32 +247,32 @@ export function Sidebar({
           <DrawerContent className="max-w-80">
             {(onClose) => (
               <>
-                <DrawerHeader className="grid grid-cols-[auto,minmax(0,1fr),auto] items-center gap-3 border-b border-border/70 px-4 py-4">
-                  <div className="flex items-center">
+                <DrawerHeader className="border-b border-border/70 px-4 py-4">
+                  <div className="flex w-full items-center gap-3">
                     <Image
                       src="/new campus-logo.jpg"
                       alt="Campus Logo"
-                      width={80}
-                      height={42}
-                      className="h-auto w-[80px] max-w-none object-contain drop-shadow-sm"
+                      width={96}
+                      height={50}
+                      className="h-auto w-[96px] shrink-0 object-contain drop-shadow-sm"
                     />
-                  </div>
 
-                  <div className="min-w-0">
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] leading-tight text-campus-text-secondary">
-                      {contextLabel || "Campus Portal"}
-                    </p>
-                  </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="max-w-[116px] whitespace-normal text-xs font-semibold uppercase tracking-[0.18em] leading-tight text-campus-text-secondary">
+                        {contextLabel || "Campus Portal"}
+                      </p>
+                    </div>
 
-                  <Button
-                    isIconOnly
-                    variant="light"
-                    onPress={onClose}
-                    aria-label="Close menu"
-                    className="text-campus-text-primary"
-                  >
-                    <FiX className="text-lg" />
-                  </Button>
+                    <Button
+                      isIconOnly
+                      variant="light"
+                      onPress={onClose}
+                      aria-label="Close menu"
+                      className="shrink-0 text-campus-text-primary"
+                    >
+                      <FiX className="text-lg" />
+                    </Button>
+                  </div>
                 </DrawerHeader>
                 <DrawerBody className="p-0">
                   <div
