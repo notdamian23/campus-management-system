@@ -16,9 +16,14 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CAMPUS Management System",
+  title: "CAMPUS",
   description:
     "Campus attendance, payments, events, and document management system.",
+    icons: {
+    icon: "/campus-chrome logo.png",
+    shortcut: "/campus-chrome logo.png",
+    apple: "/logo.png",
+  },
 };
 
 export default function RootLayout({
