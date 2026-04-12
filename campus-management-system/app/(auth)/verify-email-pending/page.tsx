@@ -6,10 +6,13 @@ import { Alert } from "@heroui/alert";
 import { Button } from "@heroui/button";
 import { Chip } from "@heroui/chip";
 import { onAuthStateChanged, signOut, verifyBeforeUpdateEmail } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
 import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
-import { auth, db } from "@/lib/firebase";
-import { logCampusAuthEvent } from "@/lib/firebase-functions";
+import { auth } from "@/lib/firebase";
+import {
+  getCurrentCampusProfileForCurrentUser,
+  logCampusAuthEvent,
+  savePendingEmailVerificationForCurrentUser,
+} from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
 import {
   buildEmailActionSettings,
@@ -57,11 +60,10 @@ export default function VerifyEmailPendingPage() {
       let nextProfile = syncResult.profile;
 
       if (!nextProfile) {
-        const profileSnap = await getDoc(doc(db, "profiles", activeUser.uid));
-        if (!profileSnap.exists()) {
+        nextProfile = await getCurrentCampusProfileForCurrentUser();
+        if (!nextProfile) {
           throw new Error("Your CAMPUS profile could not be found.");
         }
-        nextProfile = profileSnap.data() as CampusProfileDoc;
       }
 
       setProfile(nextProfile);
@@ -141,6 +143,11 @@ export default function VerifyEmailPendingPage() {
         uid: user.uid,
       });
       await verifyBeforeUpdateEmail(user, pendingEmail, buildEmailActionSettings());
+      const refreshedProfile =
+        await savePendingEmailVerificationForCurrentUser(pendingEmail);
+      if (refreshedProfile) {
+        setProfile(refreshedProfile as CampusProfileDoc);
+      }
       campusToast.success({
         title: "Verification email resent",
         description: `A new verification link was sent to ${pendingEmail}.`,

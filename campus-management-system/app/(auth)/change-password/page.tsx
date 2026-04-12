@@ -6,17 +6,19 @@ import { Alert } from "@heroui/alert";
 import { Button } from "@heroui/button";
 import { Input } from "@heroui/input";
 import { onAuthStateChanged, updatePassword, verifyBeforeUpdateEmail } from "firebase/auth";
-import { doc, getDoc, updateDoc } from "firebase/firestore";
 import { campusToast } from "@/lib/toast";
 import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
-import { auth, db } from "@/lib/firebase";
+import { auth } from "@/lib/firebase";
 import {
   buildEmailActionSettings,
-  type CampusProfileDoc,
   getOnboardingRedirect,
   resolveRoleHome,
   setCampusCookies,
 } from "@/lib/campus-auth";
+import {
+  getCurrentCampusProfileForCurrentUser,
+  savePendingEmailVerificationForCurrentUser,
+} from "@/lib/firebase-functions";
 
 function validatePassword(value: string) {
   if (value.length < 8) {
@@ -68,14 +70,12 @@ export default function ChangePasswordPage() {
       }
 
       try {
-        const profileSnap = await getDoc(doc(db, "profiles", user.uid));
-        if (!profileSnap.exists()) {
+        const profile = await getCurrentCampusProfileForCurrentUser();
+        if (!profile) {
           setGeneralError("Your CAMPUS profile could not be found.");
           router.replace("/login");
           return;
         }
-
-        const profile = profileSnap.data() as CampusProfileDoc;
         if (typeof profile.role !== "string" || !profile.role) {
           setGeneralError("Your CAMPUS role is missing. Contact administration.");
           router.replace("/login");
@@ -148,15 +148,7 @@ export default function ChangePasswordPage() {
         normalizedEmail,
         buildEmailActionSettings(),
       );
-
-      const profileRef = doc(db, "profiles", user.uid);
-      await updateDoc(profileRef, {
-        pendingEmail: normalizedEmail,
-        emailVerificationPending: true,
-        emailVerified: false,
-        firstLoginCompleted: false,
-        status: "pending",
-      });
+      await savePendingEmailVerificationForCurrentUser(normalizedEmail);
 
       setCampusCookies({
         role,

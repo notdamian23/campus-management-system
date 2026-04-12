@@ -12,6 +12,22 @@ type Role = "admin" | "ec" | "teacher" | "student";
 type CallableAuthContext = {
   auth?: CallableRequest<Record<string, unknown>>["auth"];
 };
+type CampusProfilePayload = {
+  role?: string;
+  schoolId?: string;
+  email?: string;
+  pendingEmail?: string | null;
+  mustChangePassword?: boolean;
+  emailVerified?: boolean;
+  emailVerificationPending?: boolean;
+  firstLoginCompleted?: boolean;
+  status?: string;
+  teacherName?: string;
+  studentName?: string;
+  name?: string;
+  course?: string;
+  year?: string;
+};
 
 function serverTimestamp() {
   return admin.firestore.FieldValue.serverTimestamp();
@@ -23,6 +39,39 @@ function normalizeText(value: unknown): string {
 
 function normalizeLower(value: unknown): string {
   return normalizeText(value).toLowerCase();
+}
+
+function optionalText(value: unknown): string | undefined {
+  const normalized = normalizeText(value);
+  return normalized || undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  if (value === true) return true;
+  if (value === false) return false;
+  return undefined;
+}
+
+function buildCampusProfilePayload(
+  data: FirebaseFirestore.DocumentData
+): CampusProfilePayload {
+  return {
+    role: optionalText(data.role),
+    schoolId: optionalText(data.schoolId),
+    email: optionalText(data.email),
+    pendingEmail:
+      data.pendingEmail === null ? null : normalizeText(data.pendingEmail) || null,
+    mustChangePassword: optionalBoolean(data.mustChangePassword),
+    emailVerified: optionalBoolean(data.emailVerified),
+    emailVerificationPending: optionalBoolean(data.emailVerificationPending),
+    firstLoginCompleted: optionalBoolean(data.firstLoginCompleted),
+    status: optionalText(data.status),
+    teacherName: optionalText(data.teacherName),
+    studentName: optionalText(data.studentName),
+    name: optionalText(data.name),
+    course: optionalText(data.course),
+    year: optionalText(data.year),
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -686,6 +735,201 @@ export const resolveSchoolIdLogin = onCall({region: REGION}, async (request) => 
         source,
       };
     }
+  });
+
+export const getCurrentCampusProfile = onCall({region: REGION}, async (request) => {
+    if (!request.auth) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Login required."
+      );
+    }
+
+    const uid = normalizeText(request.auth.uid);
+    const profileRef = db.doc(`profiles/${uid}`);
+    const profileSnap = await profileRef.get();
+
+    if (!profileSnap.exists) {
+      throw new HttpsError(
+        "not-found",
+        "Your CAMPUS profile could not be found."
+      );
+    }
+
+    const profileData = profileSnap.data() ?? {};
+
+    try {
+      const authUser = await admin.auth().getUser(uid);
+      const authEmail = normalizeLower(authUser.email);
+      const currentEmail = normalizeLower(profileData.email);
+      const pendingEmail = normalizeLower(profileData.pendingEmail);
+
+      if (
+        authEmail &&
+        authEmail !== currentEmail &&
+        (!pendingEmail || pendingEmail === authEmail)
+      ) {
+        await profileRef.set(
+          {
+            email: authEmail,
+            updatedAt: serverTimestamp(),
+          },
+          {merge: true}
+        );
+        profileData.email = authEmail;
+      }
+    } catch (error) {
+      console.warn("getCurrentCampusProfile: unable to sync auth email", {
+        uid,
+        error,
+      });
+    }
+
+    return {
+      profile: buildCampusProfilePayload(profileData),
+    };
+  });
+
+export const savePendingEmailVerification = onCall({region: REGION}, async (request) => {
+    if (!request.auth) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Login required."
+      );
+    }
+
+    const body = asRecord(request.data);
+    const pendingEmail = normalizeLower(body.pendingEmail);
+
+    if (!pendingEmail) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Email address is required."
+      );
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(pendingEmail)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Please provide a valid email address."
+      );
+    }
+
+    const uid = normalizeText(request.auth.uid);
+    const profileRef = db.doc(`profiles/${uid}`);
+    const profileSnap = await profileRef.get();
+
+    if (!profileSnap.exists) {
+      throw new HttpsError(
+        "not-found",
+        "Your CAMPUS profile could not be found."
+      );
+    }
+
+    await profileRef.set(
+      {
+        pendingEmail,
+        mustChangePassword: true,
+        emailVerificationPending: true,
+        emailVerified: false,
+        firstLoginCompleted: false,
+        status: "pending",
+        updatedAt: serverTimestamp(),
+      },
+      {merge: true}
+    );
+
+    const refreshedProfileSnap = await profileRef.get();
+    return {
+      profile: buildCampusProfilePayload(refreshedProfileSnap.data() ?? {}),
+    };
+  });
+
+export const finalizeVerifiedCampusProfile = onCall({region: REGION}, async (request) => {
+    if (!request.auth) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Login required."
+      );
+    }
+
+    const uid = normalizeText(request.auth.uid);
+    const profileRef = db.doc(`profiles/${uid}`);
+    const profileSnap = await profileRef.get();
+
+    if (!profileSnap.exists) {
+      throw new HttpsError(
+        "not-found",
+        "Your CAMPUS profile could not be found."
+      );
+    }
+
+    const profileData = profileSnap.data() ?? {};
+
+    let authUser: admin.auth.UserRecord;
+    try {
+      authUser = await admin.auth().getUser(uid);
+    } catch (error: unknown) {
+      const authError = error as {message?: string};
+      throw new HttpsError(
+        "internal",
+        authError.message || "Unable to verify your Firebase account."
+      );
+    }
+
+    const authEmail = normalizeLower(authUser.email);
+    if (!authEmail || authUser.emailVerified !== true) {
+      return {
+        finalized: false,
+        profile: buildCampusProfilePayload(profileData),
+      };
+    }
+
+    const pendingEmail = normalizeLower(profileData.pendingEmail);
+    const currentEmail = normalizeLower(profileData.email);
+    const shouldFinalize =
+      (pendingEmail && pendingEmail === authEmail) ||
+      (
+        !pendingEmail &&
+        currentEmail === authEmail &&
+        (
+          profileData.emailVerificationPending === true ||
+          profileData.emailVerified === false ||
+          profileData.firstLoginCompleted === false
+        )
+      );
+
+    if (!shouldFinalize) {
+      return {
+        finalized: false,
+        profile: buildCampusProfilePayload(profileData),
+      };
+    }
+
+    await profileRef.set(
+      {
+        email: authEmail,
+        emailVerified: true,
+        emailVerificationPending: false,
+        mustChangePassword: false,
+        firstLoginCompleted: true,
+        pendingEmail: admin.firestore.FieldValue.delete(),
+        status: profileData.status === "Inactive" ? "Inactive" : "active",
+        updatedAt: serverTimestamp(),
+      },
+      {merge: true}
+    );
+
+    const refreshedProfileSnap = await profileRef.get();
+    console.info("finalizeVerifiedCampusProfile: finalized", {
+      uid,
+      role: normalizeText(refreshedProfileSnap.data()?.role),
+    });
+
+    return {
+      finalized: true,
+      profile: buildCampusProfilePayload(refreshedProfileSnap.data() ?? {}),
+    };
   });
 
 export const adminUpsertPortableDevice = onCall({region: REGION}, async (request) => {

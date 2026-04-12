@@ -10,9 +10,8 @@ import { Switch } from "@heroui/switch";
 
 import { campusToast } from "@/lib/toast";
 import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
-import { auth, db } from "@/lib/firebase";
+import { auth } from "@/lib/firebase";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { doc, getDoc, updateDoc } from "firebase/firestore";
 import {
   type CampusProfileDoc,
   finalizeVerifiedProfile,
@@ -21,6 +20,7 @@ import {
   setCampusCookies,
 } from "@/lib/campus-auth";
 import {
+  getCurrentCampusProfileForCurrentUser,
   logCampusAuthEvent,
   resolveSchoolIdLoginForSchoolId,
 } from "@/lib/firebase-functions";
@@ -213,9 +213,9 @@ function LoginForm() {
         emailVerified: cred.user.emailVerified,
       });
 
-      // 2) Load profile (role + mustChangePassword) from Firestore
-      let snap = await getDoc(doc(db, "profiles", uid));
-      if (!snap.exists()) {
+      // 2) Load profile (role + mustChangePassword) from backend
+      let data = await getCurrentCampusProfileForCurrentUser();
+      if (!data) {
         await signOut(auth);
         showLoginToast(
           "Profile not found",
@@ -223,8 +223,6 @@ function LoginForm() {
         );
         return;
       }
-
-      let data = snap.data() as CampusProfileDoc;
 
       // Validate role
       if (
@@ -255,16 +253,14 @@ function LoginForm() {
         (data.firstLoginCompleted === false && data.emailVerified === false)
       ) {
         const syncResult = await finalizeVerifiedProfile(cred.user);
-        if (syncResult.finalized) {
-          snap = await getDoc(doc(db, "profiles", uid));
-          if (snap.exists()) {
-            data = snap.data() as CampusProfileDoc;
+        if (syncResult.profile) {
+          data = syncResult.profile as CampusProfileDoc;
+        } else {
+          const refreshedProfile = await getCurrentCampusProfileForCurrentUser();
+          if (refreshedProfile) {
+            data = refreshedProfile;
           }
         }
-      }
-
-      if (cred.user.email && cred.user.email !== data.email) {
-        await updateDoc(doc(db, "profiles", uid), { email: cred.user.email });
       }
 
       // 3) Set cookies ONCE (middleware uses these)

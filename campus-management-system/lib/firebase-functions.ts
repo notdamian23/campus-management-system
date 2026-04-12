@@ -1,5 +1,6 @@
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { app } from "@/lib/firebase";
+import type { CampusProfileDoc } from "@/lib/campus-auth";
 
 export const CAMPUS_FUNCTIONS_REGION =
   process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_REGION?.trim() ||
@@ -9,6 +10,13 @@ type ResolveSchoolIdLoginResponse = {
   email?: string | null;
   found?: boolean;
   source?: "auth" | "profile" | "fallback" | "missing";
+};
+type CampusProfileResponse = {
+  profile?: CampusProfileDoc | null;
+};
+type FinalizeCampusProfileResponse = {
+  finalized?: boolean;
+  profile?: CampusProfileDoc | null;
 };
 
 export type SchoolIdLoginResolution =
@@ -30,6 +38,10 @@ export type SchoolIdLoginResolution =
 
 function trimValue(value: unknown) {
   return String(value ?? "").trim();
+}
+
+function getCampusFunctions() {
+  return getFunctions(app, CAMPUS_FUNCTIONS_REGION);
 }
 
 function logAuthDebug(
@@ -78,11 +90,10 @@ export async function resolveSchoolIdLoginForSchoolId(
   });
 
   try {
-    const functions = getFunctions(app, CAMPUS_FUNCTIONS_REGION);
     const callable = httpsCallable<
       { schoolId: string },
       ResolveSchoolIdLoginResponse
-    >(functions, "resolveSchoolIdLogin");
+    >(getCampusFunctions(), "resolveSchoolIdLogin");
 
     const result = await callable({ schoolId: normalizedSchoolId });
     const mappedEmail = trimValue(result.data?.email);
@@ -131,6 +142,59 @@ export async function resolveSchoolIdLoginForSchoolId(
       message: toResolverFailureMessage(functionError.code),
     };
   }
+}
+
+export async function getCurrentCampusProfileForCurrentUser(): Promise<CampusProfileDoc | null> {
+  logAuthDebug("info", "Loading current CAMPUS profile");
+  const callable = httpsCallable<Record<string, never>, CampusProfileResponse>(
+    getCampusFunctions(),
+    "getCurrentCampusProfile",
+  );
+
+  const result = await callable({});
+  const profile = result.data?.profile ?? null;
+
+  logAuthDebug("info", "Loaded current CAMPUS profile", {
+    hasProfile: Boolean(profile),
+    role: profile?.role ?? "",
+  });
+
+  return profile;
+}
+
+export async function savePendingEmailVerificationForCurrentUser(
+  pendingEmail: string,
+): Promise<CampusProfileDoc | null> {
+  const normalizedEmail = trimValue(pendingEmail).toLowerCase();
+  logAuthDebug("info", "Saving pending verification email", {
+    pendingEmail: normalizedEmail,
+  });
+
+  const callable = httpsCallable<
+    { pendingEmail: string },
+    CampusProfileResponse
+  >(getCampusFunctions(), "savePendingEmailVerification");
+
+  const result = await callable({ pendingEmail: normalizedEmail });
+  return result.data?.profile ?? null;
+}
+
+export async function finalizeVerifiedCampusProfileForCurrentUser(): Promise<{
+  finalized: boolean;
+  profile: CampusProfileDoc | null;
+}> {
+  logAuthDebug("info", "Finalizing verified CAMPUS profile");
+
+  const callable = httpsCallable<Record<string, never>, FinalizeCampusProfileResponse>(
+    getCampusFunctions(),
+    "finalizeVerifiedCampusProfile",
+  );
+
+  const result = await callable({});
+  return {
+    finalized: result.data?.finalized === true,
+    profile: result.data?.profile ?? null,
+  };
 }
 
 export function logCampusAuthEvent(

@@ -1,13 +1,5 @@
-import {
-  deleteField,
-  doc,
-  getDoc,
-  serverTimestamp,
-  updateDoc,
-} from "firebase/firestore";
 import type { User } from "firebase/auth";
-import { db } from "@/lib/firebase";
-import { logCampusAuthEvent } from "@/lib/firebase-functions";
+import { finalizeVerifiedCampusProfileForCurrentUser } from "@/lib/firebase-functions";
 
 export type CampusRole = "teacher" | "student" | "ec" | "admin";
 
@@ -105,53 +97,8 @@ export function buildEmailActionSettings() {
 }
 
 export async function finalizeVerifiedProfile(user: User) {
-  const authEmail = normalizeEmail(user.email);
-  if (!user.uid || !authEmail || !user.emailVerified) {
+  if (!user.uid || !normalizeEmail(user.email) || !user.emailVerified) {
     return { finalized: false, profile: null as CampusProfileDoc | null };
   }
-
-  const profileRef = doc(db, "profiles", user.uid);
-  const profileSnap = await getDoc(profileRef);
-  if (!profileSnap.exists()) {
-    return { finalized: false, profile: null as CampusProfileDoc | null };
-  }
-
-  const profile = profileSnap.data() as CampusProfileDoc;
-  const pendingEmail = normalizeEmail(profile.pendingEmail);
-  const currentEmail = normalizeEmail(profile.email);
-  const shouldFinalize =
-    (pendingEmail && pendingEmail === authEmail) ||
-    (!pendingEmail &&
-      currentEmail === authEmail &&
-      (profile.emailVerificationPending === true ||
-        profile.emailVerified === false ||
-        profile.firstLoginCompleted === false));
-
-  if (!shouldFinalize) {
-    return { finalized: false, profile };
-  }
-
-  await updateDoc(profileRef, {
-    email: authEmail,
-    emailVerified: true,
-    emailVerificationPending: false,
-    mustChangePassword: false,
-    firstLoginCompleted: true,
-    pendingEmail: deleteField(),
-    status: profile.status === "Inactive" ? "Inactive" : "active",
-    updatedAt: serverTimestamp(),
-  });
-
-  logCampusAuthEvent("info", "Finalized verified CAMPUS profile", {
-    uid: user.uid,
-    role: profile.role ?? "",
-  });
-
-  const refreshedProfileSnap = await getDoc(profileRef);
-  return {
-    finalized: true,
-    profile: refreshedProfileSnap.exists()
-      ? (refreshedProfileSnap.data() as CampusProfileDoc)
-      : profile,
-  };
+  return finalizeVerifiedCampusProfileForCurrentUser();
 }
