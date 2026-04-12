@@ -117,6 +117,9 @@ export function getStudentEventTone(status: StudentEventStatus): StudentTone {
   if (status === "Attended") return "green";
   if (status === "Missed") return "red";
   if (status === "Payment Due") return "red";
+  if (status === "Pre-registered") return "green";
+  if (status === "Waitlisted") return "amber";
+  if (status === "Cancelled") return "slate";
   if (status === "Pre-registration") return "blue";
   return "amber";
 }

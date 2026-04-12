@@ -669,6 +669,18 @@ export function TeacherPortalProvider({
         const yearLevel =
           String(data.yearLevel ?? "").trim() ||
           (yearTargets.length > 0 ? yearTargets.join(", ") : "All Years");
+        const lifecycle = computeLifecycle(
+          String(data.date ?? "").trim(),
+          scheduledTime,
+          timeEnd,
+        );
+        const preRegCount = Math.max(0, Number(data.preRegCount ?? 0));
+        const presentCount = presentCounts.get(eventItem.id) ?? 0;
+        const baseAbsentCount = absentCounts.get(eventItem.id) ?? 0;
+        const derivedAbsentCount =
+          data.isPreReg === true && lifecycle === "completed"
+            ? Math.max(baseAbsentCount, preRegCount - presentCount)
+            : baseAbsentCount;
 
         return {
           id: eventItem.id,
@@ -686,19 +698,15 @@ export function TeacherPortalProvider({
           withPayment: data.withPayment === true,
           preRegSlots:
             typeof data.preRegSlots === "number" ? data.preRegSlots : null,
-          preRegCount: Number(data.preRegCount ?? 0),
-          lifecycle: computeLifecycle(
-            String(data.date ?? "").trim(),
-            scheduledTime,
-            timeEnd,
-          ),
+          preRegCount,
+          lifecycle,
           eventDate: toEventDate(String(data.date ?? "").trim(), scheduledTime),
           createdAtMs: toMillis(data.createdAt),
           createdBy: data.createdBy ?? null,
-          registrationCount: Math.max(0, Number(data.preRegCount ?? 0)),
+          registrationCount: preRegCount,
           attendanceCount: attendanceCounts.get(eventItem.id) ?? 0,
-          presentCount: presentCounts.get(eventItem.id) ?? 0,
-          absentCount: absentCounts.get(eventItem.id) ?? 0,
+          presentCount,
+          absentCount: derivedAbsentCount,
           imageCount: imageCounts.get(eventItem.id) ?? 0,
           documentCount: documentCounts.get(eventItem.id) ?? 0,
         } as TeacherEvent;

@@ -692,9 +692,6 @@ export default function TeacherEventsPage() {
                             {selectedParticipants.length} participant
                             {selectedParticipants.length === 1 ? "" : "s"}
                           </Chip>
-                          <p className="text-xs text-campus-text-secondary">
-                            Export teacher-visible attendance to CSV.
-                          </p>
                         </div>
 
                         <Button

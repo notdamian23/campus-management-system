@@ -59,7 +59,14 @@ function matchesStatusFilter(item: StudentEvent, filter: EventStatusFilter) {
   if (filter === "attended") return item.status === "Attended";
   if (filter === "missed") return item.status === "Missed";
 
-  return item.status === "Upcoming" || item.status === "Pre-registration";
+  return (
+    item.status === "Upcoming" ||
+    item.status === "Payment Due" ||
+    item.status === "Pre-registration" ||
+    item.status === "Pre-registered" ||
+    item.status === "Waitlisted" ||
+    item.status === "Cancelled"
+  );
 }
 
 function getGroupLabel(eventDate: Date | null) {
@@ -86,7 +93,9 @@ export default function StudentEventsPage() {
     loading,
     error,
     registeredEventIds,
+    registrationsByEvent,
     registerForEvent,
+    cancelEventRegistration,
   } = useStudentPortal();
 
   useStudentPageErrorToast(error, "student events");
@@ -94,7 +103,7 @@ export default function StudentEventsPage() {
   const [sortMode, setSortMode] = useState<EventSortMode>("oldest_to_latest");
   const [statusFilter, setStatusFilter] = useState<EventStatusFilter>("all");
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  const [registeringId, setRegisteringId] = useState<string | null>(null);
+  const [actioningId, setActioningId] = useState<string | null>(null);
 
   const isMobile = useIsBelowBreakpoint(1024);
   const registeredSet = useMemo(
@@ -102,10 +111,7 @@ export default function StudentEventsPage() {
     [registeredEventIds],
   );
 
-  const eventOnlyItems = useMemo(
-    () => events.filter((item) => item.status !== "Payment Due"),
-    [events],
-  );
+  const eventOnlyItems = useMemo(() => events, [events]);
 
   const filteredEvents = useMemo(
     () =>
@@ -117,7 +123,11 @@ export default function StudentEventsPage() {
     () => ({
       upcoming: eventOnlyItems.filter(
         (item) =>
-          item.status === "Upcoming" || item.status === "Pre-registration",
+          item.status === "Upcoming" ||
+          item.status === "Payment Due" ||
+          item.status === "Pre-registration" ||
+          item.status === "Pre-registered" ||
+          item.status === "Waitlisted",
       ).length,
       attended: eventOnlyItems.filter((item) => item.status === "Attended")
         .length,
@@ -174,7 +184,7 @@ export default function StudentEventsPage() {
   const accountInactive = profile?.accountStatus === "Inactive";
 
   async function handleRegister(eventId: string) {
-    setRegisteringId(eventId);
+    setActioningId(eventId);
 
     const result = await registerForEvent(eventId);
 
@@ -192,16 +202,40 @@ export default function StudentEventsPage() {
       });
     }
 
-    setRegisteringId(null);
+    setActioningId(null);
+  }
+
+  async function handleCancelRegistration(eventId: string) {
+    setActioningId(eventId);
+
+    const result = await cancelEventRegistration(eventId);
+
+    if (result.ok) {
+      campusToast.success({
+        title: "Registration updated",
+        description: result.msg,
+        dedupeKey: `student-events:cancel:${eventId}`,
+      });
+    } else {
+      campusToast.error({
+        title: "Cancellation failed",
+        description: result.msg,
+        dedupeKey: `student-events:cancel-error:${eventId}`,
+      });
+    }
+
+    setActioningId(null);
   }
 
   const detailsContent = selectedEvent ? (
     <StudentEventDetails
       event={selectedEvent}
       registered={registeredSet.has(selectedEvent.id)}
+      registrationStatus={registrationsByEvent[selectedEvent.id]?.status ?? null}
       accountInactive={accountInactive}
-      isRegistering={registeringId === selectedEvent.id}
+      isRegistering={actioningId === selectedEvent.id}
       onRegister={handleRegister}
+      onCancelRegistration={handleCancelRegistration}
     />
   ) : null;
 
@@ -367,8 +401,10 @@ export default function StudentEventsPage() {
 
               <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
                 {group.items.map((item, index) => {
-                  const registered = registeredSet.has(item.id);
-                  const hasFooter = item.isPreReg || item.withPayment || registered;
+                  const hasFooter =
+                    item.isPreReg ||
+                    item.withPayment ||
+                    Boolean(item.registrationStatus);
 
                   return (
                     <StudentEventCard
@@ -393,13 +429,22 @@ export default function StudentEventsPage() {
                       action={
                         <Button
                           color="primary"
-                          variant={item.status === "Pre-registration" ? "flat" : "light"}
+                          variant={
+                            item.status === "Pre-registration" ||
+                            item.status === "Pre-registered" ||
+                            item.status === "Waitlisted"
+                              ? "flat"
+                              : "light"
+                          }
                           size="sm"
                           onPress={() => setSelectedEventId(item.id)}
                         >
                           {item.status === "Pre-registration"
                             ? "Review / register"
-                            : "View details"}
+                            : item.status === "Pre-registered" ||
+                                item.status === "Waitlisted"
+                              ? "Review registration"
+                              : "View details"}
                         </Button>
                       }
                       footer={hasFooter ? (
@@ -414,9 +459,19 @@ export default function StudentEventsPage() {
                               Payment linked
                             </Chip>
                           ) : null}
-                          {registered ? (
+                          {item.registrationStatus === "PRE_REGISTERED" ? (
                             <Chip size="sm" className="bg-emerald-100 text-emerald-700">
-                              Registered
+                              Pre-registered
+                            </Chip>
+                          ) : null}
+                          {item.registrationStatus === "WAITLISTED" ? (
+                            <Chip size="sm" className="bg-amber-100 text-amber-700">
+                              Waitlisted
+                            </Chip>
+                          ) : null}
+                          {item.registrationStatus === "CANCELLED" ? (
+                            <Chip size="sm" className="bg-slate-100 text-slate-700">
+                              Cancelled
                             </Chip>
                           ) : null}
                         </div>
@@ -507,18 +562,32 @@ export default function StudentEventsPage() {
 function StudentEventDetails({
   event,
   registered,
+  registrationStatus,
   accountInactive,
   isRegistering,
   onRegister,
+  onCancelRegistration,
 }: {
   event: StudentEvent;
   registered: boolean;
+  registrationStatus: StudentEvent["registrationStatus"];
   accountInactive: boolean;
   isRegistering: boolean;
   onRegister: (eventId: string) => Promise<void>;
+  onCancelRegistration: (eventId: string) => Promise<void>;
 }) {
   const toneClasses = getStudentToneClasses(getStudentEventTone(event.status));
   const canRegister = event.status === "Pre-registration";
+  const canCancel =
+    event.lifecycle !== "completed" &&
+    (registrationStatus === "PRE_REGISTERED" ||
+      registrationStatus === "WAITLISTED") &&
+    (!event.cancellationDeadlineAtMs ||
+      Date.now() <= event.cancellationDeadlineAtMs);
+  const showRegistrationActionCard =
+    event.lifecycle !== "completed" &&
+    (registrationStatus === "PRE_REGISTERED" ||
+      registrationStatus === "WAITLISTED");
   const requirementText = event.withPayment
     ? "Bring your payment receipt if the EC requires verification during attendance or check-in."
     : "Follow the EC instructions shared for this event before arrival.";
@@ -542,9 +611,19 @@ function StudentEventDetails({
                 Payment required
               </Chip>
             ) : null}
-            {registered ? (
+            {registrationStatus === "PRE_REGISTERED" ? (
               <Chip size="sm" className="bg-emerald-100 text-emerald-700">
-                Registered
+                Pre-registered
+              </Chip>
+            ) : null}
+            {registrationStatus === "WAITLISTED" ? (
+              <Chip size="sm" className="bg-amber-100 text-amber-700">
+                Waitlisted
+              </Chip>
+            ) : null}
+            {registrationStatus === "CANCELLED" ? (
+              <Chip size="sm" className="bg-slate-100 text-slate-700">
+                Cancelled
               </Chip>
             ) : null}
           </div>
@@ -596,7 +675,7 @@ function StudentEventDetails({
               isDisabled={registered || isRegistering || accountInactive}
             >
               {registered
-                ? "Registered"
+                ? "Already registered"
                 : isRegistering
                   ? "Registering..."
                   : accountInactive
@@ -609,6 +688,51 @@ function StudentEventDetails({
                 Approach the EC member to activate your account before registering.
               </p>
             ) : null}
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {!canRegister && showRegistrationActionCard ? (
+        <Card shadow="none" className="border border-border/70 bg-white/95">
+          <CardBody className="gap-4 p-4 sm:p-5">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-campus-text-primary">
+                Registration status
+              </p>
+              <p className="text-sm leading-6 text-campus-text-secondary">
+                {registrationStatus === "WAITLISTED"
+                  ? "You are currently on the waitlist. If a confirmed slot opens, the system can promote your registration automatically."
+                  : "Your pre-registration is already recorded for this event."}
+              </p>
+            </div>
+
+            <Button
+              color="danger"
+              variant="flat"
+              className="w-full sm:w-auto"
+              onPress={() => onCancelRegistration(event.id)}
+              isDisabled={!canCancel || isRegistering}
+            >
+              {isRegistering
+                ? "Updating..."
+                : canCancel
+                  ? "Cancel registration"
+                  : "Cancellation closed"}
+            </Button>
+
+            {!canCancel ? (
+              <p className="text-sm text-campus-text-secondary">
+                The cancellation deadline has already passed for this event.
+              </p>
+            ) : null}
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {registrationStatus === "CANCELLED" ? (
+        <Card shadow="none" className="border border-slate-200 bg-slate-50/80">
+          <CardBody className="p-4 text-sm text-slate-700">
+            Your pre-registration was cancelled before attendance verification.
           </CardBody>
         </Card>
       ) : null}
@@ -633,6 +757,22 @@ function StudentEventDetails({
         <Card shadow="none" className="border border-amber-100 bg-amber-50/80">
           <CardBody className="p-4 text-sm text-amber-700">
             Keep this event on your radar and watch for updates in your notifications.
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {event.status === "Waitlisted" ? (
+        <Card shadow="none" className="border border-amber-100 bg-amber-50/80">
+          <CardBody className="p-4 text-sm text-amber-700">
+            This event is currently full, and your registration is on the waitlist.
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {event.status === "Payment Due" ? (
+        <Card shadow="none" className="border border-amber-100 bg-amber-50/80">
+          <CardBody className="p-4 text-sm text-amber-700">
+            Complete the linked EC payment first. The backend will reject pre-registration until that payment is marked paid on your account.
           </CardBody>
         </Card>
       ) : null}

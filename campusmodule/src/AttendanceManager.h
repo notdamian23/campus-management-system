@@ -15,7 +15,9 @@ enum class AttendanceAction : uint8_t {
 enum class AttendanceOutcome : uint8_t {
   TimeInRecorded,
   TimeOutRecorded,
+  TimeInTooEarly,
   DuplicateTimeIn,
+  TimeOutAlreadyDone,
   DuplicateTimeOut,
   MissingTimeIn,
   NoPairedEvent,
@@ -26,6 +28,7 @@ class AttendanceManager {
  public:
   AttendanceManager(StorageManager &storage, TimeManager &clock);
 
+  bool canStartTimeIn(const EventInfo &event) const;
   bool canStudentTimeIn(const String &studentId, const String &eventId,
                         String &message) const;
   bool canStudentTimeOut(const String &studentId, const String &eventId,

@@ -284,6 +284,14 @@ function normalizeEnrollmentSyncStatus(value) {
         return "failed";
     return "pending";
 }
+function parseRegistrationStatus(value) {
+    const raw = normalizeLower(value);
+    if (raw === "waitlisted")
+        return "WAITLISTED";
+    if (raw === "cancelled")
+        return "CANCELLED";
+    return "PRE_REGISTERED";
+}
 function normalizeTargetList(value) {
     const raw = dedupeStrings(asStringArray(value));
     return raw.filter((item) => normalizeLower(item) !== "all years" && normalizeLower(item) !== "all courses");
@@ -569,12 +577,15 @@ async function resolveAuthorizedStudentIds(eventId, event) {
     const authorized = new Map();
     registrationsSnap.docs.forEach((doc) => {
         const data = doc.data();
+        if (event.isPreReg && parseRegistrationStatus(data.status) !== "PRE_REGISTERED") {
+            return;
+        }
         const studentId = normalizeText(data.uid) || normalizeText(data.studentUid) || doc.id;
         if (studentId) {
             authorized.set(studentId, { registrationId: doc.id });
         }
     });
-    if (authorized.size > 0) {
+    if (event.isPreReg || authorized.size > 0) {
         return authorized;
     }
     const profilesSnap = await db.collection("profiles").where("role", "==", "student").get();
@@ -1323,17 +1334,22 @@ async function pairDeviceToEvent(device, eventId) {
     return context;
 }
 async function isStudentRegisteredForEvent(eventId, studentId) {
-    const registrationsSnap = await db.collection(`events/${eventId}/registrations`).limit(1).get();
-    if (registrationsSnap.empty) {
+    var _a, _b;
+    const eventSnap = await db.doc(`events/${eventId}`).get();
+    const eventData = (_a = eventSnap.data()) !== null && _a !== void 0 ? _a : {};
+    if (eventData.isPreReg !== true) {
         return true;
     }
     const directSnap = await db.doc(`events/${eventId}/registrations/${studentId}`).get();
     if (directSnap.exists) {
-        return true;
+        return parseRegistrationStatus((_b = directSnap.data()) === null || _b === void 0 ? void 0 : _b.status) === "PRE_REGISTERED";
     }
+    const registrationsSnap = await db.collection(`events/${eventId}/registrations`).get();
     return registrationsSnap.docs.some((doc) => {
         const data = doc.data();
-        return normalizeText(data.uid) === studentId || normalizeText(data.studentUid) === studentId;
+        return (parseRegistrationStatus(data.status) === "PRE_REGISTERED" &&
+            (normalizeText(data.uid) === studentId ||
+                normalizeText(data.studentUid) === studentId));
     });
 }
 async function syncAttendanceRecord(device, record) {

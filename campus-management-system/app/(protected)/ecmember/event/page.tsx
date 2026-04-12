@@ -106,9 +106,15 @@ type EventDoc = {
   details?: string;
   isPreReg?: boolean;
   withPayment?: boolean;
+  waitlistEnabled?: boolean;
+  requiredPaymentId?: string;
+  registrationStartAt?: any;
+  registrationEndAt?: any;
+  cancellationDeadlineAt?: any;
 
   preRegSlots?: number | null;
   preRegCount?: number;
+  waitlistCount?: number;
 
   status?: EventStatus;
   createdBy?: string | null;
@@ -168,7 +174,18 @@ type RegistrationDoc = {
   studentName: string;
   course: string;
   year: string;
+  status: "PRE_REGISTERED" | "WAITLISTED" | "CANCELLED";
   createdAt?: any;
+  updatedAt?: any;
+  registeredAt?: any;
+  waitlistedAt?: any;
+  cancelledAt?: any;
+};
+
+type PaymentLinkOption = {
+  id: string;
+  title: string;
+  ref: string;
 };
 
 type RemoteStudent = {
@@ -364,6 +381,23 @@ function toTimeValue(time24: string) {
   return new Time(hour, minute);
 }
 
+function dateFromIsoAnd24h(dateIso: string, time24: string) {
+  const [year, month, day] = String(dateIso ?? "").split("-").map(Number);
+  if (!year || !month || !day) return null;
+
+  const { hour, minute } = parse24h(time24);
+  const nextDate = new Date(year, month - 1, day, hour, minute, 0, 0);
+  return Number.isNaN(nextDate.getTime()) ? null : nextDate;
+}
+
+function isoDateFromDate(date: Date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function time24FromDate(date: Date) {
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
 function toMinutesFrom24h(time24: string) {
   const { hour, minute } = parse24h(time24);
   return hour * 60 + minute;
@@ -455,6 +489,33 @@ function toMillis(value: any): number {
   }
   const d = new Date(value as string | number | Date);
   return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function parseRegistrationStatus(
+  raw: unknown,
+): RegistrationDoc["status"] {
+  const normalized = String(raw ?? "").trim().toUpperCase();
+  if (normalized === "WAITLISTED") return "WAITLISTED";
+  if (normalized === "CANCELLED") return "CANCELLED";
+  return "PRE_REGISTERED";
+}
+
+function formatRegistrationStatus(
+  status: RegistrationDoc["status"],
+): string {
+  if (status === "WAITLISTED") return "Waitlisted";
+  if (status === "CANCELLED") return "Cancelled";
+  return "Pre-registered";
+}
+
+function registrationSortMillis(row: Partial<RegistrationDoc>): number {
+  return (
+    toMillis(row.registeredAt) ||
+    toMillis(row.waitlistedAt) ||
+    toMillis(row.cancelledAt) ||
+    toMillis(row.updatedAt) ||
+    toMillis(row.createdAt)
+  );
 }
 
 function formatDateTime(value: any): string {
@@ -700,6 +761,8 @@ export default function EventDashboard() {
   const [details, setDetails] = useState("");
   const [isPreReg, setIsPreReg] = useState(false);
   const [withPayment, setWithPayment] = useState(false);
+  const [waitlistEnabled, setWaitlistEnabled] = useState(false);
+  const [requiredPaymentId, setRequiredPaymentId] = useState("");
 
   const [eventScheduled24, setEventScheduled24] = useState("07:00");
   const [eventStartTimeValue, setEventStartTimeValue] = useState<Time | null>(
@@ -709,6 +772,31 @@ export default function EventDashboard() {
   const [eventEndTimeValue, setEventEndTimeValue] = useState<Time | null>(() =>
     toTimeValue("08:00"),
   );
+  const [registrationStartDate, setRegistrationStartDate] = useState<string>(
+    () => isoDateToday(),
+  );
+  const [registrationStartDateValue, setRegistrationStartDateValue] =
+    useState<any>(() => toCalendarDate(isoDateToday()));
+  const [registrationStart24, setRegistrationStart24] = useState(() => now24h());
+  const [registrationStartTimeValue, setRegistrationStartTimeValue] =
+    useState<Time | null>(() => toTimeValue(now24h()));
+  const [registrationEndDate, setRegistrationEndDate] = useState<string>(
+    () => isoDateToday(),
+  );
+  const [registrationEndDateValue, setRegistrationEndDateValue] = useState<any>(
+    () => toCalendarDate(isoDateToday()),
+  );
+  const [registrationEnd24, setRegistrationEnd24] = useState("23:59");
+  const [registrationEndTimeValue, setRegistrationEndTimeValue] =
+    useState<Time | null>(() => toTimeValue("23:59"));
+  const [cancellationDeadlineDate, setCancellationDeadlineDate] =
+    useState<string>(() => isoDateToday());
+  const [cancellationDeadlineDateValue, setCancellationDeadlineDateValue] =
+    useState<any>(() => toCalendarDate(isoDateToday()));
+  const [cancellationDeadline24, setCancellationDeadline24] =
+    useState("23:59");
+  const [cancellationDeadlineTimeValue, setCancellationDeadlineTimeValue] =
+    useState<Time | null>(() => toTimeValue("23:59"));
 
   const [preRegSlots, setPreRegSlots] = useState<number>(50);
 
@@ -721,6 +809,9 @@ export default function EventDashboard() {
 
   const [events, setEvents] = useState<EventDoc[]>([]);
   const [eventsLoading, setEventsLoading] = useState(true);
+  const [paymentLinkOptions, setPaymentLinkOptions] = useState<
+    PaymentLinkOption[]
+  >([]);
   const [notifications, setNotifications] = useState<NotificationSummary[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
   const [expandedNotificationId, setExpandedNotificationId] = useState<
@@ -800,6 +891,33 @@ export default function EventDashboard() {
         setRoleLoading(false);
       }
     });
+
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(collection(db, "payments"), orderBy("createdAt", "desc")),
+      (snap) => {
+        const rows = snap.docs.map((paymentDoc) => {
+          const data = paymentDoc.data() as {
+            title?: unknown;
+            ref?: unknown;
+          };
+
+          return {
+            id: paymentDoc.id,
+            title: String(data.title ?? "Untitled Payment").trim() || "Untitled Payment",
+            ref: String(data.ref ?? paymentDoc.id).trim() || paymentDoc.id,
+          } as PaymentLinkOption;
+        });
+
+        setPaymentLinkOptions(rows);
+      },
+      () => {
+        setPaymentLinkOptions([]);
+      },
+    );
 
     return () => unsub();
   }, []);
@@ -1147,9 +1265,14 @@ export default function EventDashboard() {
                   course: String(data.course ?? ""),
                   year: String(data.year ?? ""),
                   createdAt: data.createdAt,
+                  updatedAt: data.updatedAt,
+                  registeredAt: data.registeredAt,
+                  waitlistedAt: data.waitlistedAt,
+                  cancelledAt: data.cancelledAt,
+                  status: parseRegistrationStatus(data.status),
                 };
               })
-              .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+              .sort((a, b) => registrationSortMillis(b) - registrationSortMillis(a));
 
             const activeRows = await Promise.all(
               rows.map(async (row) => {
@@ -2566,6 +2689,8 @@ export default function EventDashboard() {
     setDetails("");
     setIsPreReg(false);
     setWithPayment(false);
+    setWaitlistEnabled(false);
+    setRequiredPaymentId("");
     setSelectedEventStudents([]);
     setEventYearSearch("");
     setEventCourseSearch("");
@@ -2579,6 +2704,18 @@ export default function EventDashboard() {
     setEventStartTimeValue(toTimeValue("07:00"));
     setEventEnd24("08:00");
     setEventEndTimeValue(toTimeValue("08:00"));
+    setRegistrationStartDate(nextEventDate);
+    setRegistrationStartDateValue(toCalendarDate(nextEventDate));
+    setRegistrationStart24(now24h());
+    setRegistrationStartTimeValue(toTimeValue(now24h()));
+    setRegistrationEndDate(nextEventDate);
+    setRegistrationEndDateValue(toCalendarDate(nextEventDate));
+    setRegistrationEnd24("23:59");
+    setRegistrationEndTimeValue(toTimeValue("23:59"));
+    setCancellationDeadlineDate(nextEventDate);
+    setCancellationDeadlineDateValue(toCalendarDate(nextEventDate));
+    setCancellationDeadline24("23:59");
+    setCancellationDeadlineTimeValue(toTimeValue("23:59"));
   }, []);
 
   const handleStartEditUpcomingEvent = async (eventToEdit: EventDoc) => {
@@ -2675,6 +2812,8 @@ export default function EventDashboard() {
     const preRegEnabled = Boolean(eventToEdit.isPreReg);
     setIsPreReg(preRegEnabled);
     setWithPayment(Boolean(eventToEdit.withPayment));
+    setWaitlistEnabled(Boolean(eventToEdit.waitlistEnabled));
+    setRequiredPaymentId(String(eventToEdit.requiredPaymentId ?? "").trim());
     setPreRegSlots(
       typeof eventToEdit.preRegSlots === "number" &&
         eventToEdit.preRegSlots >= 0
@@ -2686,20 +2825,53 @@ export default function EventDashboard() {
     setEventStartTimeValue(toTimeValue(start24));
     setEventEnd24(end24);
     setEventEndTimeValue(toTimeValue(end24));
+    const registrationStartDateValueMs = toMillis(eventToEdit.registrationStartAt);
+    const registrationEndDateValueMs = toMillis(eventToEdit.registrationEndAt);
+    const cancellationDeadlineValueMs = toMillis(eventToEdit.cancellationDeadlineAt);
+    const defaultRegistrationEnd = dateFromIsoAnd24h(nextDate, start24) ?? new Date();
+    const registrationStartDateObject =
+      registrationStartDateValueMs > 0 ?
+        new Date(registrationStartDateValueMs) :
+        new Date();
+    const registrationEndDateObject =
+      registrationEndDateValueMs > 0 ?
+        new Date(registrationEndDateValueMs) :
+        defaultRegistrationEnd;
+    const cancellationDeadlineDateObject =
+      cancellationDeadlineValueMs > 0 ?
+        new Date(cancellationDeadlineValueMs) :
+        registrationEndDateObject;
 
-    if (preRegEnabled) {
-      setSelectedEventYearLevels([]);
-      setSelectedEventCourses([]);
-      setIsAllYearsExplicit(false);
-      setIsAllCoursesExplicit(false);
-      setSelectedEventStudents([]);
-    } else {
-      setSelectedEventYearLevels(selectedYears);
-      setSelectedEventCourses(selectedCourses);
-      setIsAllYearsExplicit(allYearsExplicit);
-      setIsAllCoursesExplicit(allCoursesExplicit);
-      setSelectedEventStudents(parsedTargets);
-    }
+    setRegistrationStartDate(isoDateFromDate(registrationStartDateObject));
+    setRegistrationStartDateValue(
+      toCalendarDate(isoDateFromDate(registrationStartDateObject)),
+    );
+    setRegistrationStart24(time24FromDate(registrationStartDateObject));
+    setRegistrationStartTimeValue(
+      toTimeValue(time24FromDate(registrationStartDateObject)),
+    );
+    setRegistrationEndDate(isoDateFromDate(registrationEndDateObject));
+    setRegistrationEndDateValue(
+      toCalendarDate(isoDateFromDate(registrationEndDateObject)),
+    );
+    setRegistrationEnd24(time24FromDate(registrationEndDateObject));
+    setRegistrationEndTimeValue(
+      toTimeValue(time24FromDate(registrationEndDateObject)),
+    );
+    setCancellationDeadlineDate(isoDateFromDate(cancellationDeadlineDateObject));
+    setCancellationDeadlineDateValue(
+      toCalendarDate(isoDateFromDate(cancellationDeadlineDateObject)),
+    );
+    setCancellationDeadline24(time24FromDate(cancellationDeadlineDateObject));
+    setCancellationDeadlineTimeValue(
+      toTimeValue(time24FromDate(cancellationDeadlineDateObject)),
+    );
+
+    setSelectedEventYearLevels(selectedYears);
+    setSelectedEventCourses(selectedCourses);
+    setIsAllYearsExplicit(allYearsExplicit);
+    setIsAllCoursesExplicit(allCoursesExplicit);
+    setSelectedEventStudents(parsedTargets);
 
     setEventYearSearch("");
     setEventCourseSearch("");
@@ -2727,6 +2899,9 @@ export default function EventDashboard() {
     if (isPreReg && (Number.isNaN(preRegSlots) || preRegSlots < 0)) {
       return setSaveError("Pre-reg slots must be at least 0.");
     }
+    if (withPayment && !requiredPaymentId.trim()) {
+      return setSaveError("Select the linked payment before saving this event.");
+    }
     if (!isPreReg && !hasEventRegistrantSelection && !editingEventId) {
       return setSaveError(
         "Choose at least one registrant filter or student before creating an event.",
@@ -2746,6 +2921,64 @@ export default function EventDashboard() {
     try {
       setSaving(true);
       const slots = isPreReg ? preRegSlots : null;
+      const registrationStartAt = isPreReg
+        ? dateFromIsoAnd24h(registrationStartDate, registrationStart24)
+        : null;
+      const registrationEndAt = isPreReg
+        ? dateFromIsoAnd24h(registrationEndDate, registrationEnd24)
+        : null;
+      const cancellationDeadlineAt = isPreReg
+        ? dateFromIsoAnd24h(cancellationDeadlineDate, cancellationDeadline24)
+        : null;
+      const eventStartAt = dateFromIsoAnd24h(date, eventScheduled24);
+
+      if (
+        isPreReg &&
+        (!registrationStartAt || !registrationEndAt || !cancellationDeadlineAt)
+      ) {
+        return setSaveError(
+          "Set valid registration and cancellation date/time values.",
+        );
+      }
+      if (
+        isPreReg &&
+        registrationStartAt &&
+        registrationEndAt &&
+        registrationStartAt > registrationEndAt
+      ) {
+        return setSaveError("Registration start must be earlier than the end.");
+      }
+      if (
+        isPreReg &&
+        eventStartAt &&
+        registrationEndAt &&
+        registrationEndAt > eventStartAt
+      ) {
+        return setSaveError(
+          "Registration end must be on or before the event start time.",
+        );
+      }
+      if (
+        isPreReg &&
+        cancellationDeadlineAt &&
+        registrationStartAt &&
+        cancellationDeadlineAt < registrationStartAt
+      ) {
+        return setSaveError(
+          "Cancellation deadline cannot be earlier than registration start.",
+        );
+      }
+      if (
+        isPreReg &&
+        cancellationDeadlineAt &&
+        registrationEndAt &&
+        cancellationDeadlineAt > registrationEndAt
+      ) {
+        return setSaveError(
+          "Cancellation deadline must be on or before registration end.",
+        );
+      }
+
       const studentTarget = selectedEventStudents
         .map((student) => `${student.studentName} (${student.schoolId})`)
         .join("; ");
@@ -2758,14 +2991,28 @@ export default function EventDashboard() {
         ? "All Courses"
         : selectedEventCourses.join(", ");
       const liveRegistrationCount = editingEventId
-        ? eventRegistrations[editingEventId]?.length
+        ? eventRegistrations[editingEventId]?.filter(
+            (row) => row.status === "PRE_REGISTERED",
+          ).length
+        : undefined;
+      const liveWaitlistCount = editingEventId
+        ? eventRegistrations[editingEventId]?.filter(
+            (row) => row.status === "WAITLISTED",
+          ).length
         : undefined;
       const fallbackRegistrationCount =
         typeof eventBeingEdited?.preRegCount === "number"
           ? Math.max(0, Math.trunc(eventBeingEdited.preRegCount))
           : 0;
+      const fallbackWaitlistCount =
+        typeof eventBeingEdited?.waitlistCount === "number"
+          ? Math.max(0, Math.trunc(eventBeingEdited.waitlistCount))
+          : 0;
       const preRegCount = isPreReg
         ? (liveRegistrationCount ?? fallbackRegistrationCount)
+        : 0;
+      const waitlistCount = isPreReg
+        ? (liveWaitlistCount ?? fallbackWaitlistCount)
         : 0;
       const preRegRemaining =
         isPreReg && typeof slots === "number"
@@ -2778,17 +3025,23 @@ export default function EventDashboard() {
         scheduledTime: startTime,
         timeStart: startTime,
         timeEnd: endTime,
-        yearLevel: isPreReg ? "All Years" : yearLevelValue,
-        course: isPreReg ? "All Courses" : courseValue,
-        yearLevels: isPreReg ? [] : selectedEventYearLevels,
-        courses: isPreReg ? [] : selectedEventCourses,
-        targetStudent: isPreReg ? "" : studentTarget,
+        yearLevel: yearLevelValue || "All Years",
+        course: courseValue || "All Courses",
+        yearLevels: selectedEventYearLevels,
+        courses: selectedEventCourses,
+        targetStudent: studentTarget,
         details: details.trim(),
         isPreReg,
         withPayment,
+        waitlistEnabled: isPreReg ? waitlistEnabled : false,
+        requiredPaymentId: withPayment ? requiredPaymentId.trim() : "",
+        registrationStartAt,
+        registrationEndAt,
+        cancellationDeadlineAt,
         preRegSlots: slots,
         preRegCount,
         preRegRemaining,
+        waitlistCount,
       };
 
       if (editingEventId) {
@@ -2854,13 +3107,14 @@ export default function EventDashboard() {
         const data = d.data() as Partial<RegistrationDoc>;
         const uid = String(data.uid ?? d.id);
         if (!uid) return;
+        const registrationStatus = parseRegistrationStatus(data.status);
 
         rowsByUid.set(uid, {
           schoolId: String(data.schoolId ?? ""),
           studentName: String(data.studentName ?? ""),
           course: String(data.course ?? ""),
           year: String(data.year ?? ""),
-          attendanceStatus: "Registered",
+          attendanceStatus: formatRegistrationStatus(registrationStatus),
           attendanceTimeIn: "-",
           attendanceTimeOut: "-",
         });
@@ -2939,6 +3193,17 @@ export default function EventDashboard() {
               : (existing?.attendanceTimeOut ?? "-"),
         });
       });
+
+      if (computeStatus(ev) === "completed") {
+        rowsByUid.forEach((row) => {
+          if (
+            row.attendanceStatus === "Pre-registered" &&
+            row.attendanceTimeIn === "-"
+          ) {
+            row.attendanceStatus = "Missed";
+          }
+        });
+      }
 
       const rows = Array.from(rowsByUid.values()).sort((a, b) => {
         const byName = a.studentName.localeCompare(b.studentName);
@@ -3108,30 +3373,19 @@ export default function EventDashboard() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Switch
                 isSelected={isPreReg}
-                onValueChange={(checked) => {
-                  setIsPreReg(checked);
-                  if (checked) {
-                    setRegistrantsModalOpen(false);
-                    setSelectedEventYearLevels([]);
-                    setSelectedEventCourses([]);
-                    setIsAllYearsExplicit(false);
-                    setIsAllCoursesExplicit(false);
-                    setSelectedEventStudents([]);
-                    setEventYearSearch("");
-                    setEventCourseSearch("");
-                    setEventSearchName("");
-                    setShowEventYearDropdown(false);
-                    setShowEventCourseDropdown(false);
-                    setShowEventStudentDropdown(false);
-                  }
-                }}
+                onValueChange={setIsPreReg}
               >
                 Pre-Registration
               </Switch>
 
               <Switch
                 isSelected={withPayment}
-                onValueChange={(checked) => setWithPayment(checked)}
+                onValueChange={(checked) => {
+                  setWithPayment(checked);
+                  if (!checked) {
+                    setRequiredPaymentId("");
+                  }
+                }}
               >
                 With Payment
               </Switch>
@@ -3207,7 +3461,6 @@ export default function EventDashboard() {
             <Button
               variant="bordered"
               className="w-full justify-between"
-              isDisabled={isPreReg}
               onPress={() => {
                 setShowEventYearDropdown(false);
                 setShowEventCourseDropdown(false);
@@ -3244,7 +3497,7 @@ export default function EventDashboard() {
                           {(isAllYearsExplicit ||
                             selectedEventYearLevels.length > 0) && (
                             <div
-                              className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isPreReg ? "bg-gray-100" : "bg-white"}`}
+                              className="mt-1 min-h-[52px] rounded-lg border bg-white px-3 py-2"
                             >
                               <div className="flex flex-wrap gap-2">
                                 {isAllYearsExplicit &&
@@ -3308,13 +3561,12 @@ export default function EventDashboard() {
                                 setShowEventYearDropdown(true);
                               }}
                               onFocus={() => setShowEventYearDropdown(true)}
-                              isDisabled={isPreReg}
                               placeholder="Search year level"
                               size="sm"
                               className="w-full"
                             />
 
-                            {!isPreReg && showEventYearDropdown && (
+                            {showEventYearDropdown && (
                               <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
                                 {!showAllYearsOption &&
                                 filteredEventYearOptions.length === 0 ? (
@@ -3381,7 +3633,7 @@ export default function EventDashboard() {
                           {(isAllCoursesExplicit ||
                             selectedEventCourses.length > 0) && (
                             <div
-                              className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isPreReg ? "bg-gray-100" : "bg-white"}`}
+                              className="mt-1 min-h-[52px] rounded-lg border bg-white px-3 py-2"
                             >
                               <div className="flex flex-wrap gap-2">
                                 {isAllCoursesExplicit &&
@@ -3445,13 +3697,12 @@ export default function EventDashboard() {
                                 setShowEventCourseDropdown(true);
                               }}
                               onFocus={() => setShowEventCourseDropdown(true)}
-                              isDisabled={isPreReg}
                               placeholder="Search course"
                               size="sm"
                               className="w-full"
                             />
 
-                            {!isPreReg && showEventCourseDropdown && (
+                            {showEventCourseDropdown && (
                               <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
                                 {!showAllCoursesOption &&
                                 filteredEventCourseOptions.length === 0 ? (
@@ -3517,7 +3768,7 @@ export default function EventDashboard() {
 
                           {selectedEventStudents.length > 0 && (
                             <div
-                              className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isPreReg ? "bg-gray-100" : "bg-white"}`}
+                              className="mt-1 min-h-[52px] rounded-lg border bg-white px-3 py-2"
                             >
                               <div className="flex flex-wrap gap-2">
                                 {selectedEventStudents.map((student) => (
@@ -3564,13 +3815,12 @@ export default function EventDashboard() {
                                 setShowEventStudentDropdown(true);
                               }}
                               onFocus={() => setShowEventStudentDropdown(true)}
-                              isDisabled={isPreReg}
                               placeholder="Search by name"
                               size="sm"
                               className="w-full"
                             />
 
-                            {!isPreReg && showEventStudentDropdown && (
+                            {showEventStudentDropdown && (
                               <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
                                 {studentsLoading ? (
                                   <div className="p-3">
@@ -3634,35 +3884,27 @@ export default function EventDashboard() {
               </ModalContent>
             </Modal>
 
-            {isPreReg && (
-              <p className="text-xs text-campus-text-secondary">
-                Pre-Registration events are open to all year levels and courses.
-              </p>
-            )}
-            {!isPreReg && hasSpecificTarget && (
+            {hasSpecificTarget && (
               <p className="text-xs text-campus-text-secondary">
                 Year Level and Course are optional when targeting specific
                 students.
               </p>
             )}
-            {!isPreReg && (
-              <p className="text-xs text-campus-text-secondary">
-                Current filters: Year Level - {eventYearLevelLabel}; Course -{" "}
-                {eventCourseLabel}.
-              </p>
-            )}
+            <p className="text-xs text-campus-text-secondary">
+              Current filters: Year Level - {eventYearLevelLabel || "All Years"}; Course -{" "}
+              {eventCourseLabel || "All Courses"}.
+            </p>
             {!isPreReg && !hasEventRegistrantSelection && !isEditingEvent && (
               <p className="text-xs text-red-600">
                 Choose at least one registrant filter or student to create this
                 event.
               </p>
             )}
-            {!isPreReg && (
-              <p className="text-xs text-campus-text-secondary">
-                Choose specific students, Year Level filters, Course filters, or
-                a combination of them.
-              </p>
-            )}
+            <p className="text-xs text-campus-text-secondary">
+              Choose specific students, Year Level filters, Course filters, or
+              a combination of them. Leave everything broad to open the event to
+              all students.
+            </p>
           </div>
 
           <div>
@@ -3676,32 +3918,187 @@ export default function EventDashboard() {
             />
           </div>
 
-          {isPreReg && (
+          {withPayment && (
             <div>
-              <label className="text-sm font-medium">
-                Pre-Registration Slots
-              </label>
-              <Input
-                aria-label="Pre-registration slots"
-                type="number"
-                min={0}
-                step={1}
-                value={String(preRegSlots)}
-                onValueChange={(value) => {
-                  const parsed = Number(value);
-                  if (Number.isNaN(parsed)) {
-                    setPreRegSlots(0);
-                    return;
-                  }
-
-                  setPreRegSlots(Math.max(0, Math.trunc(parsed)));
+              <label className="text-sm font-medium">Linked Payment</label>
+              <Select
+                aria-label="Linked payment"
+                className="mt-1 w-full"
+                placeholder={
+                  paymentLinkOptions.length === 0
+                    ? "No EC payments available yet"
+                    : "Select a payment"
+                }
+                selectedKeys={
+                  requiredPaymentId ? new Set([requiredPaymentId]) : new Set()
+                }
+                onSelectionChange={(keys) => {
+                  const selected = Array.from(keys)[0];
+                  setRequiredPaymentId(
+                    typeof selected === "string" ? selected : "",
+                  );
                 }}
-                className="w-full mt-1"
-                placeholder="e.g. 100"
-              />
-              <p className="text-xs text-campus-text-secondary mt-1">
-                This is the maximum number of students allowed to pre-register.
+                isDisabled={paymentLinkOptions.length === 0}
+              >
+                {paymentLinkOptions.map((option) => (
+                  <SelectItem key={option.id}>
+                    {option.title} ({option.ref})
+                  </SelectItem>
+                ))}
+              </Select>
+              <p className="mt-1 text-xs text-campus-text-secondary">
+                Students must have this payment marked paid before the backend
+                will accept pre-registration.
               </p>
+            </div>
+          )}
+
+          {isPreReg && (
+            <div className="space-y-4 rounded-xl border border-border/70 bg-slate-50/80 p-4">
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-campus-text-primary">
+                  Pre-Registration Settings
+                </p>
+                <p className="text-xs text-campus-text-secondary">
+                  These dates are enforced by the server when a student registers
+                  or cancels.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <div>
+                  <label className="text-sm font-medium">
+                    Registration Start Date
+                  </label>
+                  <DatePicker
+                    aria-label="Registration start date"
+                    className="mt-1 w-full"
+                    value={registrationStartDateValue}
+                    onChange={(value) => {
+                      setRegistrationStartDateValue(value);
+                      setRegistrationStartDate(toIsoDate(value));
+                    }}
+                    granularity="day"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium">
+                    Registration Start Time
+                  </label>
+                  <TimeInput
+                    aria-label="Registration start time"
+                    className="mt-1 w-full"
+                    value={registrationStartTimeValue}
+                    onChange={(value) => {
+                      setRegistrationStartTimeValue(value);
+                      setRegistrationStart24(to24hStringFromValue(value));
+                    }}
+                    granularity="minute"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium">
+                    Registration End Date
+                  </label>
+                  <DatePicker
+                    aria-label="Registration end date"
+                    className="mt-1 w-full"
+                    value={registrationEndDateValue}
+                    onChange={(value) => {
+                      setRegistrationEndDateValue(value);
+                      setRegistrationEndDate(toIsoDate(value));
+                    }}
+                    granularity="day"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium">
+                    Registration End Time
+                  </label>
+                  <TimeInput
+                    aria-label="Registration end time"
+                    className="mt-1 w-full"
+                    value={registrationEndTimeValue}
+                    onChange={(value) => {
+                      setRegistrationEndTimeValue(value);
+                      setRegistrationEnd24(to24hStringFromValue(value));
+                    }}
+                    granularity="minute"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium">
+                    Cancellation Deadline Date
+                  </label>
+                  <DatePicker
+                    aria-label="Cancellation deadline date"
+                    className="mt-1 w-full"
+                    value={cancellationDeadlineDateValue}
+                    onChange={(value) => {
+                      setCancellationDeadlineDateValue(value);
+                      setCancellationDeadlineDate(toIsoDate(value));
+                    }}
+                    granularity="day"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium">
+                    Cancellation Deadline Time
+                  </label>
+                  <TimeInput
+                    aria-label="Cancellation deadline time"
+                    className="mt-1 w-full"
+                    value={cancellationDeadlineTimeValue}
+                    onChange={(value) => {
+                      setCancellationDeadlineTimeValue(value);
+                      setCancellationDeadline24(to24hStringFromValue(value));
+                    }}
+                    granularity="minute"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+                <div>
+                  <label className="text-sm font-medium">
+                    Pre-Registration Slots
+                  </label>
+                  <Input
+                    aria-label="Pre-registration slots"
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={String(preRegSlots)}
+                    onValueChange={(value) => {
+                      const parsed = Number(value);
+                      if (Number.isNaN(parsed)) {
+                        setPreRegSlots(0);
+                        return;
+                      }
+
+                      setPreRegSlots(Math.max(0, Math.trunc(parsed)));
+                    }}
+                    className="mt-1 w-full"
+                    placeholder="e.g. 100"
+                  />
+                  <p className="mt-1 text-xs text-campus-text-secondary">
+                    This is the maximum number of students allowed to hold
+                    confirmed pre-registration slots.
+                  </p>
+                </div>
+
+                <Switch
+                  isSelected={waitlistEnabled}
+                  onValueChange={setWaitlistEnabled}
+                >
+                  Enable Waitlist
+                </Switch>
+              </div>
             </div>
           )}
 
@@ -4442,7 +4839,16 @@ export default function EventDashboard() {
                     const liveStatus = computeStatus(ev);
                     const hasSlots =
                       ev.isPreReg && typeof ev.preRegSlots === "number";
-                    const registrations = eventRegistrations[ev.id];
+                    const registrations = eventRegistrations[ev.id] ?? [];
+                    const preRegisteredRows = registrations.filter(
+                      (row) => row.status === "PRE_REGISTERED",
+                    );
+                    const waitlistedRows = registrations.filter(
+                      (row) => row.status === "WAITLISTED",
+                    );
+                    const cancelledRows = registrations.filter(
+                      (row) => row.status === "CANCELLED",
+                    );
                     const isEventExpanded = expandedEventId === ev.id;
                     const toggleEventDetails = () => {
                       setExpandedEventId((prev) => {
@@ -4452,8 +4858,8 @@ export default function EventDashboard() {
                       });
                     };
                     const used = hasSlots
-                      ? registrations
-                        ? registrations.length
+                      ? registrations.length > 0
+                        ? preRegisteredRows.length
                         : typeof ev.preRegCount === "number"
                           ? ev.preRegCount
                           : 0
@@ -4596,7 +5002,9 @@ export default function EventDashboard() {
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <p className="text-sm text-campus-text-primary">
                                 <b>Pre-Registrations:</b>{" "}
-                                {registrations ? registrations.length : used}
+                                {preRegisteredRows.length > 0
+                                  ? preRegisteredRows.length
+                                  : used}
                               </p>
                               <Button
                                 size="sm"
@@ -4630,6 +5038,30 @@ export default function EventDashboard() {
                               <b>With Payment:</b>{" "}
                               {ev.withPayment ? "Yes" : "No"}
                             </p>
+                            {ev.isPreReg && (
+                              <>
+                                <p className="text-sm text-campus-text-primary">
+                                  <b>Registration Window:</b>{" "}
+                                  {formatDateTime(ev.registrationStartAt)} to{" "}
+                                  {formatDateTime(ev.registrationEndAt)}
+                                </p>
+                                <p className="text-sm text-campus-text-primary">
+                                  <b>Cancellation Deadline:</b>{" "}
+                                  {formatDateTime(ev.cancellationDeadlineAt)}
+                                </p>
+                              </>
+                            )}
+                            {ev.isPreReg && (
+                              <p className="text-sm text-campus-text-primary">
+                                <b>Waitlist:</b> {ev.waitlistEnabled ? "Enabled" : "Disabled"} |{" "}
+                                <b>Pre-registered:</b> {preRegisteredRows.length > 0
+                                  ? preRegisteredRows.length
+                                  : Math.max(0, Number(ev.preRegCount ?? 0))} |{" "}
+                                <b>Waitlisted:</b> {waitlistedRows.length > 0
+                                  ? waitlistedRows.length
+                                  : Math.max(0, Number(ev.waitlistCount ?? 0))}
+                              </p>
+                            )}
 
                             {ev.isPreReg &&
                               typeof ev.preRegSlots === "number" && (
@@ -4640,14 +5072,13 @@ export default function EventDashboard() {
                               )}
 
                             {ev.isPreReg &&
-                              registrations &&
-                              registrations.length > 0 && (
+                              preRegisteredRows.length > 0 && (
                                 <div className="space-y-2">
                                   <p className="text-sm font-semibold text-campus-text-primary">
-                                    Registered Students
+                                    Pre-registered Students
                                   </p>
                                   <div className="grid grid-cols-1 gap-3 rounded-lg border bg-white p-3 lg:grid-cols-2">
-                                    {registrations.map((reg) => (
+                                    {preRegisteredRows.map((reg) => (
                                       <Card
                                         key={reg.id}
                                         shadow="none"
@@ -4689,10 +5120,20 @@ export default function EventDashboard() {
                                             </div>
                                             <div>
                                               <p className="text-xs text-campus-text-secondary">
+                                                Status
+                                              </p>
+                                              <p className="text-campus-text-primary">
+                                                {formatRegistrationStatus(reg.status)}
+                                              </p>
+                                            </div>
+                                            <div>
+                                              <p className="text-xs text-campus-text-secondary">
                                                 Registered At
                                               </p>
                                               <p className="text-campus-text-primary">
-                                                {formatDateTime(reg.createdAt)}
+                                                {formatDateTime(
+                                                  reg.registeredAt || reg.createdAt,
+                                                )}
                                               </p>
                                             </div>
                                           </div>
@@ -4702,6 +5143,134 @@ export default function EventDashboard() {
                                   </div>
                                 </div>
                               )}
+
+                            {ev.isPreReg && waitlistedRows.length > 0 && (
+                              <div className="space-y-2">
+                                <p className="text-sm font-semibold text-campus-text-primary">
+                                  Waitlisted Students
+                                </p>
+                                <div className="grid grid-cols-1 gap-3 rounded-lg border bg-white p-3 lg:grid-cols-2">
+                                  {waitlistedRows.map((reg) => (
+                                    <Card
+                                      key={reg.id}
+                                      shadow="none"
+                                      className="border bg-gray-50"
+                                    >
+                                      <CardBody className="space-y-3 p-4 text-sm">
+                                        <div>
+                                          <p className="text-xs text-campus-text-secondary">
+                                            School ID
+                                          </p>
+                                          <p className="font-semibold text-campus-text-primary">
+                                            {reg.schoolId || "-"}
+                                          </p>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-3">
+                                          <div>
+                                            <p className="text-xs text-campus-text-secondary">
+                                              Name
+                                            </p>
+                                            <p className="text-campus-text-primary">
+                                              {reg.studentName || reg.uid}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs text-campus-text-secondary">
+                                              Status
+                                            </p>
+                                            <p className="text-campus-text-primary">
+                                              {formatRegistrationStatus(reg.status)}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs text-campus-text-secondary">
+                                              Course
+                                            </p>
+                                            <p className="text-campus-text-primary">
+                                              {reg.course || "-"}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs text-campus-text-secondary">
+                                              Waitlisted At
+                                            </p>
+                                            <p className="text-campus-text-primary">
+                                              {formatDateTime(
+                                                reg.waitlistedAt || reg.createdAt,
+                                              )}
+                                            </p>
+                                          </div>
+                                        </div>
+                                      </CardBody>
+                                    </Card>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {ev.isPreReg && cancelledRows.length > 0 && (
+                              <div className="space-y-2">
+                                <p className="text-sm font-semibold text-campus-text-primary">
+                                  Cancelled Registrations
+                                </p>
+                                <div className="grid grid-cols-1 gap-3 rounded-lg border bg-white p-3 lg:grid-cols-2">
+                                  {cancelledRows.map((reg) => (
+                                    <Card
+                                      key={reg.id}
+                                      shadow="none"
+                                      className="border bg-gray-50"
+                                    >
+                                      <CardBody className="space-y-3 p-4 text-sm">
+                                        <div>
+                                          <p className="text-xs text-campus-text-secondary">
+                                            School ID
+                                          </p>
+                                          <p className="font-semibold text-campus-text-primary">
+                                            {reg.schoolId || "-"}
+                                          </p>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-3">
+                                          <div>
+                                            <p className="text-xs text-campus-text-secondary">
+                                              Name
+                                            </p>
+                                            <p className="text-campus-text-primary">
+                                              {reg.studentName || reg.uid}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs text-campus-text-secondary">
+                                              Status
+                                            </p>
+                                            <p className="text-campus-text-primary">
+                                              {formatRegistrationStatus(reg.status)}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs text-campus-text-secondary">
+                                              Course
+                                            </p>
+                                            <p className="text-campus-text-primary">
+                                              {reg.course || "-"}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs text-campus-text-secondary">
+                                              Cancelled At
+                                            </p>
+                                            <p className="text-campus-text-primary">
+                                              {formatDateTime(
+                                                reg.cancelledAt || reg.updatedAt,
+                                              )}
+                                            </p>
+                                          </div>
+                                        </div>
+                                      </CardBody>
+                                    </Card>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
 
                             {/* FILES */}
                             <div className="pt-3 border-t space-y-4">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FiCalendar, FiChevronDown } from "react-icons/fi";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import {
@@ -80,6 +80,7 @@ interface Payment {
   date: string;
   yearLevel: string;
   course: string;
+  targetStudent: string;
   details: string;
   totalStudents: number;
   paidCount: number;
@@ -155,6 +156,34 @@ function mapRemoteStudent(data: RemoteStudent): StudentProfile {
     section,
     course,
   };
+}
+
+function matchesPaymentFilters(
+  student: StudentProfile,
+  yearLevel: string,
+  course: string,
+) {
+  const matchesYear = yearLevel === "All Years" || student.year === yearLevel;
+  const matchesCourse = course === "All Courses" || student.course === course;
+  return matchesYear && matchesCourse;
+}
+
+function getStudentSearchText(student: StudentProfile) {
+  return [
+    student.name,
+    student.schoolId,
+    student.course,
+    student.year,
+    student.section,
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function formatTargetStudentSummary(students: StudentProfile[]) {
+  return students
+    .map((student) => `${student.name} (${student.schoolId})`)
+    .join("; ");
 }
 
 function formatCurrency(value: number) {
@@ -236,6 +265,12 @@ export default function PaymentDashboard() {
   );
   const [yearLevel, setYearLevel] = useState("All Years");
   const [course, setCourse] = useState("All Courses");
+  const [paymentTargetSearchText, setPaymentTargetSearchText] = useState("");
+  const [selectedPaymentStudents, setSelectedPaymentStudents] = useState<
+    StudentProfile[]
+  >([]);
+  const [showPaymentStudentDropdown, setShowPaymentStudentDropdown] =
+    useState(false);
   const [details, setDetails] = useState("");
 
   const [students, setStudents] = useState<StudentProfile[]>([]);
@@ -257,6 +292,7 @@ export default function PaymentDashboard() {
   const [paymentStudents, setPaymentStudents] = useState<
     Record<string, PaymentStudent[]>
   >({});
+  const paymentStudentPickerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -312,8 +348,13 @@ export default function PaymentDashboard() {
             ref: String(data.ref ?? makePaymentRef(d.id)),
             amount: Number(data.amount ?? 0),
             date: String(data.date ?? ""),
-            yearLevel: String(data.yearLevel ?? "All Years"),
-            course: String(data.course ?? "All Courses"),
+            yearLevel:
+              typeof data.yearLevel === "string"
+                ? data.yearLevel
+                : "All Years",
+            course:
+              typeof data.course === "string" ? data.course : "All Courses",
+            targetStudent: String(data.targetStudent ?? ""),
             details: String(data.details ?? ""),
             totalStudents: Number(data.totalStudents ?? 0),
             paidCount: Number(data.paidCount ?? 0),
@@ -388,6 +429,22 @@ export default function PaymentDashboard() {
     setStudentStatusSortMode("paid");
   }, [expandedPayment]);
 
+  useEffect(() => {
+    if (!showAddPaymentForm) {
+      setShowPaymentStudentDropdown(false);
+      return;
+    }
+
+    const onDocMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (paymentStudentPickerRef.current?.contains(target)) return;
+      setShowPaymentStudentDropdown(false);
+    };
+
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [showAddPaymentForm]);
+
   const courseOptions = useMemo(() => {
     const set = new Set<string>();
     students.forEach((s) => {
@@ -422,6 +479,24 @@ export default function PaymentDashboard() {
     ],
     [courseOptions],
   );
+  const selectedPaymentStudentIds = useMemo(
+    () => new Set(selectedPaymentStudents.map((student) => student.uid)),
+    [selectedPaymentStudents],
+  );
+  const filteredPaymentStudentOptions = useMemo(() => {
+    const search = paymentTargetSearchText.trim().toLowerCase();
+
+    return students
+      .filter((student) => {
+        if (selectedPaymentStudentIds.has(student.uid)) return false;
+        if (!search) return true;
+        return getStudentSearchText(student).includes(search);
+      })
+      .slice(0, 20);
+  }, [paymentTargetSearchText, selectedPaymentStudentIds, students]);
+  const hasSpecificStudentTargets = selectedPaymentStudents.length > 0;
+  const hasYearFilter = yearLevel !== "All Years";
+  const hasCourseFilter = course !== "All Courses";
 
   const filteredPayments = useMemo(() => {
     const search = queryText.trim().toLowerCase();
@@ -434,7 +509,8 @@ export default function PaymentDashboard() {
         p.title.toLowerCase().includes(search) ||
         p.ref.toLowerCase().includes(search) ||
         p.course.toLowerCase().includes(search) ||
-        p.yearLevel.toLowerCase().includes(search);
+        p.yearLevel.toLowerCase().includes(search) ||
+        p.targetStudent.toLowerCase().includes(search);
 
       return matchesDate && matchesSearch;
     });
@@ -523,6 +599,9 @@ export default function PaymentDashboard() {
     setPaymentDate(new Date().toISOString().slice(0, 10));
     setYearLevel("All Years");
     setCourse("All Courses");
+    setPaymentTargetSearchText("");
+    setSelectedPaymentStudents([]);
+    setShowPaymentStudentDropdown(false);
     setDetails("");
   }
 
@@ -556,18 +635,31 @@ export default function PaymentDashboard() {
       return;
     }
 
-    const targets = students.filter((student) => {
-      const matchesYear =
-        yearLevel === "All Years" || student.year === yearLevel;
-      const matchesCourse =
-        course === "All Courses" || student.course === course;
-      return matchesYear && matchesCourse;
+    const targetMap = new Map<string, StudentProfile>();
+    const shouldApplyFilterTargets =
+      !hasSpecificStudentTargets || hasYearFilter || hasCourseFilter;
+
+    if (shouldApplyFilterTargets) {
+      students.forEach((student) => {
+        if (matchesPaymentFilters(student, yearLevel, course)) {
+          targetMap.set(student.uid, student);
+        }
+      });
+    }
+
+    selectedPaymentStudents.forEach((student) => {
+      targetMap.set(student.uid, student);
     });
+
+    const targets = Array.from(targetMap.values()).sort(
+      (a, b) =>
+        a.name.localeCompare(b.name) || a.schoolId.localeCompare(b.schoolId),
+    );
 
     if (!targets.length) {
       setNotice({
         type: "err",
-        msg: "No students match the selected filters. Adjust year/course first.",
+        msg: "No students match the selected filters or specific-student selection.",
       });
       return;
     }
@@ -587,14 +679,24 @@ export default function PaymentDashboard() {
       const paymentRef = doc(collection(db, "payments"));
       const paymentRefCode = makePaymentRef(paymentRef.id);
       const totalStudents = targets.length;
+      const targetStudent = formatTargetStudentSummary(selectedPaymentStudents);
 
       await setDoc(paymentRef, {
         title: cleanTitle,
         ref: paymentRefCode,
         amount: amountValue,
         date: paymentDate,
-        yearLevel,
-        course,
+        yearLevel: hasYearFilter
+          ? yearLevel
+          : hasSpecificStudentTargets
+            ? ""
+            : "All Years",
+        course: hasCourseFilter
+          ? course
+          : hasSpecificStudentTargets
+            ? ""
+            : "All Courses",
+        targetStudent,
         details: cleanDetails,
         totalStudents,
         paidCount: 0,
@@ -804,7 +906,7 @@ export default function PaymentDashboard() {
             aria-label="Search payments"
             type="text"
             label="Search"
-            placeholder="Search by title, reference, course, or year"
+            placeholder="Search by title, reference, course, year, or student"
             value={queryText}
             onValueChange={setQueryText}
             className="w-full"
@@ -955,6 +1057,98 @@ export default function PaymentDashboard() {
             </div>
 
             <div>
+              <label className="text-sm font-medium">Specific Students</label>
+
+              {selectedPaymentStudents.length > 0 && (
+                <div className="mt-2 rounded-lg border bg-white px-3 py-2">
+                  <div className="flex flex-wrap gap-2">
+                    {selectedPaymentStudents.map((student) => (
+                      <span
+                        key={student.uid}
+                        className="inline-flex items-center gap-2 rounded-full border bg-white px-3 py-1 text-sm"
+                      >
+                        <span className="font-medium">{student.name}</span>
+                        <span className="text-campus-text-secondary">
+                          ({student.schoolId})
+                        </span>
+                        <Button
+                          isIconOnly
+                          size="sm"
+                          variant="light"
+                          className="h-5 min-w-5 text-campus-text-secondary"
+                          onPress={() => {
+                            setSelectedPaymentStudents((prev) =>
+                              prev.filter((item) => item.uid !== student.uid),
+                            );
+                          }}
+                          aria-label={`Remove ${student.name}`}
+                        >
+                          x
+                        </Button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div ref={paymentStudentPickerRef} className="mt-2 space-y-2">
+                <Input
+                  aria-label="Payment specific students"
+                  value={paymentTargetSearchText}
+                  onValueChange={(value) => {
+                    setPaymentTargetSearchText(value);
+                    setShowPaymentStudentDropdown(true);
+                  }}
+                  onFocus={() => setShowPaymentStudentDropdown(true)}
+                  placeholder="Search by name, ID, course, or year"
+                  className="w-full"
+                />
+
+                {showPaymentStudentDropdown && (
+                  <div className="max-h-56 overflow-y-auto rounded-lg border bg-white shadow-lg">
+                    {studentsLoading ? (
+                      <div className="p-3">
+                        <CampusCardListSkeleton rows={2} />
+                      </div>
+                    ) : filteredPaymentStudentOptions.length === 0 ? (
+                      <p className="px-4 py-2 text-sm text-campus-text-secondary">
+                        No matching students.
+                      </p>
+                    ) : (
+                      filteredPaymentStudentOptions.map((student) => (
+                        <Button
+                          key={student.uid}
+                          size="sm"
+                          variant="light"
+                          className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                          onPress={() => {
+                            setSelectedPaymentStudents((prev) =>
+                              prev.some((item) => item.uid === student.uid)
+                                ? prev
+                                : [...prev, student],
+                            );
+                            setPaymentTargetSearchText("");
+                            setShowPaymentStudentDropdown(true);
+                          }}
+                        >
+                          <div className="text-left">
+                            <div className="text-sm font-medium text-campus-text-primary">
+                              {student.name}
+                            </div>
+                            <div className="text-xs text-campus-text-secondary">
+                              {student.schoolId} | {student.course} |{" "}
+                              {student.year}
+                            </div>
+                          </div>
+                        </Button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div>
               <label className="text-sm font-medium">Details</label>
               <Textarea
                 aria-label="Payment details"
@@ -969,7 +1163,14 @@ export default function PaymentDashboard() {
             <p className="text-xs text-campus-text-secondary">
               {studentsLoading
                 ? "Loading student roster..."
-                : "This payment will be assigned to students matching the selected course/year."}
+                : hasSpecificStudentTargets && !hasYearFilter && !hasCourseFilter
+                  ? "This payment will be assigned only to the selected students."
+                  : "This payment will be assigned to students matching the selected course/year, plus any specific students you added."}
+            </p>
+
+            <p className="text-xs text-campus-text-secondary">
+              Specific students are optional. Leave Year Level and Course on All
+              to assign only the selected students.
             </p>
 
             <Button
@@ -1161,6 +1362,20 @@ export default function PaymentDashboard() {
                             Unpaid: {unpaid}
                           </Chip>
                         </div>
+
+                        {(p.targetStudent || p.yearLevel || p.course) && (
+                          <div className="mb-4 space-y-1 text-sm text-campus-text-secondary">
+                            {p.targetStudent && (
+                              <p>Specific students: {p.targetStudent}</p>
+                            )}
+                            {(p.yearLevel || p.course) && (
+                              <p>
+                                Filters: Year Level - {p.yearLevel || "Any"} |
+                                {" "}Course - {p.course || "Any"}
+                              </p>
+                            )}
+                          </div>
+                        )}
 
                         <h4 className="font-semibold text-campus-text-primary mb-2">
                           Students

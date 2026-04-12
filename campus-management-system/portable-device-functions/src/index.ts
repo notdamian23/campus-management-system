@@ -405,6 +405,13 @@ function normalizeEnrollmentSyncStatus(value: unknown): "pending" | "synced" | "
   return "pending";
 }
 
+function parseRegistrationStatus(value: unknown): "PRE_REGISTERED" | "WAITLISTED" | "CANCELLED" {
+  const raw = normalizeLower(value);
+  if (raw === "waitlisted") return "WAITLISTED";
+  if (raw === "cancelled") return "CANCELLED";
+  return "PRE_REGISTERED";
+}
+
 function normalizeTargetList(value: unknown): string[] {
   const raw = dedupeStrings(asStringArray(value));
   return raw.filter((item) => normalizeLower(item) !== "all years" && normalizeLower(item) !== "all courses");
@@ -770,13 +777,16 @@ async function resolveAuthorizedStudentIds(
 
   registrationsSnap.docs.forEach((doc) => {
     const data = doc.data();
+    if (event.isPreReg && parseRegistrationStatus(data.status) !== "PRE_REGISTERED") {
+      return;
+    }
     const studentId = normalizeText(data.uid) || normalizeText(data.studentUid) || doc.id;
     if (studentId) {
       authorized.set(studentId, {registrationId: doc.id});
     }
   });
 
-  if (authorized.size > 0) {
+  if (event.isPreReg || authorized.size > 0) {
     return authorized;
   }
 
@@ -1784,19 +1794,25 @@ async function pairDeviceToEvent(device: DeviceContext, eventId: string) {
 }
 
 async function isStudentRegisteredForEvent(eventId: string, studentId: string): Promise<boolean> {
-  const registrationsSnap = await db.collection(`events/${eventId}/registrations`).limit(1).get();
-  if (registrationsSnap.empty) {
+  const eventSnap = await db.doc(`events/${eventId}`).get();
+  const eventData = eventSnap.data() ?? {};
+  if (eventData.isPreReg !== true) {
     return true;
   }
 
   const directSnap = await db.doc(`events/${eventId}/registrations/${studentId}`).get();
   if (directSnap.exists) {
-    return true;
+    return parseRegistrationStatus(directSnap.data()?.status) === "PRE_REGISTERED";
   }
 
+  const registrationsSnap = await db.collection(`events/${eventId}/registrations`).get();
   return registrationsSnap.docs.some((doc) => {
     const data = doc.data();
-    return normalizeText(data.uid) === studentId || normalizeText(data.studentUid) === studentId;
+    return (
+      parseRegistrationStatus(data.status) === "PRE_REGISTERED" &&
+      (normalizeText(data.uid) === studentId ||
+        normalizeText(data.studentUid) === studentId)
+    );
   });
 }
 

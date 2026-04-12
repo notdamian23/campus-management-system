@@ -16,10 +16,9 @@ import {
   onSnapshot,
   orderBy,
   query,
-  serverTimestamp,
-  setDoc,
 } from "firebase/firestore";
-import { auth, db } from "@/lib/firebase";
+import { getFunctions, httpsCallable } from "firebase/functions";
+import { app, auth, db } from "@/lib/firebase";
 
 type LifecycleStatus = "upcoming" | "ongoing" | "completed";
 export type StudentAccountStatus = "Active" | "Inactive";
@@ -28,8 +27,26 @@ export type StudentEventStatus =
   | "Upcoming"
   | "Payment Due"
   | "Pre-registration"
+  | "Pre-registered"
+  | "Waitlisted"
+  | "Cancelled"
   | "Attended"
   | "Missed";
+
+export type StudentRegistrationStatus =
+  | "PRE_REGISTERED"
+  | "WAITLISTED"
+  | "CANCELLED";
+
+export type StudentRegistrationRecord = {
+  eventId: string;
+  status: StudentRegistrationStatus;
+  createdAtMs: number;
+  updatedAtMs: number;
+  registeredAtMs: number;
+  waitlistedAtMs: number;
+  cancelledAtMs: number;
+};
 
 export type StudentNotificationType =
   | "upcoming"
@@ -75,6 +92,16 @@ export type StudentEvent = {
   status: StudentEventStatus;
   eventDate: Date | null;
   attendanceStatus: string | null;
+  registrationStatus: StudentRegistrationStatus | null;
+  requiredPaymentId: string;
+  registrationStartAtMs: number;
+  registrationEndAtMs: number;
+  cancellationDeadlineAtMs: number;
+  waitlistEnabled: boolean;
+  preRegSlots: number | null;
+  preRegCount: number;
+  waitlistCount: number;
+  preRegRemaining: number | null;
 };
 
 export type StudentNotification = {
@@ -94,6 +121,7 @@ type StudentPortalContextValue = {
   readNotificationIds: string[];
   unreadNotificationsCount: number;
   registeredEventIds: string[];
+  registrationsByEvent: Record<string, StudentRegistrationRecord>;
   loading: boolean;
   loadingProfile: boolean;
   loadingEvents: boolean;
@@ -102,6 +130,9 @@ type StudentPortalContextValue = {
   markNotificationRead: (notificationId: string) => void;
   markAllNotificationsRead: () => void;
   registerForEvent: (eventId: string) => Promise<{ ok: boolean; msg: string }>;
+  cancelEventRegistration: (
+    eventId: string,
+  ) => Promise<{ ok: boolean; msg: string }>;
 };
 
 type RawEventDoc = {
@@ -120,6 +151,15 @@ type RawEventDoc = {
   details: string;
   isPreReg: boolean;
   withPayment: boolean;
+  waitlistEnabled: boolean;
+  requiredPaymentId: string;
+  registrationStartAtMs: number;
+  registrationEndAtMs: number;
+  cancellationDeadlineAtMs: number;
+  preRegSlots: number | null;
+  preRegCount: number;
+  waitlistCount: number;
+  preRegRemaining: number | null;
 };
 
 type PaymentDocData = {
@@ -159,6 +199,22 @@ type ProfileNotificationDoc = {
 type AttendanceDocData = {
   status?: string;
   attendanceStatus?: string;
+};
+
+type RegistrationDocData = {
+  status?: string;
+  createdAt?: { toMillis?: () => number };
+  updatedAt?: { toMillis?: () => number };
+  registeredAt?: { toMillis?: () => number };
+  waitlistedAt?: { toMillis?: () => number };
+  cancelledAt?: { toMillis?: () => number };
+};
+
+type ManagePreRegistrationResult = {
+  status?: StudentRegistrationStatus;
+  message?: string;
+  preRegCount?: number;
+  waitlistCount?: number;
 };
 
 type ProfileDocData = {
@@ -322,6 +378,15 @@ function toMillis(value: unknown) {
   return 0;
 }
 
+function parseRegistrationStatus(
+  raw: unknown,
+): StudentRegistrationStatus {
+  const normalized = String(raw ?? "").trim().toUpperCase();
+  if (normalized === "WAITLISTED") return "WAITLISTED";
+  if (normalized === "CANCELLED") return "CANCELLED";
+  return "PRE_REGISTERED";
+}
+
 function toTargetList(value: unknown) {
   if (Array.isArray(value)) {
     return value.map((item) => String(item ?? "").trim()).filter(Boolean);
@@ -404,6 +469,7 @@ export function StudentPortalProvider({
 }: {
   children: React.ReactNode;
 }) {
+  const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [rawEvents, setRawEvents] = useState<RawEventDoc[]>([]);
   const [payments, setPayments] = useState<StudentPayment[]>([]);
@@ -415,6 +481,9 @@ export function StudentPortalProvider({
     Record<string, string | null>
   >({});
   const [registeredEventIds, setRegisteredEventIds] = useState<string[]>([]);
+  const [registrationsByEvent, setRegistrationsByEvent] = useState<
+    Record<string, StudentRegistrationRecord>
+  >({});
 
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(true);
@@ -515,6 +584,28 @@ export function StudentPortalProvider({
               details: String(data.details ?? ""),
               isPreReg: data.isPreReg === true,
               withPayment: data.withPayment === true,
+              waitlistEnabled: data.waitlistEnabled === true,
+              requiredPaymentId: String(data.requiredPaymentId ?? "").trim(),
+              registrationStartAtMs: toMillis(
+                (data as { registrationStartAt?: unknown }).registrationStartAt,
+              ),
+              registrationEndAtMs: toMillis(
+                (data as { registrationEndAt?: unknown }).registrationEndAt,
+              ),
+              cancellationDeadlineAtMs: toMillis(
+                (data as { cancellationDeadlineAt?: unknown })
+                  .cancellationDeadlineAt,
+              ),
+              preRegSlots:
+                typeof data.preRegSlots === "number"
+                  ? Math.max(0, Math.trunc(data.preRegSlots))
+                  : null,
+              preRegCount: Math.max(0, Number(data.preRegCount ?? 0)),
+              waitlistCount: Math.max(0, Number(data.waitlistCount ?? 0)),
+              preRegRemaining:
+                typeof data.preRegRemaining === "number"
+                  ? Math.max(0, Math.trunc(data.preRegRemaining))
+                  : null,
             };
           })
           .filter((event) => {
@@ -738,12 +829,14 @@ export function StudentPortalProvider({
   useEffect(() => {
     if (!profile) {
       setRegisteredEventIds([]);
+      setRegistrationsByEvent({});
       return;
     }
     const uid = profile.uid;
 
     if (rawEvents.length === 0) {
       setRegisteredEventIds([]);
+      setRegistrationsByEvent({});
       return;
     }
 
@@ -751,20 +844,52 @@ export function StudentPortalProvider({
 
     async function loadRegistrations() {
       try {
-        const checks = await Promise.all(
+        const entries = await Promise.all(
           rawEvents.map(async (ev) => {
             const snap = await getDoc(
               doc(db, "events", ev.id, "registrations", uid),
             );
-            return snap.exists() ? ev.id : null;
+            if (!snap.exists()) {
+              return [ev.id, null] as const;
+            }
+
+            const data = snap.data() as RegistrationDocData;
+            return [
+              ev.id,
+              {
+                eventId: ev.id,
+                status: parseRegistrationStatus(data.status),
+                createdAtMs: toMillis(data.createdAt),
+                updatedAtMs: toMillis(data.updatedAt),
+                registeredAtMs: toMillis(data.registeredAt),
+                waitlistedAtMs: toMillis(data.waitlistedAt),
+                cancelledAtMs: toMillis(data.cancelledAt),
+              } as StudentRegistrationRecord,
+            ] as const;
           }),
         );
 
         if (!active) return;
-        setRegisteredEventIds(checks.filter((id): id is string => Boolean(id)));
+        const nextRegistrations = Object.fromEntries(
+          entries.filter(
+            (
+              entry,
+            ): entry is readonly [string, StudentRegistrationRecord] =>
+              Boolean(entry[1]),
+          ),
+        );
+        setRegistrationsByEvent(nextRegistrations);
+        setRegisteredEventIds(
+          Object.values(nextRegistrations)
+            .filter(
+              (registration) => registration.status !== "CANCELLED",
+            )
+            .map((registration) => registration.eventId),
+        );
       } catch {
         if (!active) return;
         setRegisteredEventIds([]);
+        setRegistrationsByEvent({});
       }
     }
 
@@ -776,12 +901,12 @@ export function StudentPortalProvider({
   }, [profile, rawEvents]);
 
   const events = useMemo(() => {
-    const paymentByTitle = new Map<string, StudentPayment>();
+    const paymentById = new Map<string, StudentPayment>();
     payments.forEach((p) => {
-      const key = normalizeText(p.title);
+      const key = normalizeText(p.paymentId);
       if (!key) return;
-      if (!paymentByTitle.has(key)) {
-        paymentByTitle.set(key, p);
+      if (!paymentById.has(key)) {
+        paymentById.set(key, p);
       }
     });
 
@@ -795,16 +920,31 @@ export function StudentPortalProvider({
           raw.timeEnd,
         );
         const attendanceRaw = normalizeText(attendanceByEvent[raw.id] ?? "");
-        const paymentMatch = paymentByTitle.get(normalizeText(raw.title));
+        const registration = registrationsByEvent[raw.id] ?? null;
+        const paymentMatch = raw.requiredPaymentId
+          ? paymentById.get(normalizeText(raw.requiredPaymentId))
+          : null;
 
         let status: StudentEventStatus = "Upcoming";
 
-        if (lifecycle === "completed") {
-          if (attendanceRaw === "present" || attendanceRaw === "attended") {
-            status = "Attended";
-          } else {
+        if (attendanceRaw === "present" || attendanceRaw === "attended") {
+          status = "Attended";
+        } else if (registration?.status === "CANCELLED") {
+          status = "Cancelled";
+        } else if (lifecycle === "completed") {
+          if (registration?.status === "WAITLISTED") {
+            status = "Waitlisted";
+          } else if (raw.isPreReg && registration?.status === "PRE_REGISTERED") {
             status = "Missed";
+          } else if (!raw.isPreReg) {
+            status = "Missed";
+          } else {
+            status = "Upcoming";
           }
+        } else if (registration?.status === "PRE_REGISTERED") {
+          status = "Pre-registered";
+        } else if (registration?.status === "WAITLISTED") {
+          status = "Waitlisted";
         } else if (
           raw.withPayment &&
           (!paymentMatch || paymentMatch.status === "UNPAID")
@@ -832,6 +972,16 @@ export function StudentPortalProvider({
           status,
           eventDate,
           attendanceStatus: attendanceRaw || null,
+          registrationStatus: registration?.status ?? null,
+          requiredPaymentId: raw.requiredPaymentId,
+          registrationStartAtMs: raw.registrationStartAtMs,
+          registrationEndAtMs: raw.registrationEndAtMs,
+          cancellationDeadlineAtMs: raw.cancellationDeadlineAtMs,
+          waitlistEnabled: raw.waitlistEnabled,
+          preRegSlots: raw.preRegSlots,
+          preRegCount: raw.preRegCount,
+          waitlistCount: raw.waitlistCount,
+          preRegRemaining: raw.preRegRemaining,
         } as StudentEvent;
       })
       .sort((a, b) => {
@@ -839,7 +989,7 @@ export function StudentPortalProvider({
         const bMs = b.eventDate?.getTime() ?? 0;
         return aMs - bMs;
       });
-  }, [rawEvents, attendanceByEvent, payments]);
+  }, [attendanceByEvent, payments, rawEvents, registrationsByEvent]);
 
   const notifications = useMemo(() => {
     const items: StudentNotification[] = [];
@@ -892,13 +1042,16 @@ export function StudentPortalProvider({
           date,
         });
       } else if (ev.status === "Payment Due") {
-        pushItem(`payment:${normalizeText(ev.title)}`, {
+        pushItem(
+          `payment:${normalizeText(ev.requiredPaymentId || ev.title)}`,
+          {
           id: `event-payment:${ev.id}`,
           title: `Payment Due: ${ev.title}`,
           description: ev.description,
           type: "payment",
           date,
-        });
+        },
+        );
       } else if (ev.status === "Missed") {
         pushItem(`event-missed:${ev.id}`, {
           id: `event-missed:${ev.id}`,
@@ -914,7 +1067,7 @@ export function StudentPortalProvider({
       if (payment.status !== "UNPAID") return;
 
       const paymentDate = parseDateOnly(payment.date) ?? new Date();
-      pushItem(`payment:${normalizeText(payment.title)}`, {
+      pushItem(`payment:${normalizeText(payment.paymentId)}`, {
         id: `payment:${payment.paymentId}`,
         title: `Payment Due: ${payment.title}`,
         description: `Reference ${payment.ref} | Amount ${payment.amount.toFixed(
@@ -1025,6 +1178,54 @@ export function StudentPortalProvider({
     });
   }, [notifications]);
 
+  const managePreRegistration = useMemo(
+    () =>
+      httpsCallable<
+        { eventId: string; action: "register" | "cancel" },
+        ManagePreRegistrationResult
+      >(functions, "studentManagePreRegistration"),
+    [functions],
+  );
+
+  const applyRegistrationResult = useCallback(
+    (eventId: string, nextStatus: StudentRegistrationStatus) => {
+      const nowMs = Date.now();
+
+      setRegistrationsByEvent((prev) => {
+        const existing = prev[eventId];
+        return {
+          ...prev,
+          [eventId]: {
+            eventId,
+            status: nextStatus,
+            createdAtMs: existing?.createdAtMs ?? nowMs,
+            updatedAtMs: nowMs,
+            registeredAtMs:
+              nextStatus === "PRE_REGISTERED"
+                ? nowMs
+                : (existing?.registeredAtMs ?? 0),
+            waitlistedAtMs:
+              nextStatus === "WAITLISTED"
+                ? nowMs
+                : (existing?.waitlistedAtMs ?? 0),
+            cancelledAtMs:
+              nextStatus === "CANCELLED"
+                ? nowMs
+                : (existing?.cancelledAtMs ?? 0),
+          },
+        };
+      });
+
+      setRegisteredEventIds((prev) => {
+        if (nextStatus === "CANCELLED") {
+          return prev.filter((id) => id !== eventId);
+        }
+        return prev.includes(eventId) ? prev : [...prev, eventId];
+      });
+    },
+    [],
+  );
+
   const registerForEvent = useCallback(
     async (eventId: string) => {
       if (!profile?.uid) {
@@ -1038,29 +1239,26 @@ export function StudentPortalProvider({
         };
       }
 
-      const uid = profile.uid;
-
       try {
-        await setDoc(
-          doc(db, "events", eventId, "registrations", uid),
-          {
-            uid,
-            schoolId: profile.schoolId,
-            studentName: profile.studentName,
-            course: profile.course,
-            year: profile.year,
-            accountStatus: profile.accountStatus,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true },
-        );
+        const result = await managePreRegistration({
+          eventId,
+          action: "register",
+        });
+        const nextStatus = result.data?.status;
+        if (
+          nextStatus !== "PRE_REGISTERED" &&
+          nextStatus !== "WAITLISTED" &&
+          nextStatus !== "CANCELLED"
+        ) {
+          throw new Error("Registration status was not returned by the server.");
+        }
 
-        setRegisteredEventIds((prev) =>
-          prev.includes(eventId) ? prev : [...prev, eventId],
-        );
+        applyRegistrationResult(eventId, nextStatus);
 
-        return { ok: true, msg: "Registered successfully." };
+        return {
+          ok: true,
+          msg: result.data?.message || "Registration updated successfully.",
+        };
       } catch (e: unknown) {
         return {
           ok: false,
@@ -1068,7 +1266,35 @@ export function StudentPortalProvider({
         };
       }
     },
-    [profile],
+    [applyRegistrationResult, managePreRegistration, profile],
+  );
+
+  const cancelEventRegistration = useCallback(
+    async (eventId: string) => {
+      if (!profile?.uid) {
+        return { ok: false, msg: "You need to be logged in first." };
+      }
+
+      try {
+        const result = await managePreRegistration({
+          eventId,
+          action: "cancel",
+        });
+        applyRegistrationResult(eventId, "CANCELLED");
+
+        return {
+          ok: true,
+          msg:
+            result.data?.message || "Your event registration was cancelled.",
+        };
+      } catch (e: unknown) {
+        return {
+          ok: false,
+          msg: toErrorMessage(e, "Failed to cancel this event registration."),
+        };
+      }
+    },
+    [applyRegistrationResult, managePreRegistration, profile],
   );
 
   const loading =
@@ -1086,6 +1312,7 @@ export function StudentPortalProvider({
       readNotificationIds,
       unreadNotificationsCount,
       registeredEventIds,
+      registrationsByEvent,
       loading,
       loadingProfile,
       loadingEvents,
@@ -1094,6 +1321,7 @@ export function StudentPortalProvider({
       markNotificationRead,
       markAllNotificationsRead,
       registerForEvent,
+      cancelEventRegistration,
     }),
     [
       profile,
@@ -1103,6 +1331,7 @@ export function StudentPortalProvider({
       readNotificationIds,
       unreadNotificationsCount,
       registeredEventIds,
+      registrationsByEvent,
       loading,
       loadingProfile,
       loadingEvents,
@@ -1111,6 +1340,7 @@ export function StudentPortalProvider({
       markNotificationRead,
       markAllNotificationsRead,
       registerForEvent,
+      cancelEventRegistration,
     ],
   );
 

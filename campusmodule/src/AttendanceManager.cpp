@@ -1,5 +1,6 @@
 #include "AttendanceManager.h"
 
+#include "Config.h"
 #include "StorageManager.h"
 #include "TimeManager.h"
 
@@ -13,10 +14,104 @@ String sanitizeIdComponent(const String &value) {
   output.replace("|", "_");
   return output;
 }
+
+bool parseTimeText(const String &value, int &hour, int &minute) {
+  String text = value;
+  text.trim();
+  if (text.isEmpty()) {
+    return false;
+  }
+
+  String upper = text;
+  upper.toUpperCase();
+  const bool isPm = upper.endsWith("PM");
+  const bool isAm = upper.endsWith("AM");
+  if (isPm || isAm) {
+    upper = upper.substring(0, upper.length() - 2);
+    upper.trim();
+  }
+
+  const int colonIndex = upper.indexOf(':');
+  if (colonIndex < 0) {
+    return false;
+  }
+
+  hour = upper.substring(0, colonIndex).toInt();
+  minute = upper.substring(colonIndex + 1).toInt();
+  if (minute < 0 || minute > 59) {
+    return false;
+  }
+
+  if (isAm || isPm) {
+    if (hour < 1 || hour > 12) {
+      return false;
+    }
+    if (isPm && hour < 12) {
+      hour += 12;
+    }
+    if (isAm && hour == 12) {
+      hour = 0;
+    }
+  } else if (hour < 0 || hour > 23) {
+    return false;
+  }
+
+  return true;
+}
+
+bool parseEventDateTime(const String &date, const String &timeText,
+                        uint64_t &epoch) {
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  if (sscanf(date.c_str(), "%d-%d-%d", &year, &month, &day) != 3) {
+    return false;
+  }
+
+  int hour = 0;
+  int minute = 0;
+  if (!parseTimeText(timeText, hour, minute)) {
+    return false;
+  }
+
+  struct tm tmValue = {};
+  tmValue.tm_year = year - 1900;
+  tmValue.tm_mon = month - 1;
+  tmValue.tm_mday = day;
+  tmValue.tm_hour = hour;
+  tmValue.tm_min = minute;
+  tmValue.tm_sec = 0;
+
+  const time_t localEpoch = mktime(&tmValue);
+  if (localEpoch < 0) {
+    return false;
+  }
+
+  epoch = static_cast<uint64_t>(localEpoch) - CampusConfig::kUtcOffsetSeconds;
+  return true;
+}
 }  // namespace
 
 AttendanceManager::AttendanceManager(StorageManager &storage, TimeManager &clock)
     : storage_(storage), clock_(clock) {}
+
+bool AttendanceManager::canStartTimeIn(const EventInfo &event) const {
+  if (!event.isValid() || event.date.isEmpty() || event.scheduledTime.isEmpty()) {
+    return true;
+  }
+
+  const TimeSnapshot now = clock_.now();
+  if (!now.valid) {
+    return true;
+  }
+
+  uint64_t eventStartEpoch = 0;
+  if (!parseEventDateTime(event.date, event.scheduledTime, eventStartEpoch)) {
+    return true;
+  }
+
+  return now.epoch >= eventStartEpoch;
+}
 
 bool AttendanceManager::canStudentTimeIn(const String &studentId,
                                          const String &eventId,
@@ -26,8 +121,13 @@ bool AttendanceManager::canStudentTimeIn(const String &studentId,
     return true;
   }
 
+  if (existing.hasTimeOut()) {
+    message = "TIME OUT already done. Cannot return to TIME IN";
+    return false;
+  }
+
   if (existing.hasTimeIn()) {
-    message = "Duplicate Time in";
+    message = "TIME IN already recorded";
     return false;
   }
 
@@ -40,12 +140,12 @@ bool AttendanceManager::canStudentTimeOut(const String &studentId,
   AttendanceRecord existing;
   if (!storage_.findAttendanceRecord(eventId, studentId, existing) ||
       !existing.hasTimeIn()) {
-    message = "No Time in record. Cannot Time out.";
+    message = "No TIME IN record found. Cannot TIME OUT";
     return false;
   }
 
   if (existing.hasTimeOut()) {
-    message = "Duplicate Time out";
+    message = "TIME OUT already recorded";
     return false;
   }
 
@@ -92,17 +192,24 @@ AttendanceOutcome AttendanceManager::saveAttendanceAction(
     return AttendanceOutcome::NoPairedEvent;
   }
 
+  if (action == AttendanceAction::TimeIn && !canStartTimeIn(event)) {
+    message = "TIME IN not allowed yet";
+    return AttendanceOutcome::TimeInTooEarly;
+  }
+
   String validationMessage;
   if (action == AttendanceAction::TimeIn &&
       !canStudentTimeIn(student.studentUid, event.eventId, validationMessage)) {
     message = validationMessage;
-    return AttendanceOutcome::DuplicateTimeIn;
+    return validationMessage.startsWith("TIME OUT already done")
+               ? AttendanceOutcome::TimeOutAlreadyDone
+               : AttendanceOutcome::DuplicateTimeIn;
   }
 
   if (action == AttendanceAction::TimeOut &&
       !canStudentTimeOut(student.studentUid, event.eventId, validationMessage)) {
     message = validationMessage;
-    return validationMessage.startsWith("No Time in")
+    return validationMessage.startsWith("No TIME IN")
                ? AttendanceOutcome::MissingTimeIn
                : AttendanceOutcome::DuplicateTimeOut;
   }

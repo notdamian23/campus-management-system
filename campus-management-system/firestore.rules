@@ -83,13 +83,7 @@ service cloud.firestore {
         allow read: if isAdminOrEC() ||
           isSelf(uid) ||
           (signedIn() && resource.data.uid == request.auth.uid);
-        allow create: if isSelf(uid) &&
-          request.resource.data.uid == request.auth.uid &&
-          activeStudentAccount();
-        allow update: if isSelf(uid) &&
-          request.resource.data.uid == request.auth.uid &&
-          activeStudentAccount();
-        allow delete: if isAdminOrEC() || isSelf(uid);
+        allow create, update, delete: if isAdminOrEC();
       }
 
       match /{subcollection}/{docId} {

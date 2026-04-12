@@ -305,6 +305,13 @@ bool isPastEventEndTime(const EventInfo &event) {
   return now.epoch >= eventEndEpoch;
 }
 
+void showTimeInBlockedMessage(const EventInfo &event) {
+  const String startsAt =
+      trim16(event.scheduledTime.isEmpty() ? "Unknown" : event.scheduledTime);
+  showTimedMessage("TIME IN not", "allowed yet", kLongMessageMs, "Starts at:",
+                   startsAt);
+}
+
 void resetPairedEventState() {
   g_pairedEvent = EventInfo{};
   g_cachedPairedStudents.clear();
@@ -1444,18 +1451,30 @@ void handleAttendanceLoop() {
       showTimedMessage(student.studentName, "Time Out saved", kShortMessageMs);
     }
     g_feedback.success();
+  } else if (outcome == AttendanceOutcome::TimeInTooEarly) {
+    Serial.printf(
+        "[ATTEND] TIME IN blocked before start student=%s date=%s start=%s\n",
+        student.studentUid.c_str(), g_pairedEvent.date.c_str(),
+        g_pairedEvent.scheduledTime.c_str());
+    showTimeInBlockedMessage(g_pairedEvent);
+    g_feedback.warning();
   } else if (outcome == AttendanceOutcome::DuplicateTimeIn) {
-    Serial.println("[ATTEND] duplicate TIME IN");
-    showTimedMessage(student.studentName, "Duplicate Time in", kShortMessageMs);
+    Serial.println("[ATTEND] TIME IN already recorded");
+    showTimedMessage("TIME IN", "already recorded", kShortMessageMs);
+    g_feedback.warning();
+  } else if (outcome == AttendanceOutcome::TimeOutAlreadyDone) {
+    Serial.println("[ATTEND] TIME OUT already done. Cannot return to TIME IN");
+    showTimedMessage("TIME OUT", "already done", kLongMessageMs,
+                     "Cannot return", "to TIME IN");
     g_feedback.warning();
   } else if (outcome == AttendanceOutcome::DuplicateTimeOut) {
-    Serial.println("[ATTEND] duplicate TIME OUT");
-    showTimedMessage(student.studentName, "Duplicate Time out", kShortMessageMs);
+    Serial.println("[ATTEND] TIME OUT already recorded");
+    showTimedMessage("TIME OUT", "already recorded", kShortMessageMs);
     g_feedback.warning();
   } else if (outcome == AttendanceOutcome::MissingTimeIn) {
-    const String exact = "No Time in record. Cannot Time out.";
-    Serial.printf("[ATTEND] %s\n", exact.c_str());
-    showWrappedMessage(exact, kMediumMessageMs);
+    Serial.println("[ATTEND] No TIME IN record found. Cannot TIME OUT");
+    showTimedMessage("No TIME IN", "record found", kMediumMessageMs,
+                     "Cannot TIME OUT");
     g_feedback.warning();
   } else {
     showTimedMessage("Save Failed", trim16(message), kShortMessageMs);
@@ -1790,6 +1809,15 @@ void handleAttendanceMenuAction(ButtonAction action) {
           "Time out already done. Cannot proceed to Time in";
       Serial.printf("[ATTEND] %s\n", exact.c_str());
       showWrappedMessage(exact, kLongMessageMs);
+      g_feedback.warning();
+      return;
+    }
+
+    if (!g_attendance.canStartTimeIn(g_pairedEvent)) {
+      Serial.printf("[ATTEND] TIME IN blocked before start date=%s start=%s\n",
+                    g_pairedEvent.date.c_str(),
+                    g_pairedEvent.scheduledTime.c_str());
+      showTimeInBlockedMessage(g_pairedEvent);
       g_feedback.warning();
       return;
     }

@@ -23,7 +23,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.campusDeviceSyncAttendance = exports.campusDeviceSubmitEnrollment = exports.campusDevicePendingEnrollments = exports.campusDeviceConfirmPairing = exports.campusDeviceLatestEvent = exports.adminUpsertPortableDevice = exports.resolveSchoolIdLogin = exports.adminDeleteUser = exports.adminCreateUser = void 0;
+exports.campusDeviceSyncAttendance = exports.campusDeviceSubmitEnrollment = exports.campusDevicePendingEnrollments = exports.campusDeviceConfirmPairing = exports.campusDeviceLatestEvent = exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.resolveSchoolIdLogin = exports.adminDeleteUser = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
 const functions = __importStar(require("firebase-functions/v1"));
 if (admin.apps.length === 0) {
@@ -44,6 +44,9 @@ function serverTimestamp() {
 function normalizeText(value) {
     return String(value !== null && value !== void 0 ? value : "").trim();
 }
+function normalizeLower(value) {
+    return normalizeText(value).toLowerCase();
+}
 function asRecord(value) {
     return typeof value === "object" && value !== null ?
         value :
@@ -53,7 +56,132 @@ function toMillis(value) {
     if (value && typeof value.toMillis === "function") {
         return value.toMillis();
     }
-    return 0;
+    if (value &&
+        typeof value === "object" &&
+        typeof value.seconds === "number") {
+        return Number(value.seconds) * 1000;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+        return value;
+    }
+    if (value instanceof Date) {
+        return value.getTime();
+    }
+    const parsed = Date.parse(String(value !== null && value !== void 0 ? value : ""));
+    return Number.isNaN(parsed) ? 0 : parsed;
+}
+function normalizeYear(raw) {
+    const value = normalizeText(raw);
+    const lowered = value.toLowerCase();
+    if (!value)
+        return "Unassigned";
+    if (value === "1" || lowered === "1st year")
+        return "1st Year";
+    if (value === "2" || lowered === "2nd year")
+        return "2nd Year";
+    if (value === "3" || lowered === "3rd year")
+        return "3rd Year";
+    if (value === "4" || lowered === "4th year")
+        return "4th Year";
+    if (value === "5" || lowered === "5th year")
+        return "5th Year";
+    return value;
+}
+function toTargetList(value) {
+    if (Array.isArray(value)) {
+        return value.map((item) => normalizeText(item)).filter(Boolean);
+    }
+    const raw = normalizeText(value);
+    if (!raw)
+        return [];
+    return raw
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+function matchesTargetList(targetValue, studentValue, allLabel) {
+    const targets = toTargetList(targetValue);
+    if (targets.length === 0)
+        return true;
+    if (targets.some((item) => normalizeLower(item) === normalizeLower(allLabel))) {
+        return true;
+    }
+    return targets.some((item) => normalizeLower(item) === normalizeLower(studentValue));
+}
+function matchesSpecificStudentTarget(targetValue, schoolId, studentName) {
+    var _a;
+    const rawTarget = normalizeText(targetValue);
+    if (!rawTarget)
+        return true;
+    const normalizedSchoolId = normalizeLower(schoolId);
+    const normalizedStudentName = normalizeLower(studentName);
+    if (!normalizedSchoolId && !normalizedStudentName)
+        return false;
+    const parts = rawTarget
+        .split(";")
+        .map((part) => part.trim())
+        .filter(Boolean);
+    for (const part of parts.length ? parts : [rawTarget]) {
+        const normalized = normalizeLower(part);
+        const withoutParens = normalizeLower(part.replace(/\([^)]*\)/g, " ").trim());
+        const parenMatch = part.match(/\(([^)]+)\)/);
+        const insideParen = normalizeLower((_a = parenMatch === null || parenMatch === void 0 ? void 0 : parenMatch[1]) !== null && _a !== void 0 ? _a : "");
+        if (normalized === normalizedSchoolId || normalized === normalizedStudentName) {
+            return true;
+        }
+        if (insideParen && insideParen === normalizedSchoolId) {
+            return true;
+        }
+        if (withoutParens &&
+            (withoutParens === normalizedStudentName ||
+                normalizedStudentName.includes(withoutParens) ||
+                withoutParens.includes(normalizedStudentName))) {
+            return true;
+        }
+        if (normalizedSchoolId && normalized.includes(normalizedSchoolId)) {
+            return true;
+        }
+        if (normalizedStudentName && normalized.includes(normalizedStudentName)) {
+            return true;
+        }
+    }
+    return false;
+}
+function parseRegistrationStatus(raw) {
+    const normalized = normalizeLower(raw);
+    if (normalized === "waitlisted")
+        return "WAITLISTED";
+    if (normalized === "cancelled")
+        return "CANCELLED";
+    return "PRE_REGISTERED";
+}
+function parseEventWindowMs(value) {
+    return toMillis(value);
+}
+function resolveEventStartMs(data) {
+    const date = normalizeText(data.date);
+    const scheduledTime = normalizeText(data.scheduledTime) ||
+        normalizeText(data.scheduledTimeStart) ||
+        normalizeText(data.timeStart);
+    return parseEventStartMs(date, scheduledTime);
+}
+function resolveRegistrationStartMs(data) {
+    return parseEventWindowMs(data.registrationStartAt);
+}
+function resolveRegistrationEndMs(data) {
+    const explicit = parseEventWindowMs(data.registrationEndAt);
+    if (explicit > 0)
+        return explicit;
+    return resolveEventStartMs(data);
+}
+function resolveCancellationDeadlineMs(data) {
+    const explicit = parseEventWindowMs(data.cancellationDeadlineAt);
+    if (explicit > 0)
+        return explicit;
+    return resolveRegistrationEndMs(data);
+}
+function makeStudentNotificationId(eventId) {
+    return `preregister-${eventId}`;
 }
 function parseQueryInt(value, fallback, min, max) {
     const raw = Array.isArray(value) ? value[0] : value;
@@ -304,6 +432,279 @@ exports.adminUpsertPortableDevice = functions
     }, { merge: true });
     return { deviceId, enabled };
 });
+exports.studentManagePreRegistration = functions
+    .region(REGION)
+    .https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError("unauthenticated", "Login required.");
+    }
+    const body = asRecord(data);
+    const eventId = normalizeText(body.eventId);
+    const action = normalizeLower(body.action) === "cancel" ? "cancel" : "register";
+    const uid = normalizeText(context.auth.uid);
+    if (!eventId) {
+        throw new functions.https.HttpsError("invalid-argument", "eventId is required.");
+    }
+    const eventRef = db.doc(`events/${eventId}`);
+    const registrationRef = db.doc(`events/${eventId}/registrations/${uid}`);
+    const profileRef = db.doc(`profiles/${uid}`);
+    const studentRef = db.doc(`students/${uid}`);
+    const result = await db.runTransaction(async (transaction) => {
+        var _a, _b, _c, _d, _e, _f, _g, _h;
+        const [eventSnap, profileSnap, studentSnap] = await Promise.all([
+            transaction.get(eventRef),
+            transaction.get(profileRef),
+            transaction.get(studentRef),
+        ]);
+        if (!eventSnap.exists) {
+            throw new functions.https.HttpsError("not-found", "Event not found.");
+        }
+        const profileData = (_a = profileSnap.data()) !== null && _a !== void 0 ? _a : {};
+        const studentData = (_b = studentSnap.data()) !== null && _b !== void 0 ? _b : {};
+        const role = normalizeLower(profileData.role);
+        if (role !== "student") {
+            throw new functions.https.HttpsError("permission-denied", "Student access only.");
+        }
+        const accountStatus = normalizeLower(studentData.status) ||
+            normalizeLower(profileData.status);
+        if (accountStatus === "inactive") {
+            throw new functions.https.HttpsError("failed-precondition", "Approach EC member to activate your account first.");
+        }
+        const eventData = (_c = eventSnap.data()) !== null && _c !== void 0 ? _c : {};
+        if (eventData.isPreReg !== true) {
+            throw new functions.https.HttpsError("failed-precondition", "This event is not open for pre-registration.");
+        }
+        const nowMs = Date.now();
+        const registrationStartMs = resolveRegistrationStartMs(eventData);
+        const registrationEndMs = resolveRegistrationEndMs(eventData);
+        const cancellationDeadlineMs = resolveCancellationDeadlineMs(eventData);
+        const eventStartMs = resolveEventStartMs(eventData);
+        if (action === "register") {
+            if (registrationStartMs > 0 && nowMs < registrationStartMs) {
+                throw new functions.https.HttpsError("failed-precondition", "Registration has not opened yet.");
+            }
+            if (registrationEndMs > 0 && nowMs > registrationEndMs) {
+                throw new functions.https.HttpsError("failed-precondition", "Registration is already closed.");
+            }
+            if (eventStartMs !== Number.MAX_SAFE_INTEGER && nowMs >= eventStartMs) {
+                throw new functions.https.HttpsError("failed-precondition", "Registration is already closed for this event.");
+            }
+        }
+        else if (cancellationDeadlineMs > 0 && nowMs > cancellationDeadlineMs) {
+            throw new functions.https.HttpsError("failed-precondition", "The cancellation deadline has already passed.");
+        }
+        const schoolId = normalizeText(profileData.schoolId) || uid;
+        const studentName = normalizeText(profileData.studentName) ||
+            normalizeText(profileData.name) ||
+            schoolId;
+        const course = normalizeText(profileData.course) || "Unassigned";
+        const year = normalizeYear(profileData.year);
+        const courseTargets = toTargetList(eventData.courses);
+        const yearTargets = toTargetList(eventData.yearLevels);
+        const courseValue = courseTargets.length > 0 ?
+            courseTargets :
+            normalizeText(eventData.course);
+        const yearValue = yearTargets.length > 0 ?
+            yearTargets :
+            normalizeText(eventData.yearLevel);
+        if (!matchesTargetList(courseValue, course, "All Courses")) {
+            throw new functions.https.HttpsError("permission-denied", "Your course is not allowed for this event.");
+        }
+        if (!matchesTargetList(yearValue, year, "All Years")) {
+            throw new functions.https.HttpsError("permission-denied", "Your year level is not allowed for this event.");
+        }
+        if (!matchesSpecificStudentTarget(eventData.targetStudent, schoolId, studentName)) {
+            throw new functions.https.HttpsError("permission-denied", "You are not part of the allowed audience for this event.");
+        }
+        const requiredPaymentId = normalizeText(eventData.requiredPaymentId);
+        if (eventData.withPayment === true) {
+            if (!requiredPaymentId) {
+                throw new functions.https.HttpsError("failed-precondition", "This event requires a linked payment before registration.");
+            }
+            const paymentAssignmentSnap = await transaction.get(db.doc(`payments/${requiredPaymentId}/students/${uid}`));
+            if (!paymentAssignmentSnap.exists) {
+                throw new functions.https.HttpsError("failed-precondition", "Complete the required payment first.");
+            }
+            const paymentStatus = normalizeLower((_d = paymentAssignmentSnap.data()) === null || _d === void 0 ? void 0 : _d.status);
+            if (paymentStatus !== "paid") {
+                throw new functions.https.HttpsError("failed-precondition", "Complete the required payment first.");
+            }
+        }
+        const registrationsSnap = await transaction.get(db.collection(`events/${eventId}/registrations`));
+        let currentRegistrationData = null;
+        const waitlistedSnapshots = [];
+        let preRegisteredCount = 0;
+        let waitlistCount = 0;
+        registrationsSnap.docs.forEach((registrationDoc) => {
+            const registrationData = registrationDoc.data();
+            const studentUid = normalizeText(registrationData.uid) ||
+                normalizeText(registrationData.studentUid) ||
+                registrationDoc.id;
+            const status = parseRegistrationStatus(registrationData.status);
+            if (studentUid === uid || registrationDoc.id === uid) {
+                currentRegistrationData = registrationData;
+            }
+            if (status === "PRE_REGISTERED") {
+                preRegisteredCount += 1;
+            }
+            else if (status === "WAITLISTED") {
+                waitlistCount += 1;
+                waitlistedSnapshots.push(registrationDoc);
+            }
+        });
+        const currentRegistrationPayload = currentRegistrationData;
+        const currentStatus = currentRegistrationPayload ?
+            parseRegistrationStatus(currentRegistrationPayload["status"]) :
+            null;
+        const slots = typeof eventData.preRegSlots === "number" ?
+            Math.max(0, Math.trunc(eventData.preRegSlots)) :
+            null;
+        const waitlistEnabled = eventData.waitlistEnabled === true;
+        let nextStatus;
+        let message = "";
+        let promotedStudentUid = "";
+        const notificationRef = db.doc(`profiles/${uid}/notifications/${makeStudentNotificationId(eventId)}`);
+        if (action === "register") {
+            if (currentStatus === "PRE_REGISTERED") {
+                throw new functions.https.HttpsError("already-exists", "You are already pre-registered for this event.");
+            }
+            if (currentStatus === "WAITLISTED") {
+                throw new functions.https.HttpsError("already-exists", "You are already on the waitlist for this event.");
+            }
+            const hasSlot = slots == null || preRegisteredCount < slots;
+            if (hasSlot) {
+                nextStatus = "PRE_REGISTERED";
+                preRegisteredCount += 1;
+                message = "Pre-registration confirmed.";
+            }
+            else if (waitlistEnabled) {
+                nextStatus = "WAITLISTED";
+                waitlistCount += 1;
+                message = "Event is full. You have been added to the waitlist.";
+            }
+            else {
+                throw new functions.https.HttpsError("failed-precondition", "All pre-registration slots are already full.");
+            }
+            const existingRegistrationData = (currentRegistrationPayload !== null && currentRegistrationPayload !== void 0 ? currentRegistrationPayload : {});
+            transaction.set(registrationRef, {
+                uid,
+                schoolId,
+                studentName,
+                course,
+                year,
+                status: nextStatus,
+                createdAt: (_e = existingRegistrationData.createdAt) !== null && _e !== void 0 ? _e : serverTimestamp(),
+                updatedAt: serverTimestamp(),
+                updatedByUid: uid,
+                actorRole: "student",
+                registeredAt: nextStatus === "PRE_REGISTERED" ?
+                    serverTimestamp() :
+                    (_f = existingRegistrationData.registeredAt) !== null && _f !== void 0 ? _f : null,
+                waitlistedAt: nextStatus === "WAITLISTED" ?
+                    serverTimestamp() :
+                    (_g = existingRegistrationData.waitlistedAt) !== null && _g !== void 0 ? _g : null,
+                cancelledAt: null,
+                cancellationReason: null,
+            }, { merge: true });
+            transaction.set(notificationRef, {
+                title: nextStatus === "PRE_REGISTERED" ?
+                    `Pre-registration confirmed: ${normalizeText(eventData.title) || "Event"}` :
+                    `Waitlisted: ${normalizeText(eventData.title) || "Event"}`,
+                message: message,
+                date: normalizeText(eventData.date),
+                scheduledTime: normalizeText(eventData.scheduledTime) ||
+                    normalizeText(eventData.timeStart),
+                type: "preregister",
+                createdAt: serverTimestamp(),
+            }, { merge: true });
+        }
+        else {
+            if (!currentRegistrationData || !currentStatus) {
+                throw new functions.https.HttpsError("not-found", "No active pre-registration record was found.");
+            }
+            if (currentStatus === "CANCELLED") {
+                throw new functions.https.HttpsError("failed-precondition", "This registration is already cancelled.");
+            }
+            nextStatus = "CANCELLED";
+            const existingRegistrationData = currentRegistrationPayload;
+            if (currentStatus === "PRE_REGISTERED") {
+                preRegisteredCount = Math.max(0, preRegisteredCount - 1);
+            }
+            else if (currentStatus === "WAITLISTED") {
+                waitlistCount = Math.max(0, waitlistCount - 1);
+            }
+            transaction.set(registrationRef, {
+                status: "CANCELLED",
+                updatedAt: serverTimestamp(),
+                updatedByUid: uid,
+                actorRole: "student",
+                cancelledAt: serverTimestamp(),
+                cancellationReason: "student_cancelled",
+                createdAt: (_h = existingRegistrationData.createdAt) !== null && _h !== void 0 ? _h : serverTimestamp(),
+            }, { merge: true });
+            message = "Your pre-registration was cancelled.";
+            if (currentStatus === "PRE_REGISTERED" && waitlistEnabled) {
+                const nextWaitlisted = waitlistedSnapshots
+                    .filter((registrationDoc) => registrationDoc.id !== uid)
+                    .sort((left, right) => toMillis(left.data().createdAt) - toMillis(right.data().createdAt))[0];
+                if (nextWaitlisted) {
+                    const nextWaitlistedData = nextWaitlisted.data();
+                    promotedStudentUid =
+                        normalizeText(nextWaitlistedData.uid) ||
+                            normalizeText(nextWaitlistedData.studentUid) ||
+                            nextWaitlisted.id;
+                    if (promotedStudentUid) {
+                        preRegisteredCount += 1;
+                        waitlistCount = Math.max(0, waitlistCount - 1);
+                        transaction.set(nextWaitlisted.ref, {
+                            status: "PRE_REGISTERED",
+                            updatedAt: serverTimestamp(),
+                            updatedByUid: uid,
+                            actorRole: "system",
+                            registeredAt: serverTimestamp(),
+                            promotedFromWaitlistAt: serverTimestamp(),
+                        }, { merge: true });
+                        const promotedNotificationRef = db.doc(`profiles/${promotedStudentUid}/notifications/${makeStudentNotificationId(eventId)}`);
+                        transaction.set(promotedNotificationRef, {
+                            title: `Pre-registration confirmed: ${normalizeText(eventData.title) || "Event"}`,
+                            message: "A slot opened up and your waitlist entry was promoted.",
+                            date: normalizeText(eventData.date),
+                            scheduledTime: normalizeText(eventData.scheduledTime) ||
+                                normalizeText(eventData.timeStart),
+                            type: "preregister",
+                            createdAt: serverTimestamp(),
+                        }, { merge: true });
+                    }
+                }
+            }
+            transaction.set(notificationRef, {
+                title: `Registration cancelled: ${normalizeText(eventData.title) || "Event"}`,
+                message,
+                date: normalizeText(eventData.date),
+                scheduledTime: normalizeText(eventData.scheduledTime) ||
+                    normalizeText(eventData.timeStart),
+                type: "preregister",
+                createdAt: serverTimestamp(),
+            }, { merge: true });
+        }
+        transaction.set(eventRef, {
+            preRegCount: preRegisteredCount,
+            preRegRemaining: slots == null ?
+                null :
+                Math.max(0, slots - preRegisteredCount),
+            waitlistCount,
+            updatedAt: serverTimestamp(),
+        }, { merge: true });
+        return {
+            status: nextStatus,
+            message,
+            preRegCount: preRegisteredCount,
+            waitlistCount,
+            promotedStudentUid,
+        };
+    });
+    return result;
+});
 exports.campusDeviceLatestEvent = deviceEndpoint("GET", async (_req, res) => {
     const today = formatManilaDate();
     const snapshot = await db
@@ -478,9 +879,19 @@ exports.campusDeviceSyncAttendance = deviceEndpoint("POST", async (req, res, dev
             };
             let duplicate = false;
             await db.runTransaction(async (transaction) => {
+                var _a, _b;
                 const eventSnap = await transaction.get(eventRef);
                 if (!eventSnap.exists) {
                     throw new ApiError(404, "Event not found.");
+                }
+                const eventData = (_a = eventSnap.data()) !== null && _a !== void 0 ? _a : {};
+                if (eventData.isPreReg === true) {
+                    const registrationSnap = await transaction.get(db.doc(`events/${eventId}/registrations/${studentUid}`));
+                    if (!registrationSnap.exists ||
+                        parseRegistrationStatus((_b = registrationSnap.data()) === null || _b === void 0 ? void 0 : _b.status) !==
+                            "PRE_REGISTERED") {
+                        throw new ApiError(403, "Student is not pre-registered for this event.");
+                    }
                 }
                 const attendanceSnap = await transaction.get(attendanceRef);
                 if (attendanceSnap.exists) {
