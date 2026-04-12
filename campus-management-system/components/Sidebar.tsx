@@ -199,6 +199,9 @@ export function Sidebar({
             <p className="truncate text-sm font-semibold text-campus-text-primary">
               {activeItem?.label || "Workspace"}
             </p>
+            <span className="mt-1 inline-flex rounded-full border border-primary-200 bg-primary-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-primary-700">
+              Mobile Header V2
+            </span>
           </div>
 
           <Image
