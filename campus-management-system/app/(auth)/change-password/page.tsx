@@ -17,6 +17,7 @@ import {
 } from "@/lib/campus-auth";
 import {
   getCurrentCampusProfileForCurrentUser,
+  logCampusAuthEvent,
   savePendingEmailVerificationForCurrentUser,
 } from "@/lib/firebase-functions";
 
@@ -142,12 +143,24 @@ export default function ChangePasswordPage() {
 
     setLoading(true);
     try {
+      logCampusAuthEvent("info", "Submitting first-time email verification request", {
+        enteredEmail: normalizedEmail,
+        currentUserUid: user.uid,
+        currentUserEmail: user.email ?? "",
+        firebaseMethod: "verifyBeforeUpdateEmail",
+      });
       await updatePassword(user, newPassword);
       await verifyBeforeUpdateEmail(
         user,
         normalizedEmail,
         buildEmailActionSettings(),
       );
+      logCampusAuthEvent("info", "Verification email accepted by Firebase", {
+        enteredEmail: normalizedEmail,
+        currentUserUid: user.uid,
+        currentUserEmail: user.email ?? "",
+        firebaseMethod: "verifyBeforeUpdateEmail",
+      });
       await savePendingEmailVerificationForCurrentUser(normalizedEmail);
 
       setCampusCookies({
@@ -165,6 +178,14 @@ export default function ChangePasswordPage() {
       router.replace("/verify-email-pending");
     } catch (error: unknown) {
       const authError = error as { code?: string; message?: string };
+      logCampusAuthEvent("error", "First-time email verification request failed", {
+        enteredEmail: normalizedEmail,
+        currentUserUid: user.uid,
+        currentUserEmail: user.email ?? "",
+        firebaseMethod: "verifyBeforeUpdateEmail",
+        code: authError.code ?? "unknown",
+        message: authError.message ?? "Unknown Firebase error",
+      });
       if (authError.code === "auth/requires-recent-login") {
         setGeneralError("Please sign in again, then update your password right away.");
         router.replace("/login?next=/change-password");
@@ -175,7 +196,9 @@ export default function ChangePasswordPage() {
           authError.message || "Choose a stronger password and try again.",
         );
       } else if (authError.code === "auth/email-already-in-use") {
-        setGeneralError("That email address is already in use.");
+        setGeneralError(
+          "This email is already linked to another CAMPUS account. Please use a different email.",
+        );
       } else if (authError.code === "auth/network-request-failed") {
         setGeneralError("Network error. Check your connection and try again.");
       } else {

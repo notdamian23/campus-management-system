@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import { HeroUIProvider } from "@heroui/system";
@@ -24,6 +24,11 @@ export const metadata: Metadata = {
     shortcut: "/campus-chrome logo.png",
     apple: "/campus-chrome logo.png",
   },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default function RootLayout({
