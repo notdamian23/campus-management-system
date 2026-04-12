@@ -9,6 +9,11 @@ import {
   useTeacherPortal,
 } from "@/components/teacher/TeacherPortalProvider";
 
+export const metadata = {
+  title: "CAMPUS",
+  description: "CAMPUS",
+};  
+
 const teacherNavItems: NavItem[] = [
   {
     href: "/teacher",
