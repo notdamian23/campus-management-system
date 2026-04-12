@@ -74,6 +74,15 @@ export default function VerifyEmailPendingPage() {
       });
 
       const onboardingRedirect = getOnboardingRedirect(nextProfile);
+      if (onboardingRedirect === "/change-password") {
+        logCampusAuthEvent("info", "Verification page redirected back to change-password", {
+          uid: activeUser.uid,
+          role: nextProfile.role ?? "",
+        });
+        router.replace("/change-password");
+        return;
+      }
+
       if (!onboardingRedirect) {
         logCampusAuthEvent("info", "Verification flow completed from pending page", {
           uid: activeUser.uid,

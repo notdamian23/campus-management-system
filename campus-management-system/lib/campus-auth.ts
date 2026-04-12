@@ -48,13 +48,17 @@ export function needsPasswordChange(profile: CampusProfileDoc) {
 export function needsEmailVerification(profile: CampusProfileDoc) {
   return (
     profile.emailVerificationPending === true ||
-    (profile.firstLoginCompleted === false && profile.emailVerified === false)
+    (
+      profile.mustChangePassword !== true &&
+      profile.firstLoginCompleted === false &&
+      profile.emailVerified === false
+    )
   );
 }
 
 export function getOnboardingRedirect(profile: CampusProfileDoc) {
-  if (needsEmailVerification(profile)) return "/verify-email-pending";
   if (needsPasswordChange(profile)) return "/change-password";
+  if (needsEmailVerification(profile)) return "/verify-email-pending";
   return null;
 }
 
