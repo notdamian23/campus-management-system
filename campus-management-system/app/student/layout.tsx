@@ -126,7 +126,7 @@ function StudentLayoutShell({ children }: { children: ReactNode }) {
           navItems={navItems}
           enableMobileDrawer
           titleSize="sm"
-          logoSize={80}
+          logoSize={208}
           contextLabel="Student Portal"
           showLogout
           showStudentAccountSwitch={canSwitchToEc}

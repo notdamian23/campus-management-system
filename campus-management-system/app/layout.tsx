@@ -19,10 +19,10 @@ export const metadata: Metadata = {
   title: "CAMPUS",
   description:
     "Campus attendance, payments, events, and document management system.",
-    icons: {
+  icons: {
     icon: "/campus-chrome logo.png",
     shortcut: "/campus-chrome logo.png",
-    apple: "/logo.png",
+    apple: "/campus-chrome logo.png",
   },
 };
 

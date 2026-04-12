@@ -299,9 +299,13 @@ function LoginForm() {
 
   return (
     <CampusAuthShell
-      title="CAMPUS"
       description="Welcome back! Sign in to your account to access attendance, events, documents, and payment tools."
-      eyebrow="Secure Account Access"
+      logoSrc="/campus-login logo.png"
+      logoAlt="CAMPUS login logo"
+      logoWidth={720}
+      logoHeight={280}
+      logoWrapperClassName="mb-5 flex w-full items-center justify-center overflow-visible rounded-none border-0 bg-transparent shadow-none"
+      logoImageClassName="h-auto w-full max-w-[300px] object-contain drop-shadow-[0_22px_40px_rgba(123,0,0,0.2)] sm:max-w-[360px] lg:max-w-[400px]"
       footer={
         <>
           Don&apos;t have an account?{" "}

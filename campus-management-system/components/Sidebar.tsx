@@ -51,8 +51,7 @@ interface SidebarProps {
 export function Sidebar({
   navItems,
   enableMobileDrawer = false,
-  logoSize = 96,
-  titleSize = "lg",
+  logoSize = 188,
   contextLabel,
   showLogout = false,
   showStudentAccountSwitch = false,
@@ -72,12 +71,6 @@ export function Sidebar({
     navItems.find(
       (item) => pathname === item.href || pathname.startsWith(`${item.href}/`),
     ) ?? navItems[0];
-
-  const titleClasses = {
-    sm: "text-3xl",
-    md: "text-4xl",
-    lg: "text-5xl",
-  };
 
   const NavLinks = () => (
     <nav className="mt-4 flex flex-col gap-1.5 px-3">
@@ -135,19 +128,14 @@ export function Sidebar({
 
   const LogoSection = ({ size = logoSize }: { size?: number }) => (
     <div className="mb-4 mt-6 flex w-full justify-center px-4">
-      <div className="flex flex-col items-center gap-3 text-center">
+      <div className="flex flex-col items-center gap-4 text-center">
         <Image
           src="/new campus-logo.jpg"
           alt="Campus Logo"
           width={size}
-          height={size}
-          className="rounded-full object-cover shadow-md"
+          height={Math.round(size * 0.52)}
+          className="h-auto w-auto max-w-full object-contain drop-shadow-md"
         />
-        <h2
-          className={`text-primary-500 font-black ${titleClasses[titleSize]}`}
-        >
-          CAMPUS
-        </h2>
         {contextLabel ? (
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-campus-text-secondary">
             {contextLabel}
@@ -213,9 +201,13 @@ export function Sidebar({
             </p>
           </div>
 
-          <div className="rounded-2xl bg-primary-50 px-3 py-2 text-xs font-black uppercase tracking-[0.18em] text-primary-700">
-            CAMPUS
-          </div>
+          <Image
+            src="/new campus-logo.jpg"
+            alt="Campus Logo"
+            width={64}
+            height={33}
+            className="h-auto w-auto object-contain drop-shadow-sm"
+          />
         </div>
       )}
 
@@ -256,13 +248,17 @@ export function Sidebar({
             {(onClose) => (
               <>
                 <DrawerHeader className="flex items-center justify-between border-b border-border/70">
-                  <div>
+                  <div className="flex items-center gap-3">
+                    <Image
+                      src="/new campus-logo.jpg"
+                      alt="Campus Logo"
+                      width={84}
+                      height={44}
+                      className="h-auto w-auto object-contain drop-shadow-sm"
+                    />
                     <p className="text-xs font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
                       {contextLabel || "Campus Portal"}
                     </p>
-                    <div className="font-black text-2xl text-primary-500">
-                      CAMPUS
-                    </div>
                   </div>
                   <Button
                     isIconOnly
@@ -281,16 +277,6 @@ export function Sidebar({
                       paddingBottom: "max(8px, env(safe-area-inset-bottom))",
                     }}
                   >
-                    <div className="mb-2 mt-6 flex w-full justify-center">
-                      <Image
-                        src="/new campus-logo.jpg"
-                        alt="CAMPUS Logo"
-                        width={64}
-                        height={64}
-                        className="rounded-full object-cover shadow-md"
-                      />
-                    </div>
-
                     <ScrollShadow hideScrollBar className="min-h-0 flex-1">
                       <NavLinks />
                       <AccountSwitchSection />

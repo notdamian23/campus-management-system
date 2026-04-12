@@ -77,7 +77,7 @@ function TeacherLayoutShell({ children }: { children: ReactNode }) {
           navItems={teacherNavItems}
           enableMobileDrawer
           titleSize="sm"
-          logoSize={80}
+          logoSize={208}
           contextLabel="Teacher Portal"
           showLogout
         />

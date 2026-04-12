@@ -116,7 +116,7 @@ export default function ECLayout({ children }: Props) {
           }
           enableMobileDrawer
           titleSize="sm"
-          logoSize={80}
+          logoSize={208}
           contextLabel={
             viewerRole === "admin" ? "Admin Student Lookup" : "EC Workspace"
           }

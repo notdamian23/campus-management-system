@@ -12,7 +12,7 @@ const poppins = Poppins({
 });
 
 type CampusAuthShellProps = {
-  title: string;
+  title?: string;
   description: string;
   children: ReactNode;
   footer?: ReactNode;
@@ -20,6 +20,12 @@ type CampusAuthShellProps = {
   className?: string;
   cardClassName?: string;
   bodyClassName?: string;
+  logoSrc?: string;
+  logoAlt?: string;
+  logoWidth?: number;
+  logoHeight?: number;
+  logoWrapperClassName?: string;
+  logoImageClassName?: string;
 };
 
 export function CampusAuthShell({
@@ -31,7 +37,15 @@ export function CampusAuthShell({
   className,
   cardClassName,
   bodyClassName,
+  logoSrc = "/campus-login logo.png",
+  logoAlt = "Campus Logo",
+  logoWidth = 220,
+  logoHeight = 220,
+  logoWrapperClassName,
+  logoImageClassName,
 }: CampusAuthShellProps) {
+  const hasTitle = Boolean(title?.trim());
+
   return (
     <div
       className={clsx(
@@ -52,13 +66,18 @@ export function CampusAuthShell({
             bodyClassName,
           )}
         >
-          <div className="mb-6 flex h-32 w-32 items-center justify-center overflow-hidden rounded-full border-4 border-white/90 shadow-2xl sm:h-40 sm:w-40">
+          <div
+            className={
+              logoWrapperClassName ??
+              "mb-6 flex h-32 w-32 items-center justify-center overflow-hidden rounded-full border-4 border-white/90 shadow-2xl sm:h-40 sm:w-40"
+            }
+          >
             <Image
-              src="/new campus-logo.jpg"
-              alt="Campus Logo"
-              width={220}
-              height={220}
-              className="h-full w-full object-cover"
+              src={logoSrc}
+              alt={logoAlt}
+              width={logoWidth}
+              height={logoHeight}
+              className={logoImageClassName ?? "h-full w-full object-cover"}
               priority
             />
           </div>
@@ -73,16 +92,23 @@ export function CampusAuthShell({
             </Chip>
           ) : null}
 
-          <h1
+          {hasTitle ? (
+            <h1
+              className={clsx(
+                "text-center text-5xl font-extrabold tracking-tight text-primary-500 sm:text-6xl",
+                poppins.className,
+              )}
+            >
+              {title}
+            </h1>
+          ) : null}
+
+          <p
             className={clsx(
-              "text-center text-5xl font-extrabold tracking-tight text-primary-500 sm:text-6xl",
-              poppins.className,
+              "mb-8 max-w-md text-center text-sm text-campus-text-secondary sm:text-base",
+              hasTitle ? "mt-3" : "mt-1",
             )}
           >
-            {title}
-          </h1>
-
-          <p className="mb-8 mt-3 max-w-md text-center text-sm text-campus-text-secondary sm:text-base">
             {description}
           </p>
 
