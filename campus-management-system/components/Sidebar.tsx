@@ -181,7 +181,7 @@ export function Sidebar({
     <>
       {/* Mobile Top Bar (only if drawer enabled) */}
       {enableMobileDrawer && (
-        <div className="sticky top-0 z-40 flex items-center gap-3 border-b border-border/70 bg-white/90 px-3 py-3 shadow-sm backdrop-blur lg:hidden">
+        <div className="sticky top-0 z-40 flex items-center gap-3 border-b border-border/70 bg-white/95 px-3 py-3 shadow-[0_8px_20px_rgba(15,23,42,0.06)] backdrop-blur lg:hidden">
           <Button
             isIconOnly
             variant="bordered"
@@ -193,23 +193,20 @@ export function Sidebar({
           </Button>
 
           <div className="min-w-0 flex-1">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
+            <p className="truncate text-[10px] font-semibold uppercase tracking-[0.18em] text-campus-text-secondary sm:text-[11px]">
               {contextLabel || "Campus Portal"}
             </p>
-            <p className="truncate text-sm font-semibold text-campus-text-primary">
+            <p className="mt-0.5 truncate text-base font-semibold leading-tight text-campus-text-primary">
               {activeItem?.label || "Workspace"}
             </p>
-            <span className="mt-1 inline-flex rounded-full border border-primary-200 bg-primary-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-primary-700">
-              Mobile Header V2
-            </span>
           </div>
 
           <Image
             src="/new campus-logo.jpg"
             alt="Campus Logo"
-            width={64}
-            height={33}
-            className="h-auto w-auto object-contain drop-shadow-sm"
+            width={70}
+            height={36}
+            className="h-auto w-[70px] shrink-0 object-contain drop-shadow-sm"
           />
         </div>
       )}
@@ -250,19 +247,23 @@ export function Sidebar({
           <DrawerContent className="max-w-80">
             {(onClose) => (
               <>
-                <DrawerHeader className="flex items-center justify-between border-b border-border/70">
-                  <div className="flex items-center gap-3">
+                <DrawerHeader className="grid grid-cols-[auto,minmax(0,1fr),auto] items-center gap-3 border-b border-border/70 px-4 py-4">
+                  <div className="flex items-center">
                     <Image
                       src="/new campus-logo.jpg"
                       alt="Campus Logo"
-                      width={84}
-                      height={44}
-                      className="h-auto w-auto object-contain drop-shadow-sm"
+                      width={80}
+                      height={42}
+                      className="h-auto w-[80px] max-w-none object-contain drop-shadow-sm"
                     />
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
+                  </div>
+
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] leading-tight text-campus-text-secondary">
                       {contextLabel || "Campus Portal"}
                     </p>
                   </div>
+
                   <Button
                     isIconOnly
                     variant="light"
