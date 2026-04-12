@@ -7,6 +7,7 @@ import {
 } from "firebase/firestore";
 import type { User } from "firebase/auth";
 import { db } from "@/lib/firebase";
+import { logCampusAuthEvent } from "@/lib/firebase-functions";
 
 export type CampusRole = "teacher" | "student" | "ec" | "admin";
 
@@ -139,6 +140,11 @@ export async function finalizeVerifiedProfile(user: User) {
     pendingEmail: deleteField(),
     status: profile.status === "Inactive" ? "Inactive" : "active",
     updatedAt: serverTimestamp(),
+  });
+
+  logCampusAuthEvent("info", "Finalized verified CAMPUS profile", {
+    uid: user.uid,
+    role: profile.role ?? "",
   });
 
   const refreshedProfileSnap = await getDoc(profileRef);

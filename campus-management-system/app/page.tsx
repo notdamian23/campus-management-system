@@ -7,11 +7,10 @@ import { useEffect, useState, Suspense } from "react";
 import { Button } from "@heroui/button";
 import { Input } from "@heroui/input";
 import { Switch } from "@heroui/switch";
-import { getFunctions, httpsCallable } from "firebase/functions";
 
 import { campusToast } from "@/lib/toast";
 import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
-import { app, auth, db } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { doc, getDoc, updateDoc } from "firebase/firestore";
 import {
@@ -21,6 +20,10 @@ import {
   resolveRoleHome,
   setCampusCookies,
 } from "@/lib/campus-auth";
+import {
+  logCampusAuthEvent,
+  resolveSchoolIdLoginForSchoolId,
+} from "@/lib/firebase-functions";
 
 const EyeSlashFilledIcon = (props: React.SVGProps<SVGSVGElement>) => {
   return (
@@ -185,27 +188,30 @@ function LoginForm() {
 
     setLoading(true);
     try {
-      let loginEmail = `${sid}@campus.local`;
-      const functions = getFunctions(app, "asia-southeast1");
-      const resolveSchoolIdLogin = httpsCallable<
-        { schoolId: string },
-        { email?: string | null }
-      >(functions, "resolveSchoolIdLogin");
+      const resolution = await resolveSchoolIdLoginForSchoolId(sid);
 
-      try {
-        const resolved = await resolveSchoolIdLogin({ schoolId: sid });
-        const resolvedEmail = resolved.data?.email?.trim();
-
-        if (resolvedEmail) {
-          loginEmail = resolvedEmail;
-        }
-      } catch {
-        loginEmail = `${sid}@campus.local`;
+      if (resolution.status === "missing") {
+        setFieldErrors({ schoolId: "Invalid School ID" });
+        return;
       }
+
+      if (resolution.status === "failed") {
+        showLoginToast("Login service unavailable", resolution.message, "warning");
+        return;
+      }
+
+      const loginEmail = resolution.email;
 
       const cred = await signInWithEmailAndPassword(auth, loginEmail, password);
       const uid = cred.user.uid;
       await cred.user.reload();
+
+      logCampusAuthEvent("info", "Firebase sign-in succeeded", {
+        schoolId: sid,
+        uid,
+        resolverSource: resolution.source,
+        emailVerified: cred.user.emailVerified,
+      });
 
       // 2) Load profile (role + mustChangePassword) from Firestore
       let snap = await getDoc(doc(db, "profiles", uid));
@@ -236,6 +242,14 @@ function LoginForm() {
       }
       const role = data.role;
 
+      logCampusAuthEvent("info", "Loaded CAMPUS profile after sign-in", {
+        schoolId: sid,
+        uid,
+        role,
+        mustChangePassword: data.mustChangePassword === true,
+        emailVerificationPending: data.emailVerificationPending === true,
+      });
+
       if (
         data.emailVerificationPending === true ||
         (data.firstLoginCompleted === false && data.emailVerified === false)
@@ -262,20 +276,41 @@ function LoginForm() {
 
       const onboardingRedirect = getOnboardingRedirect(data);
       if (onboardingRedirect) {
+        logCampusAuthEvent("info", "Redirecting to onboarding step", {
+          schoolId: sid,
+          uid,
+          onboardingRedirect,
+        });
         router.push(onboardingRedirect);
         return;
       }
 
       // 4) Redirect by role (or use ?next=...)
       if (nextPath) {
+        logCampusAuthEvent("info", "Redirecting to next path after login", {
+          schoolId: sid,
+          uid,
+          nextPath,
+        });
         router.push(nextPath);
         return;
       }
 
+      logCampusAuthEvent("info", "Redirecting to role home after login", {
+        schoolId: sid,
+        uid,
+        role,
+      });
       router.push(resolveRoleHome(role));
     } catch (e: unknown) {
       const error = e as { code?: string; message?: string };
       const code = error.code;
+
+      logCampusAuthEvent("error", "Login failed", {
+        schoolId: sid,
+        code: code ?? "unknown",
+        message: error.message ?? "Unknown login error",
+      });
 
       if (
         code === "functions/not-found" ||

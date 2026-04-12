@@ -23,21 +23,14 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.campusDeviceSyncAttendance = exports.campusDeviceSubmitEnrollment = exports.campusDevicePendingEnrollments = exports.campusDeviceConfirmPairing = exports.campusDeviceLatestEvent = exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.resolveSchoolIdLogin = exports.adminDeleteUser = exports.adminCreateUser = void 0;
+exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminDeleteUser = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
-const functions = __importStar(require("firebase-functions/v1"));
+const https_1 = require("firebase-functions/v2/https");
 if (admin.apps.length === 0) {
     admin.initializeApp();
 }
 const db = admin.firestore();
 const REGION = "asia-southeast1";
-const MANILA_TIME_ZONE = "Asia/Manila";
-class ApiError extends Error {
-    constructor(status, message) {
-        super(message);
-        this.status = status;
-    }
-}
 function serverTimestamp() {
     return admin.firestore.FieldValue.serverTimestamp();
 }
@@ -183,22 +176,6 @@ function resolveCancellationDeadlineMs(data) {
 function makeStudentNotificationId(eventId) {
     return `preregister-${eventId}`;
 }
-function parseQueryInt(value, fallback, min, max) {
-    const raw = Array.isArray(value) ? value[0] : value;
-    const parsed = Number.parseInt(normalizeText(raw), 10);
-    if (!Number.isFinite(parsed)) {
-        return fallback;
-    }
-    return Math.min(Math.max(parsed, min), max);
-}
-function formatManilaDate(now = new Date()) {
-    return new Intl.DateTimeFormat("en-CA", {
-        timeZone: MANILA_TIME_ZONE,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-    }).format(now);
-}
 function parseEventStartMs(date, time) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         return Number.MAX_SAFE_INTEGER;
@@ -223,19 +200,10 @@ function parseEventStartMs(date, time) {
     const parsed = Date.parse(`${date}T${hh}:${mm}:00+08:00`);
     return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed;
 }
-function errorMessage(error, fallback) {
-    if (error instanceof ApiError) {
-        return error.message;
-    }
-    if (error instanceof Error && error.message.trim()) {
-        return error.message.trim();
-    }
-    return fallback;
-}
 async function callerRole(context) {
     var _a, _b;
     if (!context.auth) {
-        throw new functions.https.HttpsError("unauthenticated", "Login required.");
+        throw new https_1.HttpsError("unauthenticated", "Login required.");
     }
     const callerProfileSnap = await db.doc(`profiles/${context.auth.uid}`).get();
     return callerProfileSnap.exists ?
@@ -245,67 +213,19 @@ async function callerRole(context) {
 async function requireAdmin(context) {
     const role = await callerRole(context);
     if (role !== "admin") {
-        throw new functions.https.HttpsError("permission-denied", "Admin only.");
+        throw new https_1.HttpsError("permission-denied", "Admin only.");
     }
 }
-async function authenticateDevice(req) {
+async function requireAdminOrEC(context) {
+    const role = await callerRole(context);
+    if (role !== "admin" && role !== "ec") {
+        throw new https_1.HttpsError("permission-denied", "EC/Admin only.");
+    }
+}
+exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request) => {
     var _a;
-    const deviceId = normalizeText(req.get("X-Device-Id"));
-    const secret = normalizeText(req.get("X-Device-Secret"));
-    if (!deviceId || !secret) {
-        throw new ApiError(401, "Missing device authentication headers.");
-    }
-    const ref = db.doc(`devices/${deviceId}`);
-    const snap = await ref.get();
-    if (!snap.exists) {
-        throw new ApiError(403, "Device is not registered.");
-    }
-    const data = (_a = snap.data()) !== null && _a !== void 0 ? _a : {};
-    if (data.enabled === false) {
-        throw new ApiError(403, "Device is disabled.");
-    }
-    if (normalizeText(data.secret) !== secret) {
-        throw new ApiError(403, "Device secret is invalid.");
-    }
-    await ref.set({
-        lastSeenAt: serverTimestamp(),
-    }, { merge: true });
-    return { deviceId, secret, ref, data };
-}
-function sendJson(res, status, payload) {
-    res.status(status).json(payload);
-}
-function deviceEndpoint(method, handler) {
-    return functions.region(REGION).https.onRequest(async (req, res) => {
-        res.set("Cache-Control", "no-store");
-        if (req.method === "OPTIONS") {
-            res.set("Allow", `${method}, OPTIONS`);
-            res.status(204).send("");
-            return;
-        }
-        if (req.method !== method) {
-            res.set("Allow", `${method}, OPTIONS`);
-            sendJson(res, 405, { error: "Method not allowed." });
-            return;
-        }
-        try {
-            const device = await authenticateDevice(req);
-            await handler(req, res, device);
-        }
-        catch (error) {
-            const status = error instanceof ApiError ? error.status : 500;
-            const message = errorMessage(error, "Internal server error.");
-            console.error("Portable device endpoint failed", error);
-            sendJson(res, status, { error: message });
-        }
-    });
-}
-exports.adminCreateUser = functions
-    .region(REGION)
-    .https.onCall(async (data, context) => {
-    var _a;
-    await requireAdmin(context);
-    const body = asRecord(data);
+    await requireAdmin(request);
+    const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
     const role = normalizeText(body.role);
     const emailRaw = normalizeText(body.email);
@@ -314,19 +234,19 @@ exports.adminCreateUser = functions
     const yearRaw = normalizeText(body.year);
     const year = normalizeYear(body.year);
     if (!schoolId) {
-        throw new functions.https.HttpsError("invalid-argument", "School ID is required.");
+        throw new https_1.HttpsError("invalid-argument", "School ID is required.");
     }
     if (!["admin", "ec", "teacher", "student"].includes(role)) {
-        throw new functions.https.HttpsError("invalid-argument", "Invalid role.");
+        throw new https_1.HttpsError("invalid-argument", "Invalid role.");
     }
     if (role === "student" && !studentName) {
-        throw new functions.https.HttpsError("invalid-argument", "studentName is required for student role.");
+        throw new https_1.HttpsError("invalid-argument", "studentName is required for student role.");
     }
     if (role === "student" && !course) {
-        throw new functions.https.HttpsError("invalid-argument", "course is required for student role.");
+        throw new https_1.HttpsError("invalid-argument", "course is required for student role.");
     }
     if (role === "student" && !yearRaw) {
-        throw new functions.https.HttpsError("invalid-argument", "year is required for student role.");
+        throw new https_1.HttpsError("invalid-argument", "year is required for student role.");
     }
     const email = emailRaw || `${schoolId}@campus.local`;
     try {
@@ -369,7 +289,7 @@ exports.adminCreateUser = functions
         }
         await db.collection("logs").add({
             action: "admin_create_user",
-            actorUid: normalizeText((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid),
+            actorUid: normalizeText((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid),
             targetUid: uid,
             targetSchoolId: schoolId,
             createdAt: serverTimestamp(),
@@ -379,23 +299,21 @@ exports.adminCreateUser = functions
     catch (error) {
         const authError = error;
         if (authError.code === "auth/email-already-exists") {
-            throw new functions.https.HttpsError("already-exists", "Account already exists.");
+            throw new https_1.HttpsError("already-exists", "Account already exists.");
         }
-        throw new functions.https.HttpsError("internal", authError.message || "Failed to create user.");
+        throw new https_1.HttpsError("internal", authError.message || "Failed to create user.");
     }
 });
-exports.adminDeleteUser = functions
-    .region(REGION)
-    .https.onCall(async (data, context) => {
+exports.adminDeleteUser = (0, https_1.onCall)({ region: REGION }, async (request) => {
     var _a, _b, _c, _d;
-    await requireAdmin(context);
-    const body = asRecord(data);
+    await requireAdmin(request);
+    const body = asRecord(request.data);
     const uid = normalizeText(body.uid);
     if (!uid) {
-        throw new functions.https.HttpsError("invalid-argument", "uid required");
+        throw new https_1.HttpsError("invalid-argument", "uid required");
     }
-    if (uid === normalizeText((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid)) {
-        throw new functions.https.HttpsError("failed-precondition", "You cannot delete yourself.");
+    if (uid === normalizeText((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid)) {
+        throw new https_1.HttpsError("failed-precondition", "You cannot delete yourself.");
     }
     const profileSnap = await db.doc(`profiles/${uid}`).get();
     const schoolId = (_c = (_b = profileSnap.data()) === null || _b === void 0 ? void 0 : _b.schoolId) !== null && _c !== void 0 ? _c : null;
@@ -403,21 +321,158 @@ exports.adminDeleteUser = functions
     await db.doc(`profiles/${uid}`).delete().catch(() => undefined);
     await db.collection("logs").add({
         action: "DELETE_USER",
-        actorUid: normalizeText((_d = context.auth) === null || _d === void 0 ? void 0 : _d.uid),
+        actorUid: normalizeText((_d = request.auth) === null || _d === void 0 ? void 0 : _d.uid),
         targetUid: uid,
         targetSchoolId: schoolId,
         createdAt: serverTimestamp(),
     });
     return { success: true };
 });
-exports.resolveSchoolIdLogin = functions
-    .region(REGION)
-    .https.onCall(async (data) => {
+exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    await requireAdminOrEC(request);
+    const body = asRecord(request.data);
+    const rawLimit = Number.parseInt(normalizeText(body.limit), 10);
+    const limit = Number.isFinite(rawLimit) ?
+        Math.min(Math.max(rawLimit, 1), 5000) :
+        2000;
+    const profileSnapshot = await db
+        .collection("profiles")
+        .where("role", "==", "student")
+        .limit(limit)
+        .get();
+    const studentRefs = profileSnapshot.docs.map((profileDoc) => db.doc(`students/${profileDoc.id}`));
+    const studentSnapshots = studentRefs.length > 0 ?
+        await db.getAll(...studentRefs) :
+        [];
+    const studentByUid = new Map();
+    studentSnapshots.forEach((studentSnap) => {
+        var _a;
+        if (!studentSnap.exists)
+            return;
+        studentByUid.set(studentSnap.id, (_a = studentSnap.data()) !== null && _a !== void 0 ? _a : {});
+    });
+    const students = profileSnapshot.docs.map((profileDoc) => {
+        var _a, _b, _c, _d, _e;
+        const profileData = (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {};
+        const studentData = (_b = studentByUid.get(profileDoc.id)) !== null && _b !== void 0 ? _b : {};
+        return {
+            uid: profileDoc.id,
+            schoolId: normalizeText(profileData.schoolId) ||
+                normalizeText(studentData.schoolId) ||
+                profileDoc.id,
+            studentName: normalizeText(profileData.studentName) ||
+                normalizeText(studentData.studentName) ||
+                normalizeText(profileData.name) ||
+                normalizeText(studentData.name),
+            name: normalizeText(profileData.name) ||
+                normalizeText(studentData.name) ||
+                normalizeText(profileData.studentName) ||
+                normalizeText(studentData.studentName),
+            course: normalizeText(profileData.course) ||
+                normalizeText(studentData.course) ||
+                "Unassigned",
+            year: normalizeYear((_d = (_c = profileData.year) !== null && _c !== void 0 ? _c : studentData.year) !== null && _d !== void 0 ? _d : studentData.yearLevel),
+            status: normalizeText(studentData.status) ||
+                normalizeText(profileData.status) ||
+                "Active",
+            email: normalizeText(profileData.email),
+            createdAtMs: toMillis((_e = profileData.createdAt) !== null && _e !== void 0 ? _e : studentData.createdAt),
+        };
+    });
+    return { students };
+});
+exports.ecCreateStudent = (0, https_1.onCall)({ region: REGION }, async (request) => {
     var _a;
-    const body = asRecord(data);
+    await requireAdminOrEC(request);
+    const body = asRecord(request.data);
+    const schoolId = normalizeText(body.schoolId);
+    const studentName = normalizeText(body.studentName);
+    const course = normalizeText(body.course);
+    const yearRaw = normalizeText(body.year);
+    const year = normalizeYear(body.year);
+    const emailRaw = normalizeText(body.email);
+    const email = emailRaw || `${schoolId}@campus.local`;
+    if (!schoolId) {
+        throw new https_1.HttpsError("invalid-argument", "School ID is required.");
+    }
+    if (!studentName) {
+        throw new https_1.HttpsError("invalid-argument", "Student name is required.");
+    }
+    if (!course) {
+        throw new https_1.HttpsError("invalid-argument", "Course is required.");
+    }
+    if (!yearRaw) {
+        throw new https_1.HttpsError("invalid-argument", "Year is required.");
+    }
+    const existingProfileSnapshot = await db
+        .collection("profiles")
+        .where("schoolId", "==", schoolId)
+        .limit(1)
+        .get();
+    if (!existingProfileSnapshot.empty) {
+        throw new https_1.HttpsError("already-exists", "Student with this School ID already exists.");
+    }
+    try {
+        const userRecord = await admin.auth().createUser({
+            email,
+            password: schoolId,
+            disabled: false,
+        });
+        const uid = userRecord.uid;
+        const timestamp = serverTimestamp();
+        await db.doc(`profiles/${uid}`).set({
+            schoolId,
+            email,
+            role: "student",
+            studentName,
+            name: studentName,
+            course,
+            year,
+            mustChangePassword: true,
+            emailVerified: false,
+            emailVerificationPending: false,
+            pendingEmail: null,
+            firstLoginCompleted: false,
+            status: "pending",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        await db.doc(`students/${uid}`).set({
+            uid,
+            studentId: uid,
+            schoolId,
+            studentName,
+            name: studentName,
+            course,
+            year,
+            yearLevel: year,
+            status: "active",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        await db.collection("logs").add({
+            action: "ec_create_student",
+            actorUid: normalizeText((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid),
+            targetUid: uid,
+            targetSchoolId: schoolId,
+            createdAt: timestamp,
+        });
+        return { uid };
+    }
+    catch (error) {
+        const authError = error;
+        if (authError.code === "auth/email-already-exists") {
+            throw new https_1.HttpsError("already-exists", "Account already exists.");
+        }
+        throw new https_1.HttpsError("internal", authError.message || "Failed to create student account.");
+    }
+});
+exports.resolveSchoolIdLogin = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a;
+    const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
     if (!schoolId) {
-        throw new functions.https.HttpsError("invalid-argument", "School ID is required.");
+        throw new https_1.HttpsError("invalid-argument", "School ID is required.");
     }
     const profileSnapshot = await db
         .collection("profiles")
@@ -425,40 +480,56 @@ exports.resolveSchoolIdLogin = functions
         .limit(1)
         .get();
     if (profileSnapshot.empty) {
-        return { email: null };
+        console.warn("resolveSchoolIdLogin: profile not found", { schoolId });
+        return {
+            email: null,
+            found: false,
+            source: "missing",
+        };
     }
     const profileDoc = profileSnapshot.docs[0];
     const profileData = (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {};
     const profileEmail = normalizeText(profileData.email);
     try {
         const userRecord = await admin.auth().getUser(profileDoc.id);
+        const resolvedEmail = normalizeText(userRecord.email) ||
+            profileEmail ||
+            `${schoolId}@campus.local`;
+        const source = normalizeText(userRecord.email) ? "auth" : profileEmail ? "profile" : "fallback";
+        console.info("resolveSchoolIdLogin: resolved", {
+            schoolId,
+            uid: profileDoc.id,
+            source,
+        });
         return {
-            email: normalizeText(userRecord.email) ||
-                profileEmail ||
-                `${schoolId}@campus.local`,
+            email: resolvedEmail,
+            found: true,
+            source,
         };
     }
     catch (error) {
         console.error("resolveSchoolIdLogin failed to read Auth user", error);
+        const fallbackEmail = profileEmail || `${schoolId}@campus.local`;
+        const source = profileEmail ? "profile" : "fallback";
         return {
-            email: profileEmail || `${schoolId}@campus.local`,
+            email: fallbackEmail,
+            found: true,
+            source,
         };
     }
 });
-exports.adminUpsertPortableDevice = functions
-    .region(REGION)
-    .https.onCall(async (data, context) => {
-    await requireAdmin(context);
-    const body = asRecord(data);
+exports.adminUpsertPortableDevice = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    await requireAdmin(request);
+    const body = asRecord(request.data);
     const deviceId = normalizeText(body.deviceId);
     const secret = normalizeText(body.secret);
     const name = normalizeText(body.name) || deviceId;
     const enabled = body.enabled !== false;
     if (!deviceId) {
-        throw new functions.https.HttpsError("invalid-argument", "Device ID is required.");
+        throw new https_1.HttpsError("invalid-argument", "Device ID is required.");
     }
     if (!secret) {
-        throw new functions.https.HttpsError("invalid-argument", "Device secret is required.");
+        throw new https_1.HttpsError("invalid-argument", "Device secret is required.");
     }
     await db.doc(`devices/${deviceId}`).set({
         name,
@@ -469,18 +540,16 @@ exports.adminUpsertPortableDevice = functions
     }, { merge: true });
     return { deviceId, enabled };
 });
-exports.studentManagePreRegistration = functions
-    .region(REGION)
-    .https.onCall(async (data, context) => {
-    if (!context.auth) {
-        throw new functions.https.HttpsError("unauthenticated", "Login required.");
+exports.studentManagePreRegistration = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    if (!request.auth) {
+        throw new https_1.HttpsError("unauthenticated", "Login required.");
     }
-    const body = asRecord(data);
+    const body = asRecord(request.data);
     const eventId = normalizeText(body.eventId);
     const action = normalizeLower(body.action) === "cancel" ? "cancel" : "register";
-    const uid = normalizeText(context.auth.uid);
+    const uid = normalizeText(request.auth.uid);
     if (!eventId) {
-        throw new functions.https.HttpsError("invalid-argument", "eventId is required.");
+        throw new https_1.HttpsError("invalid-argument", "eventId is required.");
     }
     const eventRef = db.doc(`events/${eventId}`);
     const registrationRef = db.doc(`events/${eventId}/registrations/${uid}`);
@@ -494,22 +563,22 @@ exports.studentManagePreRegistration = functions
             transaction.get(studentRef),
         ]);
         if (!eventSnap.exists) {
-            throw new functions.https.HttpsError("not-found", "Event not found.");
+            throw new https_1.HttpsError("not-found", "Event not found.");
         }
         const profileData = (_a = profileSnap.data()) !== null && _a !== void 0 ? _a : {};
         const studentData = (_b = studentSnap.data()) !== null && _b !== void 0 ? _b : {};
         const role = normalizeLower(profileData.role);
         if (role !== "student") {
-            throw new functions.https.HttpsError("permission-denied", "Student access only.");
+            throw new https_1.HttpsError("permission-denied", "Student access only.");
         }
         const accountStatus = normalizeLower(studentData.status) ||
             normalizeLower(profileData.status);
         if (accountStatus === "inactive") {
-            throw new functions.https.HttpsError("failed-precondition", "Approach EC member to activate your account first.");
+            throw new https_1.HttpsError("failed-precondition", "Approach EC member to activate your account first.");
         }
         const eventData = (_c = eventSnap.data()) !== null && _c !== void 0 ? _c : {};
         if (eventData.isPreReg !== true) {
-            throw new functions.https.HttpsError("failed-precondition", "This event is not open for pre-registration.");
+            throw new https_1.HttpsError("failed-precondition", "This event is not open for pre-registration.");
         }
         const nowMs = Date.now();
         const registrationStartMs = resolveRegistrationStartMs(eventData);
@@ -518,17 +587,17 @@ exports.studentManagePreRegistration = functions
         const eventStartMs = resolveEventStartMs(eventData);
         if (action === "register") {
             if (registrationStartMs > 0 && nowMs < registrationStartMs) {
-                throw new functions.https.HttpsError("failed-precondition", "Registration has not opened yet.");
+                throw new https_1.HttpsError("failed-precondition", "Registration has not opened yet.");
             }
             if (registrationEndMs > 0 && nowMs > registrationEndMs) {
-                throw new functions.https.HttpsError("failed-precondition", "Registration is already closed.");
+                throw new https_1.HttpsError("failed-precondition", "Registration is already closed.");
             }
             if (eventStartMs !== Number.MAX_SAFE_INTEGER && nowMs >= eventStartMs) {
-                throw new functions.https.HttpsError("failed-precondition", "Registration is already closed for this event.");
+                throw new https_1.HttpsError("failed-precondition", "Registration is already closed for this event.");
             }
         }
         else if (cancellationDeadlineMs > 0 && nowMs > cancellationDeadlineMs) {
-            throw new functions.https.HttpsError("failed-precondition", "The cancellation deadline has already passed.");
+            throw new https_1.HttpsError("failed-precondition", "The cancellation deadline has already passed.");
         }
         const schoolId = normalizeText(profileData.schoolId) || uid;
         const studentName = normalizeText(profileData.studentName) ||
@@ -545,26 +614,26 @@ exports.studentManagePreRegistration = functions
             yearTargets :
             normalizeText(eventData.yearLevel);
         if (!matchesTargetList(courseValue, course, "All Courses")) {
-            throw new functions.https.HttpsError("permission-denied", "Your course is not allowed for this event.");
+            throw new https_1.HttpsError("permission-denied", "Your course is not allowed for this event.");
         }
         if (!matchesTargetList(yearValue, year, "All Years")) {
-            throw new functions.https.HttpsError("permission-denied", "Your year level is not allowed for this event.");
+            throw new https_1.HttpsError("permission-denied", "Your year level is not allowed for this event.");
         }
         if (!matchesSpecificStudentTarget(eventData.targetStudent, schoolId, studentName)) {
-            throw new functions.https.HttpsError("permission-denied", "You are not part of the allowed audience for this event.");
+            throw new https_1.HttpsError("permission-denied", "You are not part of the allowed audience for this event.");
         }
         const requiredPaymentId = normalizeText(eventData.requiredPaymentId);
         if (eventData.withPayment === true) {
             if (!requiredPaymentId) {
-                throw new functions.https.HttpsError("failed-precondition", "This event requires a linked payment before registration.");
+                throw new https_1.HttpsError("failed-precondition", "This event requires a linked payment before registration.");
             }
             const paymentAssignmentSnap = await transaction.get(db.doc(`payments/${requiredPaymentId}/students/${uid}`));
             if (!paymentAssignmentSnap.exists) {
-                throw new functions.https.HttpsError("failed-precondition", "Complete the required payment first.");
+                throw new https_1.HttpsError("failed-precondition", "Complete the required payment first.");
             }
             const paymentStatus = normalizeLower((_d = paymentAssignmentSnap.data()) === null || _d === void 0 ? void 0 : _d.status);
             if (paymentStatus !== "paid") {
-                throw new functions.https.HttpsError("failed-precondition", "Complete the required payment first.");
+                throw new https_1.HttpsError("failed-precondition", "Complete the required payment first.");
             }
         }
         const registrationsSnap = await transaction.get(db.collection(`events/${eventId}/registrations`));
@@ -603,10 +672,10 @@ exports.studentManagePreRegistration = functions
         const notificationRef = db.doc(`profiles/${uid}/notifications/${makeStudentNotificationId(eventId)}`);
         if (action === "register") {
             if (currentStatus === "PRE_REGISTERED") {
-                throw new functions.https.HttpsError("already-exists", "You are already pre-registered for this event.");
+                throw new https_1.HttpsError("already-exists", "You are already pre-registered for this event.");
             }
             if (currentStatus === "WAITLISTED") {
-                throw new functions.https.HttpsError("already-exists", "You are already on the waitlist for this event.");
+                throw new https_1.HttpsError("already-exists", "You are already on the waitlist for this event.");
             }
             const hasSlot = slots == null || preRegisteredCount < slots;
             if (hasSlot) {
@@ -620,7 +689,7 @@ exports.studentManagePreRegistration = functions
                 message = "Event is full. You have been added to the waitlist.";
             }
             else {
-                throw new functions.https.HttpsError("failed-precondition", "All pre-registration slots are already full.");
+                throw new https_1.HttpsError("failed-precondition", "All pre-registration slots are already full.");
             }
             const existingRegistrationData = (currentRegistrationPayload !== null && currentRegistrationPayload !== void 0 ? currentRegistrationPayload : {});
             transaction.set(registrationRef, {
@@ -657,10 +726,10 @@ exports.studentManagePreRegistration = functions
         }
         else {
             if (!currentRegistrationData || !currentStatus) {
-                throw new functions.https.HttpsError("not-found", "No active pre-registration record was found.");
+                throw new https_1.HttpsError("not-found", "No active pre-registration record was found.");
             }
             if (currentStatus === "CANCELLED") {
-                throw new functions.https.HttpsError("failed-precondition", "This registration is already cancelled.");
+                throw new https_1.HttpsError("failed-precondition", "This registration is already cancelled.");
             }
             nextStatus = "CANCELLED";
             const existingRegistrationData = currentRegistrationPayload;
@@ -742,217 +811,8 @@ exports.studentManagePreRegistration = functions
     });
     return result;
 });
-exports.campusDeviceLatestEvent = deviceEndpoint("GET", async (_req, res) => {
-    const today = formatManilaDate();
-    const snapshot = await db
-        .collection("events")
-        .where("date", ">=", today)
-        .orderBy("date", "asc")
-        .limit(25)
-        .get();
-    const candidates = snapshot.docs
-        .map((eventDoc) => {
-        const data = eventDoc.data();
-        const date = normalizeText(data.date);
-        const scheduledTime = normalizeText(data.scheduledTime) ||
-            normalizeText(data.timeStart);
-        const status = normalizeText(data.status).toLowerCase() || "upcoming";
-        return {
-            eventId: eventDoc.id,
-            title: normalizeText(data.title) || "Untitled Event",
-            date,
-            scheduledTime,
-            location: normalizeText(data.location) || "TBA",
-            status,
-            sortMs: parseEventStartMs(date, scheduledTime),
-            createdAtMs: toMillis(data.createdAt),
-        };
-    })
-        .filter((event) => event.status !== "completed");
-    candidates.sort((left, right) => {
-        if (left.sortMs !== right.sortMs) {
-            return left.sortMs - right.sortMs;
-        }
-        return right.createdAtMs - left.createdAtMs;
-    });
-    const event = candidates[0];
-    if (!event) {
-        sendJson(res, 404, { error: "No upcoming event found." });
-        return;
-    }
-    sendJson(res, 200, {
-        event: {
-            eventId: event.eventId,
-            title: event.title,
-            date: event.date,
-            scheduledTime: event.scheduledTime,
-            location: event.location,
-            status: event.status,
-        },
-    });
-});
-exports.campusDeviceConfirmPairing = deviceEndpoint("POST", async (req, res, device) => {
-    const body = asRecord(req.body);
-    const eventId = normalizeText(body.eventId);
-    const title = normalizeText(body.title);
-    const date = normalizeText(body.date);
-    const scheduledTime = normalizeText(body.scheduledTime);
-    const location = normalizeText(body.location);
-    if (!eventId) {
-        throw new ApiError(400, "eventId is required.");
-    }
-    await db.doc(`devicePairings/${device.deviceId}`).set({
-        deviceId: device.deviceId,
-        eventId,
-        eventTitle: title,
-        date,
-        scheduledTime,
-        location,
-        status: "paired",
-        pairedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-    }, { merge: true });
-    await device.ref.set({
-        lastPairedEventId: eventId,
-        lastPairedAt: serverTimestamp(),
-    }, { merge: true });
-    sendJson(res, 200, { status: "paired" });
-});
-exports.campusDevicePendingEnrollments = deviceEndpoint("GET", async (req, res) => {
-    const limit = parseQueryInt(req.query.limit, 20, 1, 50);
-    const snapshot = await db
-        .collection("fingerprintEnrollments")
-        .where("status", "==", "pending")
-        .limit(limit)
-        .get();
-    const students = snapshot.docs
-        .map((studentDoc) => {
-        const data = studentDoc.data();
-        return {
-            studentUid: normalizeText(data.studentUid) || studentDoc.id,
-            schoolId: normalizeText(data.schoolId),
-            studentName: normalizeText(data.studentName) ||
-                normalizeText(data.name),
-            course: normalizeText(data.course),
-            year: normalizeText(data.year),
-        };
-    })
-        .filter((student) => student.studentUid);
-    sendJson(res, 200, { students });
-});
-exports.campusDeviceSubmitEnrollment = deviceEndpoint("POST", async (req, res, device) => {
-    const body = asRecord(req.body);
-    const studentUid = normalizeText(body.studentUid);
-    const templateId = Number.parseInt(normalizeText(body.templateId), 10);
-    if (!studentUid) {
-        throw new ApiError(400, "studentUid is required.");
-    }
-    if (!Number.isFinite(templateId) || templateId <= 0) {
-        throw new ApiError(400, "templateId must be a positive number.");
-    }
-    await db.doc(`fingerprintEnrollments/${studentUid}`).set({
-        studentUid,
-        schoolId: normalizeText(body.schoolId),
-        studentName: normalizeText(body.studentName),
-        course: normalizeText(body.course),
-        year: normalizeText(body.year),
-        templateId,
-        deviceId: device.deviceId,
-        status: "enrolled",
-        enrolledAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-    }, { merge: true });
-    sendJson(res, 200, { status: "enrolled" });
-});
-exports.campusDeviceSyncAttendance = deviceEndpoint("POST", async (req, res, device) => {
-    const body = asRecord(req.body);
-    const rawRecords = Array.isArray(body.records) ? body.records : null;
-    if (!rawRecords) {
-        throw new ApiError(400, "records must be an array.");
-    }
-    const results = [];
-    for (const rawRecord of rawRecords) {
-        const record = asRecord(rawRecord);
-        const recordId = normalizeText(record.recordId);
-        const eventId = normalizeText(record.eventId);
-        const studentUid = normalizeText(record.studentUid);
-        if (!recordId) {
-            results.push({
-                recordId: "",
-                status: "failed",
-                message: "recordId is required.",
-            });
-            continue;
-        }
-        if (!eventId || !studentUid) {
-            results.push({
-                recordId,
-                status: "failed",
-                message: "eventId and studentUid are required.",
-            });
-            continue;
-        }
-        try {
-            const attendanceRef = db.doc(`events/${eventId}/attendance/${studentUid}`);
-            const eventRef = db.doc(`events/${eventId}`);
-            const payload = {
-                uid: studentUid,
-                studentUid,
-                schoolId: normalizeText(record.schoolId),
-                studentName: normalizeText(record.studentName),
-                course: normalizeText(record.course),
-                year: normalizeText(record.year),
-                status: "Present",
-                source: "portableModule",
-                deviceId: normalizeText(record.deviceId) || device.deviceId,
-                templateId: Number.parseInt(normalizeText(record.templateId), 10) || -1,
-                capturedAtEpoch: Number.parseInt(normalizeText(record.capturedAtEpoch), 10) || 0,
-                capturedAtIso: normalizeText(record.capturedAtIso),
-                timeSource: normalizeText(record.timeSource) || "unknown",
-                eventId,
-                eventTitle: normalizeText(record.eventTitle),
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-            };
-            let duplicate = false;
-            await db.runTransaction(async (transaction) => {
-                var _a, _b;
-                const eventSnap = await transaction.get(eventRef);
-                if (!eventSnap.exists) {
-                    throw new ApiError(404, "Event not found.");
-                }
-                const eventData = (_a = eventSnap.data()) !== null && _a !== void 0 ? _a : {};
-                if (eventData.isPreReg === true) {
-                    const registrationSnap = await transaction.get(db.doc(`events/${eventId}/registrations/${studentUid}`));
-                    if (!registrationSnap.exists ||
-                        parseRegistrationStatus((_b = registrationSnap.data()) === null || _b === void 0 ? void 0 : _b.status) !==
-                            "PRE_REGISTERED") {
-                        throw new ApiError(403, "Student is not pre-registered for this event.");
-                    }
-                }
-                const attendanceSnap = await transaction.get(attendanceRef);
-                if (attendanceSnap.exists) {
-                    duplicate = true;
-                    return;
-                }
-                transaction.set(attendanceRef, payload);
-            });
-            results.push({
-                recordId,
-                status: duplicate ? "duplicate" : "uploaded",
-                message: duplicate ?
-                    "Attendance already exists." :
-                    "Attendance saved.",
-            });
-        }
-        catch (error) {
-            results.push({
-                recordId,
-                status: "failed",
-                message: errorMessage(error, "Failed to sync attendance."),
-            });
-        }
-    }
-    sendJson(res, 200, { results });
-});
+// Portable device HTTP endpoints now live exclusively in the
+// `portable-device-functions` codebase. Keeping them out of the default
+// codebase avoids Firebase deploy ownership conflicts for the same
+// `campusDevice*` function names.
 //# sourceMappingURL=index.js.map

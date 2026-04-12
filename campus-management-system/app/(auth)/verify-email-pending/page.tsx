@@ -9,6 +9,7 @@ import { onAuthStateChanged, signOut, verifyBeforeUpdateEmail } from "firebase/a
 import { doc, getDoc } from "firebase/firestore";
 import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
 import { auth, db } from "@/lib/firebase";
+import { logCampusAuthEvent } from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
 import {
   buildEmailActionSettings,
@@ -43,6 +44,9 @@ export default function VerifyEmailPendingPage() {
     setGeneralError("");
 
     try {
+      logCampusAuthEvent("info", "Refreshing verification status", {
+        uid: user.uid,
+      });
       await user.reload();
       const activeUser = auth.currentUser;
       if (!activeUser) {
@@ -69,6 +73,10 @@ export default function VerifyEmailPendingPage() {
 
       const onboardingRedirect = getOnboardingRedirect(nextProfile);
       if (!onboardingRedirect) {
+        logCampusAuthEvent("info", "Verification flow completed from pending page", {
+          uid: activeUser.uid,
+          role: nextProfile.role ?? "",
+        });
         campusToast.success({
           title: "Onboarding complete",
           description: "Your email is verified and your CAMPUS account is ready.",
@@ -82,6 +90,10 @@ export default function VerifyEmailPendingPage() {
         error instanceof Error
           ? error.message
           : "Unable to refresh your verification status.";
+      logCampusAuthEvent("error", "Verification status refresh failed", {
+        uid: user.uid,
+        message,
+      });
       setGeneralError(message);
     } finally {
       setInitializing(false);
@@ -125,6 +137,9 @@ export default function VerifyEmailPendingPage() {
     setGeneralError("");
 
     try {
+      logCampusAuthEvent("info", "Resending verification email", {
+        uid: user.uid,
+      });
       await verifyBeforeUpdateEmail(user, pendingEmail, buildEmailActionSettings());
       campusToast.success({
         title: "Verification email resent",
@@ -133,6 +148,11 @@ export default function VerifyEmailPendingPage() {
       });
     } catch (error: unknown) {
       const authError = error as { code?: string; message?: string };
+      logCampusAuthEvent("error", "Resend verification email failed", {
+        uid: user.uid,
+        code: authError.code ?? "unknown",
+        message: authError.message ?? "Unknown resend error",
+      });
       if (authError.code === "auth/requires-recent-login") {
         setGeneralError("Please sign in again before requesting another verification email.");
         router.replace("/login?next=/verify-email-pending");

@@ -7,6 +7,7 @@ import { Button } from "@heroui/button";
 import { applyActionCode, checkActionCode, signOut } from "firebase/auth";
 import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
 import { auth } from "@/lib/firebase";
+import { logCampusAuthEvent } from "@/lib/firebase-functions";
 import { clearCampusCookies, finalizeVerifiedProfile } from "@/lib/campus-auth";
 
 type ActionState = "loading" | "success" | "error";
@@ -40,6 +41,10 @@ function AuthActionContent() {
       }
 
       try {
+        logCampusAuthEvent("info", "Processing auth action link", {
+          mode: mode || "unknown",
+          hasOobCode: Boolean(oobCode),
+        });
         const info = await checkActionCode(auth, oobCode);
         const operation = String(info.operation ?? "").trim();
         const targetEmail = String(info.data.email ?? "").trim();
@@ -60,6 +65,10 @@ function AuthActionContent() {
         }
 
         await applyActionCode(auth, oobCode);
+        logCampusAuthEvent("info", "Firebase action code applied", {
+          operation,
+          hasTargetEmail: Boolean(targetEmail),
+        });
 
         try {
           const currentUser = auth.currentUser;
@@ -93,6 +102,11 @@ function AuthActionContent() {
         }, 1400);
       } catch (error: unknown) {
         const authError = error as { code?: string; message?: string };
+        logCampusAuthEvent("error", "Auth action link failed", {
+          mode: mode || "unknown",
+          code: authError.code ?? "unknown",
+          message: authError.message ?? "Unknown auth action error",
+        });
         if (
           authError.code === "auth/expired-action-code" ||
           authError.code === "auth/invalid-action-code"
