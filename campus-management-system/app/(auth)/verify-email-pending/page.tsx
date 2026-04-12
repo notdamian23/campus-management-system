@@ -15,7 +15,6 @@ import {
 } from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
 import {
-  buildEmailActionSettings,
   clearCampusCookies,
   finalizeVerifiedProfile,
   getOnboardingRedirect,
@@ -148,8 +147,16 @@ export default function VerifyEmailPendingPage() {
     setGeneralError("");
 
     try {
-      const actionCodeSettings = buildEmailActionSettings();
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        throw new Error("No authenticated user is available for resend.");
+      }
+      const actionCodeSettings = {
+        url: `${(process.env.NEXT_PUBLIC_APP_URL?.trim() || "https://campusportal.site").replace(/\/+$/, "")}/auth/action`,
+        handleCodeInApp: false,
+      };
       logCampusAuthEvent("info", "Resending verification email", {
+        firebaseMethod: "verifyBeforeUpdateEmail",
         currentUser: user.email ? "present" : "present-without-email",
         authCurrentUser: auth.currentUser ? "present" : "missing",
         uid: user.uid,
@@ -159,10 +166,11 @@ export default function VerifyEmailPendingPage() {
         actionUrl: actionCodeSettings.url,
         handleCodeInApp: actionCodeSettings.handleCodeInApp,
       });
-      await verifyBeforeUpdateEmail(user, pendingEmail, actionCodeSettings);
+      await verifyBeforeUpdateEmail(currentUser, pendingEmail, actionCodeSettings);
       logCampusAuthEvent("info", "Resend verification email accepted by Firebase", {
-        uid: user.uid,
-        currentUserEmail: auth.currentUser?.email ?? "",
+        firebaseMethod: "verifyBeforeUpdateEmail",
+        uid: currentUser.uid,
+        currentUserEmail: currentUser.email ?? "",
         pendingEmail,
         actionUrl: actionCodeSettings.url,
       });
@@ -182,6 +190,7 @@ export default function VerifyEmailPendingPage() {
         `${authError.code}: ${authError.message ?? "Unknown Firebase error."}` :
         authError.message || "Failed to resend the verification email.";
       logCampusAuthEvent("error", "Resend verification email failed", {
+        firebaseMethod: "verifyBeforeUpdateEmail",
         uid: user.uid,
         code: authError.code ?? "unknown",
         message: authError.message ?? "Unknown resend error",
