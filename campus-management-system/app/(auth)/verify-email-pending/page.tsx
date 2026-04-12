@@ -148,10 +148,24 @@ export default function VerifyEmailPendingPage() {
     setGeneralError("");
 
     try {
+      const actionCodeSettings = buildEmailActionSettings();
       logCampusAuthEvent("info", "Resending verification email", {
+        currentUser: user.email ? "present" : "present-without-email",
+        authCurrentUser: auth.currentUser ? "present" : "missing",
         uid: user.uid,
+        currentUserUid: auth.currentUser?.uid ?? "",
+        currentUserEmail: auth.currentUser?.email ?? "",
+        pendingEmail,
+        actionUrl: actionCodeSettings.url,
+        handleCodeInApp: actionCodeSettings.handleCodeInApp,
       });
-      await verifyBeforeUpdateEmail(user, pendingEmail, buildEmailActionSettings());
+      await verifyBeforeUpdateEmail(user, pendingEmail, actionCodeSettings);
+      logCampusAuthEvent("info", "Resend verification email accepted by Firebase", {
+        uid: user.uid,
+        currentUserEmail: auth.currentUser?.email ?? "",
+        pendingEmail,
+        actionUrl: actionCodeSettings.url,
+      });
       const refreshedProfile =
         await savePendingEmailVerificationForCurrentUser(pendingEmail);
       if (refreshedProfile) {
@@ -164,22 +178,25 @@ export default function VerifyEmailPendingPage() {
       });
     } catch (error: unknown) {
       const authError = error as { code?: string; message?: string };
+      const exactErrorMessage = authError.code ?
+        `${authError.code}: ${authError.message ?? "Unknown Firebase error."}` :
+        authError.message || "Failed to resend the verification email.";
       logCampusAuthEvent("error", "Resend verification email failed", {
         uid: user.uid,
         code: authError.code ?? "unknown",
         message: authError.message ?? "Unknown resend error",
+        currentUserEmail: auth.currentUser?.email ?? "",
+        pendingEmail,
       });
       if (authError.code === "auth/requires-recent-login") {
-        setGeneralError("Please sign in again before requesting another verification email.");
+        setGeneralError(exactErrorMessage);
         router.replace("/login?next=/verify-email-pending");
       } else if (authError.code === "auth/invalid-email") {
-        setGeneralError("The pending email address is invalid. Contact administration.");
+        setGeneralError(exactErrorMessage);
       } else if (authError.code === "auth/network-request-failed") {
-        setGeneralError("Network error. Check your connection and try again.");
+        setGeneralError(exactErrorMessage);
       } else {
-        setGeneralError(
-          authError.message || "Failed to resend the verification email.",
-        );
+        setGeneralError(exactErrorMessage);
       }
     } finally {
       setResending(false);

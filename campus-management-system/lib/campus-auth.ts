@@ -95,7 +95,7 @@ export function getAppBaseUrl() {
 export function buildEmailActionSettings() {
   const baseUrl = getAppBaseUrl();
   return {
-    url: `${baseUrl}/verify-email-pending`,
+    url: `${baseUrl}/auth/action`,
     handleCodeInApp: false,
   };
 }
