@@ -11,13 +11,18 @@ import {
   query,
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
+import {
+  type CampusProfileDoc,
+  getOnboardingRedirect,
+} from "@/lib/campus-auth";
 
 export type TeacherAccessState =
   | "loading"
   | "authorized"
   | "unauthenticated"
   | "forbidden"
-  | "must-change-password";
+  | "must-change-password"
+  | "verification-pending";
 
 export type TeacherProfile = {
   uid: string;
@@ -161,15 +166,7 @@ type TeacherPortalContextValue = {
   error: string | null;
 };
 
-type ProfileDocData = {
-  role?: string;
-  mustChangePassword?: boolean;
-  schoolId?: string;
-  teacherName?: string;
-  studentName?: string;
-  name?: string;
-  email?: string;
-};
+type ProfileDocData = CampusProfileDoc;
 
 const TeacherPortalContext = createContext<TeacherPortalContextValue | null>(
   null,
@@ -361,9 +358,15 @@ export function TeacherPortalProvider({
         }
 
         const data = snap.data() as ProfileDocData;
-        if (data.mustChangePassword) {
+        const onboardingRedirect = getOnboardingRedirect(data);
+        if (onboardingRedirect === "/change-password") {
           setProfile(null);
           setAccessState("must-change-password");
+          return;
+        }
+        if (onboardingRedirect === "/verify-email-pending") {
+          setProfile(null);
+          setAccessState("verification-pending");
           return;
         }
 

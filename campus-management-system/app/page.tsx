@@ -3,7 +3,7 @@
 import React from "react";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState, Suspense } from "react";
+import { useEffect, useState, Suspense } from "react";
 import { Button } from "@heroui/button";
 import { Input } from "@heroui/input";
 import { Switch } from "@heroui/switch";
@@ -14,6 +14,13 @@ import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
 import { app, auth, db } from "@/lib/firebase";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { doc, getDoc, updateDoc } from "firebase/firestore";
+import {
+  type CampusProfileDoc,
+  finalizeVerifiedProfile,
+  getOnboardingRedirect,
+  resolveRoleHome,
+  setCampusCookies,
+} from "@/lib/campus-auth";
 
 const EyeSlashFilledIcon = (props: React.SVGProps<SVGSVGElement>) => {
   return (
@@ -75,7 +82,6 @@ const EyeFilledIcon = (props: React.SVGProps<SVGSVGElement>) => {
   );
 };
 
-type Role = "teacher" | "student" | "ec" | "admin";
 type LoginFieldErrors = {
   schoolId?: string;
   password?: string;
@@ -99,14 +105,6 @@ function getLoginInputClassNames(isInvalid: boolean) {
   };
 }
 
-function setCampusCookies(role: string, mustChangePassword: boolean) {
-  // Basic cookies for middleware guard (7 days)
-  const maxAge = 60 * 60 * 24 * 7;
-  document.cookie = `campus_logged_in=1; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
-  document.cookie = `campus_role=${role}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
-  document.cookie = `campus_must_change=${mustChangePassword ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
-}
-
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -120,6 +118,17 @@ function LoginForm() {
 
   const [isVisible, setIsVisible] = React.useState(false);
   const toggleVisibility = () => setIsVisible(!isVisible);
+
+  useEffect(() => {
+    if (searchParams.get("verified") !== "1") return;
+
+    campusToast.success({
+      title: "Email verified",
+      description:
+        "Your CAMPUS email is verified. Sign in with your School ID and new password to continue.",
+      dedupeKey: "login:verified-email",
+    });
+  }, [searchParams]);
 
   const showLoginToast = (
     title: string,
@@ -196,9 +205,10 @@ function LoginForm() {
 
       const cred = await signInWithEmailAndPassword(auth, loginEmail, password);
       const uid = cred.user.uid;
+      await cred.user.reload();
 
       // 2) Load profile (role + mustChangePassword) from Firestore
-      const snap = await getDoc(doc(db, "profiles", uid));
+      let snap = await getDoc(doc(db, "profiles", uid));
       if (!snap.exists()) {
         await signOut(auth);
         showLoginToast(
@@ -208,12 +218,7 @@ function LoginForm() {
         return;
       }
 
-      const data = snap.data() as {
-        role?: Role;
-        mustChangePassword?: boolean;
-        schoolId?: string;
-        email?: string;
-      };
+      let data = snap.data() as CampusProfileDoc;
 
       // Validate role
       if (
@@ -229,30 +234,45 @@ function LoginForm() {
         );
         return;
       }
+      const role = data.role;
+
+      if (
+        data.emailVerificationPending === true ||
+        (data.firstLoginCompleted === false && data.emailVerified === false)
+      ) {
+        const syncResult = await finalizeVerifiedProfile(cred.user);
+        if (syncResult.finalized) {
+          snap = await getDoc(doc(db, "profiles", uid));
+          if (snap.exists()) {
+            data = snap.data() as CampusProfileDoc;
+          }
+        }
+      }
 
       if (cred.user.email && cred.user.email !== data.email) {
         await updateDoc(doc(db, "profiles", uid), { email: cred.user.email });
       }
 
       // 3) Set cookies ONCE (middleware uses these)
-      setCampusCookies(data.role, data.mustChangePassword === true);
+      setCampusCookies({
+        role,
+        mustChangePassword: data.mustChangePassword === true,
+        emailVerificationPending: data.emailVerificationPending === true,
+      });
 
-      // 4) Force password change on first login
-      if (data.mustChangePassword === true) {
-        router.push("/change-password");
+      const onboardingRedirect = getOnboardingRedirect(data);
+      if (onboardingRedirect) {
+        router.push(onboardingRedirect);
         return;
       }
 
-      // 5) Redirect by role (or use ?next=...)
+      // 4) Redirect by role (or use ?next=...)
       if (nextPath) {
         router.push(nextPath);
         return;
       }
 
-      if (data.role === "teacher") router.push("/teacher");
-      else if (data.role === "student") router.push("/student");
-      else if (data.role === "ec") router.push("/ecmember");
-      else router.push("/admin");
+      router.push(resolveRoleHome(role));
     } catch (e: unknown) {
       const error = e as { code?: string; message?: string };
       const code = error.code;

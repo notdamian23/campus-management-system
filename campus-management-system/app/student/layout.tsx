@@ -1,11 +1,20 @@
 "use client";
 
 import { ReactNode, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
 import { Sidebar, NavItem } from "@/components/Sidebar";
+import { CampusLayoutLoadingState } from "@/components/ui";
 import {
   StudentPortalProvider,
   useStudentPortal,
 } from "@/components/student";
+import { auth, db } from "@/lib/firebase";
+import {
+  type CampusProfileDoc,
+  getOnboardingRedirect,
+} from "@/lib/campus-auth";
 
 export default function StudentLayout({ children }: { children: ReactNode }) {
   return (
@@ -16,16 +25,48 @@ export default function StudentLayout({ children }: { children: ReactNode }) {
 }
 
 function StudentLayoutShell({ children }: { children: ReactNode }) {
+  const router = useRouter();
   const { unreadNotificationsCount } = useStudentPortal();
   const [canSwitchToEc, setCanSwitchToEc] = useState(false);
+  const [authorized, setAuthorized] = useState(false);
 
   useEffect(() => {
-    const roleCookie = document.cookie
-      .split("; ")
-      .find((item) => item.startsWith("campus_role="));
-    const role = roleCookie?.slice("campus_role=".length) ?? "";
-    setCanSwitchToEc(role === "ec");
-  }, []);
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      setAuthorized(false);
+
+      if (!user) {
+        router.replace("/login");
+        return;
+      }
+
+      try {
+        const snap = await getDoc(doc(db, "profiles", user.uid));
+        if (!snap.exists()) {
+          router.replace("/login");
+          return;
+        }
+
+        const profile = snap.data() as CampusProfileDoc;
+        const onboardingRedirect = getOnboardingRedirect(profile);
+        if (onboardingRedirect) {
+          router.replace(onboardingRedirect);
+          return;
+        }
+
+        if (profile.role !== "student" && profile.role !== "ec") {
+          router.replace("/login");
+          return;
+        }
+
+        setCanSwitchToEc(profile.role === "ec");
+        setAuthorized(true);
+      } catch {
+        router.replace("/login");
+      }
+    });
+
+    return () => unsub();
+  }, [router]);
 
   const navItems = useMemo<NavItem[]>(() => {
     const notificationCount = unreadNotificationsCount;
@@ -68,6 +109,15 @@ function StudentLayoutShell({ children }: { children: ReactNode }) {
 
     return [...baseItems, notificationsItem];
   }, [unreadNotificationsCount]);
+
+  if (!authorized) {
+    return (
+      <CampusLayoutLoadingState
+        title="Loading student portal"
+        description="Checking your CAMPUS account setup and syncing your student dashboard."
+      />
+    );
+  }
 
   return (
     <div className="min-h-[100dvh] bg-[#f2f2f2]">

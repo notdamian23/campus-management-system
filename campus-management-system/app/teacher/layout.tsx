@@ -52,6 +52,11 @@ function TeacherLayoutShell({ children }: { children: ReactNode }) {
 
     if (accessState === "must-change-password") {
       router.replace("/change-password");
+      return;
+    }
+
+    if (accessState === "verification-pending") {
+      router.replace("/verify-email-pending");
     }
   }, [accessState, router]);
 

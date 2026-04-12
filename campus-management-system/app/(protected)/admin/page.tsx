@@ -65,8 +65,19 @@ import {
   updateDoc,
 } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
+import {
+  type CampusProfileDoc,
+  getOnboardingRedirect,
+} from "@/lib/campus-auth";
 
 const roleOptions = ["student", "teacher", "ec", "admin"] as const;
+const yearOptions = [
+  "1st Year",
+  "2nd Year",
+  "3rd Year",
+  "4th Year",
+  "5th Year",
+] as const;
 type Role = (typeof roleOptions)[number];
 type AdminTab = "overview" | "users" | "logs" | "exports";
 type EmailFilter = "all" | "with_email" | "without_email";
@@ -452,6 +463,9 @@ export default function AdminDashboardPage() {
   const [savingRoleUid, setSavingRoleUid] = useState<string | null>(null);
   const [newSchoolId, setNewSchoolId] = useState("");
   const [newRole, setNewRole] = useState<Role>("student");
+  const [newStudentName, setNewStudentName] = useState("");
+  const [newCourse, setNewCourse] = useState("");
+  const [newYear, setNewYear] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [creating, setCreating] = useState(false);
   const [deletingUid, setDeletingUid] = useState<string | null>(null);
@@ -481,7 +495,13 @@ export default function AdminDashboardPage() {
         setChecking(true);
         if (!user) return router.replace("/login");
         const snap = await getDoc(doc(db, "profiles", user.uid));
-        if (!snap.exists() || snap.data()?.role !== "admin")
+        if (!snap.exists()) return router.replace("/login");
+
+        const profile = snap.data() as CampusProfileDoc;
+        const onboardingRedirect = getOnboardingRedirect(profile);
+        if (onboardingRedirect) return router.replace(onboardingRedirect);
+
+        if (profile.role !== "admin")
           return router.replace("/login");
         setAdminUid(user.uid);
       } catch {
@@ -667,12 +687,18 @@ export default function AdminDashboardPage() {
     Boolean(userSearch.trim()) || roleFilter !== "all" || emailFilter !== "all";
   const canResetCreateForm =
     Boolean(newSchoolId.trim()) ||
+    Boolean(newStudentName.trim()) ||
+    Boolean(newCourse.trim()) ||
+    Boolean(newYear.trim()) ||
     Boolean(newEmail.trim()) ||
     newRole !== "student";
 
   const resetCreateForm = () => {
     setNewSchoolId("");
     setNewEmail("");
+    setNewStudentName("");
+    setNewCourse("");
+    setNewYear("");
     setNewRole("student");
   };
 
@@ -821,7 +847,14 @@ export default function AdminDashboardPage() {
   }
 
   async function createAccount() {
-    if (!newSchoolId.trim()) {
+    const schoolId = newSchoolId.trim();
+    const email = newEmail.trim();
+    const studentName = newStudentName.trim();
+    const course = newCourse.trim();
+    const year = newYear.trim();
+    const isStudentRole = newRole === "student";
+
+    if (!schoolId) {
       campusToast.warning({
         title: "Missing school ID",
         description: "School ID is required.",
@@ -831,8 +864,8 @@ export default function AdminDashboardPage() {
     }
 
     if (
-      newEmail.trim() &&
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail.trim())
+      email &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
     ) {
       campusToast.warning({
         title: "Invalid email",
@@ -842,21 +875,58 @@ export default function AdminDashboardPage() {
       return;
     }
 
+    if (isStudentRole && !studentName) {
+      campusToast.warning({
+        title: "Missing student name",
+        description: "Student name is required for student accounts.",
+        dedupeKey: "admin:create-account:missing-student-name",
+      });
+      return;
+    }
+
+    if (isStudentRole && !course) {
+      campusToast.warning({
+        title: "Missing course",
+        description: "Course is required for student accounts.",
+        dedupeKey: "admin:create-account:missing-course",
+      });
+      return;
+    }
+
+    if (isStudentRole && !year) {
+      campusToast.warning({
+        title: "Missing year level",
+        description: "Year level is required for student accounts.",
+        dedupeKey: "admin:create-account:missing-year",
+      });
+      return;
+    }
+
     setCreating(true);
     try {
       const fn = httpsCallable<
-        { schoolId: string; role: Role; email: string | null },
+        {
+          schoolId: string;
+          role: Role;
+          email: string | null;
+          studentName?: string | null;
+          course?: string | null;
+          year?: string | null;
+        },
         { uid?: string }
       >(functions, "adminCreateUser");
       const result = await fn({
-        schoolId: newSchoolId.trim(),
+        schoolId,
         role: newRole,
-        email: newEmail.trim() || null,
+        email: email || null,
+        studentName: isStudentRole ? studentName : null,
+        course: isStudentRole ? course : null,
+        year: isStudentRole ? year : null,
       });
       campusToast.success({
         title: "Account created",
         description: `UID: ${result?.data?.uid ?? "-"}`,
-        dedupeKey: `admin:create-account:${result?.data?.uid ?? newSchoolId.trim()}`,
+        dedupeKey: `admin:create-account:${result?.data?.uid ?? schoolId}`,
       });
       resetCreateForm();
       setTab("users");
@@ -1750,10 +1820,43 @@ export default function AdminDashboardPage() {
                         }
                       />
                     </div>
+                    {newRole === "student" ? (
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                        <Input
+                          label="Student Name"
+                          value={newStudentName}
+                          onValueChange={setNewStudentName}
+                          placeholder="e.g. Juan Dela Cruz"
+                          isRequired
+                        />
+                        <Input
+                          label="Course"
+                          value={newCourse}
+                          onValueChange={setNewCourse}
+                          placeholder="e.g. Computer Engineering"
+                          isRequired
+                        />
+                        <Select
+                          label="Year Level"
+                          selectedKeys={newYear ? [newYear] : []}
+                          onSelectionChange={(keys) => {
+                            const selected = Array.from(keys as Set<React.Key>)[0];
+                            if (typeof selected === "string") setNewYear(selected);
+                          }}
+                          placeholder="Select year"
+                          isRequired
+                        >
+                          {yearOptions.map((year) => (
+                            <SelectItem key={year}>{year}</SelectItem>
+                          ))}
+                        </Select>
+                      </div>
+                    ) : null}
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <p className="text-sm text-campus-text-secondary">
-                        Required fields are marked automatically. Optional email
-                        helps users receive verification and recovery messages.
+                        {newRole === "student"
+                          ? "Student accounts also need a name, course, and year level so roster, preregistration, and payment rules work correctly."
+                          : "Required fields are marked automatically. Optional email helps users receive verification and recovery messages."}
                       </p>
                       <div className="flex flex-col gap-3 sm:flex-row">
                         <Button

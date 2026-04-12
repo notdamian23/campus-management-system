@@ -309,11 +309,24 @@ exports.adminCreateUser = functions
     const schoolId = normalizeText(body.schoolId);
     const role = normalizeText(body.role);
     const emailRaw = normalizeText(body.email);
+    const studentName = normalizeText(body.studentName);
+    const course = normalizeText(body.course);
+    const yearRaw = normalizeText(body.year);
+    const year = normalizeYear(body.year);
     if (!schoolId) {
         throw new functions.https.HttpsError("invalid-argument", "School ID is required.");
     }
     if (!["admin", "ec", "teacher", "student"].includes(role)) {
         throw new functions.https.HttpsError("invalid-argument", "Invalid role.");
+    }
+    if (role === "student" && !studentName) {
+        throw new functions.https.HttpsError("invalid-argument", "studentName is required for student role.");
+    }
+    if (role === "student" && !course) {
+        throw new functions.https.HttpsError("invalid-argument", "course is required for student role.");
+    }
+    if (role === "student" && !yearRaw) {
+        throw new functions.https.HttpsError("invalid-argument", "year is required for student role.");
     }
     const email = emailRaw || `${schoolId}@campus.local`;
     try {
@@ -323,13 +336,37 @@ exports.adminCreateUser = functions
             disabled: false,
         });
         const uid = userRecord.uid;
-        await db.doc(`profiles/${uid}`).set({
+        const profilePayload = {
             schoolId,
             email,
             role,
             mustChangePassword: true,
+            emailVerified: false,
+            emailVerificationPending: false,
+            pendingEmail: null,
+            firstLoginCompleted: false,
+            status: "pending",
             createdAt: serverTimestamp(),
-        }, { merge: true });
+        };
+        if (role === "student") {
+            profilePayload.studentName = studentName;
+            profilePayload.name = studentName;
+            profilePayload.course = course;
+            profilePayload.year = year;
+        }
+        await db.doc(`profiles/${uid}`).set(profilePayload, { merge: true });
+        if (role === "student") {
+            await db.doc(`students/${uid}`).set({
+                schoolId,
+                studentName,
+                name: studentName,
+                course,
+                year,
+                status: "active",
+                updatedAt: serverTimestamp(),
+                createdAt: serverTimestamp(),
+            }, { merge: true });
+        }
         await db.collection("logs").add({
             action: "admin_create_user",
             actorUid: normalizeText((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid),

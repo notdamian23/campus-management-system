@@ -7,6 +7,10 @@ import { doc, getDoc } from "firebase/firestore";
 import { CampusLayoutLoadingState } from "@/components/ui";
 import { auth, db } from "@/lib/firebase";
 import { Sidebar, NavItem } from "@/components/Sidebar";
+import {
+  type CampusProfileDoc,
+  getOnboardingRedirect,
+} from "@/lib/campus-auth";
 
 type Props = {
   children: ReactNode;
@@ -72,13 +76,10 @@ export default function ECLayout({ children }: Props) {
         return;
       }
 
-      const data = snap.data() as {
-        role?: string;
-        mustChangePassword?: boolean;
-      };
-
-      if (data.mustChangePassword) {
-        router.replace("/change-password");
+      const data = snap.data() as CampusProfileDoc;
+      const onboardingRedirect = getOnboardingRedirect(data);
+      if (onboardingRedirect) {
+        router.replace(onboardingRedirect);
         return;
       }
 

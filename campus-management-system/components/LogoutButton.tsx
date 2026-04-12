@@ -5,12 +5,7 @@ import { signOut } from "firebase/auth";
 import { Button } from "@heroui/button";
 import { LogOut } from "lucide-react";
 import { auth } from "@/lib/firebase";
-
-function clearCampusCookies() {
-  document.cookie = "campus_logged_in=; Path=/; Max-Age=0";
-  document.cookie = "campus_role=; Path=/; Max-Age=0";
-  document.cookie = "campus_must_change=; Path=/; Max-Age=0";
-}
+import { clearCampusCookies } from "@/lib/campus-auth";
 
 type LogoutButtonProps = {
   className?: string;
