@@ -258,24 +258,35 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
     const schoolId = normalizeText(body.schoolId);
     const role = normalizeText(body.role);
     const emailRaw = normalizeText(body.email);
+    const name = normalizeText(body.name);
+    const teacherName = normalizeText(body.teacherName);
     const studentName = normalizeText(body.studentName);
     const course = normalizeText(body.course);
     const yearRaw = normalizeText(body.year);
     const year = normalizeYear(body.year);
+    const resolvedTeacherName = teacherName || name;
+    const resolvedStudentName = studentName || name;
+    const resolvedEcName = name;
     if (!schoolId) {
         throw new https_1.HttpsError("invalid-argument", "School ID is required.");
     }
     if (!["admin", "ec", "teacher", "student"].includes(role)) {
         throw new https_1.HttpsError("invalid-argument", "Invalid role.");
     }
-    if (role === "student" && !studentName) {
+    if (role === "teacher" && !resolvedTeacherName) {
+        throw new https_1.HttpsError("invalid-argument", "teacherName is required for teacher role.");
+    }
+    if (role === "student" && !resolvedStudentName) {
         throw new https_1.HttpsError("invalid-argument", "studentName is required for student role.");
     }
-    if (role === "student" && !course) {
-        throw new https_1.HttpsError("invalid-argument", "course is required for student role.");
+    if (role === "ec" && !resolvedEcName) {
+        throw new https_1.HttpsError("invalid-argument", "name is required for ec role.");
     }
-    if (role === "student" && !yearRaw) {
-        throw new https_1.HttpsError("invalid-argument", "year is required for student role.");
+    if ((role === "student" || role === "ec") && !course) {
+        throw new https_1.HttpsError("invalid-argument", "course is required for student and ec roles.");
+    }
+    if ((role === "student" || role === "ec") && !yearRaw) {
+        throw new https_1.HttpsError("invalid-argument", "year is required for student and ec roles.");
     }
     const email = emailRaw || `${schoolId}@campus.local`;
     try {
@@ -297,9 +308,18 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
             status: "pending",
             createdAt: serverTimestamp(),
         };
+        if (role === "teacher") {
+            profilePayload.teacherName = resolvedTeacherName;
+            profilePayload.name = resolvedTeacherName;
+        }
         if (role === "student") {
-            profilePayload.studentName = studentName;
-            profilePayload.name = studentName;
+            profilePayload.studentName = resolvedStudentName;
+            profilePayload.name = resolvedStudentName;
+            profilePayload.course = course;
+            profilePayload.year = year;
+        }
+        if (role === "ec") {
+            profilePayload.name = resolvedEcName;
             profilePayload.course = course;
             profilePayload.year = year;
         }
@@ -307,8 +327,8 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
         if (role === "student") {
             await db.doc(`students/${uid}`).set({
                 schoolId,
-                studentName,
-                name: studentName,
+                studentName: resolvedStudentName,
+                name: resolvedStudentName,
                 course,
                 year,
                 status: "active",

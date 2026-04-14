@@ -6,12 +6,23 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, Suspense } from "react";
 import { Button } from "@heroui/button";
 import { Input } from "@heroui/input";
+import {
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+} from "@heroui/modal";
 import { Switch } from "@heroui/switch";
 
 import { campusToast } from "@/lib/toast";
 import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
 import { auth } from "@/lib/firebase";
-import { signInWithEmailAndPassword, signOut } from "firebase/auth";
+import {
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signOut,
+} from "firebase/auth";
 import {
   type CampusProfileDoc,
   finalizeVerifiedProfile,
@@ -90,6 +101,12 @@ type LoginFieldErrors = {
   password?: string;
 };
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_RESET_SUCCESS_DESCRIPTION =
+  "If that email is registered with CAMPUS, a password reset email will arrive shortly. Please check your inbox and spam folder.";
+const CAMPUS_LOCAL_RESET_DESCRIPTION =
+  "Generated @campus.local addresses cannot receive reset emails. Use your registered recovery/contact email or contact CAMPUS administration.";
+
 function getLoginInputClassNames(isInvalid: boolean) {
   return {
     base: "w-full",
@@ -108,6 +125,14 @@ function getLoginInputClassNames(isInvalid: boolean) {
   };
 }
 
+function isValidEmailAddress(value: string) {
+  return EMAIL_PATTERN.test(value);
+}
+
+function isCampusLocalEmail(value: string) {
+  return /@campus\.local$/i.test(value.trim());
+}
+
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -118,6 +143,10 @@ function LoginForm() {
   const [loading, setLoading] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<LoginFieldErrors>({});
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetEmailError, setResetEmailError] = useState("");
+  const [resetSending, setResetSending] = useState(false);
 
   const [isVisible, setIsVisible] = React.useState(false);
   const toggleVisibility = () => setIsVisible(!isVisible);
@@ -158,6 +187,113 @@ function LoginForm() {
 
       return next;
     });
+  };
+
+  const resetPasswordFormState = () => {
+    setResetEmail("");
+    setResetEmailError("");
+  };
+
+  const closeResetModal = () => {
+    if (resetSending) return;
+    setResetModalOpen(false);
+    resetPasswordFormState();
+  };
+
+  const openResetModal = () => {
+    resetPasswordFormState();
+    setResetModalOpen(true);
+  };
+
+  const showPasswordResetSuccessToast = () => {
+    campusToast.success({
+      title: "Check your inbox",
+      description: PASSWORD_RESET_SUCCESS_DESCRIPTION,
+      dedupeKey: "login:password-reset:success",
+    });
+  };
+
+  const handlePasswordReset = async (
+    event?: React.FormEvent<HTMLFormElement>,
+  ) => {
+    event?.preventDefault();
+    if (resetSending) return;
+
+    const normalizedEmail = resetEmail.trim().toLowerCase();
+
+    if (!normalizedEmail) {
+      setResetEmailError("Email is required");
+      return;
+    }
+
+    if (!isValidEmailAddress(normalizedEmail)) {
+      setResetEmailError("Enter a valid email address");
+      return;
+    }
+
+    if (isCampusLocalEmail(normalizedEmail)) {
+      setResetEmailError(CAMPUS_LOCAL_RESET_DESCRIPTION);
+      return;
+    }
+
+    setResetEmailError("");
+    setResetSending(true);
+
+    try {
+      await sendPasswordResetEmail(auth, normalizedEmail);
+      logCampusAuthEvent("info", "Password reset email requested", {
+        emailDomain: normalizedEmail.split("@")[1] ?? "",
+      });
+      showPasswordResetSuccessToast();
+      setResetModalOpen(false);
+      resetPasswordFormState();
+    } catch (e: unknown) {
+      const error = e as { code?: string; message?: string };
+      const code = error.code ?? "unknown";
+
+      logCampusAuthEvent("warn", "Password reset request failed", {
+        code,
+        emailDomain: normalizedEmail.split("@")[1] ?? "",
+      });
+
+      if (code === "auth/invalid-email" || code === "auth/missing-email") {
+        setResetEmailError("Enter a valid email address");
+      } else if (code === "auth/user-not-found") {
+        showPasswordResetSuccessToast();
+        setResetModalOpen(false);
+        resetPasswordFormState();
+      } else if (code === "auth/too-many-requests") {
+        campusToast.warning({
+          title: "Too many reset attempts",
+          description:
+            "Please wait a moment before requesting another password reset email.",
+          dedupeKey: "login:password-reset:too-many-requests",
+        });
+      } else if (code === "auth/network-request-failed") {
+        campusToast.warning({
+          title: "Network issue",
+          description:
+            "We couldn't reach Firebase right now. Check your internet connection and try again.",
+          dedupeKey: "login:password-reset:network",
+        });
+      } else if (code === "auth/unauthorized-domain") {
+        campusToast.error({
+          title: "Password reset unavailable",
+          description:
+            "Password reset email is not available from this domain right now. Please contact CAMPUS administration.",
+          dedupeKey: "login:password-reset:unauthorized-domain",
+        });
+      } else {
+        campusToast.error({
+          title: "Unable to send reset email",
+          description:
+            "We couldn't send a password reset email right now. Please try again in a moment.",
+          dedupeKey: "login:password-reset:unknown",
+        });
+      }
+    } finally {
+      setResetSending(false);
+    }
   };
 
   const handleLogin = async () => {
@@ -346,98 +482,176 @@ function LoginForm() {
         </>
       }
     >
-      <div className="space-y-7">
-        <Input
-          label="School ID"
-          labelPlacement="outside"
-          placeholder="e.g. 23209455"
-          type="text"
-          value={schoolId}
-          onValueChange={(value) => {
-            setSchoolId(value);
-            clearFieldErrors("schoolId", "password");
-          }}
-          inputMode="numeric"
-          isInvalid={Boolean(fieldErrors.schoolId)}
-          errorMessage={fieldErrors.schoolId}
-          startContent={
-            <span className="material-icons pointer-events-none text-xl text-text-muted">
-              person
-            </span>
-          }
-          classNames={getLoginInputClassNames(Boolean(fieldErrors.schoolId))}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") handleLogin();
-          }}
-        />
-
-        <Input
-          label="Password"
-          labelPlacement="outside"
-          placeholder="Enter password"
-          type={isVisible ? "text" : "password"}
-          value={password}
-          onValueChange={(value) => {
-            setPassword(value);
-            clearFieldErrors("password");
-          }}
-          isInvalid={Boolean(fieldErrors.password)}
-          errorMessage={fieldErrors.password}
-          startContent={
-            <span className="material-icons pointer-events-none text-xl text-text-muted">
-              lock
-            </span>
-          }
-          endContent={
-            <Button
-              isIconOnly
-              aria-label="Toggle password visibility"
-              className="h-9 w-9 min-w-0 rounded-full bg-transparent text-text-muted"
-              variant="light"
-              type="button"
-              onPress={toggleVisibility}
-            >
-              {isVisible ? (
-                <EyeSlashFilledIcon className="pointer-events-none text-2xl" />
-              ) : (
-                <EyeFilledIcon className="pointer-events-none text-2xl" />
-              )}
-            </Button>
-          }
-          classNames={getLoginInputClassNames(Boolean(fieldErrors.password))}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") handleLogin();
-          }}
-        />
-
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <Switch
-            size="sm"
-            isSelected={rememberMe}
-            onValueChange={setRememberMe}
-            classNames={{
-              label: "text-sm font-medium text-text-primary",
+      <>
+        <div className="space-y-7">
+          <Input
+            label="School ID"
+            labelPlacement="outside"
+            placeholder="e.g. 23209455"
+            type="text"
+            value={schoolId}
+            onValueChange={(value) => {
+              setSchoolId(value);
+              clearFieldErrors("schoolId", "password");
             }}
-          >
-            Remember me
-          </Switch>
+            inputMode="numeric"
+            isInvalid={Boolean(fieldErrors.schoolId)}
+            errorMessage={fieldErrors.schoolId}
+            startContent={
+              <span className="material-icons pointer-events-none text-xl text-text-muted">
+                person
+              </span>
+            }
+            classNames={getLoginInputClassNames(Boolean(fieldErrors.schoolId))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleLogin();
+            }}
+          />
+
+          <Input
+            label="Password"
+            labelPlacement="outside"
+            placeholder="Enter password"
+            type={isVisible ? "text" : "password"}
+            value={password}
+            onValueChange={(value) => {
+              setPassword(value);
+              clearFieldErrors("password");
+            }}
+            isInvalid={Boolean(fieldErrors.password)}
+            errorMessage={fieldErrors.password}
+            startContent={
+              <span className="material-icons pointer-events-none text-xl text-text-muted">
+                lock
+              </span>
+            }
+            endContent={
+              <Button
+                isIconOnly
+                aria-label="Toggle password visibility"
+                className="h-9 w-9 min-w-0 rounded-full bg-transparent text-text-muted"
+                variant="light"
+                type="button"
+                onPress={toggleVisibility}
+              >
+                {isVisible ? (
+                  <EyeSlashFilledIcon className="pointer-events-none text-2xl" />
+                ) : (
+                  <EyeFilledIcon className="pointer-events-none text-2xl" />
+                )}
+              </Button>
+            }
+            classNames={getLoginInputClassNames(Boolean(fieldErrors.password))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleLogin();
+            }}
+          />
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <Switch
+              size="sm"
+              isSelected={rememberMe}
+              onValueChange={setRememberMe}
+              classNames={{
+                label: "text-sm font-medium text-text-primary",
+              }}
+            >
+              Remember me
+            </Switch>
+            <Button
+              type="button"
+              variant="light"
+              className="h-auto min-w-0 self-start px-0 text-sm font-semibold text-primary-600 data-[hover=true]:bg-transparent sm:self-auto"
+              onPress={openResetModal}
+            >
+              Forgot password?
+            </Button>
+          </div>
+
           <Button
-            type="button"
-            variant="light"
-            className="h-auto min-w-0 self-start px-0 text-sm font-semibold text-primary-600 data-[hover=true]:bg-transparent sm:self-auto"
+            onPress={handleLogin}
+            isLoading={loading}
+            className="h-14 w-full bg-primary-500 text-base font-bold text-white shadow-lg"
           >
-            Forgot password?
+            Sign In
           </Button>
         </div>
 
-        <Button
-          onPress={handleLogin}
-          isLoading={loading}
-          className="h-14 w-full bg-primary-500 text-base font-bold text-white shadow-lg"
+        <Modal
+          isOpen={resetModalOpen}
+          onOpenChange={(open) => {
+            if (open) {
+              setResetModalOpen(true);
+              return;
+            }
+            closeResetModal();
+          }}
+          placement="center"
+          backdrop="blur"
+          isDismissable={!resetSending}
+          isKeyboardDismissDisabled={resetSending}
         >
-          Sign In
-        </Button>
-      </div>
+          <ModalContent>
+            {() => (
+              <form onSubmit={handlePasswordReset}>
+                <ModalHeader className="flex flex-col gap-1">
+                  Reset your password
+                </ModalHeader>
+                <ModalBody className="space-y-4 pb-2">
+                  <p className="text-sm leading-6 text-campus-text-secondary">
+                    Enter your registered recovery/contact email and CAMPUS will
+                    send a Firebase password reset link.
+                  </p>
+                  <div className="rounded-2xl border border-[#f1e3c8] bg-[#fff8eb] px-4 py-3 text-sm leading-6 text-campus-text-secondary">
+                    Use your registered recovery/contact email. Accounts that
+                    only use generated <span className="font-semibold text-campus-text-primary">@campus.local</span>{" "}
+                    sign-ins cannot receive password reset emails.
+                  </div>
+                  <Input
+                    autoFocus
+                    label="Email"
+                    labelPlacement="outside"
+                    type="email"
+                    value={resetEmail}
+                    onValueChange={(value) => {
+                      setResetEmail(value);
+                      if (resetEmailError) setResetEmailError("");
+                    }}
+                    placeholder="you@example.com"
+                    autoComplete="email"
+                    isInvalid={Boolean(resetEmailError)}
+                    errorMessage={resetEmailError}
+                    classNames={getLoginInputClassNames(Boolean(resetEmailError))}
+                    startContent={
+                      <span className="material-icons pointer-events-none text-xl text-text-muted">
+                        mail
+                      </span>
+                    }
+                  />
+                </ModalBody>
+                <ModalFooter className="justify-between">
+                  <Button
+                    type="button"
+                    variant="bordered"
+                    onPress={closeResetModal}
+                    isDisabled={resetSending}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="submit"
+                    isLoading={resetSending}
+                    isDisabled={resetSending}
+                    className="bg-primary-500 font-semibold text-white"
+                  >
+                    Send reset link
+                  </Button>
+                </ModalFooter>
+              </form>
+            )}
+          </ModalContent>
+        </Modal>
+      </>
     </CampusAuthShell>
   );
 }

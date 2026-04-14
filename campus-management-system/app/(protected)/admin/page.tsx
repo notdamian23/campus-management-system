@@ -78,12 +78,21 @@ const yearOptions = [
   "4th Year",
   "5th Year",
 ] as const;
+const courseOptions = [
+  "Computer Engineering",
+  "Industrial Engineering",
+  "Electrical Engineering",
+  "Mechanical Engineering",
+  "Electronics Engineering",
+] as const;
 type Role = (typeof roleOptions)[number];
 type AdminTab = "overview" | "users" | "logs" | "exports";
 type EmailFilter = "all" | "with_email" | "without_email";
 type UserSortMode =
   | "school_id_asc"
   | "school_id_desc"
+  | "name_asc"
+  | "name_desc"
   | "role_asc"
   | "role_desc"
   | "newest"
@@ -93,6 +102,11 @@ type Profile = {
   schoolId?: string;
   email?: string;
   role: Role;
+  name?: string;
+  studentName?: string;
+  teacherName?: string;
+  course?: string;
+  year?: string;
   createdAt?: unknown;
 };
 type LogItem = {
@@ -156,11 +170,16 @@ const roleCards = [
 
 const userColumns: CampusTableColumn<Profile>[] = [
   { key: "schoolId", label: "School ID" },
+  { key: "name", label: "Name" },
   { key: "email", label: "Email" },
   { key: "role", label: "Role" },
   { key: "roleAssignment", label: "Role Assignment" },
   { key: "actions", label: "Actions", align: "end", className: "text-right" },
 ];
+
+const createAccountFormGridClassName =
+  "grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_220px_minmax(0,1fr)]";
+const createAccountSingleFieldClassName = "md:col-span-2 xl:col-span-2";
 
 const logColumns: CampusTableColumn<LogItem>[] = [
   { key: "action", label: "Action" },
@@ -282,6 +301,23 @@ function roleRank(role: Role) {
 
 function hasEmail(profile: Profile) {
   return Boolean(String(profile.email ?? "").trim());
+}
+
+function resolveProfileName(profile: Pick<Profile, "name" | "studentName" | "teacherName">) {
+  const values = [profile.name, profile.studentName, profile.teacherName];
+  return values
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean) ?? "";
+}
+
+function compareResolvedNames(left: Profile, right: Profile) {
+  const leftName = resolveProfileName(left);
+  const rightName = resolveProfileName(right);
+
+  if (leftName && rightName) return leftName.localeCompare(rightName);
+  if (leftName) return -1;
+  if (rightName) return 1;
+  return 0;
 }
 
 function getRoleDescription(role: Role) {
@@ -440,7 +476,7 @@ function UsersRolesSkeleton() {
       </Card>
       <Card shadow="sm" className="border">
         <CardBody className="p-0">
-          <CampusTableBodySkeleton rows={6} columns={5} />
+          <CampusTableBodySkeleton rows={6} columns={6} />
         </CardBody>
       </Card>
     </div>
@@ -463,6 +499,8 @@ export default function AdminDashboardPage() {
   const [savingRoleUid, setSavingRoleUid] = useState<string | null>(null);
   const [newSchoolId, setNewSchoolId] = useState("");
   const [newRole, setNewRole] = useState<Role>("student");
+  const [newEcName, setNewEcName] = useState("");
+  const [newTeacherName, setNewTeacherName] = useState("");
   const [newStudentName, setNewStudentName] = useState("");
   const [newCourse, setNewCourse] = useState("");
   const [newYear, setNewYear] = useState("");
@@ -602,7 +640,13 @@ export default function AdminDashboardPage() {
     return profiles.filter((profile) => {
       const matchesSearch =
         !search ||
-        [profile.schoolId, profile.email, profile.role, profile.id]
+        [
+          profile.schoolId,
+          resolveProfileName(profile),
+          profile.email,
+          profile.role,
+          profile.id,
+        ]
           .join(" ")
           .toLowerCase()
           .includes(search);
@@ -630,6 +674,18 @@ export default function AdminDashboardPage() {
       if (userSortMode === "school_id_desc") {
         return String(right.schoolId ?? "").localeCompare(
           String(left.schoolId ?? ""),
+        );
+      }
+      if (userSortMode === "name_asc") {
+        return (
+          compareResolvedNames(left, right) ||
+          String(left.schoolId ?? "").localeCompare(String(right.schoolId ?? ""))
+        );
+      }
+      if (userSortMode === "name_desc") {
+        return (
+          compareResolvedNames(right, left) ||
+          String(left.schoolId ?? "").localeCompare(String(right.schoolId ?? ""))
         );
       }
       if (userSortMode === "role_asc") {
@@ -670,6 +726,16 @@ export default function AdminDashboardPage() {
   );
 
   const usersWithoutEmailCount = profiles.length - usersWithEmailCount;
+  const isStudentCreateRole = newRole === "student";
+  const isTeacherCreateRole = newRole === "teacher";
+  const isEcCreateRole = newRole === "ec";
+  const createAccountHelperText = isStudentCreateRole
+    ? "Student accounts need a name, course, and year level so roster, preregistration, and payment rules work correctly."
+    : isTeacherCreateRole
+      ? "Teacher accounts need a saved name so directory results and classroom-facing views stay easy to identify."
+      : isEcCreateRole
+        ? "EC Member accounts need a name, course, and year level so admin and operations views stay aligned."
+        : "Required fields are marked automatically. Optional email helps users receive verification and recovery messages.";
   const recentActivityItems = useMemo(
     () =>
       logs.slice(0, 6).map((log) => ({
@@ -687,6 +753,8 @@ export default function AdminDashboardPage() {
     Boolean(userSearch.trim()) || roleFilter !== "all" || emailFilter !== "all";
   const canResetCreateForm =
     Boolean(newSchoolId.trim()) ||
+    Boolean(newEcName.trim()) ||
+    Boolean(newTeacherName.trim()) ||
     Boolean(newStudentName.trim()) ||
     Boolean(newCourse.trim()) ||
     Boolean(newYear.trim()) ||
@@ -696,6 +764,8 @@ export default function AdminDashboardPage() {
   const resetCreateForm = () => {
     setNewSchoolId("");
     setNewEmail("");
+    setNewEcName("");
+    setNewTeacherName("");
     setNewStudentName("");
     setNewCourse("");
     setNewYear("");
@@ -708,6 +778,86 @@ export default function AdminDashboardPage() {
     setEmailFilter("all");
     setUserSortMode("school_id_asc");
   };
+
+  const renderCourseField = (key: string, className?: string) => (
+    <div key={key} className={className}>
+      <Select
+        label="Course"
+        selectedKeys={newCourse ? [newCourse] : []}
+        onSelectionChange={(keys) => {
+          const selected = Array.from(keys as Set<React.Key>)[0];
+          if (typeof selected === "string") setNewCourse(selected);
+        }}
+        placeholder="Select course"
+        isRequired
+      >
+        {courseOptions.map((course) => (
+          <SelectItem key={course}>{course}</SelectItem>
+        ))}
+      </Select>
+    </div>
+  );
+
+  const renderYearField = (key: string, className?: string) => (
+    <div key={key} className={className}>
+      <Select
+        label="Year Level"
+        selectedKeys={newYear ? [newYear] : []}
+        onSelectionChange={(keys) => {
+          const selected = Array.from(keys as Set<React.Key>)[0];
+          if (typeof selected === "string") setNewYear(selected);
+        }}
+        placeholder="Select year"
+        isRequired
+      >
+        {yearOptions.map((year) => (
+          <SelectItem key={year}>{year}</SelectItem>
+        ))}
+      </Select>
+    </div>
+  );
+
+  const createAccountDetailFields = isStudentCreateRole
+    ? [
+        <div key="studentName">
+          <Input
+            label="Student Name"
+            value={newStudentName}
+            onValueChange={setNewStudentName}
+            placeholder="e.g. Juan Dela Cruz"
+            isRequired
+          />
+        </div>,
+        renderCourseField("studentCourse"),
+        renderYearField("studentYear"),
+      ]
+    : isTeacherCreateRole
+      ? [
+          <div key="teacherName" className={createAccountSingleFieldClassName}>
+            <Input
+              label="Teacher Name"
+              value={newTeacherName}
+              onValueChange={setNewTeacherName}
+              placeholder="e.g. Juan Dela Cruz"
+              isRequired
+            />
+          </div>,
+        ]
+      : isEcCreateRole
+        ? [
+            <div key="ecName">
+              <Input
+                label="EC Member Name"
+                value={newEcName}
+                onValueChange={setNewEcName}
+                placeholder="e.g. Juan Dela Cruz"
+                isRequired
+              />
+            </div>,
+            renderCourseField("ecCourse"),
+            renderYearField("ecYear"),
+          ]
+        : [];
 
   const attentionItems = useMemo(() => {
     const items: Array<{
@@ -849,10 +999,23 @@ export default function AdminDashboardPage() {
   async function createAccount() {
     const schoolId = newSchoolId.trim();
     const email = newEmail.trim();
+    const ecName = newEcName.trim();
+    const teacherName = newTeacherName.trim();
     const studentName = newStudentName.trim();
     const course = newCourse.trim();
     const year = newYear.trim();
     const isStudentRole = newRole === "student";
+    const isTeacherRole = newRole === "teacher";
+    const isEcRole = newRole === "ec";
+    const requiresCourse = isStudentRole || isEcRole;
+    const requiresYear = isStudentRole || isEcRole;
+    const name = isStudentRole
+      ? studentName
+      : isTeacherRole
+        ? teacherName
+        : isEcRole
+          ? ecName
+          : "";
 
     if (!schoolId) {
       campusToast.warning({
@@ -875,6 +1038,24 @@ export default function AdminDashboardPage() {
       return;
     }
 
+    if (isEcRole && !ecName) {
+      campusToast.warning({
+        title: "Missing EC Member name",
+        description: "EC Member name is required for EC Member accounts.",
+        dedupeKey: "admin:create-account:missing-ec-name",
+      });
+      return;
+    }
+
+    if (isTeacherRole && !teacherName) {
+      campusToast.warning({
+        title: "Missing teacher name",
+        description: "Teacher name is required for teacher accounts.",
+        dedupeKey: "admin:create-account:missing-teacher-name",
+      });
+      return;
+    }
+
     if (isStudentRole && !studentName) {
       campusToast.warning({
         title: "Missing student name",
@@ -884,20 +1065,20 @@ export default function AdminDashboardPage() {
       return;
     }
 
-    if (isStudentRole && !course) {
+    if (requiresCourse && !course) {
       campusToast.warning({
         title: "Missing course",
-        description: "Course is required for student accounts.",
-        dedupeKey: "admin:create-account:missing-course",
+        description: `${formatRole(newRole)} accounts require a course selection.`,
+        dedupeKey: `admin:create-account:missing-course:${newRole}`,
       });
       return;
     }
 
-    if (isStudentRole && !year) {
+    if (requiresYear && !year) {
       campusToast.warning({
         title: "Missing year level",
-        description: "Year level is required for student accounts.",
-        dedupeKey: "admin:create-account:missing-year",
+        description: `${formatRole(newRole)} accounts require a year level.`,
+        dedupeKey: `admin:create-account:missing-year:${newRole}`,
       });
       return;
     }
@@ -909,6 +1090,8 @@ export default function AdminDashboardPage() {
           schoolId: string;
           role: Role;
           email: string | null;
+          name?: string | null;
+          teacherName?: string | null;
           studentName?: string | null;
           course?: string | null;
           year?: string | null;
@@ -919,9 +1102,11 @@ export default function AdminDashboardPage() {
         schoolId,
         role: newRole,
         email: email || null,
+        name: name || null,
+        teacherName: isTeacherRole ? teacherName : null,
         studentName: isStudentRole ? studentName : null,
-        course: isStudentRole ? course : null,
-        year: isStudentRole ? year : null,
+        course: requiresCourse ? course : null,
+        year: requiresYear ? year : null,
       });
       campusToast.success({
         title: "Account created",
@@ -1688,7 +1873,7 @@ export default function AdminDashboardPage() {
                         label="Search profiles"
                         value={userSearch}
                         onValueChange={setUserSearch}
-                        placeholder="School ID, email, role, or UID"
+                        placeholder="School ID, name, email, role, or UID"
                         startContent={
                           <Search size={16} className="text-campus-text-secondary" />
                         }
@@ -1738,6 +1923,8 @@ export default function AdminDashboardPage() {
                       >
                         <SelectItem key="school_id_asc">School ID, A-Z</SelectItem>
                         <SelectItem key="school_id_desc">School ID, Z-A</SelectItem>
+                        <SelectItem key="name_asc">Name, A-Z</SelectItem>
+                        <SelectItem key="name_desc">Name, Z-A</SelectItem>
                         <SelectItem key="role_asc">Role priority</SelectItem>
                         <SelectItem key="role_desc">Role reverse</SelectItem>
                         <SelectItem key="newest">Newest created</SelectItem>
@@ -1780,7 +1967,7 @@ export default function AdminDashboardPage() {
                     </div>
                   </CardHeader>
                   <CardBody className="space-y-4 p-5 pt-3">
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_220px_minmax(0,1fr)]">
+                    <div className={createAccountFormGridClassName}>
                       <Input
                         label="School ID"
                         value={newSchoolId}
@@ -1820,43 +2007,14 @@ export default function AdminDashboardPage() {
                         }
                       />
                     </div>
-                    {newRole === "student" ? (
-                      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                        <Input
-                          label="Student Name"
-                          value={newStudentName}
-                          onValueChange={setNewStudentName}
-                          placeholder="e.g. Juan Dela Cruz"
-                          isRequired
-                        />
-                        <Input
-                          label="Course"
-                          value={newCourse}
-                          onValueChange={setNewCourse}
-                          placeholder="e.g. Computer Engineering"
-                          isRequired
-                        />
-                        <Select
-                          label="Year Level"
-                          selectedKeys={newYear ? [newYear] : []}
-                          onSelectionChange={(keys) => {
-                            const selected = Array.from(keys as Set<React.Key>)[0];
-                            if (typeof selected === "string") setNewYear(selected);
-                          }}
-                          placeholder="Select year"
-                          isRequired
-                        >
-                          {yearOptions.map((year) => (
-                            <SelectItem key={year}>{year}</SelectItem>
-                          ))}
-                        </Select>
+                    {createAccountDetailFields.length > 0 ? (
+                      <div className={createAccountFormGridClassName}>
+                        {createAccountDetailFields}
                       </div>
                     ) : null}
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <p className="text-sm text-campus-text-secondary">
-                        {newRole === "student"
-                          ? "Student accounts also need a name, course, and year level so roster, preregistration, and payment rules work correctly."
-                          : "Required fields are marked automatically. Optional email helps users receive verification and recovery messages."}
+                        {createAccountHelperText}
                       </p>
                       <div className="flex flex-col gap-3 sm:flex-row">
                         <Button
@@ -1884,7 +2042,7 @@ export default function AdminDashboardPage() {
                   columns={userColumns}
                   items={sortedProfiles}
                   isLoading={profilesLoading}
-                  loadingContent={<CampusTableBodySkeleton rows={6} columns={5} />}
+                  loadingContent={<CampusTableBodySkeleton rows={6} columns={6} />}
                   emptyContent={
                     <CampusEmptyState
                       title="No users match the current filters"
@@ -1918,6 +2076,20 @@ export default function AdminDashboardPage() {
                           </p>
                         </div>
                       );
+
+                    if (columnKey === "name") {
+                      const profileName = resolveProfileName(profile);
+
+                      return profileName ? (
+                        <p className="text-sm font-medium text-campus-text-primary">
+                          {profileName}
+                        </p>
+                      ) : (
+                        <p className="text-sm text-campus-text-secondary">
+                          No name on file
+                        </p>
+                      );
+                    }
 
                     if (columnKey === "email")
                       return hasEmail(profile) ? (

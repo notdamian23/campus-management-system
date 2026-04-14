@@ -326,10 +326,15 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
     const schoolId = normalizeText(body.schoolId);
     const role = normalizeText(body.role) as Role;
     const emailRaw = normalizeText(body.email);
+    const name = normalizeText(body.name);
+    const teacherName = normalizeText(body.teacherName);
     const studentName = normalizeText(body.studentName);
     const course = normalizeText(body.course);
     const yearRaw = normalizeText(body.year);
     const year = normalizeYear(body.year);
+    const resolvedTeacherName = teacherName || name;
+    const resolvedStudentName = studentName || name;
+    const resolvedEcName = name;
 
     if (!schoolId) {
       throw new HttpsError(
@@ -345,24 +350,38 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
       );
     }
 
-    if (role === "student" && !studentName) {
+    if (role === "teacher" && !resolvedTeacherName) {
+      throw new HttpsError(
+        "invalid-argument",
+        "teacherName is required for teacher role."
+      );
+    }
+
+    if (role === "student" && !resolvedStudentName) {
       throw new HttpsError(
         "invalid-argument",
         "studentName is required for student role."
       );
     }
 
-    if (role === "student" && !course) {
+    if (role === "ec" && !resolvedEcName) {
       throw new HttpsError(
         "invalid-argument",
-        "course is required for student role."
+        "name is required for ec role."
       );
     }
 
-    if (role === "student" && !yearRaw) {
+    if ((role === "student" || role === "ec") && !course) {
       throw new HttpsError(
         "invalid-argument",
-        "year is required for student role."
+        "course is required for student and ec roles."
+      );
+    }
+
+    if ((role === "student" || role === "ec") && !yearRaw) {
+      throw new HttpsError(
+        "invalid-argument",
+        "year is required for student and ec roles."
       );
     }
 
@@ -390,9 +409,20 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
         createdAt: serverTimestamp(),
       };
 
+      if (role === "teacher") {
+        profilePayload.teacherName = resolvedTeacherName;
+        profilePayload.name = resolvedTeacherName;
+      }
+
       if (role === "student") {
-        profilePayload.studentName = studentName;
-        profilePayload.name = studentName;
+        profilePayload.studentName = resolvedStudentName;
+        profilePayload.name = resolvedStudentName;
+        profilePayload.course = course;
+        profilePayload.year = year;
+      }
+
+      if (role === "ec") {
+        profilePayload.name = resolvedEcName;
         profilePayload.course = course;
         profilePayload.year = year;
       }
@@ -406,8 +436,8 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
         await db.doc(`students/${uid}`).set(
           {
             schoolId,
-            studentName,
-            name: studentName,
+            studentName: resolvedStudentName,
+            name: resolvedStudentName,
             course,
             year,
             status: "active",
