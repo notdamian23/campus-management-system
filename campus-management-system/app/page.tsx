@@ -162,6 +162,17 @@ function LoginForm() {
     });
   }, [searchParams]);
 
+  useEffect(() => {
+    if (searchParams.get("reset") !== "1") return;
+
+    campusToast.success({
+      title: "Password reset complete",
+      description:
+        "Your password was updated. Sign in with your School ID and new password to continue.",
+      dedupeKey: "login:password-reset-complete",
+    });
+  }, [searchParams]);
+
   const showLoginToast = (
     title: string,
     description: string,
