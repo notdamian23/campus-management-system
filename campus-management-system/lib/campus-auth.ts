@@ -18,6 +18,7 @@ export type CampusProfileDoc = {
   name?: string;
   course?: string;
   year?: string;
+  readyForClearance?: boolean;
 };
 
 type CampusCookieState = {

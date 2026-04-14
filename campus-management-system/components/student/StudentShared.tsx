@@ -44,6 +44,8 @@ export type StudentStatItem = {
   description?: string;
   tone?: StudentTone;
   icon?: LucideIcon;
+  surfaceTone?: boolean;
+  valueClassName?: string;
 };
 
 type StudentPageHeaderProps = {
@@ -168,13 +170,18 @@ function StudentStatCard({
   description,
   tone = "blue",
   icon: Icon,
+  surfaceTone = false,
+  valueClassName,
 }: StudentStatItem) {
   const toneClasses = getStudentToneClasses(tone);
 
   return (
     <Card
       shadow="none"
-      className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+      className={clsx(
+        "border border-border/70 shadow-[var(--shadow-soft)]",
+        surfaceTone ? toneClasses.surface : "bg-white/95",
+      )}
     >
       <CardBody className="gap-4 p-5">
         <div className="flex items-start justify-between gap-3">
@@ -201,7 +208,13 @@ function StudentStatCard({
           ) : null}
         </div>
 
-        <div className={clsx("text-3xl font-bold", toneClasses.value)}>
+        <div
+          className={clsx(
+            "text-3xl font-bold",
+            toneClasses.value,
+            valueClassName,
+          )}
+        >
           {value}
         </div>
       </CardBody>

@@ -6,7 +6,13 @@ import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
-import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
+import {
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+} from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
@@ -15,7 +21,9 @@ import {
   CheckCircle2,
   Clock3,
   Download,
+  FileText,
   FileStack,
+  ImageIcon,
   MapPin,
   Search,
 } from "lucide-react";
@@ -34,18 +42,20 @@ import {
   capitalizeTeacherLabel,
   downloadTeacherFile,
   formatTeacherBytes,
+  isTeacherImageFile,
   formatTeacherEventDate,
   formatTeacherSchedule,
   getTeacherLifecycleTone,
   getTeacherToneClasses,
   teacherAudienceLabel,
-  teacherFileKindLabel,
   useIsBelowBreakpoint,
   useTeacherPageErrorToast,
   useTeacherPortal,
 } from "@/components/teacher";
 
 const EVENTS_PER_PAGE = 6;
+const FILE_PREVIEW_LIMIT = 3;
+const PARTICIPANTS_PER_PAGE = 4;
 
 const teacherEventColumns: CampusTableColumn<{
   id: string;
@@ -69,11 +79,55 @@ const teacherEventColumns: CampusTableColumn<{
 ];
 
 type EventTabKey = "overview" | "participants" | "files";
+type EventFilesView = "images" | "documents";
+type FileSortMode = "name_asc" | "name_desc" | "newest" | "oldest";
+type ParticipantStatusFilter = "all" | "Present" | "Absent";
 
 type SelectOption = {
   key: string;
   label: string;
 };
+
+type TeacherEventFileItem = {
+  id: string;
+  name: string;
+  kind: "docs" | "images";
+  size: number;
+  downloadURL: string;
+  contentType: string;
+  createdAtMs: number;
+};
+
+const fileSortOptions: SelectOption[] = [
+  { key: "name_asc", label: "Ascending" },
+  { key: "name_desc", label: "Descending" },
+  { key: "newest", label: "Newest to oldest" },
+  { key: "oldest", label: "Oldest to newest" },
+];
+
+const participantStatusOptions: SelectOption[] = [
+  { key: "all", label: "All" },
+  { key: "Present", label: "Present" },
+  { key: "Absent", label: "Absent" },
+];
+
+const participantCourseOptions: SelectOption[] = [
+  { key: "all", label: "All Courses" },
+  { key: "Computer Engineering", label: "Computer Engineering" },
+  { key: "Industrial Engineering", label: "Industrial Engineering" },
+  { key: "Electrical Engineering", label: "Electrical Engineering" },
+  { key: "Mechanical Engineering", label: "Mechanical Engineering" },
+  { key: "Electronics Engineering", label: "Electronics Engineering" },
+];
+
+const participantYearOptions: SelectOption[] = [
+  { key: "all", label: "All Years" },
+  { key: "1st Year", label: "1st Year" },
+  { key: "2nd Year", label: "2nd Year" },
+  { key: "3rd Year", label: "3rd Year" },
+  { key: "4th Year", label: "4th Year" },
+  { key: "5th Year", label: "5th Year" },
+];
 
 function csvCell(value: string | number) {
   const raw = String(value ?? "");
@@ -106,6 +160,51 @@ function formatExportDateTime(value: unknown) {
   return new Date(ms).toLocaleString();
 }
 
+function sortTeacherEventFiles(
+  files: TeacherEventFileItem[],
+  sortMode: FileSortMode,
+) {
+  const next = [...files];
+
+  next.sort((left, right) => {
+    if (sortMode === "name_asc") {
+      return (
+        left.name.localeCompare(right.name) ||
+        right.createdAtMs - left.createdAtMs
+      );
+    }
+
+    if (sortMode === "name_desc") {
+      return (
+        right.name.localeCompare(left.name) ||
+        right.createdAtMs - left.createdAtMs
+      );
+    }
+
+    if (sortMode === "oldest") {
+      return (
+        left.createdAtMs - right.createdAtMs ||
+        left.name.localeCompare(right.name)
+      );
+    }
+
+    return (
+      right.createdAtMs - left.createdAtMs ||
+      left.name.localeCompare(right.name)
+    );
+  });
+
+  return next;
+}
+
+function normalizeParticipantStatus(value: string) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+
+  if (normalized === "present") return "Present";
+  if (normalized === "absent" || normalized === "missed") return "Absent";
+  return "Recorded";
+}
+
 export default function TeacherEventsPage() {
   const { attendance, events, files, loading, error } = useTeacherPortal();
   const isCompactView = useIsBelowBreakpoint(1024);
@@ -119,6 +218,18 @@ export default function TeacherEventsPage() {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [selectedTab, setSelectedTab] = useState<EventTabKey>("overview");
   const [exportingEventId, setExportingEventId] = useState<string | null>(null);
+  const [participantsSearch, setParticipantsSearch] = useState("");
+  const [participantsStatusFilter, setParticipantsStatusFilter] =
+    useState<ParticipantStatusFilter>("all");
+  const [participantsCourseFilter, setParticipantsCourseFilter] = useState("all");
+  const [participantsYearFilter, setParticipantsYearFilter] = useState("all");
+  const [participantsPage, setParticipantsPage] = useState(1);
+  const [filesView, setFilesView] = useState<EventFilesView>("images");
+  const [imagesModalOpen, setImagesModalOpen] = useState(false);
+  const [documentsModalOpen, setDocumentsModalOpen] = useState(false);
+  const [imageSortMode, setImageSortMode] = useState<FileSortMode>("newest");
+  const [documentSortMode, setDocumentSortMode] = useState<FileSortMode>("newest");
+  const [documentSearch, setDocumentSearch] = useState("");
 
   const statusOptions: SelectOption[] = [
     { key: "__all_status__", label: "All status" },
@@ -168,7 +279,7 @@ export default function TeacherEventsPage() {
         studentName: item.studentName || item.schoolId || item.uid,
         course: item.course || "Unassigned",
         year: item.year || "Unassigned",
-        attendanceStatus: item.status,
+        attendanceStatus: normalizeParticipantStatus(item.status),
       }))
       .sort((a, b) => {
         const byName = a.studentName.localeCompare(b.studentName);
@@ -177,15 +288,86 @@ export default function TeacherEventsPage() {
       });
   }, [attendance, selectedEvent]);
 
-  const selectedFiles = useMemo(() => {
+  const filteredParticipants = useMemo(() => {
+    const search = participantsSearch.trim().toLowerCase();
+
+    return selectedParticipants.filter((participant) => {
+      const matchesSearch =
+        !search ||
+        participant.studentName.toLowerCase().includes(search) ||
+        participant.schoolId.toLowerCase().includes(search);
+      const matchesStatus =
+        participantsStatusFilter === "all"
+          ? true
+          : participant.attendanceStatus === participantsStatusFilter;
+      const matchesCourse =
+        participantsCourseFilter === "all"
+          ? true
+          : participant.course === participantsCourseFilter;
+      const matchesYear =
+        participantsYearFilter === "all"
+          ? true
+          : participant.year === participantsYearFilter;
+
+      return matchesSearch && matchesStatus && matchesCourse && matchesYear;
+    });
+  }, [
+    participantsCourseFilter,
+    participantsSearch,
+    participantsStatusFilter,
+    participantsYearFilter,
+    selectedParticipants,
+  ]);
+
+  const participantsTotalPages = Math.max(
+    1,
+    Math.ceil(filteredParticipants.length / PARTICIPANTS_PER_PAGE),
+  );
+  const paginatedParticipants = useMemo(() => {
+    const start = (participantsPage - 1) * PARTICIPANTS_PER_PAGE;
+    return filteredParticipants.slice(start, start + PARTICIPANTS_PER_PAGE);
+  }, [filteredParticipants, participantsPage]);
+
+  const selectedFiles = useMemo<TeacherEventFileItem[]>(() => {
     if (!selectedEvent) return [];
     return files
       .filter((file) => file.eventId === selectedEvent.id)
       .sort((a, b) => b.createdAtMs - a.createdAtMs);
   }, [files, selectedEvent]);
 
-  const selectedDocuments = selectedFiles.filter((file) => file.kind === "docs");
-  const selectedImages = selectedFiles.filter((file) => file.kind === "images");
+  const selectedDocuments = useMemo(
+    () => selectedFiles.filter((file) => file.kind === "docs"),
+    [selectedFiles],
+  );
+  const selectedImages = useMemo(
+    () => selectedFiles.filter((file) => file.kind === "images"),
+    [selectedFiles],
+  );
+  const sortedSelectedImages = useMemo(
+    () => sortTeacherEventFiles(selectedImages, imageSortMode),
+    [imageSortMode, selectedImages],
+  );
+  const sortedSelectedDocuments = useMemo(
+    () => sortTeacherEventFiles(selectedDocuments, documentSortMode),
+    [documentSortMode, selectedDocuments],
+  );
+  const filteredDocumentFiles = useMemo(() => {
+    const search = documentSearch.trim().toLowerCase();
+
+    if (!search) return sortedSelectedDocuments;
+
+    return sortedSelectedDocuments.filter((file) =>
+      file.name.toLowerCase().includes(search),
+    );
+  }, [documentSearch, sortedSelectedDocuments]);
+  const previewImageFiles = useMemo(
+    () => sortedSelectedImages.slice(0, FILE_PREVIEW_LIMIT),
+    [sortedSelectedImages],
+  );
+  const previewDocumentFiles = useMemo(
+    () => sortedSelectedDocuments.slice(0, FILE_PREVIEW_LIMIT),
+    [sortedSelectedDocuments],
+  );
 
   const upcomingCount = useMemo(
     () => events.filter((event) => event.lifecycle === "upcoming").length,
@@ -213,6 +395,33 @@ export default function TeacherEventsPage() {
       setSelectedTab("overview");
     }
   }, [selectedEvent]);
+
+  useEffect(() => {
+    setParticipantsPage(1);
+  }, [
+    participantsCourseFilter,
+    participantsSearch,
+    participantsStatusFilter,
+    participantsYearFilter,
+  ]);
+
+  useEffect(() => {
+    setParticipantsPage((prev) => Math.min(prev, participantsTotalPages));
+  }, [participantsTotalPages]);
+
+  useEffect(() => {
+    setParticipantsSearch("");
+    setParticipantsStatusFilter("all");
+    setParticipantsCourseFilter("all");
+    setParticipantsYearFilter("all");
+    setParticipantsPage(1);
+    setFilesView("images");
+    setImagesModalOpen(false);
+    setDocumentsModalOpen(false);
+    setImageSortMode("newest");
+    setDocumentSortMode("newest");
+    setDocumentSearch("");
+  }, [selectedEvent?.id]);
 
   const exportEventAttendanceCSV = async (
     ev: (typeof events)[number],
@@ -685,12 +894,78 @@ export default function TeacherEventsPage() {
                   </Tab>
 
                   <Tab key="participants" title="Participants">
-                    <div className="space-y-3 pt-3">
+                    <div className="space-y-4 pt-3">
+                      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.5fr)_180px_230px_180px]">
+                        <Input
+                          aria-label="Search participants"
+                          value={participantsSearch}
+                          onValueChange={setParticipantsSearch}
+                          placeholder="Search participants..."
+                          startContent={
+                            <Search
+                              size={16}
+                              className="text-campus-text-secondary"
+                            />
+                          }
+                        />
+
+                        <Select
+                          aria-label="Filter participants by attendance status"
+                          disallowEmptySelection
+                          items={participantStatusOptions}
+                          selectedKeys={new Set([participantsStatusFilter])}
+                          onSelectionChange={(keys) => {
+                            if (keys === "all") return;
+                            const selected = Array.from(keys)[0];
+                            if (typeof selected === "string") {
+                              setParticipantsStatusFilter(
+                                selected as ParticipantStatusFilter,
+                              );
+                            }
+                          }}
+                        >
+                          {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                        </Select>
+
+                        <Select
+                          aria-label="Filter participants by course"
+                          disallowEmptySelection
+                          items={participantCourseOptions}
+                          selectedKeys={new Set([participantsCourseFilter])}
+                          onSelectionChange={(keys) => {
+                            if (keys === "all") return;
+                            const selected = Array.from(keys)[0];
+                            if (typeof selected === "string") {
+                              setParticipantsCourseFilter(selected);
+                            }
+                          }}
+                        >
+                          {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                        </Select>
+
+                        <Select
+                          aria-label="Filter participants by year"
+                          disallowEmptySelection
+                          items={participantYearOptions}
+                          selectedKeys={new Set([participantsYearFilter])}
+                          onSelectionChange={(keys) => {
+                            if (keys === "all") return;
+                            const selected = Array.from(keys)[0];
+                            if (typeof selected === "string") {
+                              setParticipantsYearFilter(selected);
+                            }
+                          }}
+                        >
+                          {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                        </Select>
+                      </div>
+
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <Chip size="sm" className="bg-slate-100 text-slate-700">
-                            {selectedParticipants.length} participant
-                            {selectedParticipants.length === 1 ? "" : "s"}
+                            {filteredParticipants.length === selectedParticipants.length
+                              ? `${filteredParticipants.length} participant${filteredParticipants.length === 1 ? "" : "s"}`
+                              : `${filteredParticipants.length} of ${selectedParticipants.length} participant${selectedParticipants.length === 1 ? "" : "s"}`}
                           </Chip>
                         </div>
 
@@ -720,8 +995,17 @@ export default function TeacherEventsPage() {
                           icon={CheckCircle2}
                           compact
                         />
+                      ) : filteredParticipants.length === 0 ? (
+                        <TeacherEmptyState
+                          title="No participants found"
+                          description="Try another search term or adjust the status, course, or year filters."
+                          icon={Search}
+                          compact
+                        />
                       ) : (
-                        selectedParticipants.map((participant) => {
+                        <>
+                          <div className="space-y-3">
+                            {paginatedParticipants.map((participant) => {
                           const toneClasses = getTeacherToneClasses(
                             participant.attendanceStatus === "Present"
                               ? "green"
@@ -751,24 +1035,35 @@ export default function TeacherEventsPage() {
                               </CardBody>
                             </Card>
                           );
-                        })
+                            })}
+                          </div>
+
+                          {filteredParticipants.length > PARTICIPANTS_PER_PAGE ? (
+                            <div className="flex justify-center sm:justify-end">
+                              <Pagination
+                                showControls
+                                page={participantsPage}
+                                total={participantsTotalPages}
+                                onChange={(nextPage) => setParticipantsPage(nextPage)}
+                              />
+                            </div>
+                          ) : null}
+                        </>
                       )}
                     </div>
                   </Tab>
 
                   <Tab key="files" title="Files">
                     <div className="space-y-5 pt-3">
-                      <FileSection
-                        title="Documents"
-                        emptyTitle="No event documents yet"
-                        emptyDescription="Teacher-visible event documents will appear here once uploaded."
-                        files={selectedDocuments}
-                      />
-                      <FileSection
-                        title="Images"
-                        emptyTitle="No event images yet"
-                        emptyDescription="Teacher-visible photo documentation will appear here once uploaded."
-                        files={selectedImages}
+                      <EventFilesTabs
+                        activeView={filesView}
+                        onViewChange={setFilesView}
+                        imageCount={sortedSelectedImages.length}
+                        documentCount={sortedSelectedDocuments.length}
+                        previewImageFiles={previewImageFiles}
+                        previewDocumentFiles={previewDocumentFiles}
+                        onOpenImages={() => setImagesModalOpen(true)}
+                        onOpenDocuments={() => setDocumentsModalOpen(true)}
                       />
                     </div>
                   </Tab>
@@ -778,6 +1073,29 @@ export default function TeacherEventsPage() {
           )}
         </ModalContent>
       </Modal>
+
+      <AllImagesModal
+        isOpen={Boolean(selectedEvent) && imagesModalOpen}
+        onOpenChange={setImagesModalOpen}
+        files={sortedSelectedImages}
+        sortMode={imageSortMode}
+        onSortChange={setImageSortMode}
+        eventTitle={selectedEvent?.title || ""}
+        isCompactView={isCompactView}
+      />
+
+      <AllDocumentsModal
+        isOpen={Boolean(selectedEvent) && documentsModalOpen}
+        onOpenChange={setDocumentsModalOpen}
+        files={filteredDocumentFiles}
+        totalCount={sortedSelectedDocuments.length}
+        searchValue={documentSearch}
+        onSearchValueChange={setDocumentSearch}
+        sortMode={documentSortMode}
+        onSortChange={setDocumentSortMode}
+        eventTitle={selectedEvent?.title || ""}
+        isCompactView={isCompactView}
+      />
     </div>
   );
 }
@@ -814,87 +1132,471 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function FileSection({
+function EventFilesTabs({
+  activeView,
+  onViewChange,
+  imageCount,
+  documentCount,
+  previewImageFiles,
+  previewDocumentFiles,
+  onOpenImages,
+  onOpenDocuments,
+}: {
+  activeView: EventFilesView;
+  onViewChange: (view: EventFilesView) => void;
+  imageCount: number;
+  documentCount: number;
+  previewImageFiles: TeacherEventFileItem[];
+  previewDocumentFiles: TeacherEventFileItem[];
+  onOpenImages: () => void;
+  onOpenDocuments: () => void;
+}) {
+  const options: Array<{ key: EventFilesView; label: string }> = [
+    { key: "images", label: "Images" },
+    { key: "documents", label: "Documents" },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div className="flex justify-center sm:justify-start">
+        <div
+          role="tablist"
+          aria-label="Event files categories"
+          className="inline-flex rounded-full border border-border/70 bg-slate-100/90 p-1"
+        >
+          {options.map((option) => {
+            const isActive = activeView === option.key;
+
+            return (
+              <button
+                key={option.key}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                onClick={() => onViewChange(option.key)}
+                className={[
+                  "rounded-full px-4 py-2 text-sm font-semibold transition-all sm:px-5",
+                  isActive
+                    ? "bg-white text-campus-text-primary shadow-sm"
+                    : "text-campus-text-secondary hover:text-campus-text-primary",
+                ].join(" ")}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {activeView === "images" ? (
+        <ImagePreviewSection
+          files={previewImageFiles}
+          totalCount={imageCount}
+          onOpenAll={onOpenImages}
+        />
+      ) : (
+        <DocumentPreviewSection
+          files={previewDocumentFiles}
+          totalCount={documentCount}
+          onOpenAll={onOpenDocuments}
+        />
+      )}
+    </div>
+  );
+}
+
+function SectionHeader({
   title,
-  emptyTitle,
-  emptyDescription,
-  files,
+  count,
+  onOpenAll,
 }: {
   title: string;
-  emptyTitle: string;
-  emptyDescription: string;
-  files: Array<{
-    id: string;
-    name: string;
-    kind: "docs" | "images";
-    size: number;
-    downloadURL: string;
-  }>;
+  count: number;
+  onOpenAll: () => void;
 }) {
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <h3 className="font-semibold text-campus-text-primary">{title}</h3>
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-center gap-2">
+        <h3 className="text-base font-semibold text-campus-text-primary">{title}</h3>
         <Chip size="sm" className="bg-slate-100 text-slate-700">
-          {files.length}
+          {count}
         </Chip>
       </div>
 
-      {files.length === 0 ? (
+      {count > 0 ? (
+        <Button
+          variant="light"
+          className="h-auto min-w-0 self-start px-0 text-sm font-semibold text-primary-600 data-[hover=true]:bg-transparent sm:self-auto"
+          onPress={onOpenAll}
+        >
+          View all
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function ImagePreviewSection({
+  files,
+  totalCount,
+  onOpenAll,
+}: {
+  files: TeacherEventFileItem[];
+  totalCount: number;
+  onOpenAll: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Images" count={totalCount} onOpenAll={onOpenAll} />
+
+      {totalCount === 0 ? (
         <TeacherEmptyState
-          title={emptyTitle}
-          description={emptyDescription}
-          icon={FileStack}
+          title="No event images yet"
+          description="Teacher-visible photo documentation will appear here once uploaded."
+          icon={ImageIcon}
           compact
         />
       ) : (
-        files.map((file) => (
-          <Card
-            key={file.id}
-            shadow="none"
-            className="border border-border/70 bg-slate-50/70"
-          >
-            <CardBody className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0">
-                <p className="truncate font-semibold text-campus-text-primary">
-                  {file.name}
-                </p>
-                <div className="mt-1 flex flex-wrap gap-2">
-                  <Chip
-                    size="sm"
-                    className={
-                      file.kind === "images"
-                        ? "bg-amber-100 text-amber-700"
-                        : "bg-blue-100 text-blue-700"
-                    }
-                  >
-                    {teacherFileKindLabel(file.kind)}
-                  </Chip>
-                  <Chip size="sm" className="bg-violet-100 text-violet-700">
-                    {formatTeacherBytes(file.size)}
-                  </Chip>
-                </div>
-              </div>
-
-              <Button
-                size="sm"
-                variant="flat"
-                color="primary"
-                onPress={() =>
-                  downloadTeacherFile({
-                    url: file.downloadURL,
-                    name: file.name,
-                    sourceLabel: teacherFileKindLabel(file.kind).toLowerCase(),
-                  })
-                }
-                isDisabled={!file.downloadURL}
-              >
-                Download
-              </Button>
-            </CardBody>
-          </Card>
-        ))
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {files.map((file) => (
+            <ImagePreviewCard key={file.id} file={file} />
+          ))}
+        </div>
       )}
     </div>
+  );
+}
+
+function DocumentPreviewSection({
+  files,
+  totalCount,
+  onOpenAll,
+}: {
+  files: TeacherEventFileItem[];
+  totalCount: number;
+  onOpenAll: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Documents" count={totalCount} onOpenAll={onOpenAll} />
+
+      {totalCount === 0 ? (
+        <TeacherEmptyState
+          title="No event documents yet"
+          description="Teacher-visible event documents will appear here once uploaded."
+          icon={FileText}
+          compact
+        />
+      ) : (
+        <div className="space-y-3">
+          {files.map((file) => (
+            <DocumentListItem key={file.id} file={file} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ImagePreviewCard({ file }: { file: TeacherEventFileItem }) {
+  const canPreview = isTeacherImageFile(file) && Boolean(file.downloadURL);
+
+  return (
+    <Card
+      shadow="none"
+      className="overflow-hidden border border-border/70 bg-white/95 shadow-[0_14px_32px_rgba(15,23,42,0.06)]"
+    >
+      <div className="h-44 bg-slate-100">
+        {canPreview ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={file.downloadURL}
+            alt={file.name}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-100 text-amber-700">
+              <ImageIcon size={20} />
+            </div>
+            <p className="text-sm text-campus-text-secondary">
+              Preview unavailable
+            </p>
+          </div>
+        )}
+      </div>
+
+      <CardBody className="space-y-3 p-4">
+        <div className="space-y-2">
+          <p className="line-clamp-2 text-sm font-semibold text-campus-text-primary">
+            {file.name}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Chip size="sm" className="bg-amber-100 text-amber-700">
+              Image
+            </Chip>
+            <Chip size="sm" className="bg-violet-100 text-violet-700">
+              {formatTeacherBytes(file.size)}
+            </Chip>
+          </div>
+        </div>
+
+        <Button
+          color="primary"
+          variant="flat"
+          startContent={<Download size={16} />}
+          onPress={() =>
+            downloadTeacherFile({
+              url: file.downloadURL,
+              name: file.name,
+              sourceLabel: "image",
+            })
+          }
+          isDisabled={!file.downloadURL}
+        >
+          Download
+        </Button>
+      </CardBody>
+    </Card>
+  );
+}
+
+function DocumentListItem({ file }: { file: TeacherEventFileItem }) {
+  return (
+    <Card shadow="none" className="border border-border/70 bg-slate-50/70">
+      <CardBody className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="truncate font-semibold text-campus-text-primary">
+            {file.name}
+          </p>
+          <div className="mt-1 flex flex-wrap gap-2">
+            <Chip size="sm" className="bg-blue-100 text-blue-700">
+              Document
+            </Chip>
+            <Chip size="sm" className="bg-violet-100 text-violet-700">
+              {formatTeacherBytes(file.size)}
+            </Chip>
+          </div>
+        </div>
+
+        <Button
+          size="sm"
+          variant="flat"
+          color="primary"
+          startContent={<Download size={16} />}
+          onPress={() =>
+            downloadTeacherFile({
+              url: file.downloadURL,
+              name: file.name,
+              sourceLabel: "document",
+            })
+          }
+          isDisabled={!file.downloadURL}
+        >
+          Download
+        </Button>
+      </CardBody>
+    </Card>
+  );
+}
+
+function AllImagesModal({
+  isOpen,
+  onOpenChange,
+  files,
+  sortMode,
+  onSortChange,
+  eventTitle,
+  isCompactView,
+}: {
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+  files: TeacherEventFileItem[];
+  sortMode: FileSortMode;
+  onSortChange: (mode: FileSortMode) => void;
+  eventTitle: string;
+  isCompactView: boolean;
+}) {
+  return (
+    <Modal
+      isOpen={isOpen}
+      onOpenChange={onOpenChange}
+      size={isCompactView ? "full" : "5xl"}
+      scrollBehavior="inside"
+    >
+      <ModalContent>
+        {(onClose) => (
+          <>
+            <ModalHeader className="flex flex-col gap-1">
+              <span className="text-xl font-semibold text-campus-text-primary">
+                All Images
+              </span>
+              <span className="text-sm font-normal text-campus-text-secondary">
+                {eventTitle
+                  ? `${eventTitle} • ${files.length} image${files.length === 1 ? "" : "s"}`
+                  : `${files.length} image${files.length === 1 ? "" : "s"}`}
+              </span>
+            </ModalHeader>
+
+            <ModalBody className="space-y-5 pb-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm text-campus-text-secondary">
+                  Browse all teacher-visible event images and download what you need.
+                </p>
+                <Select
+                  aria-label="Sort images"
+                  disallowEmptySelection
+                  items={fileSortOptions}
+                  selectedKeys={new Set([sortMode])}
+                  onSelectionChange={(keys) => {
+                    if (keys === "all") return;
+                    const selected = Array.from(keys)[0];
+                    if (typeof selected === "string") {
+                      onSortChange(selected as FileSortMode);
+                    }
+                  }}
+                  className="w-full sm:max-w-[240px]"
+                >
+                  {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                </Select>
+              </div>
+
+              {files.length === 0 ? (
+                <TeacherEmptyState
+                  title="No images found"
+                  description="Teacher-visible event images will appear here once uploaded."
+                  icon={ImageIcon}
+                  compact
+                />
+              ) : (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {files.map((file) => (
+                    <ImagePreviewCard key={file.id} file={file} />
+                  ))}
+                </div>
+              )}
+            </ModalBody>
+
+            <ModalFooter className="justify-end">
+              <Button variant="bordered" onPress={onClose}>
+                Close
+              </Button>
+            </ModalFooter>
+          </>
+        )}
+      </ModalContent>
+    </Modal>
+  );
+}
+
+function AllDocumentsModal({
+  isOpen,
+  onOpenChange,
+  files,
+  totalCount,
+  searchValue,
+  onSearchValueChange,
+  sortMode,
+  onSortChange,
+  eventTitle,
+  isCompactView,
+}: {
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+  files: TeacherEventFileItem[];
+  totalCount: number;
+  searchValue: string;
+  onSearchValueChange: (value: string) => void;
+  sortMode: FileSortMode;
+  onSortChange: (mode: FileSortMode) => void;
+  eventTitle: string;
+  isCompactView: boolean;
+}) {
+  const hasSearch = Boolean(searchValue.trim());
+
+  return (
+    <Modal
+      isOpen={isOpen}
+      onOpenChange={onOpenChange}
+      size={isCompactView ? "full" : "4xl"}
+      scrollBehavior="inside"
+    >
+      <ModalContent>
+        {(onClose) => (
+          <>
+            <ModalHeader className="flex flex-col gap-1">
+              <span className="text-xl font-semibold text-campus-text-primary">
+                All Documents
+              </span>
+              <span className="text-sm font-normal text-campus-text-secondary">
+                {eventTitle
+                  ? `${eventTitle} • ${totalCount} document${totalCount === 1 ? "" : "s"}`
+                  : `${totalCount} document${totalCount === 1 ? "" : "s"}`}
+              </span>
+            </ModalHeader>
+
+            <ModalBody className="space-y-5 pb-4">
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_240px]">
+                <Input
+                  aria-label="Search documents"
+                  value={searchValue}
+                  onValueChange={onSearchValueChange}
+                  placeholder="Search documents by filename"
+                  startContent={<Search size={16} className="text-campus-text-secondary" />}
+                />
+                <Select
+                  aria-label="Sort documents"
+                  disallowEmptySelection
+                  items={fileSortOptions}
+                  selectedKeys={new Set([sortMode])}
+                  onSelectionChange={(keys) => {
+                    if (keys === "all") return;
+                    const selected = Array.from(keys)[0];
+                    if (typeof selected === "string") {
+                      onSortChange(selected as FileSortMode);
+                    }
+                  }}
+                >
+                  {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                </Select>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm text-campus-text-secondary">
+                  {hasSearch
+                    ? `${files.length} of ${totalCount} documents match your search.`
+                    : `${totalCount} document${totalCount === 1 ? "" : "s"} available for download.`}
+                </p>
+              </div>
+
+              {files.length === 0 ? (
+                <TeacherEmptyState
+                  title={hasSearch ? "No matching documents" : "No documents found"}
+                  description={
+                    hasSearch
+                      ? "Try a different filename search to find the document you need."
+                      : "Teacher-visible event documents will appear here once uploaded."
+                  }
+                  icon={FileText}
+                  compact
+                />
+              ) : (
+                <div className="space-y-3">
+                  {files.map((file) => (
+                    <DocumentListItem key={file.id} file={file} />
+                  ))}
+                </div>
+              )}
+            </ModalBody>
+
+            <ModalFooter className="justify-end">
+              <Button variant="bordered" onPress={onClose}>
+                Close
+              </Button>
+            </ModalFooter>
+          </>
+        )}
+      </ModalContent>
+    </Modal>
   );
 }

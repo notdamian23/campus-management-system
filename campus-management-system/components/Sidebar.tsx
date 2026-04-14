@@ -36,6 +36,34 @@ export interface NavItem {
   };
 }
 
+function normalizeSidebarPath(path: string) {
+  if (!path) return "/";
+  if (path === "/") return path;
+  return path.replace(/\/+$/, "") || "/";
+}
+
+function doesNavItemMatchPath(pathname: string, href: string) {
+  const normalizedPathname = normalizeSidebarPath(pathname);
+  const normalizedHref = normalizeSidebarPath(href);
+
+  return (
+    normalizedPathname === normalizedHref ||
+    normalizedPathname.startsWith(`${normalizedHref}/`)
+  );
+}
+
+function getActiveNavItem(navItems: NavItem[], pathname: string) {
+  const matches = navItems.filter((item) =>
+    doesNavItemMatchPath(pathname, item.href),
+  );
+
+  if (matches.length === 0) {
+    return navItems[0];
+  }
+
+  return matches.sort((left, right) => right.href.length - left.href.length)[0];
+}
+
 interface SidebarProps {
   navItems: NavItem[];
   enableMobileDrawer?: boolean;
@@ -67,16 +95,17 @@ export function Sidebar({
     setMobileOpen(false);
   }, [pathname]);
 
-  const activeItem =
-    navItems.find(
-      (item) => pathname === item.href || pathname.startsWith(`${item.href}/`),
-    ) ?? navItems[0];
+  const activeItem = getActiveNavItem(navItems, pathname);
+
+  const handleRefreshPage = () => {
+    setMobileOpen(false);
+    window.location.reload();
+  };
 
   const NavLinks = () => (
     <nav className="mt-4 flex flex-col gap-1.5 px-3">
       {navItems.map((item) => {
-        const isActive =
-          pathname === item.href || pathname.startsWith(`${item.href}/`);
+        const isActive = activeItem?.href === item.href;
 
         return (
           <Link
@@ -126,15 +155,42 @@ export function Sidebar({
     </nav>
   );
 
+  const LogoButton = ({
+    width,
+    height,
+    className,
+  }: {
+    width: number;
+    height: number;
+    className: string;
+  }) => (
+    <button
+      type="button"
+      onClick={handleRefreshPage}
+      aria-label="Refresh page"
+      title="Refresh page"
+      className="rounded-[28px] transition-transform hover:scale-[1.01] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+    >
+      <Image
+        src="/new campus-logo.jpg"
+        alt="Campus Logo"
+        width={width}
+        height={height}
+        className={clsx(
+          "cursor-pointer h-auto max-w-full object-contain drop-shadow-md",
+          className,
+        )}
+      />
+    </button>
+  );
+
   const LogoSection = ({ size = logoSize }: { size?: number }) => (
     <div className="mb-4 mt-6 flex w-full justify-center px-4">
       <div className="flex flex-col items-center gap-4 text-center">
-        <Image
-          src="/new campus-logo.jpg"
-          alt="Campus Logo"
+        <LogoButton
           width={size}
           height={Math.round(size * 0.52)}
-          className="h-auto w-auto max-w-full object-contain drop-shadow-md"
+          className="w-auto"
         />
         {contextLabel ? (
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-campus-text-secondary">
@@ -201,12 +257,10 @@ export function Sidebar({
             </p>
           </div>
 
-          <Image
-            src="/new campus-logo.jpg"
-            alt="Campus Logo"
+          <LogoButton
             width={70}
             height={36}
-            className="h-auto w-[70px] shrink-0 object-contain drop-shadow-sm"
+            className="w-[70px] shrink-0 drop-shadow-sm"
           />
         </div>
       )}
@@ -249,12 +303,10 @@ export function Sidebar({
               <>
                 <DrawerHeader className="border-b border-border/70 px-4 py-4">
                   <div className="flex w-full items-center gap-3">
-                    <Image
-                      src="/new campus-logo.jpg"
-                      alt="Campus Logo"
+                    <LogoButton
                       width={96}
                       height={50}
-                      className="h-auto w-[96px] shrink-0 object-contain drop-shadow-sm"
+                      className="w-[96px] shrink-0 drop-shadow-sm"
                     />
 
                     <div className="min-w-0 flex-1">

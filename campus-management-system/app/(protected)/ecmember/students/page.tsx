@@ -68,6 +68,7 @@ type Student = {
   year: string;
   status: StudentAccountStatus;
   fingerprintStatus: StudentFingerprintStatus;
+  readyForClearance: boolean;
   email?: string;
   createdAt?: unknown;
 };
@@ -148,6 +149,7 @@ type RemoteStudent = {
   course?: string;
   year?: string;
   status?: string;
+  readyForClearance?: boolean;
   email?: string;
   createdAtMs?: number | null;
 };
@@ -161,6 +163,7 @@ type StudentDirectoryProjection = {
   year?: string;
   yearLevel?: string;
   status?: string;
+  readyForClearance?: boolean;
   fingerprintStatus?: string;
   fingerprintTemplateId?: number | string;
   templateId?: number | string;
@@ -408,6 +411,10 @@ function normalizeStudentAccountStatus(raw: unknown): StudentAccountStatus {
   return normalizeText(raw) === "inactive" ? "Inactive" : "Active";
 }
 
+function normalizeReadyForClearance(raw: unknown) {
+  return raw === true;
+}
+
 function toPositiveNumber(raw: unknown) {
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? value : 0;
@@ -444,6 +451,7 @@ function mapRemoteStudent(data: RemoteStudent): Student {
     year: normalizeYear(data.year),
     status,
     fingerprintStatus: "Inactive",
+    readyForClearance: normalizeReadyForClearance(data.readyForClearance),
     email: String(data.email ?? "").trim() || undefined,
     createdAt:
       typeof data.createdAtMs === "number" ? data.createdAtMs : undefined,
@@ -459,6 +467,9 @@ function mergeStudentProjection(
   return {
     ...student,
     status: normalizeStudentAccountStatus(projection.status ?? student.status),
+    readyForClearance: normalizeReadyForClearance(
+      projection.readyForClearance ?? student.readyForClearance,
+    ),
     fingerprintStatus: getFingerprintStatus(projection),
   };
 }
@@ -517,6 +528,9 @@ export default function ECStudentLookup() {
   const [updatingStudentUid, setUpdatingStudentUid] = useState<string | null>(
     null,
   );
+  const [markingClearanceStudentUid, setMarkingClearanceStudentUid] = useState<
+    string | null
+  >(null);
   const [statusNotice, setStatusNotice] = useState<Notice | null>(null);
   const [statusTab, setStatusTab] = useState<StudentStatusTab>("attended");
   const [attendedSearch, setAttendedSearch] = useState("");
@@ -803,11 +817,15 @@ export default function ECStudentLookup() {
   const selectedStudentCourse = selectedStudent?.course ?? "";
   const selectedStudentYear = selectedStudent?.year ?? "";
   const selectedStudentStatus = selectedStudent?.status ?? "Active";
+  const selectedStudentReadyForClearance =
+    selectedStudent?.readyForClearance ?? false;
 
   const updateStudentState = useCallback(
     (
       studentUid: string,
-      patch: Partial<Pick<Student, "status" | "fingerprintStatus">>,
+      patch: Partial<
+        Pick<Student, "status" | "fingerprintStatus" | "readyForClearance">
+      >,
     ) => {
       setStudents((prev) => {
         let changed = false;
@@ -817,9 +835,12 @@ export default function ECStudentLookup() {
           const nextStatus = patch.status ?? student.status;
           const nextFingerprintStatus =
             patch.fingerprintStatus ?? student.fingerprintStatus;
+          const nextReadyForClearance =
+            patch.readyForClearance ?? student.readyForClearance;
           if (
             nextStatus === student.status &&
-            nextFingerprintStatus === student.fingerprintStatus
+            nextFingerprintStatus === student.fingerprintStatus &&
+            nextReadyForClearance === student.readyForClearance
           ) {
             return student;
           }
@@ -829,6 +850,7 @@ export default function ECStudentLookup() {
             ...student,
             status: nextStatus,
             fingerprintStatus: nextFingerprintStatus,
+            readyForClearance: nextReadyForClearance,
           };
         });
 
@@ -841,9 +863,12 @@ export default function ECStudentLookup() {
         const nextStatus = patch.status ?? prev.status;
         const nextFingerprintStatus =
           patch.fingerprintStatus ?? prev.fingerprintStatus;
+        const nextReadyForClearance =
+          patch.readyForClearance ?? prev.readyForClearance;
         if (
           nextStatus === prev.status &&
-          nextFingerprintStatus === prev.fingerprintStatus
+          nextFingerprintStatus === prev.fingerprintStatus &&
+          nextReadyForClearance === prev.readyForClearance
         ) {
           return prev;
         }
@@ -852,6 +877,7 @@ export default function ECStudentLookup() {
           ...prev,
           status: nextStatus,
           fingerprintStatus: nextFingerprintStatus,
+          readyForClearance: nextReadyForClearance,
         };
       });
     },
@@ -899,6 +925,7 @@ export default function ECStudentLookup() {
       course: selectedStudentCourse,
       year: selectedStudentYear,
       status: selectedStudentStatus,
+      readyForClearance: selectedStudentReadyForClearance,
     };
 
     let active = true;
@@ -928,6 +955,10 @@ export default function ECStudentLookup() {
           updateStudentState(currentStudent.uid, {
             status: normalizeStudentAccountStatus(
               studentProjection?.status ?? currentStudent.status,
+            ),
+            readyForClearance: normalizeReadyForClearance(
+              studentProjection?.readyForClearance ??
+                currentStudent.readyForClearance,
             ),
             fingerprintStatus: getFingerprintStatus(studentProjection),
           });
@@ -1087,6 +1118,7 @@ export default function ECStudentLookup() {
     selectedStudentCourse,
     selectedStudentYear,
     selectedStudentStatus,
+    selectedStudentReadyForClearance,
     statusModalOpen,
     updateStudentState,
   ]);
@@ -1167,6 +1199,8 @@ export default function ECStudentLookup() {
     setCourseFilter("");
     setYearFilter("");
   };
+
+  const clearanceReadyNotificationId = "clearance-ready-status";
 
   const openStudentStatusModal = (student: Student) => {
     setSelectedStudent(student);
@@ -1273,6 +1307,140 @@ export default function ECStudentLookup() {
       });
     } finally {
       setUpdatingStudentUid(null);
+    }
+  }
+
+  async function markStudentReadyForClearance(student: Student) {
+    if (!student.uid) {
+      setStatusNotice({
+        type: "err",
+        msg: "This student record is missing a UID.",
+      });
+      campusToast.error({
+        title: "Student record incomplete",
+        description: "This student record is missing a UID.",
+        dedupeKey: "ec-students:clearance:missing-uid",
+      });
+      return;
+    }
+
+    if (student.readyForClearance) {
+      campusToast.info({
+        title: "Already ready for clearance",
+        description: `${student.name} is already marked ready for clearance signing.`,
+        dedupeKey: `ec-students:clearance:already-ready:${student.uid}`,
+      });
+      return;
+    }
+
+    setMarkingClearanceStudentUid(student.uid);
+    setStatusNotice(null);
+
+    try {
+      const timestamp = serverTimestamp();
+
+      await setDoc(
+        doc(db, "students", student.uid),
+        {
+          uid: student.uid,
+          studentId: student.uid,
+          schoolId: student.id,
+          studentName: student.name,
+          name: student.name,
+          course: student.course,
+          year: student.year,
+          yearLevel: student.year,
+          readyForClearance: true,
+          updatedAt: timestamp,
+        },
+        { merge: true },
+      );
+
+      try {
+        await setDoc(
+          doc(db, "profiles", student.uid),
+          {
+            readyForClearance: true,
+            updatedAt: timestamp,
+          },
+          { merge: true },
+        );
+      } catch (error: unknown) {
+        const message = toErrorMessage(error, "");
+        if (!message.toLowerCase().includes("permission-denied")) {
+          throw error;
+        }
+      }
+
+      let notificationError = "";
+      try {
+        await setDoc(
+          doc(
+            db,
+            "profiles",
+            student.uid,
+            "notifications",
+            clearanceReadyNotificationId,
+          ),
+          {
+            title: "Clearance Ready",
+            message: "You are now ready for clearance signing.",
+            type: "announcement",
+            createdAt: timestamp,
+            date: "",
+            scheduledTime: "",
+            read: false,
+            targetUid: student.uid,
+          },
+          { merge: true },
+        );
+      } catch (error: unknown) {
+        notificationError = toErrorMessage(
+          error,
+          "The readiness update was saved, but the notification could not be sent.",
+        );
+      }
+
+      updateStudentState(student.uid, { readyForClearance: true });
+
+      const successMessage = notificationError
+        ? `${student.name} is ready for clearance signing, but the notification could not be sent.`
+        : "Student marked ready for clearance.";
+
+      setStatusNotice({
+        type: "ok",
+        msg: notificationError || successMessage,
+      });
+
+      if (notificationError) {
+        campusToast.warning({
+          title: "Ready for clearance saved",
+          description: notificationError,
+          dedupeKey: `ec-students:clearance:notification-warning:${student.uid}`,
+        });
+      } else {
+        campusToast.success({
+          title: "Clearance ready",
+          description: successMessage,
+          dedupeKey: `ec-students:clearance:${student.uid}`,
+        });
+      }
+    } catch (error: unknown) {
+      const message = toErrorMessage(
+        error,
+        "Failed to mark this student ready for clearance.",
+      );
+      setStatusNotice({
+        type: "err",
+        msg: message,
+      });
+      campusToast.error({
+        title: "Clearance update failed",
+        description: message,
+        dedupeKey: `ec-students:clearance-error:${student.uid}`,
+      });
+    } finally {
+      setMarkingClearanceStudentUid(null);
     }
   }
 
@@ -1797,6 +1965,7 @@ export default function ECStudentLookup() {
             setPaymentsPage(1);
             setPaymentSortMode("paid");
             setUpdatingStudentUid(null);
+            setMarkingClearanceStudentUid(null);
           }
         }}
         size={isCompactViewport ? "full" : "5xl"}
@@ -1822,7 +1991,7 @@ export default function ECStudentLookup() {
                       <p className="text-xs text-campus-text-secondary mt-1">
                         {selectedStudent.name} ({selectedStudent.id}) |{" "}
                         {selectedStudent.course} | {selectedStudent.year} |
-                        Fingerprint: {selectedStudent.fingerprintStatus}
+                        {" "}Fingerprint: {selectedStudent.fingerprintStatus}
                       </p>
                     )}
                     {selectedStudent && (
@@ -1847,6 +2016,19 @@ export default function ECStudentLookup() {
                         >
                           Fingerprint: {selectedStudent.fingerprintStatus}
                         </Chip>
+                        <Chip
+                          color={
+                            selectedStudent.readyForClearance
+                              ? "success"
+                              : "danger"
+                          }
+                          variant="flat"
+                        >
+                          Clearance:{" "}
+                          {selectedStudent.readyForClearance
+                            ? "Ready"
+                            : "Not ready"}
+                        </Chip>
                         <Button
                           size="sm"
                           className="bg-[#7b0000] text-white"
@@ -1854,11 +2036,39 @@ export default function ECStudentLookup() {
                             void toggleStudentStatus(selectedStudent)
                           }
                           isLoading={updatingStudentUid === selectedStudent.uid}
+                          isDisabled={
+                            markingClearanceStudentUid === selectedStudent.uid
+                          }
                         >
-                          Set{" "}
+                          Set account{" "}
                           {selectedStudent.status === "Active"
                             ? "Inactive"
                             : "Active"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={
+                            selectedStudent.readyForClearance ? "flat" : "solid"
+                          }
+                          className={
+                            selectedStudent.readyForClearance
+                              ? "bg-emerald-100 text-emerald-700"
+                              : "bg-emerald-600 text-white"
+                          }
+                          onPress={() =>
+                            void markStudentReadyForClearance(selectedStudent)
+                          }
+                          isLoading={
+                            markingClearanceStudentUid === selectedStudent.uid
+                          }
+                          isDisabled={
+                            selectedStudent.readyForClearance ||
+                            updatingStudentUid === selectedStudent.uid
+                          }
+                        >
+                          {selectedStudent.readyForClearance
+                            ? "Already ready for clearance"
+                            : "Mark ready for clearance"}
                         </Button>
                       </div>
                     )}

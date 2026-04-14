@@ -67,6 +67,7 @@ function buildCampusProfilePayload(data) {
         name: optionalText(data.name),
         course: optionalText(data.course),
         year: optionalText(data.year),
+        readyForClearance: optionalBoolean(data.readyForClearance),
     };
 }
 function asRecord(value) {
@@ -317,6 +318,7 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
             profilePayload.name = resolvedStudentName;
             profilePayload.course = course;
             profilePayload.year = year;
+            profilePayload.readyForClearance = false;
         }
         if (role === "ec") {
             profilePayload.name = resolvedEcName;
@@ -331,6 +333,7 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
                 name: resolvedStudentName,
                 course,
                 year,
+                readyForClearance: false,
                 status: "active",
                 updatedAt: serverTimestamp(),
                 createdAt: serverTimestamp(),
@@ -421,6 +424,8 @@ exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request)
                 normalizeText(studentData.course) ||
                 "Unassigned",
             year: normalizeYear((_d = (_c = profileData.year) !== null && _c !== void 0 ? _c : studentData.year) !== null && _d !== void 0 ? _d : studentData.yearLevel),
+            readyForClearance: studentData.readyForClearance === true ||
+                profileData.readyForClearance === true,
             status: normalizeText(studentData.status) ||
                 normalizeText(profileData.status) ||
                 "Active",
@@ -477,6 +482,7 @@ exports.ecCreateStudent = (0, https_1.onCall)({ region: REGION }, async (request
             name: studentName,
             course,
             year,
+            readyForClearance: false,
             mustChangePassword: true,
             emailVerified: false,
             emailVerificationPending: false,
@@ -495,6 +501,7 @@ exports.ecCreateStudent = (0, https_1.onCall)({ region: REGION }, async (request
             course,
             year,
             yearLevel: year,
+            readyForClearance: false,
             status: "active",
             createdAt: timestamp,
             updatedAt: timestamp,

@@ -27,6 +27,7 @@ type CampusProfilePayload = {
   name?: string;
   course?: string;
   year?: string;
+  readyForClearance?: boolean;
 };
 
 function serverTimestamp() {
@@ -71,6 +72,7 @@ function buildCampusProfilePayload(
     name: optionalText(data.name),
     course: optionalText(data.course),
     year: optionalText(data.year),
+    readyForClearance: optionalBoolean(data.readyForClearance),
   };
 }
 
@@ -414,12 +416,13 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
         profilePayload.name = resolvedTeacherName;
       }
 
-      if (role === "student") {
-        profilePayload.studentName = resolvedStudentName;
-        profilePayload.name = resolvedStudentName;
-        profilePayload.course = course;
-        profilePayload.year = year;
-      }
+        if (role === "student") {
+          profilePayload.studentName = resolvedStudentName;
+          profilePayload.name = resolvedStudentName;
+          profilePayload.course = course;
+          profilePayload.year = year;
+          profilePayload.readyForClearance = false;
+        }
 
       if (role === "ec") {
         profilePayload.name = resolvedEcName;
@@ -432,18 +435,19 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
         {merge: true}
       );
 
-      if (role === "student") {
-        await db.doc(`students/${uid}`).set(
-          {
-            schoolId,
-            studentName: resolvedStudentName,
-            name: resolvedStudentName,
-            course,
-            year,
-            status: "active",
-            updatedAt: serverTimestamp(),
-            createdAt: serverTimestamp(),
-          },
+        if (role === "student") {
+          await db.doc(`students/${uid}`).set(
+            {
+              schoolId,
+              studentName: resolvedStudentName,
+              name: resolvedStudentName,
+              course,
+              year,
+              readyForClearance: false,
+              status: "active",
+              updatedAt: serverTimestamp(),
+              createdAt: serverTimestamp(),
+            },
           {merge: true}
         );
       }
@@ -542,11 +546,11 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
       const profileData = profileDoc.data() ?? {};
       const studentData = studentByUid.get(profileDoc.id) ?? {};
 
-      return {
-        uid: profileDoc.id,
-        schoolId:
-          normalizeText(profileData.schoolId) ||
-          normalizeText(studentData.schoolId) ||
+        return {
+          uid: profileDoc.id,
+          schoolId:
+            normalizeText(profileData.schoolId) ||
+            normalizeText(studentData.schoolId) ||
           profileDoc.id,
         studentName:
           normalizeText(profileData.studentName) ||
@@ -567,6 +571,9 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
           studentData.year ??
           studentData.yearLevel
         ),
+        readyForClearance:
+          studentData.readyForClearance === true ||
+          profileData.readyForClearance === true,
         status:
           normalizeText(studentData.status) ||
           normalizeText(profileData.status) ||
@@ -642,18 +649,19 @@ export const ecCreateStudent = onCall({region: REGION}, async (request) => {
       const uid = userRecord.uid;
       const timestamp = serverTimestamp();
 
-      await db.doc(`profiles/${uid}`).set(
-        {
-          schoolId,
-          email,
-          role: "student",
-          studentName,
-          name: studentName,
-          course,
-          year,
-          mustChangePassword: true,
-          emailVerified: false,
-          emailVerificationPending: false,
+        await db.doc(`profiles/${uid}`).set(
+          {
+            schoolId,
+            email,
+            role: "student",
+            studentName,
+            name: studentName,
+            course,
+            year,
+            readyForClearance: false,
+            mustChangePassword: true,
+            emailVerified: false,
+            emailVerificationPending: false,
           pendingEmail: null,
           firstLoginCompleted: false,
           status: "pending",
@@ -663,19 +671,20 @@ export const ecCreateStudent = onCall({region: REGION}, async (request) => {
         {merge: true}
       );
 
-      await db.doc(`students/${uid}`).set(
-        {
-          uid,
-          studentId: uid,
-          schoolId,
-          studentName,
-          name: studentName,
-          course,
-          year,
-          yearLevel: year,
-          status: "active",
-          createdAt: timestamp,
-          updatedAt: timestamp,
+        await db.doc(`students/${uid}`).set(
+          {
+            uid,
+            studentId: uid,
+            schoolId,
+            studentName,
+            name: studentName,
+            course,
+            year,
+            yearLevel: year,
+            readyForClearance: false,
+            status: "active",
+            createdAt: timestamp,
+            updatedAt: timestamp,
         },
         {merge: true}
       );

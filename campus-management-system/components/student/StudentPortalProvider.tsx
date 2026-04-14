@@ -62,6 +62,7 @@ export type StudentProfile = {
   course: string;
   year: string;
   accountStatus: StudentAccountStatus;
+  readyForClearance: boolean;
 };
 
 export type StudentPayment = {
@@ -225,10 +226,18 @@ type ProfileDocData = {
   course?: string;
   year?: string;
   status?: string;
+  readyForClearance?: boolean;
 };
 
 type StudentProjectionDocData = {
   status?: string;
+  schoolId?: string;
+  studentName?: string;
+  name?: string;
+  course?: string;
+  year?: string;
+  yearLevel?: string;
+  readyForClearance?: boolean;
 };
 
 const StudentPortalContext = createContext<StudentPortalContextValue | null>(
@@ -272,6 +281,10 @@ function normalizeYear(raw: unknown) {
 
 function normalizeStudentAccountStatus(raw: unknown): StudentAccountStatus {
   return normalizeText(raw) === "inactive" ? "Inactive" : "Active";
+}
+
+function normalizeReadyForClearance(raw: unknown) {
+  return raw === true;
 }
 
 function parseDateOnly(input: string): Date | null {
@@ -493,7 +506,70 @@ export function StudentPortalProvider({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    let unsubscribeProfileDoc: (() => void) | null = null;
+    let unsubscribeStudentDoc: (() => void) | null = null;
+    let latestProfileData: ProfileDocData | null = null;
+    let latestStudentData: StudentProjectionDocData | null = null;
+    let hasProfileSnapshot = false;
+
+    const stopProfileListeners = () => {
+      unsubscribeProfileDoc?.();
+      unsubscribeProfileDoc = null;
+      unsubscribeStudentDoc?.();
+      unsubscribeStudentDoc = null;
+      latestProfileData = null;
+      latestStudentData = null;
+      hasProfileSnapshot = false;
+    };
+
+    const syncProfileState = (uid: string) => {
+      if (!hasProfileSnapshot) return;
+
+      if (!latestProfileData) {
+        setProfile(null);
+        setLoadingProfile(false);
+        return;
+      }
+
+      const schoolId =
+        String(
+          latestProfileData.schoolId ?? latestStudentData?.schoolId ?? "",
+        ).trim() || uid;
+      const studentName =
+        String(
+          latestProfileData.studentName ??
+            latestProfileData.name ??
+            latestStudentData?.studentName ??
+            latestStudentData?.name ??
+            schoolId,
+        ).trim() || schoolId;
+
+      setProfile({
+        uid,
+        schoolId,
+        studentName,
+        course:
+          String(
+            latestProfileData.course ?? latestStudentData?.course ?? "",
+          ).trim() || "Unassigned",
+        year: normalizeYear(
+          latestProfileData.year ??
+            latestStudentData?.year ??
+            latestStudentData?.yearLevel,
+        ),
+        accountStatus: normalizeStudentAccountStatus(
+          latestStudentData?.status ?? latestProfileData.status,
+        ),
+        readyForClearance: normalizeReadyForClearance(
+          latestStudentData?.readyForClearance ??
+            latestProfileData.readyForClearance,
+        ),
+      });
+      setLoadingProfile(false);
+    };
+
+    const unsub = onAuthStateChanged(auth, (user) => {
+      stopProfileListeners();
       setLoadingProfile(true);
 
       if (!user) {
@@ -502,45 +578,44 @@ export function StudentPortalProvider({
         return;
       }
 
-      try {
-        const [profileSnap, studentSnap] = await Promise.all([
-          getDoc(doc(db, "profiles", user.uid)),
-          getDoc(doc(db, "students", user.uid)),
-        ]);
-
-        if (!profileSnap.exists()) {
+      unsubscribeProfileDoc = onSnapshot(
+        doc(db, "profiles", user.uid),
+        (profileSnap) => {
+          hasProfileSnapshot = true;
+          latestProfileData = profileSnap.exists()
+            ? (profileSnap.data() as ProfileDocData)
+            : null;
+          syncProfileState(user.uid);
+        },
+        (e) => {
+          latestProfileData = null;
+          hasProfileSnapshot = true;
           setProfile(null);
+          setError(toErrorMessage(e, "Failed to load student profile."));
           setLoadingProfile(false);
-          return;
-        }
+        },
+      );
 
-        const data = profileSnap.data() as ProfileDocData;
-        const studentData = studentSnap.exists()
-          ? (studentSnap.data() as StudentProjectionDocData)
-          : null;
-        setProfile({
-          uid: user.uid,
-          schoolId: String(data.schoolId ?? "").trim(),
-          studentName:
-            String(data.studentName ?? "").trim() ||
-            String(data.name ?? "").trim() ||
-            String(data.schoolId ?? "").trim() ||
-            user.uid,
-          course: String(data.course ?? "").trim() || "Unassigned",
-          year: normalizeYear(data.year),
-          accountStatus: normalizeStudentAccountStatus(
-            studentData?.status ?? data.status,
-          ),
-        });
-      } catch (e: unknown) {
-        setProfile(null);
-        setError(toErrorMessage(e, "Failed to load student profile."));
-      } finally {
-        setLoadingProfile(false);
-      }
+      unsubscribeStudentDoc = onSnapshot(
+        doc(db, "students", user.uid),
+        (studentSnap) => {
+          latestStudentData = studentSnap.exists()
+            ? (studentSnap.data() as StudentProjectionDocData)
+            : null;
+          syncProfileState(user.uid);
+        },
+        (e) => {
+          latestStudentData = null;
+          syncProfileState(user.uid);
+          setError(toErrorMessage(e, "Failed to load student status details."));
+        },
+      );
     });
 
-    return () => unsub();
+    return () => {
+      stopProfileListeners();
+      unsub();
+    };
   }, []);
 
   useEffect(() => {

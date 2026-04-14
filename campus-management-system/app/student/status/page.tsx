@@ -10,6 +10,7 @@ import {
   CircleAlert,
   CreditCard,
   Landmark,
+  ShieldCheck,
   ShieldAlert,
 } from "lucide-react";
 import { CampusMetricSkeleton } from "@/components/ui";
@@ -45,6 +46,7 @@ export default function StudentStatus() {
   const [attendedPage, setAttendedPage] = useState(1);
   const [missedPage, setMissedPage] = useState(1);
   const [paymentsPage, setPaymentsPage] = useState(1);
+  const readyForClearance = profile?.readyForClearance === true;
 
   const attendedEvents = useMemo(
     () =>
@@ -173,7 +175,10 @@ export default function StudentStatus() {
       />
 
       {loading ? (
-        <CampusMetricSkeleton count={3} className="sm:grid-cols-3 xl:grid-cols-3" />
+        <CampusMetricSkeleton
+          count={4}
+          className="sm:grid-cols-2 xl:grid-cols-4"
+        />
       ) : (
         <StudentStatsGrid
           items={[
@@ -197,6 +202,18 @@ export default function StudentStatus() {
               description: "Payment records currently assigned to your account.",
               tone: "amber",
               icon: CreditCard,
+            },
+            {
+              label: "Clearance Status",
+              value: readyForClearance
+                ? "Ready for clearance signing"
+                : "Not ready for clearance signing",
+              description:
+                "Updated by EC members when your account is cleared for signing.",
+              tone: readyForClearance ? "green" : "red",
+              icon: ShieldCheck,
+              surfaceTone: true,
+              valueClassName: "text-lg font-semibold leading-7 sm:text-xl",
             },
           ]}
         />

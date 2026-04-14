@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
-import Image from "next/image";
 import clsx from "clsx";
 import { Poppins } from "next/font/google";
 import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Skeleton } from "@heroui/skeleton";
+import { CampusAuthLogo, CampusAuthLogoSkeleton } from "./CampusAuthLogo";
 
 const poppins = Poppins({
   subsets: ["latin"],
@@ -20,12 +20,6 @@ type CampusAuthShellProps = {
   className?: string;
   cardClassName?: string;
   bodyClassName?: string;
-  logoSrc?: string;
-  logoAlt?: string;
-  logoWidth?: number;
-  logoHeight?: number;
-  logoWrapperClassName?: string;
-  logoImageClassName?: string;
 };
 
 export function CampusAuthShell({
@@ -37,12 +31,6 @@ export function CampusAuthShell({
   className,
   cardClassName,
   bodyClassName,
-  logoSrc = "/campus-login logo.png",
-  logoAlt = "Campus Logo",
-  logoWidth = 220,
-  logoHeight = 220,
-  logoWrapperClassName,
-  logoImageClassName,
 }: CampusAuthShellProps) {
   const hasTitle = Boolean(title?.trim());
 
@@ -66,21 +54,7 @@ export function CampusAuthShell({
             bodyClassName,
           )}
         >
-          <div
-            className={
-              logoWrapperClassName ??
-              "mb-6 flex h-32 w-32 items-center justify-center overflow-hidden rounded-full border-4 border-white/90 shadow-2xl sm:h-40 sm:w-40"
-            }
-          >
-            <Image
-              src={logoSrc}
-              alt={logoAlt}
-              width={logoWidth}
-              height={logoHeight}
-              className={logoImageClassName ?? "h-full w-full object-cover"}
-              priority
-            />
-          </div>
+          <CampusAuthLogo />
 
           {eyebrow ? (
             <Chip
@@ -133,7 +107,7 @@ export function CampusAuthShellSkeleton() {
         className="w-full max-w-[560px] border border-white/10 bg-bg-main/95 backdrop-blur"
       >
         <CardBody className="flex flex-col items-center px-8 py-10 sm:px-12 sm:py-14">
-          <Skeleton className="mb-6 h-32 w-32 rounded-full sm:h-40 sm:w-40" />
+          <CampusAuthLogoSkeleton />
           <Skeleton className="mb-4 h-8 w-32 rounded-full" />
           <Skeleton className="h-14 w-52 rounded-2xl" />
           <Skeleton className="mt-3 h-5 w-72 rounded-xl" />
