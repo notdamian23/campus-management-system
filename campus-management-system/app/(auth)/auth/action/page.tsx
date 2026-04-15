@@ -325,7 +325,6 @@ function AuthActionContent() {
 
   return (
     <CampusAuthShell
-      title="CAMPUS"
       description={shellDescription}
       eyebrow={shellEyebrow}
       footer={shellFooter}

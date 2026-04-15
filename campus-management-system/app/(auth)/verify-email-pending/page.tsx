@@ -229,7 +229,6 @@ export default function VerifyEmailPendingPage() {
 
   return (
     <CampusAuthShell
-      title="CAMPUS"
       description="Your password was updated. Verify your email address before CAMPUS unlocks your dashboard."
       eyebrow="Email Verification Required"
       footer="You can keep using School ID login after verification completes."

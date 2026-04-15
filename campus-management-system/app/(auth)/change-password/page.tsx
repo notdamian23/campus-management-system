@@ -215,7 +215,6 @@ export default function ChangePasswordPage() {
 
   return (
     <CampusAuthShell
-      title="CAMPUS"
       description="First login detected. Set your permanent password and verify your email address before entering the portal."
       eyebrow="First Sign-In Setup"
       footer="Use your university email or an address you can access right now."
