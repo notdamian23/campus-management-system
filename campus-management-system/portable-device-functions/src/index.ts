@@ -3,6 +3,7 @@ import {createHash, createHmac, timingSafeEqual} from "crypto";
 import * as admin from "firebase-admin";
 import * as functions from "firebase-functions/v1";
 import type {Request, Response} from "express";
+import {createCampusLogger} from "./campusLogger";
 
 if (admin.apps.length === 0) {
   admin.initializeApp();
@@ -10,6 +11,7 @@ if (admin.apps.length === 0) {
 
 const db = admin.firestore();
 const REGION = "asia-southeast1";
+const deviceLogger = createCampusLogger("CAMPUS device");
 const MANILA_TIME_ZONE = "Asia/Manila";
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_EVENT_LIMIT = 20;
@@ -665,7 +667,7 @@ function deviceEndpoint(
     } catch (error: unknown) {
       const status = error instanceof ApiError ? error.status : 500;
       const message = errorMessage(error, "Internal server error.");
-      console.error("Portable device endpoint failed", error);
+      deviceLogger.error("Portable device endpoint failed", {error, status});
       sendJson(res, status, {error: message});
     }
   });

@@ -144,9 +144,8 @@ export default function ChangePasswordPage() {
     setLoading(true);
     try {
       logCampusAuthEvent("info", "Submitting first-time email verification request", {
-        enteredEmail: normalizedEmail,
-        currentUserUid: user.uid,
-        currentUserEmail: user.email ?? "",
+        emailDomain: normalizedEmail.split("@")[1] ?? "",
+        hasCurrentUserEmail: Boolean(user.email),
         firebaseMethod: "verifyBeforeUpdateEmail",
       });
       await updatePassword(user, newPassword);
@@ -156,9 +155,8 @@ export default function ChangePasswordPage() {
         buildEmailActionSettings(),
       );
       logCampusAuthEvent("info", "Verification email accepted by Firebase", {
-        enteredEmail: normalizedEmail,
-        currentUserUid: user.uid,
-        currentUserEmail: user.email ?? "",
+        emailDomain: normalizedEmail.split("@")[1] ?? "",
+        hasCurrentUserEmail: Boolean(user.email),
         firebaseMethod: "verifyBeforeUpdateEmail",
       });
       await savePendingEmailVerificationForCurrentUser(normalizedEmail);
@@ -179,9 +177,8 @@ export default function ChangePasswordPage() {
     } catch (error: unknown) {
       const authError = error as { code?: string; message?: string };
       logCampusAuthEvent("error", "First-time email verification request failed", {
-        enteredEmail: normalizedEmail,
-        currentUserUid: user.uid,
-        currentUserEmail: user.email ?? "",
+        emailDomain: normalizedEmail.split("@")[1] ?? "",
+        hasCurrentUserEmail: Boolean(user.email),
         firebaseMethod: "verifyBeforeUpdateEmail",
         code: authError.code ?? "unknown",
         message: authError.message ?? "Unknown Firebase error",

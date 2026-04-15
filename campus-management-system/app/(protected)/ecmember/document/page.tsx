@@ -56,6 +56,7 @@ import {
   useECPageErrorToast,
   useIsBelowBreakpoint,
 } from "@/components/ecmember";
+import { createCampusLogger } from "@/lib/campus-logger";
 import { auth, db, storage } from "@/lib/firebase";
 import { campusToast } from "@/lib/toast";
 
@@ -85,6 +86,7 @@ const DOC_CATEGORIES: DocCategory[] = [
   "Clearance",
   "General",
 ];
+const ecDocumentsLogger = createCampusLogger("EC Documents");
 
 type FirestoreTimestampLike = { toMillis?: () => number; seconds?: number };
 
@@ -397,7 +399,7 @@ export default function DocumentsPage() {
         setDocumentsLoading(false);
       },
       (error) => {
-        console.error("[EC Documents] Firestore subscribe failed.", {
+        ecDocumentsLogger.error("Firestore subscribe failed.", {
           uid: activeUid,
           code: toErrorCode(error),
           message: toErrorMessage(error),
@@ -578,7 +580,7 @@ export default function DocumentsPage() {
     setUploadError("");
 
     const uploadSessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    console.info("[EC Documents] Upload session started.", {
+    ecDocumentsLogger.info("Upload session started.", {
       uploadSessionId,
       uid: activeUid,
       fileCount: pendingFiles.length,
@@ -623,7 +625,7 @@ export default function DocumentsPage() {
         const storageRef = ref(storage, storagePath);
 
         try {
-          console.info("[EC Documents] Uploading file.", {
+          ecDocumentsLogger.info("Uploading file.", {
             uploadSessionId,
             uid: activeUid,
             name: file.name,
@@ -660,7 +662,7 @@ export default function DocumentsPage() {
           nextTotalBytes += file.size;
           uploadedCount += 1;
 
-          console.info("[EC Documents] File uploaded successfully.", {
+          ecDocumentsLogger.info("File uploaded successfully.", {
             uploadSessionId,
             uid: activeUid,
             name: file.name,
@@ -671,7 +673,7 @@ export default function DocumentsPage() {
           const code = toErrorCode(error);
           const message = toErrorMessage(error);
 
-          console.error("[EC Documents] File upload failed.", {
+          ecDocumentsLogger.error("File upload failed.", {
             uploadSessionId,
             uid: activeUid,
             name: file.name,
@@ -691,18 +693,15 @@ export default function DocumentsPage() {
               "Cleanup storage object",
             );
           } catch (cleanupError) {
-            console.warn(
-              "[EC Documents] Failed to cleanup orphaned storage object.",
-              {
-                uploadSessionId,
-                uid: activeUid,
-                name: file.name,
-                storagePath,
-                code: toErrorCode(cleanupError),
-                message: toErrorMessage(cleanupError),
-                raw: cleanupError,
-              },
-            );
+            ecDocumentsLogger.warn("Failed to cleanup orphaned storage object.", {
+              uploadSessionId,
+              uid: activeUid,
+              name: file.name,
+              storagePath,
+              code: toErrorCode(cleanupError),
+              message: toErrorMessage(cleanupError),
+              raw: cleanupError,
+            });
           }
         }
       }
@@ -753,7 +752,7 @@ export default function DocumentsPage() {
         });
       }
 
-      console.info("[EC Documents] Upload session finished.", {
+      ecDocumentsLogger.info("Upload session finished.", {
         uploadSessionId,
         uid: activeUid,
         uploadedCount,
@@ -765,7 +764,7 @@ export default function DocumentsPage() {
         setIsCategoryModalOpen(false);
       }
     } catch (error) {
-      console.error("[EC Documents] Unexpected upload flow failure.", {
+      ecDocumentsLogger.error("Unexpected upload flow failure.", {
         uploadSessionId,
         uid: activeUid,
         code: toErrorCode(error),
@@ -796,7 +795,7 @@ export default function DocumentsPage() {
     }
 
     try {
-      console.info("[EC Documents] Starting direct download.", {
+      ecDocumentsLogger.info("Starting direct download.", {
         docId: docItem.id,
         name: docItem.name,
       });
@@ -820,7 +819,7 @@ export default function DocumentsPage() {
         timeout: 4000,
       });
     } catch (error) {
-      console.error("[EC Documents] Direct download failed.", {
+      ecDocumentsLogger.error("Direct download failed.", {
         docId: docItem.id,
         name: docItem.name,
         code: toErrorCode(error),
@@ -855,14 +854,11 @@ export default function DocumentsPage() {
             throw storageError;
           }
 
-          console.warn(
-            "[EC Documents] Storage object already missing during delete.",
-            {
-              docId: targetDoc.id,
-              name: targetDoc.name,
-              storagePath: targetDoc.storagePath,
-            },
-          );
+          ecDocumentsLogger.warn("Storage object already missing during delete.", {
+            docId: targetDoc.id,
+            name: targetDoc.name,
+            storagePath: targetDoc.storagePath,
+          });
         }
       }
 
@@ -881,7 +877,7 @@ export default function DocumentsPage() {
 
       setPendingDeleteDocument(null);
     } catch (error) {
-      console.error("[EC Documents] Delete failed.", {
+      ecDocumentsLogger.error("Delete failed.", {
         docId: targetDoc.id,
         name: targetDoc.name,
         code: toErrorCode(error),

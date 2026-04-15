@@ -26,11 +26,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminDeleteUser = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
 const https_1 = require("firebase-functions/v2/https");
+const campusLogger_1 = require("./campusLogger");
 if (admin.apps.length === 0) {
     admin.initializeApp();
 }
 const db = admin.firestore();
 const REGION = "asia-southeast1";
+const authLogger = (0, campusLogger_1.createCampusLogger)("CAMPUS auth");
 function serverTimestamp() {
     return admin.firestore.FieldValue.serverTimestamp();
 }
@@ -536,7 +538,7 @@ exports.resolveSchoolIdLogin = (0, https_1.onCall)({ region: REGION }, async (re
         .limit(1)
         .get();
     if (profileSnapshot.empty) {
-        console.warn("resolveSchoolIdLogin: profile not found", { schoolId });
+        authLogger.debug("resolveSchoolIdLogin profile not found");
         return {
             email: null,
             found: false,
@@ -552,9 +554,7 @@ exports.resolveSchoolIdLogin = (0, https_1.onCall)({ region: REGION }, async (re
             profileEmail ||
             `${schoolId}@campus.local`;
         const source = normalizeText(userRecord.email) ? "auth" : profileEmail ? "profile" : "fallback";
-        console.info("resolveSchoolIdLogin: resolved", {
-            schoolId,
-            uid: profileDoc.id,
+        authLogger.info("resolveSchoolIdLogin resolved", {
             source,
         });
         return {
@@ -564,7 +564,9 @@ exports.resolveSchoolIdLogin = (0, https_1.onCall)({ region: REGION }, async (re
         };
     }
     catch (error) {
-        console.error("resolveSchoolIdLogin failed to read Auth user", error);
+        authLogger.warn("resolveSchoolIdLogin auth lookup failed, using fallback", {
+            error,
+        });
         const fallbackEmail = profileEmail || `${schoolId}@campus.local`;
         const source = profileEmail ? "profile" : "fallback";
         return {
@@ -602,10 +604,7 @@ exports.getCurrentCampusProfile = (0, https_1.onCall)({ region: REGION }, async 
         }
     }
     catch (error) {
-        console.warn("getCurrentCampusProfile: unable to sync auth email", {
-            uid,
-            error,
-        });
+        authLogger.warn("getCurrentCampusProfile unable to sync auth email", { error });
     }
     return {
         profile: buildCampusProfilePayload(profileData),
@@ -696,8 +695,7 @@ exports.finalizeVerifiedCampusProfile = (0, https_1.onCall)({ region: REGION }, 
         updatedAt: serverTimestamp(),
     }, { merge: true });
     const refreshedProfileSnap = await profileRef.get();
-    console.info("finalizeVerifiedCampusProfile: finalized", {
-        uid,
+    authLogger.info("finalizeVerifiedCampusProfile finalized", {
         role: normalizeText((_b = refreshedProfileSnap.data()) === null || _b === void 0 ? void 0 : _b.role),
     });
     return {

@@ -350,12 +350,9 @@ function LoginForm() {
       const loginEmail = resolution.email;
 
       const cred = await signInWithEmailAndPassword(auth, loginEmail, password);
-      const uid = cred.user.uid;
       await cred.user.reload();
 
       logCampusAuthEvent("info", "Firebase sign-in succeeded", {
-        schoolId: sid,
-        uid,
         resolverSource: resolution.source,
         emailVerified: cred.user.emailVerified,
       });
@@ -388,8 +385,6 @@ function LoginForm() {
       const role = data.role;
 
       logCampusAuthEvent("info", "Loaded CAMPUS profile after sign-in", {
-        schoolId: sid,
-        uid,
         role,
         mustChangePassword: data.mustChangePassword === true,
         emailVerificationPending: data.emailVerificationPending === true,
@@ -420,8 +415,6 @@ function LoginForm() {
       const onboardingRedirect = getOnboardingRedirect(data);
       if (onboardingRedirect) {
         logCampusAuthEvent("info", "Redirecting to onboarding step", {
-          schoolId: sid,
-          uid,
           onboardingRedirect,
         });
         router.push(onboardingRedirect);
@@ -431,17 +424,13 @@ function LoginForm() {
       // 4) Redirect by role (or use ?next=...)
       if (nextPath) {
         logCampusAuthEvent("info", "Redirecting to next path after login", {
-          schoolId: sid,
-          uid,
-          nextPath,
+          hasNextPath: true,
         });
         router.push(nextPath);
         return;
       }
 
       logCampusAuthEvent("info", "Redirecting to role home after login", {
-        schoolId: sid,
-        uid,
         role,
       });
       router.push(resolveRoleHome(role));
@@ -450,7 +439,6 @@ function LoginForm() {
       const code = error.code;
 
       logCampusAuthEvent("error", "Login failed", {
-        schoolId: sid,
         code: code ?? "unknown",
         message: error.message ?? "Unknown login error",
       });

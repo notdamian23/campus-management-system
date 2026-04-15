@@ -56,10 +56,26 @@ import { Switch } from "@heroui/switch";
 import { Tab, Tabs } from "@heroui/tabs";
 import { CampusCardListSkeleton } from "@/components/ui";
 import {
+  AllEventDocumentsModal,
+  AllEventImagesModal,
+  EventDetailFileItem,
+  EventDetailInfoRow,
+  EventDetailSectionCard,
+  EventDetailStat,
+  EventFilesTabs,
+  eventDetailTabsClassNames,
+} from "@/components/events/EventDetailsShared";
+import {
   BellRing,
+  CalendarDays,
   CalendarClock,
+  Clock3,
   ClipboardList,
+  Download,
   FileStack,
+  MapPin,
+  Search,
+  Trash2,
   Users,
 } from "lucide-react";
 import {
@@ -84,10 +100,12 @@ import {
   Time,
   today,
 } from "@internationalized/date";
+import { createCampusLogger } from "@/lib/campus-logger";
 import { campusToast } from "@/lib/toast";
 
 type Role = "teacher" | "student" | "ec";
 type EventStatus = "upcoming" | "ongoing" | "completed";
+const ecEventsLogger = createCampusLogger("EC Events");
 
 type EventDoc = {
   id: string;
@@ -209,8 +227,6 @@ type StudentLookup = {
 type NotificationListStatus = "scheduled" | "sent";
 type EventFilesTab = "images" | "docs";
 type EventSortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
-type ImageModalSortMode = "ascending" | "descending";
-type DocumentModalSortMode = "ascending" | "descending";
 type PendingDeleteFile = {
   eventId: string;
   kind: "images" | "docs";
@@ -237,6 +253,43 @@ type NotificationSummary = {
   createdAt?: any;
   recipientCount: number;
   status: NotificationListStatus;
+};
+
+type EventDetailsTab = "overview" | "participants" | "files";
+
+type EventAttendanceDoc = {
+  id: string;
+  uid?: string;
+  studentUid?: string;
+  schoolId?: string;
+  studentName?: string;
+  name?: string;
+  course?: string;
+  yearLevel?: string;
+  year?: string;
+  status?: string;
+  attendanceStatus?: string;
+  present?: boolean;
+  timeIn?: any;
+  timeInIso?: string;
+  timeOut?: any;
+  timeOutIso?: string;
+  timestamp?: any;
+  deviceTimestampIso?: string;
+  createdAt?: any;
+  updatedAt?: any;
+};
+
+type EventParticipantRow = {
+  uid: string;
+  schoolId: string;
+  studentName: string;
+  course: string;
+  year: string;
+  attendanceStatus: string;
+  attendanceTimeIn: string;
+  attendanceTimeOut: string;
+  sortMs: number;
 };
 
 const ONE_MB_IN_BYTES = 1024 * 1024;
@@ -524,6 +577,160 @@ function formatDateTime(value: any): string {
   return new Date(ms).toLocaleString();
 }
 
+function formatEventScheduleLabel(event: Pick<EventDoc, "scheduledTime" | "timeStart" | "timeEnd">) {
+  const start = String(event.scheduledTime || event.timeStart || "").trim() || "TBA";
+  const end = String(event.timeEnd || "").trim();
+  return end ? `${start} - ${end}` : start;
+}
+
+function getEventTargetLabel(event: Pick<EventDoc, "course" | "yearLevel" | "targetStudent">) {
+  const pieces: string[] = [];
+
+  if (String(event.course ?? "").trim() && String(event.course).trim() !== "All Courses") {
+    pieces.push(String(event.course).trim());
+  }
+
+  if (String(event.yearLevel ?? "").trim() && String(event.yearLevel).trim() !== "All Years") {
+    pieces.push(String(event.yearLevel).trim());
+  }
+
+  if (String(event.targetStudent ?? "").trim()) {
+    pieces.push(`Students: ${String(event.targetStudent).trim()}`);
+  }
+
+  return pieces.length > 0 ? pieces.join(" | ") : "All students";
+}
+
+function toEventDetailFileItem(
+  file: EventFile,
+  kind: "images" | "docs",
+): EventDetailFileItem {
+  return {
+    id: file.id,
+    name:
+      String(
+        file.name ?? (kind === "images" ? "Untitled image" : "Untitled document"),
+      ).trim() || (kind === "images" ? "Untitled image" : "Untitled document"),
+    kind,
+    size: Number(file.size ?? 0),
+    downloadURL: String(file.downloadURL ?? "").trim(),
+    contentType: String(file.contentType ?? "").trim(),
+    createdAtMs: toMillis(file.createdAt),
+  };
+}
+
+function getEventParticipantToneClasses(status: string) {
+  if (status === "Present") return "bg-emerald-100 text-emerald-700";
+  if (status === "Missed" || status === "Absent") return "bg-rose-100 text-rose-700";
+  if (status === "Waitlisted") return "bg-amber-100 text-amber-700";
+  if (status === "Cancelled") return "bg-slate-100 text-slate-700";
+  return "bg-blue-100 text-blue-700";
+}
+
+function buildEventParticipantRows(
+  event: EventDoc | null,
+  registrations: RegistrationDoc[],
+  attendanceRows: EventAttendanceDoc[],
+) {
+  if (!event) return [] as EventParticipantRow[];
+
+  const rowsByUid = new Map<string, EventParticipantRow>();
+
+  registrations.forEach((registration) => {
+    const uid = String(registration.uid ?? registration.id).trim();
+    if (!uid) return;
+
+    rowsByUid.set(uid, {
+      uid,
+      schoolId: String(registration.schoolId ?? "").trim() || uid,
+      studentName:
+        String(registration.studentName ?? "").trim() ||
+        String(registration.schoolId ?? "").trim() ||
+        uid,
+      course: String(registration.course ?? "").trim() || "-",
+      year: String(registration.year ?? "").trim() || "-",
+      attendanceStatus: formatRegistrationStatus(
+        parseRegistrationStatus(registration.status),
+      ),
+      attendanceTimeIn: "-",
+      attendanceTimeOut: "-",
+      sortMs: registrationSortMillis(registration),
+    });
+  });
+
+  attendanceRows.forEach((rowDoc) => {
+    const uid = String(rowDoc.uid ?? rowDoc.studentUid ?? rowDoc.id).trim();
+    if (!uid) return;
+
+    const existing = rowsByUid.get(uid);
+    const fallbackStatus =
+      typeof rowDoc.present === "boolean"
+        ? rowDoc.present
+          ? "Present"
+          : "Absent"
+        : "";
+    const timeInValue = formatDateTime(
+      rowDoc.timeInIso ||
+        rowDoc.timeIn ||
+        rowDoc.timestamp ||
+        rowDoc.updatedAt ||
+        rowDoc.createdAt,
+    );
+    const timeOutValue = formatDateTime(rowDoc.timeOutIso || rowDoc.timeOut);
+    const derivedStatus =
+      timeInValue !== "-" && timeOutValue !== "-"
+        ? "Present"
+        : timeInValue !== "-"
+          ? "Timed In"
+          : "";
+    const status =
+      String(
+        rowDoc.attendanceStatus ?? rowDoc.status ?? fallbackStatus ?? "",
+      ).trim() ||
+      derivedStatus ||
+      existing?.attendanceStatus ||
+      "Recorded";
+
+    rowsByUid.set(uid, {
+      uid,
+      schoolId: String(rowDoc.schoolId ?? existing?.schoolId ?? "").trim() || uid,
+      studentName:
+        String(
+          rowDoc.studentName ?? rowDoc.name ?? existing?.studentName ?? "",
+        ).trim() ||
+        String(rowDoc.schoolId ?? existing?.schoolId ?? "").trim() ||
+        uid,
+      course: String(rowDoc.course ?? existing?.course ?? "").trim() || "-",
+      year:
+        String(rowDoc.yearLevel ?? rowDoc.year ?? existing?.year ?? "").trim() ||
+        "-",
+      attendanceStatus: status,
+      attendanceTimeIn:
+        timeInValue !== "-" ? timeInValue : (existing?.attendanceTimeIn ?? "-"),
+      attendanceTimeOut:
+        timeOutValue !== "-" ? timeOutValue : (existing?.attendanceTimeOut ?? "-"),
+      sortMs: Math.max(
+        toMillis(rowDoc.updatedAt || rowDoc.createdAt || rowDoc.timestamp),
+        existing?.sortMs ?? 0,
+      ),
+    });
+  });
+
+  if (computeStatus(event) === "completed") {
+    rowsByUid.forEach((row) => {
+      if (row.attendanceStatus === "Pre-registered" && row.attendanceTimeIn === "-") {
+        row.attendanceStatus = "Missed";
+      }
+    });
+  }
+
+  return Array.from(rowsByUid.values()).sort((left, right) => {
+    const byName = left.studentName.localeCompare(right.studentName);
+    if (byName !== 0) return byName;
+    return left.schoolId.localeCompare(right.schoolId);
+  });
+}
+
 function getDateTimeMs(date: string, time12?: string) {
   const raw = String(date ?? "").trim();
   if (!raw) return 0;
@@ -750,6 +957,9 @@ export default function EventDashboard() {
   const eventCoursePickerRef = useRef<HTMLDivElement | null>(null);
 
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+  const [selectedEventTab, setSelectedEventTab] =
+    useState<EventDetailsTab>("overview");
+  const [participantSearch, setParticipantSearch] = useState("");
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
@@ -836,6 +1046,9 @@ export default function EventDashboard() {
   const [eventRegistrations, setEventRegistrations] = useState<
     Record<string, RegistrationDoc[]>
   >({});
+  const [eventAttendance, setEventAttendance] = useState<
+    Record<string, EventAttendanceDoc[]>
+  >({});
   const [eventFilesTab, setEventFilesTab] = useState<EventFilesTab>("images");
   const [viewAllFilesModal, setViewAllFilesModal] = useState<{
     open: boolean;
@@ -848,11 +1061,6 @@ export default function EventDashboard() {
     eventTitle: "",
     kind: "images",
   });
-  const [imageModalSortMode, setImageModalSortMode] =
-    useState<ImageModalSortMode>("ascending");
-  const [documentModalSortMode, setDocumentModalSortMode] =
-    useState<DocumentModalSortMode>("ascending");
-  const [documentModalSearch, setDocumentModalSearch] = useState("");
   const [pendingDeleteFile, setPendingDeleteFile] =
     useState<PendingDeleteFile | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
@@ -1211,6 +1419,7 @@ export default function EventDashboard() {
       collection(db, "events", expandedEventId, "docs"),
       orderBy("createdAt", "desc"),
     );
+    const attendanceQ = collection(db, "events", expandedEventId, "attendance");
 
     const unsubImgs = onSnapshot(imgQ, (snap) => {
       setEventImages((prev) => ({
@@ -1232,9 +1441,20 @@ export default function EventDashboard() {
       }));
     });
 
+    const unsubAttendance = onSnapshot(attendanceQ, (snap) => {
+      setEventAttendance((prev) => ({
+        ...prev,
+        [expandedEventId]: snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as any),
+        })),
+      }));
+    });
+
     return () => {
       unsubImgs();
       unsubDocs();
+      unsubAttendance();
     };
   }, [expandedEventId]);
 
@@ -1524,6 +1744,92 @@ export default function EventDashboard() {
     return sortedFilteredEvents.slice(start, start + ITEMS_PER_PAGE);
   }, [sortedFilteredEvents, eventPage]);
 
+  const selectedEvent = useMemo(
+    () => events.find((event) => event.id === expandedEventId) ?? null,
+    [events, expandedEventId],
+  );
+  const selectedEventImages = useMemo(
+    () =>
+      selectedEvent
+        ? (eventImages[selectedEvent.id] ?? []).map((file) =>
+            toEventDetailFileItem(file, "images"),
+          )
+        : [],
+    [eventImages, selectedEvent],
+  );
+  const selectedEventDocs = useMemo(
+    () =>
+      selectedEvent
+        ? (eventDocs[selectedEvent.id] ?? []).map((file) =>
+            toEventDetailFileItem(file, "docs"),
+          )
+        : [],
+    [eventDocs, selectedEvent],
+  );
+  const selectedEventRegistrations = useMemo(
+    () => (selectedEvent ? eventRegistrations[selectedEvent.id] ?? [] : []),
+    [eventRegistrations, selectedEvent],
+  );
+  const selectedEventAttendanceRows = useMemo(
+    () => (selectedEvent ? eventAttendance[selectedEvent.id] ?? [] : []),
+    [eventAttendance, selectedEvent],
+  );
+  const selectedEventParticipantRows = useMemo(
+    () =>
+      buildEventParticipantRows(
+        selectedEvent,
+        selectedEventRegistrations,
+        selectedEventAttendanceRows,
+      ),
+    [selectedEvent, selectedEventAttendanceRows, selectedEventRegistrations],
+  );
+  const filteredSelectedParticipantRows = useMemo(() => {
+    const search = participantSearch.trim().toLowerCase();
+    if (!search) return selectedEventParticipantRows;
+
+    return selectedEventParticipantRows.filter((row) => {
+      const haystack = [
+        row.studentName,
+        row.schoolId,
+        row.course,
+        row.year,
+        row.attendanceStatus,
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(search);
+    });
+  }, [participantSearch, selectedEventParticipantRows]);
+  const selectedEventPreviewImages = useMemo(
+    () => selectedEventImages.slice(0, 3),
+    [selectedEventImages],
+  );
+  const selectedEventPreviewDocs = useMemo(
+    () => selectedEventDocs.slice(0, 3),
+    [selectedEventDocs],
+  );
+  const selectedEventPresentCount = useMemo(
+    () =>
+      selectedEventParticipantRows.filter(
+        (row) =>
+          row.attendanceStatus === "Present" ||
+          row.attendanceStatus === "Timed In",
+      ).length,
+    [selectedEventParticipantRows],
+  );
+  const selectedEventMissedCount = useMemo(
+    () =>
+      selectedEventParticipantRows.filter(
+        (row) =>
+          row.attendanceStatus === "Missed" || row.attendanceStatus === "Absent",
+      ).length,
+    [selectedEventParticipantRows],
+  );
+  const selectedEventStatus = useMemo(
+    () => (selectedEvent ? computeStatus(selectedEvent) : null),
+    [selectedEvent],
+  );
+
   const notificationTotalPages = useMemo(
     () =>
       Math.max(
@@ -1570,6 +1876,12 @@ export default function EventDashboard() {
       setExpandedNotificationId(null);
     }
   }, [expandedNotificationId, sortedFilteredNotifications]);
+
+  useEffect(() => {
+    setSelectedEventTab("overview");
+    setParticipantSearch("");
+    setEventFilesTab("images");
+  }, [expandedEventId]);
 
   const eventSortLabel = useMemo(() => {
     if (eventSortMode === "oldest_to_latest") return "Date, old to new";
@@ -1685,49 +1997,12 @@ export default function EventDashboard() {
     if (!viewAllFilesModal.eventId) return [];
     return eventDocs[viewAllFilesModal.eventId] ?? [];
   }, [eventDocs, viewAllFilesModal.eventId]);
-  const sortedViewAllModalImages = useMemo(() => {
-    const list = [...viewAllModalImages];
-    list.sort((a, b) => {
-      const aName = String(a.name ?? a.id).toLowerCase();
-      const bName = String(b.name ?? b.id).toLowerCase();
-      return imageModalSortMode === "ascending"
-        ? aName.localeCompare(bName)
-        : bName.localeCompare(aName);
-    });
-    return list;
-  }, [viewAllModalImages, imageModalSortMode]);
-  const sortedFilteredViewAllModalDocs = useMemo(() => {
-    const search = documentModalSearch.trim().toLowerCase();
-    const filtered = viewAllModalDocs.filter((file) => {
-      if (!search) return true;
-      const name = String(file.name ?? "").toLowerCase();
-      const contentType = String(file.contentType ?? "").toLowerCase();
-      return name.includes(search) || contentType.includes(search);
-    });
-
-    const sorted = [...filtered];
-    sorted.sort((a, b) => {
-      const aName = String(a.name ?? a.id).toLowerCase();
-      const bName = String(b.name ?? b.id).toLowerCase();
-      return documentModalSortMode === "ascending"
-        ? aName.localeCompare(bName)
-        : bName.localeCompare(aName);
-    });
-    return sorted;
-  }, [documentModalSearch, documentModalSortMode, viewAllModalDocs]);
 
   const openViewAllFilesModal = (
     eventId: string,
     eventTitle: string,
     kind: EventFilesTab,
   ) => {
-    if (kind === "images") {
-      setImageModalSortMode("ascending");
-    }
-    if (kind === "docs") {
-      setDocumentModalSortMode("ascending");
-      setDocumentModalSearch("");
-    }
     setViewAllFilesModal({
       open: true,
       eventId,
@@ -2100,10 +2375,9 @@ export default function EventDashboard() {
       (result) => result.status === "rejected",
     );
     if (storageDeleteFailed) {
-      console.warn(
-        "[EC Events] Some event files could not be removed from storage.",
-        { eventId },
-      );
+      ecEventsLogger.warn("Some event files could not be removed from storage.", {
+        eventId,
+      });
     }
 
     await deleteDocsInChunks([
@@ -2198,6 +2472,12 @@ export default function EventDashboard() {
         return next;
       });
       setEventRegistrations((prev) => {
+        if (!(eventToDelete.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[eventToDelete.id];
+        return next;
+      });
+      setEventAttendance((prev) => {
         if (!(eventToDelete.id in prev)) return prev;
         const next = { ...prev };
         delete next[eventToDelete.id];
@@ -2473,8 +2753,8 @@ export default function EventDashboard() {
           }
 
           bulkUpdateBlockedByPermissions = true;
-          console.warn(
-            "[EC Notifications] Bulk recipient update skipped due to Firestore permissions.",
+          ecEventsLogger.warn(
+            "Bulk recipient update skipped due to Firestore permissions.",
             {
               dispatchId: editingNotificationDispatchId,
               code,
@@ -4849,13 +5129,12 @@ export default function EventDashboard() {
                     const cancelledRows = registrations.filter(
                       (row) => row.status === "CANCELLED",
                     );
-                    const isEventExpanded = expandedEventId === ev.id;
+                    const isEventExpanded = false;
                     const toggleEventDetails = () => {
-                      setExpandedEventId((prev) => {
-                        const next = prev === ev.id ? null : ev.id;
-                        if (next) setEventFilesTab("images");
-                        return next;
-                      });
+                      setExpandedEventId(ev.id);
+                      setSelectedEventTab("overview");
+                      setParticipantSearch("");
+                      setEventFilesTab("images");
                     };
                     const used = hasSlots
                       ? registrations.length > 0
@@ -5793,272 +6072,538 @@ export default function EventDashboard() {
       </Card>
 
       <Modal
-        isOpen={viewAllFilesModal.open}
+        isOpen={Boolean(selectedEvent)}
         onOpenChange={(open) => {
-          if (!open) closeViewAllFilesModal();
+          if (!open) {
+            setExpandedEventId(null);
+            setSelectedEventTab("overview");
+            setParticipantSearch("");
+          }
         }}
         size={isCompactViewport ? "full" : "5xl"}
         scrollBehavior="inside"
       >
         <ModalContent>
-          {(onClose) => (
-            <>
-              <ModalHeader className="flex flex-col gap-1">
-                <span>
-                  {viewAllFilesModal.kind === "images"
-                    ? "All Images"
-                    : "All Documents"}
-                </span>
-                <span className="text-xs font-normal text-campus-text-secondary">
-                  {viewAllFilesModal.eventTitle || "Event files"}
-                </span>
-              </ModalHeader>
-
-              <ModalBody>
-                {viewAllFilesModal.kind === "images" ? (
-                  viewAllModalImages.length === 0 ? (
-                    <p className="text-sm text-campus-text-secondary">
-                      No images available.
-                    </p>
-                  ) : (
-                    <div className="space-y-3">
-                      <div className="flex justify-end">
-                        <Dropdown placement="bottom-end">
-                          <DropdownTrigger>
-                            <Button
-                              variant="bordered"
-                              className="h-8 min-w-0 px-3 text-xs sm:text-sm"
-                            >
-                              <span>
-                                Sort by:{" "}
-                                {imageModalSortMode === "ascending"
-                                  ? "Ascending"
-                                  : "Descending"}
-                              </span>
-                              <FiChevronDown className="ml-2" />
-                            </Button>
-                          </DropdownTrigger>
-                          <DropdownMenu
-                            aria-label="Sort all images"
-                            disallowEmptySelection
-                            selectionMode="single"
-                            selectedKeys={new Set([imageModalSortMode])}
-                            onAction={(key) =>
-                              setImageModalSortMode(
-                                String(key) as ImageModalSortMode,
-                              )
-                            }
-                          >
-                            <DropdownItem key="ascending">
-                              Ascending
-                            </DropdownItem>
-                            <DropdownItem key="descending">
-                              Descending
-                            </DropdownItem>
-                          </DropdownMenu>
-                        </Dropdown>
+          {() =>
+            selectedEvent ? (
+              <>
+                <ModalHeader className="flex flex-col gap-4 border-b border-border/70 pb-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Chip size="sm" className={statusChip(selectedEventStatus || "upcoming")}>
+                          {selectedEventStatus || "upcoming"}
+                        </Chip>
+                        <Chip size="sm" className="bg-slate-100 text-slate-700">
+                          {getEventTargetLabel(selectedEvent)}
+                        </Chip>
                       </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                        {sortedViewAllModalImages.map((img) => (
-                          <div
-                            key={img.id}
-                            className="border rounded-lg bg-white p-2"
-                          >
-                            <a
-                              href={img.downloadURL}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img
-                                src={img.downloadURL}
-                                alt={img.name || "event image"}
-                                className="w-full h-32 object-cover rounded-md"
-                              />
-                            </a>
-
-                            <div className="mt-2 space-y-1">
-                              <p className="text-xs truncate">{img.name}</p>
-                              <div className="flex items-center justify-between gap-2">
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="light"
-                                  color="primary"
-                                  className="h-7 min-w-0 px-2 text-xs"
-                                  onClick={() =>
-                                    downloadEventFile(
-                                      img,
-                                      img.name || "event-image.jpg",
-                                    )
-                                  }
-                                >
-                                  Download
-                                </Button>
-
-                                {isECUser &&
-                                  img.path &&
-                                  viewAllFilesModal.eventId && (
-                                    <Button
-                                      type="button"
-                                      size="sm"
-                                      variant="light"
-                                      color="danger"
-                                      className="h-7 min-w-0 px-2 text-xs"
-                                      onClick={() => {
-                                        const modalEventId =
-                                          viewAllFilesModal.eventId;
-                                        if (!modalEventId) return;
-                                        requestDeleteEventFile(
-                                          modalEventId,
-                                          "images",
-                                          img.id,
-                                          img.path!,
-                                          img.name || "event-image.jpg",
-                                        );
-                                      }}
-                                    >
-                                      Delete
-                                    </Button>
-                                  )}
-                              </div>
-                            </div>
-                          </div>
-                        ))}
+                      <div className="space-y-1">
+                        <h3 className="text-xl font-semibold text-campus-text-primary">
+                          {selectedEvent.title}
+                        </h3>
+                        <div className="flex flex-col gap-2 text-sm font-normal text-campus-text-secondary sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
+                          <span className="inline-flex items-center gap-1.5">
+                            <CalendarDays size={15} />
+                            {selectedEvent.date}
+                          </span>
+                          <span className="inline-flex items-center gap-1.5">
+                            <Clock3 size={15} />
+                            {formatEventScheduleLabel(selectedEvent)}
+                          </span>
+                          <span className="inline-flex items-center gap-1.5">
+                            <MapPin size={15} />
+                            {selectedEvent.location || "TBA"}
+                          </span>
+                        </div>
                       </div>
                     </div>
-                  )
-                ) : viewAllModalDocs.length === 0 ? (
-                  <p className="text-sm text-campus-text-secondary">
-                    No documents available.
-                  </p>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                      <Input
-                        value={documentModalSearch}
-                        onValueChange={setDocumentModalSearch}
-                        placeholder="Search documents..."
-                        size="sm"
-                        className="w-full"
-                      />
 
-                      <Dropdown placement="bottom-end">
-                        <DropdownTrigger>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="flat"
+                        onPress={() => setExpandedEventId(null)}
+                      >
+                        Hide details
+                      </Button>
+                      {selectedEventStatus === "completed" ? (
+                        <Button
+                          color="danger"
+                          variant="flat"
+                          onPress={() => requestDeleteCompletedEvent(selectedEvent)}
+                        >
+                          Delete
+                        </Button>
+                      ) : (
+                        <Button
+                          variant={selectedEventStatus === "upcoming" ? "solid" : "bordered"}
+                          className={selectedEventStatus === "upcoming" ? "text-white" : ""}
+                          style={
+                            selectedEventStatus === "upcoming"
+                              ? {
+                                  backgroundColor: "#F5A524",
+                                  borderColor: "#F5A524",
+                                }
+                              : undefined
+                          }
+                          onPress={() => {
+                            if (selectedEventStatus !== "upcoming") return;
+                            void handleStartEditUpcomingEvent(selectedEvent);
+                          }}
+                          isDisabled={selectedEventStatus !== "upcoming"}
+                        >
+                          {selectedEventStatus === "upcoming" ? "Edit event" : "Edit later"}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </ModalHeader>
+
+                <ModalBody className="space-y-5 pb-6">
+                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                    <EventDetailStat
+                      label="Pre-Reg"
+                      value={
+                        selectedEventRegistrations.filter(
+                          (row) => row.status === "PRE_REGISTERED",
+                        ).length || Math.max(0, Number(selectedEvent.preRegCount ?? 0))
+                      }
+                      tone="blue"
+                    />
+                    <EventDetailStat
+                      label="Present"
+                      value={selectedEventPresentCount}
+                      tone="green"
+                    />
+                    <EventDetailStat
+                      label="Missed"
+                      value={selectedEventMissedCount}
+                      tone="red"
+                    />
+                    <EventDetailStat
+                      label="Files"
+                      value={selectedEventImages.length + selectedEventDocs.length}
+                      tone="purple"
+                    />
+                  </div>
+
+                  <Tabs
+                    aria-label="EC event detail tabs"
+                    selectedKey={selectedEventTab}
+                    onSelectionChange={(key) =>
+                      setSelectedEventTab(String(key) as EventDetailsTab)
+                    }
+                    fullWidth
+                    classNames={eventDetailTabsClassNames}
+                  >
+                    <Tab key="overview" title="Overview">
+                      <div className="grid grid-cols-1 gap-4 pt-3 lg:grid-cols-2">
+                        <EventDetailSectionCard title="Event summary">
+                          <div className="space-y-4">
+                            <EventDetailInfoRow
+                              label="Audience"
+                              value={getEventTargetLabel(selectedEvent)}
+                            />
+                            <EventDetailInfoRow
+                              label="Schedule"
+                              value={`${selectedEvent.date} | ${formatEventScheduleLabel(selectedEvent)}`}
+                            />
+                            <EventDetailInfoRow
+                              label="Location"
+                              value={selectedEvent.location || "TBA"}
+                            />
+                            <EventDetailInfoRow
+                              label="Payment linked"
+                              value={selectedEvent.withPayment ? "Yes" : "No"}
+                            />
+                            <EventDetailInfoRow
+                              label="Pre-registration"
+                              value={
+                                selectedEvent.isPreReg
+                                  ? `Enabled${typeof selectedEvent.preRegSlots === "number" ? ` (${selectedEvent.preRegSlots} slots)` : ""}`
+                                  : "Disabled"
+                              }
+                            />
+                          </div>
+                        </EventDetailSectionCard>
+
+                        <EventDetailSectionCard title="Event details">
+                          <p className="text-sm leading-6 text-campus-text-secondary">
+                            {selectedEvent.details || "No event description provided."}
+                          </p>
+                        </EventDetailSectionCard>
+
+                        {selectedEvent.isPreReg ? (
+                          <EventDetailSectionCard title="Registration controls">
+                            <div className="space-y-4">
+                              <EventDetailInfoRow
+                                label="Registration window"
+                                value={`${formatDateTime(selectedEvent.registrationStartAt)} to ${formatDateTime(selectedEvent.registrationEndAt)}`}
+                              />
+                              <EventDetailInfoRow
+                                label="Cancellation deadline"
+                                value={formatDateTime(selectedEvent.cancellationDeadlineAt)}
+                              />
+                              <EventDetailInfoRow
+                                label="Waitlist"
+                                value={selectedEvent.waitlistEnabled ? "Enabled" : "Disabled"}
+                              />
+                            </div>
+                          </EventDetailSectionCard>
+                        ) : null}
+
+                        <EventDetailSectionCard title="Operational notes">
+                          <div className="space-y-4">
+                            <EventDetailInfoRow
+                              label="Files available"
+                              value={`${selectedEventImages.length} images | ${selectedEventDocs.length} documents`}
+                            />
+                            <EventDetailInfoRow
+                              label="Target student"
+                              value={selectedEvent.targetStudent || "Not restricted to specific students"}
+                            />
+                            {selectedEvent.isPreReg && typeof selectedEvent.preRegSlots === "number" ? (
+                              <EventDetailInfoRow
+                                label="Slots"
+                                value={`${selectedEvent.preRegCount || 0} / ${selectedEvent.preRegSlots} used`}
+                              />
+                            ) : null}
+                          </div>
+                        </EventDetailSectionCard>
+                      </div>
+                    </Tab>
+
+                    <Tab key="participants" title="Participants">
+                      <div className="space-y-4 pt-3">
+                        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+                          <Input
+                            aria-label="Search participants"
+                            value={participantSearch}
+                            onValueChange={setParticipantSearch}
+                            placeholder="Search participants by name, ID, course, year, or status"
+                            startContent={<Search size={16} className="text-campus-text-secondary" />}
+                          />
+
                           <Button
-                            variant="bordered"
-                            className="h-8 min-w-0 px-3 text-xs sm:text-sm"
+                            color="primary"
+                            variant="flat"
+                            startContent={<Download size={16} />}
+                            onPress={() => void exportEventAttendanceCSV(selectedEvent)}
+                            isDisabled={exportingEventId === selectedEvent.id}
+                            isLoading={exportingEventId === selectedEvent.id}
                           >
-                            <span>
-                              Sort by:{" "}
-                              {documentModalSortMode === "ascending"
-                                ? "Ascending"
-                                : "Descending"}
-                            </span>
-                            <FiChevronDown className="ml-2" />
+                            {exportingEventId === selectedEvent.id
+                              ? "Exporting..."
+                              : "Export Attendance CSV"}
                           </Button>
-                        </DropdownTrigger>
-                        <DropdownMenu
-                          aria-label="Sort all documents"
-                          disallowEmptySelection
-                          selectionMode="single"
-                          selectedKeys={new Set([documentModalSortMode])}
-                          onAction={(key) =>
-                            setDocumentModalSortMode(
-                              String(key) as DocumentModalSortMode,
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Chip size="sm" className="bg-slate-100 text-slate-700">
+                            {filteredSelectedParticipantRows.length} participant
+                            {filteredSelectedParticipantRows.length === 1 ? "" : "s"}
+                          </Chip>
+                        </div>
+
+                        {filteredSelectedParticipantRows.length === 0 ? (
+                          <ECEmptyState
+                            title="No participants found"
+                            description={
+                              participantSearch
+                                ? "Try a different search term to find a participant."
+                                : "Registrations and attendance records will appear here once activity is recorded for this event."
+                            }
+                            compact
+                          />
+                        ) : (
+                          <div className="space-y-3">
+                            {filteredSelectedParticipantRows.map((row) => (
+                              <Card
+                                key={`${row.uid}-${row.attendanceStatus}`}
+                                shadow="none"
+                                className="border border-border/70 bg-slate-50/70"
+                              >
+                                <CardBody className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+                                  <div className="min-w-0">
+                                    <p className="font-semibold text-campus-text-primary">
+                                      {row.studentName}
+                                    </p>
+                                    <p className="text-xs text-campus-text-secondary">
+                                      {row.schoolId} | {row.course} | {row.year}
+                                    </p>
+                                    <p className="mt-1 text-xs text-campus-text-secondary">
+                                      Time in: {row.attendanceTimeIn} | Time out: {row.attendanceTimeOut}
+                                    </p>
+                                  </div>
+                                  <Chip
+                                    size="sm"
+                                    className={getEventParticipantToneClasses(row.attendanceStatus)}
+                                  >
+                                    {row.attendanceStatus}
+                                  </Chip>
+                                </CardBody>
+                              </Card>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </Tab>
+
+                    <Tab key="files" title="Files">
+                      <div className="space-y-5 pt-3">
+                        {uploadErr ? (
+                          <p className="text-sm text-red-600">{uploadErr}</p>
+                        ) : null}
+                        {uploadMsg ? (
+                          <p className="text-sm text-green-600">{uploadMsg}</p>
+                        ) : null}
+
+                        {isECUser ? (
+                          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                            <Card shadow="none" className="border border-border/70 bg-slate-50/70">
+                              <CardBody className="gap-2 p-4">
+                                <p className="text-sm font-semibold text-campus-text-primary">
+                                  Upload Images
+                                </p>
+                                <p className="text-xs leading-5 text-campus-text-secondary">
+                                  Auto-compressed before upload with a 10MB final-size limit.
+                                </p>
+                                <label className="mt-2">
+                                  <span className="sr-only">Upload event images</span>
+                                  <Input
+                                    type="file"
+                                    multiple
+                                    accept="image/*"
+                                    onChange={(e) =>
+                                      handleFileInputChange(selectedEvent.id, "images", e)
+                                    }
+                                  />
+                                </label>
+                              </CardBody>
+                            </Card>
+
+                            <Card shadow="none" className="border border-border/70 bg-slate-50/70">
+                              <CardBody className="gap-2 p-4">
+                                <p className="text-sm font-semibold text-campus-text-primary">
+                                  Upload Documents
+                                </p>
+                                <p className="text-xs leading-5 text-campus-text-secondary">
+                                  PDF, DOC, and DOCX files up to 10MB each.
+                                </p>
+                                <label className="mt-2">
+                                  <span className="sr-only">Upload event documents</span>
+                                  <Input
+                                    type="file"
+                                    multiple
+                                    accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                    onChange={(e) =>
+                                      handleFileInputChange(selectedEvent.id, "docs", e)
+                                    }
+                                  />
+                                </label>
+                              </CardBody>
+                            </Card>
+                          </div>
+                        ) : null}
+
+                        <EventFilesTabs
+                          activeView={eventFilesTab === "docs" ? "documents" : "images"}
+                          onViewChange={(view) =>
+                            setEventFilesTab(view === "documents" ? "docs" : "images")
+                          }
+                          imageCount={selectedEventImages.length}
+                          documentCount={selectedEventDocs.length}
+                          previewImageFiles={selectedEventPreviewImages}
+                          previewDocumentFiles={selectedEventPreviewDocs}
+                          onOpenImages={() =>
+                            openViewAllFilesModal(selectedEvent.id, selectedEvent.title, "images")
+                          }
+                          onOpenDocuments={() =>
+                            openViewAllFilesModal(selectedEvent.id, selectedEvent.title, "docs")
+                          }
+                          onDownloadFile={(file) =>
+                            downloadEventFile(
+                              {
+                                id: file.id,
+                                name: file.name,
+                                downloadURL: file.downloadURL,
+                              },
+                              file.name,
                             )
                           }
-                        >
-                          <DropdownItem key="ascending">Ascending</DropdownItem>
-                          <DropdownItem key="descending">
-                            Descending
-                          </DropdownItem>
-                        </DropdownMenu>
-                      </Dropdown>
-                    </div>
+                          renderImageActions={(file) => {
+                            const original = (eventImages[selectedEvent.id] ?? []).find(
+                              (item) => item.id === file.id,
+                            );
+                            if (!isECUser || !original?.path) return null;
 
-                    {sortedFilteredViewAllModalDocs.length === 0 ? (
-                      <p className="text-sm text-campus-text-secondary">
-                        No documents match your search.
-                      </p>
-                    ) : (
-                      sortedFilteredViewAllModalDocs.map((file) => (
-                        <div
-                          key={file.id}
-                          className="border rounded-lg bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
-                        >
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium truncate">
-                              {file.name}
-                            </p>
-                          </div>
+                            return (
+                              <Button
+                                isIconOnly
+                                size="sm"
+                                variant="light"
+                                color="danger"
+                                aria-label={`Delete ${file.name}`}
+                                onPress={() =>
+                                  requestDeleteEventFile(
+                                    selectedEvent.id,
+                                    "images",
+                                    original.id,
+                                    original.path!,
+                                    original.name || file.name,
+                                  )
+                                }
+                              >
+                                <Trash2 size={16} />
+                              </Button>
+                            );
+                          }}
+                          renderDocumentActions={(file) => {
+                            const original = (eventDocs[selectedEvent.id] ?? []).find(
+                              (item) => item.id === file.id,
+                            );
+                            if (!isECUser || !original?.path) return null;
 
-                          <div className="flex items-center gap-3 shrink-0 self-start sm:self-auto">
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="light"
-                              color="primary"
-                              className="h-7 min-w-0 px-2 text-xs sm:text-sm"
-                              onClick={() =>
-                                downloadEventFile(
-                                  file,
-                                  file.name || "event-document",
-                                )
-                              }
-                            >
-                              Download
-                            </Button>
-
-                            {isECUser &&
-                              file.path &&
-                              viewAllFilesModal.eventId && (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="light"
-                                  color="danger"
-                                  className="h-7 min-w-0 px-2 text-xs sm:text-sm"
-                                  onClick={() => {
-                                    const modalEventId =
-                                      viewAllFilesModal.eventId;
-                                    if (!modalEventId) return;
-                                    requestDeleteEventFile(
-                                      modalEventId,
-                                      "docs",
-                                      file.id,
-                                      file.path!,
-                                      file.name || "event-document",
-                                    );
-                                  }}
-                                >
-                                  Delete
-                                </Button>
-                              )}
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                )}
-              </ModalBody>
-
-              <ModalFooter>
-                <Button
-                  variant="bordered"
-                  onPress={() => {
-                    onClose();
-                    closeViewAllFilesModal();
-                  }}
-                >
-                  Close
-                </Button>
-              </ModalFooter>
-            </>
-          )}
+                            return (
+                              <Button
+                                isIconOnly
+                                size="sm"
+                                variant="light"
+                                color="danger"
+                                aria-label={`Delete ${file.name}`}
+                                onPress={() =>
+                                  requestDeleteEventFile(
+                                    selectedEvent.id,
+                                    "docs",
+                                    original.id,
+                                    original.path!,
+                                    original.name || file.name,
+                                  )
+                                }
+                              >
+                                <Trash2 size={16} />
+                              </Button>
+                            );
+                          }}
+                          imageEmptyState={{
+                            title: "No event images yet",
+                            description: "Upload event images to share photo documentation with the campus community.",
+                          }}
+                          documentEmptyState={{
+                            title: "No event documents yet",
+                            description: "Upload event documents to keep supporting files attached to this event.",
+                          }}
+                        />
+                      </div>
+                    </Tab>
+                  </Tabs>
+                </ModalBody>
+              </>
+            ) : null
+          }
         </ModalContent>
       </Modal>
+
+      <AllEventImagesModal
+        isOpen={viewAllFilesModal.open && viewAllFilesModal.kind === "images"}
+        onOpenChange={(open) => {
+          if (!open) closeViewAllFilesModal();
+        }}
+        files={viewAllModalImages.map((file) => toEventDetailFileItem(file, "images"))}
+        eventTitle={viewAllFilesModal.eventTitle || "Event files"}
+        isCompactView={isCompactViewport}
+        onDownloadFile={(file) =>
+          downloadEventFile(
+            {
+              id: file.id,
+              name: file.name,
+              downloadURL: file.downloadURL,
+            },
+            file.name,
+          )
+        }
+        renderImageActions={(file) => {
+          const original = viewAllModalImages.find((item) => item.id === file.id);
+          const modalEventId = viewAllFilesModal.eventId;
+          if (!isECUser || !modalEventId || !original?.path) return null;
+
+          return (
+            <Button
+              isIconOnly
+              size="sm"
+              variant="light"
+              color="danger"
+              aria-label={`Delete ${file.name}`}
+              onPress={() =>
+                requestDeleteEventFile(
+                  modalEventId,
+                  "images",
+                  original.id,
+                  original.path!,
+                  original.name || file.name,
+                )
+              }
+            >
+              <Trash2 size={16} />
+            </Button>
+          );
+        }}
+        introText="Browse all event images and download what you need."
+        emptyState={{
+          title: "No images found",
+          description: "Event images will appear here once uploaded.",
+        }}
+      />
+
+      <AllEventDocumentsModal
+        isOpen={viewAllFilesModal.open && viewAllFilesModal.kind === "docs"}
+        onOpenChange={(open) => {
+          if (!open) closeViewAllFilesModal();
+        }}
+        files={viewAllModalDocs.map((file) => toEventDetailFileItem(file, "docs"))}
+        eventTitle={viewAllFilesModal.eventTitle || "Event files"}
+        isCompactView={isCompactViewport}
+        onDownloadFile={(file) =>
+          downloadEventFile(
+            {
+              id: file.id,
+              name: file.name,
+              downloadURL: file.downloadURL,
+            },
+            file.name,
+          )
+        }
+        renderDocumentActions={(file) => {
+          const original = viewAllModalDocs.find((item) => item.id === file.id);
+          const modalEventId = viewAllFilesModal.eventId;
+          if (!isECUser || !modalEventId || !original?.path) return null;
+
+          return (
+            <Button
+              isIconOnly
+              size="sm"
+              variant="light"
+              color="danger"
+              aria-label={`Delete ${file.name}`}
+              onPress={() =>
+                requestDeleteEventFile(
+                  modalEventId,
+                  "docs",
+                  original.id,
+                  original.path!,
+                  original.name || file.name,
+                )
+              }
+            >
+              <Trash2 size={16} />
+            </Button>
+          );
+        }}
+        emptyState={{
+          title: "No documents found",
+          description: "Event documents will appear here once uploaded.",
+        }}
+      />
 
       <Modal
         isOpen={Boolean(pendingDeleteFile)}

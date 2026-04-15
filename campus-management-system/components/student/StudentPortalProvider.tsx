@@ -77,6 +77,16 @@ export type StudentPayment = {
   updatedAtMs: number;
 };
 
+export type StudentEventImageFile = {
+  id: string;
+  kind: "images";
+  name: string;
+  downloadURL: string;
+  contentType: string;
+  size: number;
+  createdAtMs: number;
+};
+
 export type StudentEvent = {
   id: string;
   title: string;
@@ -103,6 +113,8 @@ export type StudentEvent = {
   preRegCount: number;
   waitlistCount: number;
   preRegRemaining: number | null;
+  imageFiles: StudentEventImageFile[];
+  imageCount: number;
 };
 
 export type StudentNotification = {
@@ -209,6 +221,14 @@ type RegistrationDocData = {
   registeredAt?: { toMillis?: () => number };
   waitlistedAt?: { toMillis?: () => number };
   cancelledAt?: { toMillis?: () => number };
+};
+
+type EventImageDocData = {
+  name?: string;
+  downloadURL?: string;
+  contentType?: string;
+  size?: number;
+  createdAt?: unknown;
 };
 
 type ManagePreRegistrationResult = {
@@ -497,9 +517,13 @@ export function StudentPortalProvider({
   const [registrationsByEvent, setRegistrationsByEvent] = useState<
     Record<string, StudentRegistrationRecord>
   >({});
+  const [eventImagesByEvent, setEventImagesByEvent] = useState<
+    Record<string, StudentEventImageFile[]>
+  >({});
 
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(true);
+  const [loadingEventImages, setLoadingEventImages] = useState(true);
   const [loadingPayments, setLoadingPayments] = useState(true);
   const [loadingProfileNotifications, setLoadingProfileNotifications] =
     useState(true);
@@ -714,6 +738,80 @@ export function StudentPortalProvider({
 
     return () => unsub();
   }, [profile]);
+
+  useEffect(() => {
+    if (!profile) {
+      setEventImagesByEvent({});
+      setLoadingEventImages(false);
+      return;
+    }
+
+    const eventIds = rawEvents.map((event) => event.id).filter(Boolean);
+    if (eventIds.length === 0) {
+      setEventImagesByEvent({});
+      setLoadingEventImages(false);
+      return;
+    }
+
+    setLoadingEventImages(true);
+    const imageBuckets = new Map<string, StudentEventImageFile[]>();
+    const ready = new Set<string>();
+
+    const syncImages = () => {
+      setEventImagesByEvent(Object.fromEntries(imageBuckets));
+      setLoadingEventImages(ready.size !== eventIds.length);
+    };
+
+    const toImageRows = (
+      eventId: string,
+      snap: {
+        docs: Array<{
+          id: string;
+          data: () => EventImageDocData;
+        }>;
+      },
+    ) =>
+      snap.docs
+        .map((imageDoc) => {
+          const data = imageDoc.data() as EventImageDocData;
+
+          return {
+            id: imageDoc.id,
+            kind: "images" as const,
+            name:
+              String(data.name ?? "Untitled image").trim() || "Untitled image",
+            downloadURL: String(data.downloadURL ?? "").trim(),
+            contentType: String(data.contentType ?? "").trim(),
+            size: Number(data.size ?? 0),
+            createdAtMs: toMillis(data.createdAt),
+          } satisfies StudentEventImageFile;
+        })
+        .sort((left, right) => right.createdAtMs - left.createdAtMs);
+
+    const unsubs = eventIds.map((eventId) =>
+      onSnapshot(
+        query(
+          collection(db, "events", eventId, "images"),
+          orderBy("createdAt", "desc"),
+        ),
+        (snap) => {
+          imageBuckets.set(eventId, toImageRows(eventId, snap));
+          ready.add(eventId);
+          syncImages();
+        },
+        (e) => {
+          imageBuckets.set(eventId, []);
+          ready.add(eventId);
+          syncImages();
+          setError(toErrorMessage(e, "Failed to load event images."));
+        },
+      ),
+    );
+
+    return () => {
+      unsubs.forEach((unsub) => unsub());
+    };
+  }, [profile, rawEvents]);
 
   useEffect(() => {
     if (!profile) {
@@ -1057,6 +1155,8 @@ export function StudentPortalProvider({
           preRegCount: raw.preRegCount,
           waitlistCount: raw.waitlistCount,
           preRegRemaining: raw.preRegRemaining,
+          imageFiles: eventImagesByEvent[raw.id] ?? [],
+          imageCount: (eventImagesByEvent[raw.id] ?? []).length,
         } as StudentEvent;
       })
       .sort((a, b) => {
@@ -1064,7 +1164,13 @@ export function StudentPortalProvider({
         const bMs = b.eventDate?.getTime() ?? 0;
         return aMs - bMs;
       });
-  }, [attendanceByEvent, payments, rawEvents, registrationsByEvent]);
+  }, [
+    attendanceByEvent,
+    eventImagesByEvent,
+    payments,
+    rawEvents,
+    registrationsByEvent,
+  ]);
 
   const notifications = useMemo(() => {
     const items: StudentNotification[] = [];
@@ -1375,6 +1481,7 @@ export function StudentPortalProvider({
   const loading =
     loadingProfile ||
     loadingEvents ||
+    loadingEventImages ||
     loadingPayments ||
     loadingProfileNotifications;
 

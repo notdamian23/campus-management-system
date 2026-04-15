@@ -23,6 +23,10 @@ service firebase.storage {
       return signedIn() && role() == "ec";
     }
 
+    function isTeacher() {
+      return signedIn() && role() == "teacher";
+    }
+
     function isAdminOrEC() {
       return isAdmin() || isEC();
     }
@@ -33,10 +37,17 @@ service firebase.storage {
       allow read, write: if isAdminOrEC();
     }
 
-    // Event file storage:
-    // events/{eventId}/{kind}/{fileId}
-    match /events/{eventId}/{kind}/{fileId} {
+    // Event image storage:
+    // events/{eventId}/images/{fileId}
+    match /events/{eventId}/images/{fileId} {
       allow read: if signedIn();
+      allow write: if isAdminOrEC();
+    }
+
+    // Event document storage:
+    // events/{eventId}/docs/{fileId}
+    match /events/{eventId}/docs/{fileId} {
+      allow read: if isAdminOrEC() || isTeacher();
       allow write: if isAdminOrEC();
     }
 

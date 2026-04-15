@@ -1,5 +1,6 @@
 import * as admin from "firebase-admin";
 import {HttpsError, onCall, type CallableRequest} from "firebase-functions/v2/https";
+import {createCampusLogger} from "./campusLogger";
 
 if (admin.apps.length === 0) {
   admin.initializeApp();
@@ -7,6 +8,7 @@ if (admin.apps.length === 0) {
 
 const db = admin.firestore();
 const REGION = "asia-southeast1";
+const authLogger = createCampusLogger("CAMPUS auth");
 
 type Role = "admin" | "ec" | "teacher" | "student";
 type CallableAuthContext = {
@@ -732,7 +734,7 @@ export const resolveSchoolIdLogin = onCall({region: REGION}, async (request) => 
       .get();
 
     if (profileSnapshot.empty) {
-      console.warn("resolveSchoolIdLogin: profile not found", {schoolId});
+      authLogger.debug("resolveSchoolIdLogin profile not found");
       return {
         email: null,
         found: false,
@@ -753,9 +755,7 @@ export const resolveSchoolIdLogin = onCall({region: REGION}, async (request) => 
       const source =
         normalizeText(userRecord.email) ? "auth" : profileEmail ? "profile" : "fallback";
 
-      console.info("resolveSchoolIdLogin: resolved", {
-        schoolId,
-        uid: profileDoc.id,
+      authLogger.info("resolveSchoolIdLogin resolved", {
         source,
       });
 
@@ -765,7 +765,9 @@ export const resolveSchoolIdLogin = onCall({region: REGION}, async (request) => 
         source,
       };
     } catch (error: unknown) {
-      console.error("resolveSchoolIdLogin failed to read Auth user", error);
+      authLogger.warn("resolveSchoolIdLogin auth lookup failed, using fallback", {
+        error,
+      });
       const fallbackEmail = profileEmail || `${schoolId}@campus.local`;
       const source = profileEmail ? "profile" : "fallback";
       return {
@@ -818,10 +820,7 @@ export const getCurrentCampusProfile = onCall({region: REGION}, async (request) 
         profileData.email = authEmail;
       }
     } catch (error) {
-      console.warn("getCurrentCampusProfile: unable to sync auth email", {
-        uid,
-        error,
-      });
+      authLogger.warn("getCurrentCampusProfile unable to sync auth email", {error});
     }
 
     return {
@@ -960,8 +959,7 @@ export const finalizeVerifiedCampusProfile = onCall({region: REGION}, async (req
     );
 
     const refreshedProfileSnap = await profileRef.get();
-    console.info("finalizeVerifiedCampusProfile: finalized", {
-      uid,
+    authLogger.info("finalizeVerifiedCampusProfile finalized", {
       role: normalizeText(refreshedProfileSnap.data()?.role),
     });
 

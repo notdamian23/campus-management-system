@@ -1,6 +1,7 @@
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { app } from "@/lib/firebase";
 import type { CampusProfileDoc } from "@/lib/campus-auth";
+import { createCampusLogger } from "@/lib/campus-logger";
 
 export const CAMPUS_FUNCTIONS_REGION =
   process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_REGION?.trim() ||
@@ -44,21 +45,24 @@ function getCampusFunctions() {
   return getFunctions(app, CAMPUS_FUNCTIONS_REGION);
 }
 
-function logAuthDebug(
+const authLogger = createCampusLogger("CAMPUS auth");
+
+function logAuthEvent(
   level: "info" | "warn" | "error",
   message: string,
   payload?: Record<string, unknown>,
 ) {
-  if (typeof window === "undefined") return;
+  if (level === "error") {
+    authLogger.error(message, payload);
+    return;
+  }
 
-  const logger =
-    level === "error"
-      ? console.error
-      : level === "warn"
-        ? console.warn
-        : console.info;
+  if (level === "warn") {
+    authLogger.warn(message, payload);
+    return;
+  }
 
-  logger(`[CAMPUS auth] ${message}`, payload ?? {});
+  authLogger.info(message, payload);
 }
 
 function toResolverFailureMessage(code?: string) {
@@ -83,10 +87,9 @@ export async function resolveSchoolIdLoginForSchoolId(
 ): Promise<SchoolIdLoginResolution> {
   const normalizedSchoolId = trimValue(schoolId);
 
-  logAuthDebug("info", "Resolving School ID login", {
-    schoolId: normalizedSchoolId,
+  logAuthEvent("info", "Resolving School ID login", {
     region: CAMPUS_FUNCTIONS_REGION,
-    origin: typeof window !== "undefined" ? window.location.origin : "",
+    hasSchoolId: Boolean(normalizedSchoolId),
   });
 
   try {
@@ -100,8 +103,7 @@ export async function resolveSchoolIdLoginForSchoolId(
     const source = result.data?.source ?? (mappedEmail ? "unknown" : "missing");
     const found = result.data?.found === true || Boolean(mappedEmail);
 
-    logAuthDebug("info", "resolveSchoolIdLogin completed", {
-      schoolId: normalizedSchoolId,
+    logAuthEvent("info", "resolveSchoolIdLogin completed", {
       found,
       source,
       hasEmail: Boolean(mappedEmail),
@@ -127,10 +129,8 @@ export async function resolveSchoolIdLoginForSchoolId(
       details?: unknown;
     };
 
-    logAuthDebug("error", "resolveSchoolIdLogin failed", {
-      schoolId: normalizedSchoolId,
+    logAuthEvent("error", "resolveSchoolIdLogin failed", {
       region: CAMPUS_FUNCTIONS_REGION,
-      origin: typeof window !== "undefined" ? window.location.origin : "",
       code: functionError.code ?? "unknown",
       message: functionError.message ?? "Unknown resolver error",
       details: functionError.details ?? null,
@@ -145,7 +145,7 @@ export async function resolveSchoolIdLoginForSchoolId(
 }
 
 export async function getCurrentCampusProfileForCurrentUser(): Promise<CampusProfileDoc | null> {
-  logAuthDebug("info", "Loading current CAMPUS profile");
+  logAuthEvent("info", "Loading current CAMPUS profile");
   const callable = httpsCallable<Record<string, never>, CampusProfileResponse>(
     getCampusFunctions(),
     "getCurrentCampusProfile",
@@ -154,7 +154,7 @@ export async function getCurrentCampusProfileForCurrentUser(): Promise<CampusPro
   const result = await callable({});
   const profile = result.data?.profile ?? null;
 
-  logAuthDebug("info", "Loaded current CAMPUS profile", {
+  logAuthEvent("info", "Loaded current CAMPUS profile", {
     hasProfile: Boolean(profile),
     role: profile?.role ?? "",
   });
@@ -166,8 +166,8 @@ export async function savePendingEmailVerificationForCurrentUser(
   pendingEmail: string,
 ): Promise<CampusProfileDoc | null> {
   const normalizedEmail = trimValue(pendingEmail).toLowerCase();
-  logAuthDebug("info", "Saving pending verification email", {
-    pendingEmail: normalizedEmail,
+  logAuthEvent("info", "Saving pending verification email", {
+    emailDomain: normalizedEmail.split("@")[1] ?? "",
   });
 
   const callable = httpsCallable<
@@ -183,7 +183,7 @@ export async function finalizeVerifiedCampusProfileForCurrentUser(): Promise<{
   finalized: boolean;
   profile: CampusProfileDoc | null;
 }> {
-  logAuthDebug("info", "Finalizing verified CAMPUS profile");
+  logAuthEvent("info", "Finalizing verified CAMPUS profile");
 
   const callable = httpsCallable<Record<string, never>, FinalizeCampusProfileResponse>(
     getCampusFunctions(),
@@ -202,5 +202,5 @@ export function logCampusAuthEvent(
   message: string,
   payload?: Record<string, unknown>,
 ) {
-  logAuthDebug(level, message, payload);
+  logAuthEvent(level, message, payload);
 }

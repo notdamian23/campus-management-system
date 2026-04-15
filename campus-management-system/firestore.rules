@@ -79,16 +79,28 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create, update, delete: if isAdminOrEC();
 
+      match /images/{imageId} {
+        allow read: if signedIn();
+        allow create, update, delete: if isAdminOrEC();
+      }
+
+      match /docs/{docId} {
+        allow read: if isAdminOrEC() || isTeacher();
+        allow create, update, delete: if isAdminOrEC();
+      }
+
+      match /attendance/{uid} {
+        allow read: if isAdminOrEC() || isTeacher() || isSelf(uid);
+        allow create, update, delete: if isAdminOrEC();
+      }
+
       match /registrations/{uid} {
-        allow read: if isAdminOrEC() ||
-          isSelf(uid) ||
-          (signedIn() && resource.data.uid == request.auth.uid);
+        allow read: if isAdminOrEC() || isSelf(uid);
         allow create, update, delete: if isAdminOrEC();
       }
 
       match /{subcollection}/{docId} {
-        allow read: if signedIn();
-        allow create, update, delete: if isAdminOrEC();
+        allow read, create, update, delete: if isAdminOrEC();
       }
     }
 

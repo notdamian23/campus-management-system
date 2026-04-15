@@ -2,6 +2,7 @@ export { StudentPortalProvider, useStudentPortal } from "./StudentPortalProvider
 export type {
   StudentAccountStatus,
   StudentEvent,
+  StudentEventImageFile,
   StudentEventStatus,
   StudentNotification,
   StudentNotificationType,

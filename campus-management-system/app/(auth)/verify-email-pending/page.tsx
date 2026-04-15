@@ -46,9 +46,7 @@ export default function VerifyEmailPendingPage() {
     setGeneralError("");
 
     try {
-      logCampusAuthEvent("info", "Refreshing verification status", {
-        uid: user.uid,
-      });
+      logCampusAuthEvent("info", "Refreshing verification status");
       await user.reload();
       const activeUser = auth.currentUser;
       if (!activeUser) {
@@ -75,7 +73,6 @@ export default function VerifyEmailPendingPage() {
       const onboardingRedirect = getOnboardingRedirect(nextProfile);
       if (onboardingRedirect === "/change-password") {
         logCampusAuthEvent("info", "Verification page redirected back to change-password", {
-          uid: activeUser.uid,
           role: nextProfile.role ?? "",
         });
         router.replace("/change-password");
@@ -84,7 +81,6 @@ export default function VerifyEmailPendingPage() {
 
       if (!onboardingRedirect) {
         logCampusAuthEvent("info", "Verification flow completed from pending page", {
-          uid: activeUser.uid,
           role: nextProfile.role ?? "",
         });
         campusToast.success({
@@ -101,7 +97,6 @@ export default function VerifyEmailPendingPage() {
           ? error.message
           : "Unable to refresh your verification status.";
       logCampusAuthEvent("error", "Verification status refresh failed", {
-        uid: user.uid,
         message,
       });
       setGeneralError(message);
@@ -159,20 +154,15 @@ export default function VerifyEmailPendingPage() {
         firebaseMethod: "verifyBeforeUpdateEmail",
         currentUser: user.email ? "present" : "present-without-email",
         authCurrentUser: auth.currentUser ? "present" : "missing",
-        uid: user.uid,
-        currentUserUid: auth.currentUser?.uid ?? "",
-        currentUserEmail: auth.currentUser?.email ?? "",
-        pendingEmail,
-        actionUrl: actionCodeSettings.url,
+        pendingEmailDomain: pendingEmail.split("@")[1] ?? "",
+        hasActionUrl: Boolean(actionCodeSettings.url),
         handleCodeInApp: actionCodeSettings.handleCodeInApp,
       });
       await verifyBeforeUpdateEmail(currentUser, pendingEmail, actionCodeSettings);
       logCampusAuthEvent("info", "Resend verification email accepted by Firebase", {
         firebaseMethod: "verifyBeforeUpdateEmail",
-        uid: currentUser.uid,
-        currentUserEmail: currentUser.email ?? "",
-        pendingEmail,
-        actionUrl: actionCodeSettings.url,
+        hasCurrentUserEmail: Boolean(currentUser.email),
+        pendingEmailDomain: pendingEmail.split("@")[1] ?? "",
       });
       const refreshedProfile =
         await savePendingEmailVerificationForCurrentUser(pendingEmail);
@@ -191,11 +181,10 @@ export default function VerifyEmailPendingPage() {
         authError.message || "Failed to resend the verification email.";
       logCampusAuthEvent("error", "Resend verification email failed", {
         firebaseMethod: "verifyBeforeUpdateEmail",
-        uid: user.uid,
         code: authError.code ?? "unknown",
         message: authError.message ?? "Unknown resend error",
-        currentUserEmail: auth.currentUser?.email ?? "",
-        pendingEmail,
+        hasCurrentUserEmail: Boolean(auth.currentUser?.email),
+        pendingEmailDomain: pendingEmail.split("@")[1] ?? "",
       });
       if (authError.code === "auth/requires-recent-login") {
         setGeneralError(exactErrorMessage);

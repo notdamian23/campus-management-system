@@ -37,11 +37,13 @@ exports.campusDeviceConfirmPairing = exports.campusDeviceLatestEvent = exports.c
 const crypto_1 = require("crypto");
 const admin = __importStar(require("firebase-admin"));
 const functions = __importStar(require("firebase-functions/v1"));
+const campusLogger_1 = require("./campusLogger");
 if (admin.apps.length === 0) {
     admin.initializeApp();
 }
 const db = admin.firestore();
 const REGION = "asia-southeast1";
+const deviceLogger = (0, campusLogger_1.createCampusLogger)("CAMPUS device");
 const MANILA_TIME_ZONE = "Asia/Manila";
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_EVENT_LIMIT = 20;
@@ -487,7 +489,7 @@ function deviceEndpoint(method, authMode, handler) {
         catch (error) {
             const status = error instanceof ApiError ? error.status : 500;
             const message = errorMessage(error, "Internal server error.");
-            console.error("Portable device endpoint failed", error);
+            deviceLogger.error("Portable device endpoint failed", { error, status });
             sendJson(res, status, { error: message });
         }
     });

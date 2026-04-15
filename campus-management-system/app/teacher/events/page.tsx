@@ -10,7 +10,6 @@ import {
   Modal,
   ModalBody,
   ModalContent,
-  ModalFooter,
   ModalHeader,
 } from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
@@ -21,28 +20,32 @@ import {
   CheckCircle2,
   Clock3,
   Download,
-  FileText,
   FileStack,
-  ImageIcon,
   MapPin,
   Search,
 } from "lucide-react";
+import {
+  AllEventDocumentsModal,
+  AllEventImagesModal,
+  EventDetailInfoRow,
+  EventDetailStat,
+  EventFilesTabs,
+  eventDetailTabsClassNames,
+} from "@/components/events/EventDetailsShared";
 import type { CampusTableColumn } from "@/components/ui";
 import { CampusMetricSkeleton } from "@/components/ui";
 import { db } from "@/lib/firebase";
 import { campusToast } from "@/lib/toast";
 import {
-  TeacherActivityChipGroup,
   TeacherDataTable,
   TeacherEmptyState,
   TeacherFilterBar,
   TeacherFilterBarSkeleton,
+  TeacherActivityChipGroup,
   TeacherPageHeader,
   TeacherStatsGrid,
   capitalizeTeacherLabel,
   downloadTeacherFile,
-  formatTeacherBytes,
-  isTeacherImageFile,
   formatTeacherEventDate,
   formatTeacherSchedule,
   getTeacherLifecycleTone,
@@ -80,30 +83,12 @@ const teacherEventColumns: CampusTableColumn<{
 
 type EventTabKey = "overview" | "participants" | "files";
 type EventFilesView = "images" | "documents";
-type FileSortMode = "name_asc" | "name_desc" | "newest" | "oldest";
 type ParticipantStatusFilter = "all" | "Present" | "Absent";
 
 type SelectOption = {
   key: string;
   label: string;
 };
-
-type TeacherEventFileItem = {
-  id: string;
-  name: string;
-  kind: "docs" | "images";
-  size: number;
-  downloadURL: string;
-  contentType: string;
-  createdAtMs: number;
-};
-
-const fileSortOptions: SelectOption[] = [
-  { key: "name_asc", label: "Ascending" },
-  { key: "name_desc", label: "Descending" },
-  { key: "newest", label: "Newest to oldest" },
-  { key: "oldest", label: "Oldest to newest" },
-];
 
 const participantStatusOptions: SelectOption[] = [
   { key: "all", label: "All" },
@@ -160,43 +145,6 @@ function formatExportDateTime(value: unknown) {
   return new Date(ms).toLocaleString();
 }
 
-function sortTeacherEventFiles(
-  files: TeacherEventFileItem[],
-  sortMode: FileSortMode,
-) {
-  const next = [...files];
-
-  next.sort((left, right) => {
-    if (sortMode === "name_asc") {
-      return (
-        left.name.localeCompare(right.name) ||
-        right.createdAtMs - left.createdAtMs
-      );
-    }
-
-    if (sortMode === "name_desc") {
-      return (
-        right.name.localeCompare(left.name) ||
-        right.createdAtMs - left.createdAtMs
-      );
-    }
-
-    if (sortMode === "oldest") {
-      return (
-        left.createdAtMs - right.createdAtMs ||
-        left.name.localeCompare(right.name)
-      );
-    }
-
-    return (
-      right.createdAtMs - left.createdAtMs ||
-      left.name.localeCompare(right.name)
-    );
-  });
-
-  return next;
-}
-
 function normalizeParticipantStatus(value: string) {
   const normalized = String(value ?? "").trim().toLowerCase();
 
@@ -227,9 +175,6 @@ export default function TeacherEventsPage() {
   const [filesView, setFilesView] = useState<EventFilesView>("images");
   const [imagesModalOpen, setImagesModalOpen] = useState(false);
   const [documentsModalOpen, setDocumentsModalOpen] = useState(false);
-  const [imageSortMode, setImageSortMode] = useState<FileSortMode>("newest");
-  const [documentSortMode, setDocumentSortMode] = useState<FileSortMode>("newest");
-  const [documentSearch, setDocumentSearch] = useState("");
 
   const statusOptions: SelectOption[] = [
     { key: "__all_status__", label: "All status" },
@@ -328,7 +273,7 @@ export default function TeacherEventsPage() {
     return filteredParticipants.slice(start, start + PARTICIPANTS_PER_PAGE);
   }, [filteredParticipants, participantsPage]);
 
-  const selectedFiles = useMemo<TeacherEventFileItem[]>(() => {
+  const selectedFiles = useMemo(() => {
     if (!selectedEvent) return [];
     return files
       .filter((file) => file.eventId === selectedEvent.id)
@@ -343,30 +288,13 @@ export default function TeacherEventsPage() {
     () => selectedFiles.filter((file) => file.kind === "images"),
     [selectedFiles],
   );
-  const sortedSelectedImages = useMemo(
-    () => sortTeacherEventFiles(selectedImages, imageSortMode),
-    [imageSortMode, selectedImages],
-  );
-  const sortedSelectedDocuments = useMemo(
-    () => sortTeacherEventFiles(selectedDocuments, documentSortMode),
-    [documentSortMode, selectedDocuments],
-  );
-  const filteredDocumentFiles = useMemo(() => {
-    const search = documentSearch.trim().toLowerCase();
-
-    if (!search) return sortedSelectedDocuments;
-
-    return sortedSelectedDocuments.filter((file) =>
-      file.name.toLowerCase().includes(search),
-    );
-  }, [documentSearch, sortedSelectedDocuments]);
   const previewImageFiles = useMemo(
-    () => sortedSelectedImages.slice(0, FILE_PREVIEW_LIMIT),
-    [sortedSelectedImages],
+    () => selectedImages.slice(0, FILE_PREVIEW_LIMIT),
+    [selectedImages],
   );
   const previewDocumentFiles = useMemo(
-    () => sortedSelectedDocuments.slice(0, FILE_PREVIEW_LIMIT),
-    [sortedSelectedDocuments],
+    () => selectedDocuments.slice(0, FILE_PREVIEW_LIMIT),
+    [selectedDocuments],
   );
 
   const upcomingCount = useMemo(
@@ -418,9 +346,6 @@ export default function TeacherEventsPage() {
     setFilesView("images");
     setImagesModalOpen(false);
     setDocumentsModalOpen(false);
-    setImageSortMode("newest");
-    setDocumentSortMode("newest");
-    setDocumentSearch("");
   }, [selectedEvent?.id]);
 
   const exportEventAttendanceCSV = async (
@@ -808,17 +733,29 @@ export default function TeacherEventsPage() {
                     ? `${formatTeacherEventDate(
                         selectedEvent.eventDate,
                         selectedEvent.date,
-                      )} • ${selectedEvent.location}`
+                      )} | ${selectedEvent.location}`
                     : "-"}
                 </span>
               </ModalHeader>
 
               <ModalBody className="space-y-5 pb-6">
                 <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-                  <ModalStat label="Pre-Reg" value={selectedEvent?.registrationCount ?? 0} tone="blue" />
-                  <ModalStat label="Present" value={selectedEvent?.presentCount ?? 0} tone="green" />
-                  <ModalStat label="Missed" value={selectedEvent?.absentCount ?? 0} tone="red" />
-                  <ModalStat
+                  <EventDetailStat
+                    label="Pre-Reg"
+                    value={selectedEvent?.registrationCount ?? 0}
+                    tone="blue"
+                  />
+                  <EventDetailStat
+                    label="Present"
+                    value={selectedEvent?.presentCount ?? 0}
+                    tone="green"
+                  />
+                  <EventDetailStat
+                    label="Missed"
+                    value={selectedEvent?.absentCount ?? 0}
+                    tone="red"
+                  />
+                  <EventDetailStat
                     label="Files"
                     value={
                       (selectedEvent?.documentCount ?? 0) +
@@ -835,25 +772,21 @@ export default function TeacherEventsPage() {
                     setSelectedTab(String(key) as EventTabKey)
                   }
                   fullWidth
-                  classNames={{
-                    tabList: "w-full grid grid-cols-3",
-                    tab: "w-full min-w-0 px-2",
-                    tabContent: "truncate text-xs sm:text-sm",
-                  }}
+                  classNames={eventDetailTabsClassNames}
                 >
                   <Tab key="overview" title="Overview">
                     <div className="grid grid-cols-1 gap-4 pt-3 lg:grid-cols-2">
                       <Card shadow="none" className="border border-border/70 bg-slate-50/70">
                         <CardBody className="space-y-4 p-4">
-                          <InfoRow
+                          <EventDetailInfoRow
                             label="Audience"
                             value={selectedEvent ? teacherAudienceLabel(selectedEvent) : "-"}
                           />
-                          <InfoRow
+                          <EventDetailInfoRow
                             label="Schedule"
                             value={selectedEvent ? formatTeacherSchedule(selectedEvent) : "-"}
                           />
-                          <InfoRow
+                          <EventDetailInfoRow
                             label="Status"
                             value={
                               selectedEvent
@@ -861,11 +794,11 @@ export default function TeacherEventsPage() {
                                 : "-"
                             }
                           />
-                          <InfoRow
+                          <EventDetailInfoRow
                             label="Payment linked"
                             value={selectedEvent?.withPayment ? "Yes" : "No"}
                           />
-                          <InfoRow
+                          <EventDetailInfoRow
                             label="Pre-registration"
                             value={
                               selectedEvent?.isPreReg
@@ -1026,7 +959,7 @@ export default function TeacherEventsPage() {
                                     {participant.studentName}
                                   </p>
                                   <p className="text-xs text-campus-text-secondary">
-                                    {participant.schoolId} • {participant.course} • {participant.year}
+                                    {participant.schoolId} | {participant.course} | {participant.year}
                                   </p>
                                 </div>
                                 <Chip size="sm" className={toneClasses.chip}>
@@ -1058,12 +991,19 @@ export default function TeacherEventsPage() {
                       <EventFilesTabs
                         activeView={filesView}
                         onViewChange={setFilesView}
-                        imageCount={sortedSelectedImages.length}
-                        documentCount={sortedSelectedDocuments.length}
+                        imageCount={selectedImages.length}
+                        documentCount={selectedDocuments.length}
                         previewImageFiles={previewImageFiles}
                         previewDocumentFiles={previewDocumentFiles}
                         onOpenImages={() => setImagesModalOpen(true)}
                         onOpenDocuments={() => setDocumentsModalOpen(true)}
+                        onDownloadFile={(file) =>
+                          downloadTeacherFile({
+                            url: file.downloadURL ?? "",
+                            name: file.name,
+                            sourceLabel: file.kind === "images" ? "image" : "document",
+                          })
+                        }
                       />
                     </div>
                   </Tab>
@@ -1074,232 +1014,55 @@ export default function TeacherEventsPage() {
         </ModalContent>
       </Modal>
 
-      <AllImagesModal
+      <AllEventImagesModal
         isOpen={Boolean(selectedEvent) && imagesModalOpen}
         onOpenChange={setImagesModalOpen}
-        files={sortedSelectedImages}
-        sortMode={imageSortMode}
-        onSortChange={setImageSortMode}
+        files={selectedImages}
         eventTitle={selectedEvent?.title || ""}
         isCompactView={isCompactView}
+        onDownloadFile={(file) =>
+          downloadTeacherFile({
+            url: file.downloadURL ?? "",
+            name: file.name,
+            sourceLabel: "image",
+          })
+        }
+        introText="Browse all teacher-visible event images and download what you need."
+        emptyState={{
+          title: "No images found",
+          description: "Teacher-visible event images will appear here once uploaded.",
+        }}
       />
 
-      <AllDocumentsModal
+      <AllEventDocumentsModal
         isOpen={Boolean(selectedEvent) && documentsModalOpen}
         onOpenChange={setDocumentsModalOpen}
-        files={filteredDocumentFiles}
-        totalCount={sortedSelectedDocuments.length}
-        searchValue={documentSearch}
-        onSearchValueChange={setDocumentSearch}
-        sortMode={documentSortMode}
-        onSortChange={setDocumentSortMode}
+        files={selectedDocuments}
         eventTitle={selectedEvent?.title || ""}
         isCompactView={isCompactView}
+        onDownloadFile={(file) =>
+          downloadTeacherFile({
+            url: file.downloadURL ?? "",
+            name: file.name,
+            sourceLabel: "document",
+          })
+        }
+        emptyState={{
+          title: "No documents found",
+          description: "Teacher-visible event documents will appear here once uploaded.",
+        }}
       />
     </div>
   );
 }
 
-function ModalStat({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: "blue" | "green" | "red" | "purple";
-}) {
-  const toneClasses = getTeacherToneClasses(tone);
-
-  return (
-    <Card shadow="none" className="border border-border/70 bg-slate-50/70">
-      <CardBody className="p-4">
-        <p className="text-sm text-campus-text-secondary">{label}</p>
-        <p className={`mt-2 text-2xl font-bold ${toneClasses.value}`}>{value}</p>
-      </CardBody>
-    </Card>
-  );
-}
-
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-xs uppercase tracking-[0.18em] text-campus-text-secondary">
-        {label}
-      </p>
-      <p className="mt-1 text-sm leading-6 text-campus-text-primary">{value}</p>
-    </div>
-  );
-}
-
-function EventFilesTabs({
-  activeView,
-  onViewChange,
-  imageCount,
-  documentCount,
-  previewImageFiles,
-  previewDocumentFiles,
-  onOpenImages,
-  onOpenDocuments,
-}: {
-  activeView: EventFilesView;
-  onViewChange: (view: EventFilesView) => void;
-  imageCount: number;
-  documentCount: number;
-  previewImageFiles: TeacherEventFileItem[];
-  previewDocumentFiles: TeacherEventFileItem[];
-  onOpenImages: () => void;
-  onOpenDocuments: () => void;
-}) {
-  const options: Array<{ key: EventFilesView; label: string }> = [
-    { key: "images", label: "Images" },
-    { key: "documents", label: "Documents" },
-  ];
-
-  return (
-    <div className="space-y-5">
-      <div className="flex justify-center sm:justify-start">
-        <div
-          role="tablist"
-          aria-label="Event files categories"
-          className="inline-flex rounded-full border border-border/70 bg-slate-100/90 p-1"
-        >
-          {options.map((option) => {
-            const isActive = activeView === option.key;
-
-            return (
-              <button
-                key={option.key}
-                type="button"
-                role="tab"
-                aria-selected={isActive}
-                onClick={() => onViewChange(option.key)}
-                className={[
-                  "rounded-full px-4 py-2 text-sm font-semibold transition-all sm:px-5",
-                  isActive
-                    ? "bg-white text-campus-text-primary shadow-sm"
-                    : "text-campus-text-secondary hover:text-campus-text-primary",
-                ].join(" ")}
-              >
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {activeView === "images" ? (
-        <ImagePreviewSection
-          files={previewImageFiles}
-          totalCount={imageCount}
-          onOpenAll={onOpenImages}
-        />
-      ) : (
-        <DocumentPreviewSection
-          files={previewDocumentFiles}
-          totalCount={documentCount}
-          onOpenAll={onOpenDocuments}
-        />
-      )}
-    </div>
-  );
-}
-
-function SectionHeader({
-  title,
-  count,
-  onOpenAll,
-}: {
-  title: string;
-  count: number;
-  onOpenAll: () => void;
-}) {
-  return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex items-center gap-2">
-        <h3 className="text-base font-semibold text-campus-text-primary">{title}</h3>
-        <Chip size="sm" className="bg-slate-100 text-slate-700">
-          {count}
-        </Chip>
-      </div>
-
-      {count > 0 ? (
-        <Button
-          variant="light"
-          className="h-auto min-w-0 self-start px-0 text-sm font-semibold text-primary-600 data-[hover=true]:bg-transparent sm:self-auto"
-          onPress={onOpenAll}
-        >
-          View all
-        </Button>
-      ) : null}
-    </div>
-  );
-}
-
-function ImagePreviewSection({
-  files,
-  totalCount,
-  onOpenAll,
-}: {
-  files: TeacherEventFileItem[];
-  totalCount: number;
-  onOpenAll: () => void;
-}) {
-  return (
-    <div className="space-y-4">
-      <SectionHeader title="Images" count={totalCount} onOpenAll={onOpenAll} />
-
-      {totalCount === 0 ? (
-        <TeacherEmptyState
-          title="No event images yet"
-          description="Teacher-visible photo documentation will appear here once uploaded."
-          icon={ImageIcon}
-          compact
-        />
-      ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {files.map((file) => (
-            <ImagePreviewCard key={file.id} file={file} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DocumentPreviewSection({
-  files,
-  totalCount,
-  onOpenAll,
-}: {
-  files: TeacherEventFileItem[];
-  totalCount: number;
-  onOpenAll: () => void;
-}) {
-  return (
-    <div className="space-y-4">
-      <SectionHeader title="Documents" count={totalCount} onOpenAll={onOpenAll} />
-
-      {totalCount === 0 ? (
-        <TeacherEmptyState
-          title="No event documents yet"
-          description="Teacher-visible event documents will appear here once uploaded."
-          icon={FileText}
-          compact
-        />
-      ) : (
-        <div className="space-y-3">
-          {files.map((file) => (
-            <DocumentListItem key={file.id} file={file} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
+/*
 function ImagePreviewCard({ file }: { file: TeacherEventFileItem }) {
-  const canPreview = isTeacherImageFile(file) && Boolean(file.downloadURL);
+  const canPreview = isTeacherImageFile({
+    kind: file.kind,
+    contentType: file.contentType ?? "",
+    name: file.name,
+  });
 
   return (
     <Card
@@ -1307,7 +1070,7 @@ function ImagePreviewCard({ file }: { file: TeacherEventFileItem }) {
       className="overflow-hidden border border-border/70 bg-white/95 shadow-[0_14px_32px_rgba(15,23,42,0.06)]"
     >
       <div className="h-44 bg-slate-100">
-        {canPreview ? (
+        {canPreview && file.downloadURL ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={file.downloadURL}
@@ -1347,7 +1110,7 @@ function ImagePreviewCard({ file }: { file: TeacherEventFileItem }) {
           startContent={<Download size={16} />}
           onPress={() =>
             downloadTeacherFile({
-              url: file.downloadURL,
+              url: file.downloadURL ?? "",
               name: file.name,
               sourceLabel: "image",
             })
@@ -1386,7 +1149,7 @@ function DocumentListItem({ file }: { file: TeacherEventFileItem }) {
           startContent={<Download size={16} />}
           onPress={() =>
             downloadTeacherFile({
-              url: file.downloadURL,
+              url: file.downloadURL ?? "",
               name: file.name,
               sourceLabel: "document",
             })
@@ -1600,3 +1363,4 @@ function AllDocumentsModal({
     </Modal>
   );
 }
+*/
