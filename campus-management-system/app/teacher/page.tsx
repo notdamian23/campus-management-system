@@ -80,7 +80,7 @@ export default function TeacherDashboard() {
         <TeacherPageHeader
           variant="hero"
           icon={ShieldCheck}
-          title={`Welcome back${profile?.teacherName ? `, ${profile.teacherName}` : ""}.`}
+          title={`Welcome back${profile ? `, ${profile.name || profile.schoolId || "User"}` : ""}.`}
           description="Review live events, student attendance activity, and shared event files in one teacher-friendly workspace built for the CAMPUS thesis system."
         />
       )}

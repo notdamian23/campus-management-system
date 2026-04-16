@@ -1,6 +1,9 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
 import { Button } from "@heroui/button";
 import { Chip } from "@heroui/chip";
 import {
@@ -15,6 +18,11 @@ import {
   ECStatsGrid,
   type ECStatItem,
 } from "@/components/ecmember";
+import { auth, db } from "@/lib/firebase";
+import {
+  type CampusProfileDoc,
+  resolveCampusDisplayName,
+} from "@/lib/campus-auth";
 
 const DASHBOARD_METRICS: ECStatItem[] = [
   {
@@ -80,11 +88,37 @@ const QUICK_LINKS = [
 
 export default function ECMemberDashboard() {
   const router = useRouter();
+  const [displayName, setDisplayName] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        setDisplayName(null);
+        return;
+      }
+
+      try {
+        const snap = await getDoc(doc(db, "profiles", user.uid));
+        if (!snap.exists()) {
+          setDisplayName("User");
+          return;
+        }
+
+        setDisplayName(
+          resolveCampusDisplayName(snap.data() as CampusProfileDoc),
+        );
+      } catch {
+        setDisplayName("User");
+      }
+    });
+
+    return () => unsub();
+  }, []);
 
   return (
     <div className="space-y-5 sm:space-y-6">
       <ECPageHeader
-        title="Operations Dashboard"
+        title={`Welcome back${displayName ? `, ${displayName}` : ""}.`}
         description="Keep student operations, events, payments, and shared documents moving from one EC workspace that stays usable on phones, tablets, and desktop."
         eyebrow="EC Member"
         icon={LayoutDashboard}

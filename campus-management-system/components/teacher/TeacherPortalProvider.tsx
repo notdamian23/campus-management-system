@@ -14,6 +14,7 @@ import { auth, db } from "@/lib/firebase";
 import {
   type CampusProfileDoc,
   getOnboardingRedirect,
+  resolveCampusProfileName,
 } from "@/lib/campus-auth";
 
 export type TeacherAccessState =
@@ -27,6 +28,7 @@ export type TeacherAccessState =
 export type TeacherProfile = {
   uid: string;
   schoolId: string;
+  name: string;
   teacherName: string;
   email: string;
 };
@@ -376,17 +378,14 @@ export function TeacherPortalProvider({
           return;
         }
 
-        const teacherName =
-          String(data.teacherName ?? "").trim() ||
-          String(data.name ?? "").trim() ||
-          String(data.studentName ?? "").trim() ||
-          String(data.schoolId ?? "").trim() ||
-          user.email ||
-          user.uid;
+        const schoolId = String(data.schoolId ?? "").trim() || user.uid;
+        const name = resolveCampusProfileName(data) || "";
+        const teacherName = name || schoolId;
 
         setProfile({
           uid: user.uid,
-          schoolId: String(data.schoolId ?? "").trim() || user.uid,
+          schoolId,
+          name,
           teacherName,
           email: String(data.email ?? "").trim() || user.email || "",
         });

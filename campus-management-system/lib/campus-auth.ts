@@ -16,8 +16,11 @@ export type CampusProfileDoc = {
   teacherName?: string;
   studentName?: string;
   name?: string;
+  fullName?: string;
+  displayName?: string;
   course?: string;
   year?: string;
+  yearLevel?: string;
   readyForClearance?: boolean;
 };
 
@@ -29,6 +32,45 @@ type CampusCookieState = {
 
 export function normalizeEmail(value: unknown) {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function trimProfileText(value: unknown) {
+  return String(value ?? "").trim();
+}
+
+export function resolveCampusProfileName(
+  profile?:
+    | {
+        name?: unknown;
+        fullName?: unknown;
+        displayName?: unknown;
+      }
+    | null,
+) {
+  return (
+    [
+      trimProfileText(profile?.name),
+      trimProfileText(profile?.fullName),
+      trimProfileText(profile?.displayName),
+    ].find(Boolean) ?? ""
+  );
+}
+
+export function resolveCampusDisplayName(
+  profile?:
+    | {
+        name?: unknown;
+        fullName?: unknown;
+        displayName?: unknown;
+        schoolId?: unknown;
+      }
+    | null,
+) {
+  return (
+    resolveCampusProfileName(profile) ||
+    trimProfileText(profile?.schoolId) ||
+    "User"
+  );
 }
 
 export function resolveRoleHome(role?: string) {

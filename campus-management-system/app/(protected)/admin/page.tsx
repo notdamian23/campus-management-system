@@ -68,6 +68,8 @@ import { getFunctions, httpsCallable } from "firebase/functions";
 import {
   type CampusProfileDoc,
   getOnboardingRedirect,
+  resolveCampusDisplayName,
+  resolveCampusProfileName,
 } from "@/lib/campus-auth";
 
 const roleOptions = ["student", "teacher", "ec", "admin"] as const;
@@ -103,10 +105,13 @@ type Profile = {
   email?: string;
   role: Role;
   name?: string;
+  fullName?: string;
+  displayName?: string;
   studentName?: string;
   teacherName?: string;
   course?: string;
   year?: string;
+  yearLevel?: string;
   createdAt?: unknown;
 };
 type LogItem = {
@@ -303,11 +308,10 @@ function hasEmail(profile: Profile) {
   return Boolean(String(profile.email ?? "").trim());
 }
 
-function resolveProfileName(profile: Pick<Profile, "name" | "studentName" | "teacherName">) {
-  const values = [profile.name, profile.studentName, profile.teacherName];
-  return values
-    .map((value) => String(value ?? "").trim())
-    .find(Boolean) ?? "";
+function resolveProfileName(
+  profile: Pick<Profile, "name" | "fullName" | "displayName">,
+) {
+  return resolveCampusProfileName(profile);
 }
 
 function compareResolvedNames(left: Profile, right: Profile) {
@@ -1091,10 +1095,8 @@ export default function AdminDashboardPage() {
           role: Role;
           email: string | null;
           name?: string | null;
-          teacherName?: string | null;
-          studentName?: string | null;
           course?: string | null;
-          year?: string | null;
+          yearLevel?: string | null;
         },
         { uid?: string }
       >(functions, "adminCreateUser");
@@ -1103,10 +1105,8 @@ export default function AdminDashboardPage() {
         role: newRole,
         email: email || null,
         name: name || null,
-        teacherName: isTeacherRole ? teacherName : null,
-        studentName: isStudentRole ? studentName : null,
         course: requiresCourse ? course : null,
-        year: requiresYear ? year : null,
+        yearLevel: requiresYear ? year : null,
       });
       campusToast.success({
         title: "Account created",
@@ -2079,14 +2079,17 @@ export default function AdminDashboardPage() {
 
                     if (columnKey === "name") {
                       const profileName = resolveProfileName(profile);
+                      const displayName = resolveCampusDisplayName(profile);
 
-                      return profileName ? (
-                        <p className="text-sm font-medium text-campus-text-primary">
-                          {profileName}
-                        </p>
-                      ) : (
-                        <p className="text-sm text-campus-text-secondary">
-                          No name on file
+                      return (
+                        <p
+                          className={
+                            profileName
+                              ? "text-sm font-medium text-campus-text-primary"
+                              : "text-sm text-campus-text-secondary"
+                          }
+                        >
+                          {displayName}
                         </p>
                       );
                     }

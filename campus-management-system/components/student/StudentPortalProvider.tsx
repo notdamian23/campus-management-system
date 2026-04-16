@@ -18,6 +18,7 @@ import {
   query,
 } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
+import { resolveCampusProfileName } from "@/lib/campus-auth";
 import { app, auth, db } from "@/lib/firebase";
 
 type LifecycleStatus = "upcoming" | "ongoing" | "completed";
@@ -58,6 +59,7 @@ export type StudentNotificationType =
 export type StudentProfile = {
   uid: string;
   schoolId: string;
+  name: string;
   studentName: string;
   course: string;
   year: string;
@@ -243,8 +245,11 @@ type ProfileDocData = {
   schoolId?: string;
   studentName?: string;
   name?: string;
+  fullName?: string;
+  displayName?: string;
   course?: string;
   year?: string;
+  yearLevel?: string;
   status?: string;
   readyForClearance?: boolean;
 };
@@ -559,18 +564,20 @@ export function StudentPortalProvider({
         String(
           latestProfileData.schoolId ?? latestStudentData?.schoolId ?? "",
         ).trim() || uid;
-      const studentName =
+      const name =
+        resolveCampusProfileName(latestProfileData) ||
         String(
-          latestProfileData.studentName ??
-            latestProfileData.name ??
+          latestStudentData?.name ??
             latestStudentData?.studentName ??
-            latestStudentData?.name ??
-            schoolId,
-        ).trim() || schoolId;
+            latestProfileData.studentName ??
+            "",
+        ).trim();
+      const studentName = name || schoolId;
 
       setProfile({
         uid,
         schoolId,
+        name,
         studentName,
         course:
           String(
@@ -578,6 +585,7 @@ export function StudentPortalProvider({
           ).trim() || "Unassigned",
         year: normalizeYear(
           latestProfileData.year ??
+            latestProfileData.yearLevel ??
             latestStudentData?.year ??
             latestStudentData?.yearLevel,
         ),

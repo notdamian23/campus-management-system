@@ -67,8 +67,11 @@ function buildCampusProfilePayload(data) {
         teacherName: optionalText(data.teacherName),
         studentName: optionalText(data.studentName),
         name: optionalText(data.name),
+        fullName: optionalText(data.fullName),
+        displayName: optionalText(data.displayName),
         course: optionalText(data.course),
-        year: optionalText(data.year),
+        year: optionalText(data.year) || optionalText(data.yearLevel),
+        yearLevel: optionalText(data.yearLevel) || optionalText(data.year),
         readyForClearance: optionalBoolean(data.readyForClearance),
     };
 }
@@ -255,43 +258,50 @@ async function requireAdminOrEC(context) {
     }
 }
 exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request) => {
-    var _a;
+    var _a, _b, _c, _d;
     await requireAdmin(request);
     const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
     const role = normalizeText(body.role);
     const emailRaw = normalizeText(body.email);
-    const name = normalizeText(body.name);
-    const teacherName = normalizeText(body.teacherName);
-    const studentName = normalizeText(body.studentName);
+    const name = normalizeText(body.name) ||
+        normalizeText(body.teacherName) ||
+        normalizeText(body.studentName);
     const course = normalizeText(body.course);
-    const yearRaw = normalizeText(body.year);
-    const year = normalizeYear(body.year);
-    const resolvedTeacherName = teacherName || name;
-    const resolvedStudentName = studentName || name;
-    const resolvedEcName = name;
+    const yearSource = (_a = body.yearLevel) !== null && _a !== void 0 ? _a : body.year;
+    const yearRaw = normalizeText(yearSource);
+    const year = normalizeYear(yearSource);
     if (!schoolId) {
         throw new https_1.HttpsError("invalid-argument", "School ID is required.");
     }
     if (!["admin", "ec", "teacher", "student"].includes(role)) {
         throw new https_1.HttpsError("invalid-argument", "Invalid role.");
     }
-    if (role === "teacher" && !resolvedTeacherName) {
-        throw new https_1.HttpsError("invalid-argument", "teacherName is required for teacher role.");
+    if (role === "teacher" && !name) {
+        throw new https_1.HttpsError("invalid-argument", "name is required for teacher role.");
     }
-    if (role === "student" && !resolvedStudentName) {
-        throw new https_1.HttpsError("invalid-argument", "studentName is required for student role.");
+    if (role === "student" && !name) {
+        throw new https_1.HttpsError("invalid-argument", "name is required for student role.");
     }
-    if (role === "ec" && !resolvedEcName) {
+    if (role === "ec" && !name) {
         throw new https_1.HttpsError("invalid-argument", "name is required for ec role.");
     }
     if ((role === "student" || role === "ec") && !course) {
         throw new https_1.HttpsError("invalid-argument", "course is required for student and ec roles.");
     }
     if ((role === "student" || role === "ec") && !yearRaw) {
-        throw new https_1.HttpsError("invalid-argument", "year is required for student and ec roles.");
+        throw new https_1.HttpsError("invalid-argument", "yearLevel is required for student and ec roles.");
     }
     const email = emailRaw || `${schoolId}@campus.local`;
+    const timestamp = serverTimestamp();
+    authLogger.debug("adminCreateUser request validated", {
+        role,
+        schoolId,
+        hasName: Boolean(name),
+        hasCourse: Boolean(course),
+        hasYearLevel: Boolean(year),
+        hasCustomEmail: Boolean(emailRaw),
+    });
     try {
         const userRecord = await admin.auth().createUser({
             email,
@@ -300,58 +310,79 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
         });
         const uid = userRecord.uid;
         const profilePayload = {
+            name,
             schoolId,
             email,
             role,
+            course: course || "",
+            year: year || "",
+            yearLevel: year || "",
             mustChangePassword: true,
             emailVerified: false,
             emailVerificationPending: false,
             pendingEmail: null,
             firstLoginCompleted: false,
             status: "pending",
-            createdAt: serverTimestamp(),
+            createdAt: timestamp,
+            updatedAt: timestamp,
         };
-        if (role === "teacher") {
-            profilePayload.teacherName = resolvedTeacherName;
-            profilePayload.name = resolvedTeacherName;
-        }
         if (role === "student") {
-            profilePayload.studentName = resolvedStudentName;
-            profilePayload.name = resolvedStudentName;
-            profilePayload.course = course;
-            profilePayload.year = year;
             profilePayload.readyForClearance = false;
         }
-        if (role === "ec") {
-            profilePayload.name = resolvedEcName;
-            profilePayload.course = course;
-            profilePayload.year = year;
-        }
+        authLogger.debug("adminCreateUser writing profile", {
+            uid,
+            role,
+            schoolId,
+            hasName: Boolean(profilePayload.name),
+            hasCourse: Boolean(profilePayload.course),
+            hasYearLevel: Boolean(profilePayload.yearLevel),
+        });
         await db.doc(`profiles/${uid}`).set(profilePayload, { merge: true });
+        authLogger.debug("adminCreateUser profile write complete", {
+            uid,
+            role,
+            schoolId,
+        });
         if (role === "student") {
             await db.doc(`students/${uid}`).set({
                 schoolId,
-                studentName: resolvedStudentName,
-                name: resolvedStudentName,
+                studentName: name,
+                name,
                 course,
                 year,
+                yearLevel: year,
                 readyForClearance: false,
                 status: "active",
-                updatedAt: serverTimestamp(),
-                createdAt: serverTimestamp(),
+                updatedAt: timestamp,
+                createdAt: timestamp,
             }, { merge: true });
+            authLogger.debug("adminCreateUser student projection write complete", {
+                uid,
+                schoolId,
+            });
         }
         await db.collection("logs").add({
             action: "admin_create_user",
-            actorUid: normalizeText((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid),
+            actorUid: normalizeText((_b = request.auth) === null || _b === void 0 ? void 0 : _b.uid),
             targetUid: uid,
             targetSchoolId: schoolId,
-            createdAt: serverTimestamp(),
+            createdAt: timestamp,
+        });
+        authLogger.info("adminCreateUser created account", {
+            uid,
+            role,
+            schoolId,
         });
         return { uid };
     }
     catch (error) {
         const authError = error;
+        authLogger.warn("adminCreateUser failed", {
+            role,
+            schoolId,
+            code: (_c = authError.code) !== null && _c !== void 0 ? _c : "unknown",
+            message: (_d = authError.message) !== null && _d !== void 0 ? _d : "Unknown account creation failure",
+        });
         if (authError.code === "auth/email-already-exists") {
             throw new https_1.HttpsError("already-exists", "Account already exists.");
         }

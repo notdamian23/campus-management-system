@@ -79,7 +79,7 @@ export default function StudentDashboard() {
         <StudentPageHeader
           variant="hero"
           icon={GraduationCap}
-          title={`Welcome back${profile?.studentName ? `, ${profile.studentName}` : ""}.`}
+          title={`Welcome back${profile ? `, ${profile.name || profile.schoolId || "User"}` : ""}.`}
           description="Track your events, payments, and notices in one mobile-friendly CAMPUS student portal designed for quick daily check-ins."
           meta={
             <>
