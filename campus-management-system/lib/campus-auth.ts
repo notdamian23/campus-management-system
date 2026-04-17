@@ -33,8 +33,17 @@ type CampusCookieState = {
   emailVerificationPending: boolean;
 };
 
+export type CampusVerificationEmailTarget = {
+  email: string;
+  mode: "current-auth-email" | "pending-email-update";
+};
+
 export function normalizeEmail(value: unknown) {
   return String(value ?? "").trim().toLowerCase();
+}
+
+export function isCampusLocalEmail(value: unknown) {
+  return normalizeEmail(value).endsWith("@campus.local");
 }
 
 function trimProfileText(value: unknown) {
@@ -80,6 +89,34 @@ export function resolveCampusDisplayName(
     trimProfileText(profile?.schoolId) ||
     "User"
   );
+}
+
+export function resolveCampusVerificationEmailTarget(
+  profile?:
+    | {
+        email?: unknown;
+        pendingEmail?: unknown;
+      }
+    | null,
+  authEmail?: unknown,
+): CampusVerificationEmailTarget | null {
+  const normalizedPendingEmail = normalizeEmail(profile?.pendingEmail);
+  const normalizedProfileEmail = normalizeEmail(profile?.email);
+  const normalizedAuthEmail = normalizeEmail(authEmail);
+  const candidateEmail =
+    normalizedPendingEmail || normalizedProfileEmail || normalizedAuthEmail;
+
+  if (!candidateEmail || isCampusLocalEmail(candidateEmail)) {
+    return null;
+  }
+
+  return {
+    email: candidateEmail,
+    mode:
+      normalizedAuthEmail && candidateEmail === normalizedAuthEmail
+        ? "current-auth-email"
+        : "pending-email-update",
+  };
 }
 
 export function resolveRoleHome(role?: string) {

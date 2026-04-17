@@ -183,6 +183,7 @@ export type BulkStudentImportRowPayload = {
   schoolId: string;
   lastName: string;
   firstName: string;
+  fullName?: string;
   course: string;
   yearLevel: string;
   status: string;
@@ -201,6 +202,11 @@ export type BulkStudentImportResult = {
   failedCount: number;
   skippedCount: number;
   rowResults: BulkStudentImportResultRow[];
+};
+
+export type AdminDeactivateAllStudentsResult = {
+  totalStudentCount: number;
+  updatedCount: number;
 };
 
 export async function finalizeVerifiedCampusProfileForCurrentUser(): Promise<{
@@ -239,6 +245,20 @@ export async function adminBulkImportStudents(
   >(functions, "adminBulkImportStudents");
 
   const result = await callable(payload);
+  return result.data;
+}
+
+export async function adminDeactivateAllStudents(
+  functions: ReturnType<typeof getCampusFunctions>,
+): Promise<AdminDeactivateAllStudentsResult> {
+  logAuthEvent("info", "Starting admin deactivate-all-students request");
+
+  const callable = httpsCallable<
+    Record<string, never>,
+    AdminDeactivateAllStudentsResult
+  >(functions, "adminDeactivateAllStudents");
+
+  const result = await callable({});
   return result.data;
 }
 

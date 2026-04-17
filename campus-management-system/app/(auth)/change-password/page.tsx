@@ -5,13 +5,19 @@ import { useRouter } from "next/navigation";
 import { Alert } from "@heroui/alert";
 import { Button } from "@heroui/button";
 import { Input } from "@heroui/input";
-import { onAuthStateChanged, updatePassword, verifyBeforeUpdateEmail } from "firebase/auth";
+import {
+  onAuthStateChanged,
+  sendEmailVerification,
+  updatePassword,
+  verifyBeforeUpdateEmail,
+} from "firebase/auth";
 import { campusToast } from "@/lib/toast";
 import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
 import { auth } from "@/lib/firebase";
 import {
   buildEmailActionSettings,
   getOnboardingRedirect,
+  isCampusLocalEmail,
   resolveRoleHome,
   setCampusCookies,
 } from "@/lib/campus-auth";
@@ -142,22 +148,37 @@ export default function ChangePasswordPage() {
     }
 
     setLoading(true);
+    const usesCurrentAuthEmail =
+      !isCampusLocalEmail(normalizedEmail) &&
+      normalizedEmail === String(user.email ?? "").trim().toLowerCase();
+    const firebaseMethod = usesCurrentAuthEmail ?
+      "sendEmailVerification" :
+      "verifyBeforeUpdateEmail";
+
     try {
       logCampusAuthEvent("info", "Submitting first-time email verification request", {
         emailDomain: normalizedEmail.split("@")[1] ?? "",
         hasCurrentUserEmail: Boolean(user.email),
-        firebaseMethod: "verifyBeforeUpdateEmail",
+        firebaseMethod,
       });
       await updatePassword(user, newPassword);
-      await verifyBeforeUpdateEmail(
-        user,
-        normalizedEmail,
-        buildEmailActionSettings(),
-      );
+
+      // Admin-provided emails already live on the signed-in Firebase Auth user.
+      // Those accounts need a standard verification email, not an email-change flow.
+      if (usesCurrentAuthEmail) {
+        await sendEmailVerification(user, buildEmailActionSettings());
+      } else {
+        await verifyBeforeUpdateEmail(
+          user,
+          normalizedEmail,
+          buildEmailActionSettings(),
+        );
+      }
+
       logCampusAuthEvent("info", "Verification email accepted by Firebase", {
         emailDomain: normalizedEmail.split("@")[1] ?? "",
         hasCurrentUserEmail: Boolean(user.email),
-        firebaseMethod: "verifyBeforeUpdateEmail",
+        firebaseMethod,
       });
       await savePendingEmailVerificationForCurrentUser(normalizedEmail);
 
@@ -179,7 +200,7 @@ export default function ChangePasswordPage() {
       logCampusAuthEvent("error", "First-time email verification request failed", {
         emailDomain: normalizedEmail.split("@")[1] ?? "",
         hasCurrentUserEmail: Boolean(user.email),
-        firebaseMethod: "verifyBeforeUpdateEmail",
+        firebaseMethod,
         code: authError.code ?? "unknown",
         message: authError.message ?? "Unknown Firebase error",
       });
@@ -188,6 +209,8 @@ export default function ChangePasswordPage() {
         router.replace("/login?next=/change-password");
       } else if (authError.code === "auth/invalid-email") {
         setGeneralError("Please enter a valid email address.");
+      } else if (authError.code === "auth/missing-email") {
+        setGeneralError("No verifiable email is available for this account yet.");
       } else if (authError.code === "auth/weak-password") {
         setGeneralError(
           authError.message || "Choose a stronger password and try again.",
@@ -195,6 +218,10 @@ export default function ChangePasswordPage() {
       } else if (authError.code === "auth/email-already-in-use") {
         setGeneralError(
           "This email is already linked to another CAMPUS account. Please use a different email.",
+        );
+      } else if (authError.code === "auth/too-many-requests") {
+        setGeneralError(
+          "Too many verification attempts were made. Please wait a moment and try again.",
         );
       } else if (authError.code === "auth/network-request-failed") {
         setGeneralError("Network error. Check your connection and try again.");

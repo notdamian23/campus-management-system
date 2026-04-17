@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import clsx from "clsx";
 import Link from "next/link";
 import Image from "next/image";
@@ -88,17 +88,58 @@ export function Sidebar({
 }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+
+  const openMobileSidebar = useCallback(() => {
+    setIsMobileSidebarOpen(true);
+  }, []);
+
+  const closeMobileSidebar = useCallback(() => {
+    setIsMobileSidebarOpen(false);
+  }, []);
+
+  const handleMobileDrawerOpenChange = useCallback((open: boolean) => {
+    // Keep the mobile drawer fully controlled. It may close from overlay clicks
+    // or the escape key, but it should never auto-open unless the user taps the
+    // menu button.
+    if (!open) {
+      closeMobileSidebar();
+    }
+  }, [closeMobileSidebar]);
 
   // Close mobile drawer on route change
   useEffect(() => {
-    setMobileOpen(false);
-  }, [pathname]);
+    closeMobileSidebar();
+  }, [closeMobileSidebar, pathname]);
+
+  useEffect(() => {
+    if (!enableMobileDrawer) return;
+
+    const mediaQuery = window.matchMedia("(min-width: 1024px)");
+    const handleBreakpointChange = (
+      event: MediaQueryList | MediaQueryListEvent,
+    ) => {
+      if (event.matches) {
+        closeMobileSidebar();
+      }
+    };
+
+    handleBreakpointChange(mediaQuery);
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", handleBreakpointChange);
+      return () =>
+        mediaQuery.removeEventListener("change", handleBreakpointChange);
+    }
+
+    mediaQuery.addListener(handleBreakpointChange);
+    return () => mediaQuery.removeListener(handleBreakpointChange);
+  }, [closeMobileSidebar, enableMobileDrawer]);
 
   const activeItem = getActiveNavItem(navItems, pathname);
 
   const handleRefreshPage = () => {
-    setMobileOpen(false);
+    closeMobileSidebar();
     window.location.reload();
   };
 
@@ -111,6 +152,11 @@ export function Sidebar({
           <Link
             key={item.href}
             href={item.href}
+            onClick={() => {
+              if (enableMobileDrawer) {
+                closeMobileSidebar();
+              }
+            }}
             className={clsx(
               "group flex items-center gap-3 rounded-2xl px-3 py-3.5 transition-all",
               isActive
@@ -228,6 +274,7 @@ export function Sidebar({
             aria-label={`Switch to ${studentAccountLabel}`}
             onValueChange={(isSelected) => {
               if (!isSelected) return;
+              closeMobileSidebar();
               router.push(studentAccountHref);
             }}
           />
@@ -244,7 +291,7 @@ export function Sidebar({
           <Button
             isIconOnly
             variant="bordered"
-            onPress={() => setMobileOpen(true)}
+            onPress={openMobileSidebar}
             aria-label="Open menu"
             className="border-border bg-bg-main text-campus-text-primary"
           >
@@ -295,8 +342,8 @@ export function Sidebar({
       {/* Mobile Drawer (only if enabled) */}
       {enableMobileDrawer && (
         <Drawer
-          isOpen={mobileOpen}
-          onOpenChange={setMobileOpen}
+          isOpen={isMobileSidebarOpen}
+          onOpenChange={handleMobileDrawerOpenChange}
           placement="left"
           hideCloseButton
           className="lg:hidden"
@@ -321,7 +368,10 @@ export function Sidebar({
                     <Button
                       isIconOnly
                       variant="light"
-                      onPress={onClose}
+                      onPress={() => {
+                        closeMobileSidebar();
+                        onClose();
+                      }}
                       aria-label="Close menu"
                       className="shrink-0 text-campus-text-primary"
                     >

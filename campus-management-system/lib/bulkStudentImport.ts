@@ -8,6 +8,7 @@ export type BulkStudentCsvRow = {
   schoolId: string;
   lastName: string;
   firstName: string;
+  fullName: string;
   course: string;
   yearLevel: string;
   status: string;
@@ -25,6 +26,7 @@ export type BulkStudentImportRowPayload = {
   schoolId: string;
   lastName: string;
   firstName: string;
+  fullName?: string;
   course: string;
   yearLevel: string;
   status: string;
@@ -45,28 +47,85 @@ export type BulkStudentImportResult = {
   rowResults: BulkStudentImportResultRow[];
 };
 
-const REQUIRED_HEADERS = [
-  "schoolid",
-  "lastname",
-  "firstname",
-  "course",
-  "yearlevel",
-  "status",
-];
 const REQUIRED_HEADER_LINE = "SchoolId,LastName,FirstName,Course,YearLevel,Status";
+const LEGACY_NAME_HEADER_LINE = "SchoolId,FullName,Course,YearLevel,Status";
+
+type BulkStudentCsvHeaderMap = {
+  schoolId: number;
+  lastName?: number;
+  firstName?: number;
+  fullName?: number;
+  course: number;
+  yearLevel: number;
+  status?: number;
+};
+
+const HEADER_ALIASES = {
+  schoolId: ["schoolid"],
+  lastName: ["lastname"],
+  firstName: ["firstname"],
+  fullName: ["fullname", "name", "studentname"],
+  course: ["course"],
+  yearLevel: ["yearlevel"],
+  status: ["status"],
+} as const;
 
 function normalizeText(value: unknown) {
   return String(value ?? "").trim();
 }
 
 function normalizeHeader(value: string) {
-  return value.trim().toLowerCase();
+  return value
+    .replace(/^\uFEFF/, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
 }
 
 function normalizeImportedValue(value: unknown) {
   return String(value ?? "")
     .trim()
     .replace(/\s+/g, " ");
+}
+
+function resolveHeaderIndex(
+  headers: string[],
+  aliases: readonly string[],
+): number {
+  return headers.findIndex((header) => aliases.includes(header));
+}
+
+function buildHeaderMap(headers: string[]): BulkStudentCsvHeaderMap | null {
+  const schoolIdIndex = resolveHeaderIndex(headers, HEADER_ALIASES.schoolId);
+  const courseIndex = resolveHeaderIndex(headers, HEADER_ALIASES.course);
+  const yearLevelIndex = resolveHeaderIndex(headers, HEADER_ALIASES.yearLevel);
+
+  if (schoolIdIndex < 0 || courseIndex < 0 || yearLevelIndex < 0) {
+    return null;
+  }
+
+  const lastNameIndex = resolveHeaderIndex(headers, HEADER_ALIASES.lastName);
+  const firstNameIndex = resolveHeaderIndex(headers, HEADER_ALIASES.firstName);
+  const fullNameIndex = resolveHeaderIndex(headers, HEADER_ALIASES.fullName);
+
+  if (
+    (lastNameIndex < 0 || firstNameIndex < 0) &&
+    fullNameIndex < 0
+  ) {
+    return null;
+  }
+
+  const statusIndex = resolveHeaderIndex(headers, HEADER_ALIASES.status);
+
+  return {
+    schoolId: schoolIdIndex,
+    lastName: lastNameIndex >= 0 ? lastNameIndex : undefined,
+    firstName: firstNameIndex >= 0 ? firstNameIndex : undefined,
+    fullName: fullNameIndex >= 0 ? fullNameIndex : undefined,
+    course: courseIndex,
+    yearLevel: yearLevelIndex,
+    status: statusIndex >= 0 ? statusIndex : undefined,
+  };
 }
 
 function parseCsv(content: string): string[][] {
@@ -147,6 +206,7 @@ function buildRowPayload(raw: Record<string, string>, rowIndex: number): BulkStu
   const schoolId = normalizeText(raw.schoolId);
   const lastName = normalizeStudentNamePart(raw.lastName);
   const firstName = normalizeStudentNamePart(raw.firstName);
+  const fullName = normalizeStudentNamePart(raw.fullName);
   const course = normalizeCourse(raw.course);
   const yearLevel = normalizeYearLevel(raw.yearLevel);
   const status = normalizeStatus(raw.status);
@@ -155,6 +215,7 @@ function buildRowPayload(raw: Record<string, string>, rowIndex: number): BulkStu
     schoolId,
     lastName,
     firstName,
+    fullName,
     course,
     yearLevel,
     status,
@@ -186,21 +247,31 @@ function buildPreviewRow(
   row: BulkStudentCsvRow,
   csvDuplicates: Set<string>,
   existingSchoolIds: Set<string>,
+  headerMap: BulkStudentCsvHeaderMap,
 ): BulkStudentImportPreviewRow {
   const errors: string[] = [];
+  const hasLegacyFullName = Boolean(row.fullName);
+  const hasLegacyFullNameColumn = headerMap.fullName != null;
+  const hasSplitNameColumns =
+    headerMap.lastName != null && headerMap.firstName != null;
 
   if (!row.schoolId) {
-    errors.push("School ID is required.");
+    errors.push("SchoolId is required.");
   } else if (!isValidSchoolId(row.schoolId)) {
-    errors.push("School ID must be alphanumeric and at least 4 characters.");
+    errors.push("SchoolId must be alphanumeric and at least 4 characters.");
   }
 
-  if (!row.lastName) {
-    errors.push("Last name is required.");
-  }
-
-  if (!row.firstName) {
-    errors.push("First name is required.");
+  if (!hasLegacyFullName) {
+    if (hasSplitNameColumns) {
+      if (!row.lastName) {
+        errors.push("LastName is required.");
+      }
+      if (!row.firstName) {
+        errors.push("FirstName is required.");
+      }
+    } else if (hasLegacyFullNameColumn) {
+      errors.push("FullName is required.");
+    }
   }
 
   if (!row.course) {
@@ -210,11 +281,11 @@ function buildPreviewRow(
   }
 
   if (!row.yearLevel) {
-    errors.push("Year level is required.");
+    errors.push("YearLevel is required.");
   }
 
   if (row.status === "") {
-    errors.push("Invalid status. Use active, inactive, or pending.");
+    errors.push("Status is invalid. Use active, inactive, or pending.");
   }
 
   if (csvDuplicates.has(row.schoolId)) {
@@ -232,6 +303,7 @@ function buildPreviewRow(
     displayName: formatStudentFullName({
       firstName: row.firstName,
       lastName: row.lastName,
+      fullName: row.fullName,
       schoolId: row.schoolId,
     }),
     statusLabel: isValid ? "Valid" : "Invalid",
@@ -248,15 +320,14 @@ export function buildBulkStudentImportPreviewRows(
   if (rows.length === 0) return [];
 
   const headers = rows[0].map(normalizeHeader);
-  const hasExactHeaderOrder =
-    headers.length >= REQUIRED_HEADERS.length &&
-    REQUIRED_HEADERS.every((header, index) => headers[index] === header);
+  const headerMap = buildHeaderMap(headers);
 
-  if (!hasExactHeaderOrder) {
+  if (!headerMap) {
     const errorRow: BulkStudentImportPreviewRow = {
       schoolId: "",
       lastName: "",
       firstName: "",
+      fullName: "",
       course: "",
       yearLevel: "",
       status: "",
@@ -264,7 +335,7 @@ export function buildBulkStudentImportPreviewRows(
       displayName: "",
       statusLabel: "Invalid",
       errors: [
-        `CSV header must match exactly: ${REQUIRED_HEADER_LINE}.`,
+        `CSV must include SchoolId, Course, YearLevel, and either LastName + FirstName or FullName/Name. Preferred header: ${REQUIRED_HEADER_LINE}. Legacy header is also supported: ${LEGACY_NAME_HEADER_LINE}.`,
       ],
       isValid: false,
     };
@@ -277,18 +348,28 @@ export function buildBulkStudentImportPreviewRows(
   for (let index = 1; index < rows.length; index += 1) {
     const rawRow = rows[index];
     const rowValues = {
-      schoolId: normalizeImportedValue(rawRow[0] ?? ""),
-      lastName: normalizeImportedValue(rawRow[1] ?? ""),
-      firstName: normalizeImportedValue(rawRow[2] ?? ""),
-      course: normalizeImportedValue(rawRow[3] ?? ""),
-      yearLevel: normalizeImportedValue(rawRow[4] ?? ""),
-      status: normalizeImportedValue(rawRow[5] ?? ""),
+      schoolId: normalizeImportedValue(rawRow[headerMap.schoolId] ?? ""),
+      lastName: normalizeImportedValue(
+        headerMap.lastName != null ? rawRow[headerMap.lastName] ?? "" : "",
+      ),
+      firstName: normalizeImportedValue(
+        headerMap.firstName != null ? rawRow[headerMap.firstName] ?? "" : "",
+      ),
+      fullName: normalizeImportedValue(
+        headerMap.fullName != null ? rawRow[headerMap.fullName] ?? "" : "",
+      ),
+      course: normalizeImportedValue(rawRow[headerMap.course] ?? ""),
+      yearLevel: normalizeImportedValue(rawRow[headerMap.yearLevel] ?? ""),
+      status: normalizeImportedValue(
+        headerMap.status != null ? rawRow[headerMap.status] ?? "" : "",
+      ),
     };
 
     if (
       !rowValues.schoolId &&
       !rowValues.lastName &&
       !rowValues.firstName &&
+      !rowValues.fullName &&
       !rowValues.course &&
       !rowValues.yearLevel &&
       !rowValues.status
@@ -317,7 +398,7 @@ export function buildBulkStudentImportPreviewRows(
   });
 
   return parsedRows.map((row) =>
-    buildPreviewRow(row, csvDuplicates, lowerExistingSchoolIds),
+    buildPreviewRow(row, csvDuplicates, lowerExistingSchoolIds, headerMap),
   );
 }
 
@@ -325,7 +406,7 @@ export function buildBulkStudentImportErrorCsv(
   rowResults: BulkStudentImportResultRow[],
 ): string {
   const lines = [
-    "SchoolId,LastName,FirstName,Course,YearLevel,Status,Error",
+    "SchoolId,LastName,FirstName,FullName,Course,YearLevel,Status,Error",
   ];
   rowResults.forEach((row) => {
     if (row.success) return;
@@ -340,6 +421,7 @@ export function buildBulkStudentImportErrorCsv(
       escaped(row.schoolId),
       escaped(row.lastName),
       escaped(row.firstName),
+      escaped(row.fullName ?? ""),
       escaped(row.course),
       escaped(row.yearLevel),
       escaped(row.status),

@@ -1745,6 +1745,9 @@ export default function ECStudentLookup() {
       return setNotice({ type: "err", msg: "Student name is required." });
     if (!course) return setNotice({ type: "err", msg: "Course is required." });
     if (!year) return setNotice({ type: "err", msg: "Year is required." });
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return setNotice({ type: "err", msg: "Please provide a valid email address." });
+    }
 
     setCreating(true);
     setNotice(null);
@@ -2026,6 +2029,9 @@ export default function ECStudentLookup() {
                 className="mt-1 w-full"
                 placeholder="optional@email.com"
               />
+              <p className="mt-1 text-xs text-campus-text-secondary">
+                If provided, the student can verify this email after first login.
+              </p>
             </div>
           </div>
 

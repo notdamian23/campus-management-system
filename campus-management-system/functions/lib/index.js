@@ -23,7 +23,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
+exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminDeactivateAllStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
 const https_1 = require("firebase-functions/v2/https");
 const campusLogger_1 = require("./campusLogger");
@@ -86,6 +86,11 @@ function buildStudentFullName(firstName, lastName) {
     const normalizedLastName = normalizeNamePart(lastName);
     return [normalizedFirstName, normalizedLastName].filter(Boolean).join(" ");
 }
+function resolveBulkImportFullName(row) {
+    return (normalizeNamePart(row.fullName) ||
+        normalizeNamePart(row.name) ||
+        normalizeNamePart(row.studentName));
+}
 function normalizeCourseLabel(value) {
     var _a;
     const normalized = normalizeText(value).replace(/\s+/g, " ");
@@ -94,6 +99,9 @@ function normalizeCourseLabel(value) {
     }
     const aliasKey = normalized.toLowerCase().replace(/[\s.-]+/g, "");
     return (_a = COURSE_ALIASES[aliasKey]) !== null && _a !== void 0 ? _a : "";
+}
+function isValidEmailAddress(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 function optionalBoolean(value) {
     if (value === true)
@@ -322,6 +330,9 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
     const yearSource = (_a = body.yearLevel) !== null && _a !== void 0 ? _a : body.year;
     const yearRaw = normalizeText(yearSource);
     const year = normalizeYear(yearSource);
+    if (emailRaw && !isValidEmailAddress(emailRaw)) {
+        throw new https_1.HttpsError("invalid-argument", "Please provide a valid email address.");
+    }
     if (!schoolId) {
         throw new https_1.HttpsError("invalid-argument", "School ID is required.");
     }
@@ -343,6 +354,8 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
     if ((role === "student" || role === "ec") && !yearRaw) {
         throw new https_1.HttpsError("invalid-argument", "yearLevel is required for student and ec roles.");
     }
+    // School ID login still resolves through Firebase Auth email, so we can
+    // safely use a real contact email here when one is provided.
     const email = emailRaw || `${schoolId}@campus.local`;
     const timestamp = serverTimestamp();
     authLogger.debug("adminCreateUser request validated", {
@@ -490,22 +503,31 @@ async function adminBulkImportStudentsLogic(context) {
         const schoolId = normalizeText(row.schoolId);
         const lastName = normalizeNamePart(row.lastName);
         const firstName = normalizeNamePart(row.firstName);
-        const fullName = buildStudentFullName(firstName, lastName);
+        const legacyFullName = resolveBulkImportFullName(row);
         const course = normalizeCourseLabel(row.course);
         const yearLevelRaw = normalizeText(row.yearLevel);
         const status = normalizeBulkStudentStatus(row.status);
         const normalizedYear = normalizeYear(yearLevelRaw);
         const errors = [];
+        const hasLegacyFullName = Boolean(legacyFullName);
+        const hasLegacyFullNameField = "fullName" in row || "name" in row || "studentName" in row;
         if (!schoolId) {
-            errors.push("School ID is required.");
+            errors.push("SchoolId is required.");
         }
         else if (!isValidBulkSchoolId(schoolId)) {
-            errors.push("School ID must be alphanumeric and at least 4 characters.");
+            errors.push("SchoolId must be alphanumeric and at least 4 characters.");
         }
-        if (!lastName)
-            errors.push("Last name is required.");
-        if (!firstName)
-            errors.push("First name is required.");
+        if (!hasLegacyFullName) {
+            if (hasLegacyFullNameField && !lastName && !firstName) {
+                errors.push("FullName is required.");
+            }
+            else {
+                if (!lastName)
+                    errors.push("LastName is required.");
+                if (!firstName)
+                    errors.push("FirstName is required.");
+            }
+        }
         if (!course) {
             errors.push("Course is required.");
         }
@@ -513,20 +535,20 @@ async function adminBulkImportStudentsLogic(context) {
             errors.push("Invalid course. Use a CAMPUS course label such as Computer Engineering or BSCpE.");
         }
         if (!yearLevelRaw) {
-            errors.push("Year level is required.");
+            errors.push("YearLevel is required.");
         }
         else if (!normalizedYear) {
-            errors.push("Invalid year level.");
+            errors.push("YearLevel is invalid.");
         }
         if (!status) {
-            errors.push("Invalid status. Use active, inactive, or pending.");
+            errors.push("Status is invalid. Use active, inactive, or pending.");
         }
         return {
             rowIndex: index + 1,
             schoolId,
             lastName,
             firstName,
-            fullName,
+            fullName: legacyFullName,
             course,
             yearLevel: normalizedYear,
             status: status || "active",
@@ -728,6 +750,74 @@ exports.adminDeleteUser = (0, https_1.onCall)({ region: REGION }, async (request
     });
     return { success: true };
 });
+exports.adminDeactivateAllStudents = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a;
+    await requireAdmin(request);
+    const profileSnapshot = await db
+        .collection("profiles")
+        .where("role", "==", "student")
+        .get();
+    const profileDocs = profileSnapshot.docs;
+    if (profileDocs.length === 0) {
+        return {
+            totalStudentCount: 0,
+            updatedCount: 0,
+        };
+    }
+    const studentByUid = new Map();
+    const studentRefs = profileDocs.map((profileDoc) => db.doc(`students/${profileDoc.id}`));
+    for (let index = 0; index < studentRefs.length; index += 300) {
+        const refsChunk = studentRefs.slice(index, index + 300);
+        const studentSnapshots = refsChunk.length > 0 ?
+            await db.getAll(...refsChunk) :
+            [];
+        studentSnapshots.forEach((studentSnap) => {
+            var _a;
+            if (!studentSnap.exists)
+                return;
+            studentByUid.set(studentSnap.id, (_a = studentSnap.data()) !== null && _a !== void 0 ? _a : {});
+        });
+    }
+    let updatedCount = 0;
+    // Update profile and student projections together so admin tables and
+    // student-facing account checks stay consistent after the bulk action.
+    for (let index = 0; index < profileDocs.length; index += 200) {
+        const docsChunk = profileDocs.slice(index, index + 200);
+        const batch = db.batch();
+        docsChunk.forEach((profileDoc) => {
+            var _a, _b;
+            const uid = profileDoc.id;
+            const profileData = (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {};
+            const studentData = (_b = studentByUid.get(uid)) !== null && _b !== void 0 ? _b : {};
+            const profileStatus = normalizeLower(profileData.status);
+            const studentStatus = normalizeLower(studentData.status);
+            if (profileStatus !== "inactive" || studentStatus !== "inactive") {
+                updatedCount += 1;
+            }
+            batch.set(profileDoc.ref, {
+                status: "inactive",
+                updatedAt: serverTimestamp(),
+            }, { merge: true });
+            batch.set(db.doc(`students/${uid}`), {
+                status: "inactive",
+                updatedAt: serverTimestamp(),
+            }, { merge: true });
+        });
+        await batch.commit();
+    }
+    await db.collection("logs").add({
+        action: "ADMIN_DEACTIVATE_ALL_STUDENTS",
+        actorUid: normalizeText((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid),
+        targetSchoolId: "all_students",
+        totalStudentCount: profileDocs.length,
+        updatedCount,
+        createdAt: serverTimestamp(),
+    });
+    return {
+        totalStudentCount: profileDocs.length,
+        updatedCount,
+    };
+});
 exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request) => {
     await requireAdminOrEC(request);
     const body = asRecord(request.data);
@@ -811,6 +901,9 @@ exports.ecCreateStudent = (0, https_1.onCall)({ region: REGION }, async (request
     const yearRaw = normalizeText(body.year);
     const year = normalizeYear(body.year);
     const emailRaw = normalizeText(body.email);
+    if (emailRaw && !isValidEmailAddress(emailRaw)) {
+        throw new https_1.HttpsError("invalid-argument", "Please provide a valid email address.");
+    }
     const email = emailRaw || `${schoolId}@campus.local`;
     if (!schoolId) {
         throw new https_1.HttpsError("invalid-argument", "School ID is required.");
@@ -993,6 +1086,8 @@ exports.savePendingEmailVerification = (0, https_1.onCall)({ region: REGION }, a
     if (!profileSnap.exists) {
         throw new https_1.HttpsError("not-found", "Your CAMPUS profile could not be found.");
     }
+    // We keep onboarding locked until the verified address comes back through
+    // Firebase so School ID logins continue to enforce verification safely.
     await profileRef.set({
         pendingEmail,
         mustChangePassword: true,

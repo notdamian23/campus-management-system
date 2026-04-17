@@ -19,6 +19,7 @@ import {
   ModalFooter,
   ModalHeader,
 } from "@heroui/modal";
+import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Skeleton } from "@heroui/skeleton";
 import { Tab, Tabs } from "@heroui/tabs";
@@ -84,7 +85,10 @@ import {
   getBulkStudentImportTemplateCsv,
 } from "@/lib/bulkStudentImport";
 import { CAMPUS_COURSE_OPTIONS } from "@/lib/courseOptions";
-import { getCampusFunctions } from "@/lib/firebase-functions";
+import {
+  adminDeactivateAllStudents,
+  getCampusFunctions,
+} from "@/lib/firebase-functions";
 import { formatStudentFullName } from "@/lib/student-name";
 
 const roleOptions = ["student", "teacher", "ec", "admin"] as const;
@@ -158,6 +162,8 @@ type PendingRoleChange = {
   nextRole: Role;
 };
 
+const USER_PAGE_SIZE_OPTIONS = [10, 15, 25] as const;
+
 const roleCards = [
   {
     key: "admin" as Role,
@@ -186,15 +192,61 @@ const roleCards = [
 ];
 
 const userColumns: CampusTableColumn<CampusUserRow>[] = [
-  { key: "schoolId", label: "School ID" },
-  { key: "name", label: "Name" },
-  { key: "studentId", label: "Student ID" },
-  { key: "email", label: "Email" },
-  { key: "course", label: "Course" },
-  { key: "yearLevel", label: "Year Level" },
-  { key: "role", label: "Role" },
-  { key: "roleAssignment", label: "Role Assignment" },
-  { key: "actions", label: "Actions", align: "end", className: "text-right" },
+  {
+    key: "name",
+    label: "Name",
+    className: "min-w-[280px]",
+    cellClassName: "align-top min-w-[280px]",
+  },
+  {
+    key: "schoolId",
+    label: "School ID",
+    className: "min-w-[170px]",
+    cellClassName: "align-top min-w-[170px]",
+  },
+  {
+    key: "studentId",
+    label: "Student ID",
+    className: "min-w-[150px]",
+    cellClassName: "align-top min-w-[150px]",
+  },
+  {
+    key: "email",
+    label: "Email",
+    className: "min-w-[260px]",
+    cellClassName: "align-top min-w-[260px]",
+  },
+  {
+    key: "course",
+    label: "Course",
+    className: "min-w-[210px]",
+    cellClassName: "align-top min-w-[210px]",
+  },
+  {
+    key: "yearLevel",
+    label: "Year Level",
+    className: "min-w-[140px]",
+    cellClassName: "align-top min-w-[140px]",
+  },
+  {
+    key: "role",
+    label: "Role",
+    className: "min-w-[130px]",
+    cellClassName: "align-top min-w-[130px]",
+  },
+  {
+    key: "roleAssignment",
+    label: "Role Assignment",
+    className: "min-w-[220px]",
+    cellClassName: "align-top min-w-[220px]",
+  },
+  {
+    key: "actions",
+    label: "Actions",
+    align: "end",
+    className: "min-w-[120px] text-right",
+    cellClassName: "align-top min-w-[120px]",
+  },
 ];
 
 const createAccountFormGridClassName =
@@ -501,6 +553,9 @@ export default function AdminDashboardPage() {
   const [emailFilter, setEmailFilter] = useState<EmailFilter>("all");
   const [userSortMode, setUserSortMode] =
     useState<UserSortMode>("school_id_asc");
+  const [userPage, setUserPage] = useState(1);
+  const [userPageSize, setUserPageSize] =
+    useState<(typeof USER_PAGE_SIZE_OPTIONS)[number]>(10);
   const [savingRoleUid, setSavingRoleUid] = useState<string | null>(null);
   const [savingProfileUid, setSavingProfileUid] = useState<string | null>(null);
   const [newSchoolId, setNewSchoolId] = useState("");
@@ -518,6 +573,9 @@ export default function AdminDashboardPage() {
     useState<PendingRoleChange | null>(null);
   const [pendingDeleteProfile, setPendingDeleteProfile] =
     useState<CampusUserRow | null>(null);
+  const [showDeactivateStudentsModal, setShowDeactivateStudentsModal] =
+    useState(false);
+  const [deactivatingStudents, setDeactivatingStudents] = useState(false);
   const [editingProfile, setEditingProfile] = useState<CampusUserRow | null>(
     null,
   );
@@ -766,6 +824,22 @@ export default function AdminDashboardPage() {
     });
     return next;
   }, [filteredProfiles, userSortMode]);
+  const totalUserPages = useMemo(
+    () => Math.max(1, Math.ceil(sortedProfiles.length / userPageSize)),
+    [sortedProfiles.length, userPageSize],
+  );
+  const safeUserPage = Math.min(Math.max(userPage, 1), totalUserPages);
+  const paginatedProfiles = useMemo(() => {
+    const startIndex = (safeUserPage - 1) * userPageSize;
+    return sortedProfiles.slice(startIndex, startIndex + userPageSize);
+  }, [safeUserPage, sortedProfiles, userPageSize]);
+  const currentPageStart = sortedProfiles.length === 0
+    ? 0
+    : (safeUserPage - 1) * userPageSize + 1;
+  const currentPageEnd = Math.min(
+    safeUserPage * userPageSize,
+    sortedProfiles.length,
+  );
 
   const roleCounts = useMemo(
     () =>
@@ -782,6 +856,18 @@ export default function AdminDashboardPage() {
   const existingSchoolIds = useMemo(() => {
     return new Set(profiles.map((profile) => profile.schoolId).filter(Boolean));
   }, [profiles]);
+  const totalStudentAccounts = useMemo(
+    () => profiles.filter((profile) => profile.role === "student").length,
+    [profiles],
+  );
+  const activeStudentAccounts = useMemo(
+    () =>
+      profiles.filter(
+        (profile) =>
+          profile.role === "student" && profile.accountStatus === "Active",
+      ).length,
+    [profiles],
+  );
 
   const usersWithEmailCount = useMemo(
     () => profiles.filter((profile) => hasEmail(profile)).length,
@@ -824,6 +910,14 @@ export default function AdminDashboardPage() {
     Boolean(newEmail.trim()) ||
     newRole !== "student";
 
+  useEffect(() => {
+    setUserPage(1);
+  }, [userSearch, roleFilter, emailFilter, userSortMode]);
+
+  useEffect(() => {
+    setUserPage((previous) => Math.min(Math.max(previous, 1), totalUserPages));
+  }, [totalUserPages]);
+
   const resetCreateForm = () => {
     setNewSchoolId("");
     setNewEmail("");
@@ -840,6 +934,7 @@ export default function AdminDashboardPage() {
     setRoleFilter("all");
     setEmailFilter("all");
     setUserSortMode("school_id_asc");
+    setUserPage(1);
   };
 
   const renderCourseField = (key: string, className?: string) => (
@@ -1260,6 +1355,43 @@ export default function AdminDashboardPage() {
     );
   }
 
+  async function confirmDeactivateAllStudents() {
+    setDeactivatingStudents(true);
+
+    try {
+      const result = await adminDeactivateAllStudents(getCampusFunctions());
+      const updatedCount = Number(result.updatedCount ?? 0);
+      const totalCount = Number(result.totalStudentCount ?? 0);
+
+      if (updatedCount > 0) {
+        campusToast.success({
+          title: "Student accounts updated",
+          description: `${updatedCount} student account${updatedCount === 1 ? "" : "s"} were set to inactive.`,
+          dedupeKey: `admin:deactivate-all-students:success:${updatedCount}:${totalCount}`,
+        });
+      } else {
+        campusToast.info({
+          title: "No active students found",
+          description: "All student accounts are already inactive.",
+          dedupeKey: `admin:deactivate-all-students:no-change:${totalCount}`,
+        });
+      }
+
+      setShowDeactivateStudentsModal(false);
+    } catch (error: unknown) {
+      campusToast.error({
+        title: "Bulk update failed",
+        description: toErrorMessage(
+          error,
+          "Failed to update student account statuses.",
+        ),
+        dedupeKey: "admin:deactivate-all-students:error",
+      });
+    } finally {
+      setDeactivatingStudents(false);
+    }
+  }
+
   async function saveProfileChanges() {
     if (!editingProfile) return;
 
@@ -1440,6 +1572,7 @@ export default function AdminDashboardPage() {
     setEmailFilter("all");
     setUserSearch("");
     setUserSortMode("school_id_asc");
+    setUserPage(1);
     setTab("users");
   };
 
@@ -2122,14 +2255,25 @@ export default function AdminDashboardPage() {
                       <p className="text-xs uppercase tracking-[0.18em] text-campus-text-secondary">
                         Filters and sorting help admins review high-risk access changes quickly.
                       </p>
-                      <Button
-                        variant="bordered"
-                        onPress={resetUserFilters}
-                        isDisabled={!hasActiveUserFilters && userSortMode === "school_id_asc"}
-                        startContent={<RefreshCcw size={16} />}
-                      >
-                        Reset filters
-                      </Button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          color="warning"
+                          variant="flat"
+                          onPress={() => setShowDeactivateStudentsModal(true)}
+                          isDisabled={profilesLoading || activeStudentAccounts === 0}
+                          startContent={<TriangleAlert size={16} />}
+                        >
+                          Make all students inactive
+                        </Button>
+                        <Button
+                          variant="bordered"
+                          onPress={resetUserFilters}
+                          isDisabled={!hasActiveUserFilters && userSortMode === "school_id_asc"}
+                          startContent={<RefreshCcw size={16} />}
+                        >
+                          Reset filters
+                        </Button>
+                      </div>
                     </div>
                   </CardBody>
                 </Card>
@@ -2206,7 +2350,7 @@ export default function AdminDashboardPage() {
                         value={newEmail}
                         onValueChange={setNewEmail}
                         placeholder="optional@email.com"
-                        description="Optional. Leave blank to use the generated CAMPUS login address."
+                        description="Optional. If provided, the student can verify this email after first login."
                         startContent={
                           <Mail size={16} className="text-campus-text-secondary" />
                         }
@@ -2242,224 +2386,324 @@ export default function AdminDashboardPage() {
                   </CardBody>
                 </Card>
 
-                <CampusDataTable
-                  ariaLabel="Admin user accounts"
-                  columns={userColumns}
-                  items={sortedProfiles}
-                  isLoading={profilesLoading}
-                  loadingContent={<CampusTableBodySkeleton rows={6} columns={9} />}
-                  emptyContent={
-                    <CampusEmptyState
-                      title="No users match the current filters"
-                      description="Try another search term, adjust the role or email filters, or clear the filters to see the full CAMPUS directory."
-                      compact
-                      action={
-                        <Button
-                          variant="bordered"
-                          onPress={resetUserFilters}
-                          isDisabled={!hasActiveUserFilters && userSortMode === "school_id_asc"}
-                          startContent={<RefreshCcw size={16} />}
-                        >
-                          Clear filters
-                        </Button>
+                <Card shadow="sm" className="border">
+                  <CardHeader className="flex flex-col gap-3 px-5 pb-0 pt-5 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="space-y-1">
+                      <h3 className="text-lg font-bold text-gray-900">
+                        Account directory
+                      </h3>
+                      <p className="text-sm text-gray-600">
+                        Wider columns, smoother scanning, and paginated results keep role reviews manageable on both desktop and mobile.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Chip variant="flat" className="font-semibold">
+                        Showing {currentPageStart}-{currentPageEnd} of {sortedProfiles.length}
+                      </Chip>
+                      <Chip variant="flat">
+                        Page {safeUserPage} of {totalUserPages}
+                      </Chip>
+                    </div>
+                  </CardHeader>
+                  <CardBody className="space-y-4 p-5 pt-4">
+                    <CampusDataTable
+                      ariaLabel="Admin user accounts"
+                      columns={userColumns}
+                      items={paginatedProfiles}
+                      isLoading={profilesLoading}
+                      isHeaderSticky
+                      loadingContent={
+                        <CampusTableBodySkeleton rows={userPageSize} columns={9} />
                       }
-                      className="mx-auto my-8 max-w-lg border-none bg-transparent"
+                      emptyContent={
+                        <CampusEmptyState
+                          title="No users match the current filters"
+                          description="Try another search term, adjust the role or email filters, or clear the filters to see the full CAMPUS directory."
+                          compact
+                          action={
+                            <Button
+                              variant="bordered"
+                              onPress={resetUserFilters}
+                              isDisabled={!hasActiveUserFilters && userSortMode === "school_id_asc"}
+                              startContent={<RefreshCcw size={16} />}
+                            >
+                              Clear filters
+                            </Button>
+                          }
+                          className="mx-auto my-8 max-w-lg border-none bg-transparent"
+                        />
+                      }
+                      wrapperClassName="border-[#e5e7eb]"
+                      tableClassName="min-w-[1520px]"
+                      renderCell={(profile, columnKey) => {
+                        const isSelf = profile.uid === adminUid;
+
+                        if (columnKey === "schoolId")
+                          return (
+                            <div className="space-y-1.5">
+                              <p className="font-semibold text-campus-text-primary">
+                                {profile.schoolId || "No school ID"}
+                              </p>
+                              <p className="break-all font-mono text-xs text-campus-text-secondary">
+                                UID: {profile.uid}
+                              </p>
+                            </div>
+                          );
+
+                        if (columnKey === "name")
+                          return (
+                            <div className="space-y-3">
+                              <div className="space-y-1">
+                                <p className="text-sm font-semibold text-campus-text-primary">
+                                  {profile.fullName}
+                                </p>
+                                <p className="text-xs text-campus-text-secondary">
+                                  {profile.role === "student"
+                                    ? "Student profile"
+                                    : profile.role === "teacher"
+                                      ? "Teacher profile"
+                                      : profile.role === "ec"
+                                        ? "EC member profile"
+                                        : "Admin profile"}
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap gap-2">
+                                <Chip
+                                  color={
+                                    profile.accountStatus === "Active"
+                                      ? "success"
+                                      : "default"
+                                  }
+                                  variant="flat"
+                                  size="sm"
+                                  className="whitespace-nowrap"
+                                >
+                                  Account: {profile.accountStatus}
+                                </Chip>
+                                <Chip
+                                  color={
+                                    profile.fingerprintStatus === "Active"
+                                      ? "primary"
+                                      : "default"
+                                  }
+                                  variant="flat"
+                                  size="sm"
+                                  className="whitespace-nowrap"
+                                >
+                                  Fingerprint: {profile.fingerprintStatus}
+                                </Chip>
+                                <Chip
+                                  color={
+                                    profile.clearanceReady ? "success" : "default"
+                                  }
+                                  variant="flat"
+                                  size="sm"
+                                  className="whitespace-nowrap"
+                                >
+                                  Clearance:{" "}
+                                  {profile.clearanceReady ? "Ready" : "Pending"}
+                                </Chip>
+                              </div>
+                            </div>
+                          );
+
+                        if (columnKey === "studentId")
+                          return (
+                            <Chip
+                              variant="flat"
+                              color={profile.studentId === "-" ? "default" : "primary"}
+                              className="font-medium"
+                            >
+                              {profile.studentId}
+                            </Chip>
+                          );
+
+                        if (columnKey === "email")
+                          return hasEmail(profile) ? (
+                            <div className="space-y-1.5">
+                              <Tooltip content={profile.email} delay={300}>
+                                <p className="max-w-[280px] truncate text-sm text-campus-text-primary">
+                                  {profile.email}
+                                </p>
+                              </Tooltip>
+                              <p className="text-xs text-campus-text-secondary">
+                                Contact-ready account
+                              </p>
+                            </div>
+                          ) : (
+                            <Chip variant="flat" color="warning" className="font-medium">
+                              No email on file
+                            </Chip>
+                          );
+
+                        if (columnKey === "course")
+                          return (
+                            <Chip
+                              variant="flat"
+                              color={profile.course === "-" ? "default" : "secondary"}
+                              className="max-w-full font-medium"
+                            >
+                              {profile.course}
+                            </Chip>
+                          );
+
+                        if (columnKey === "yearLevel")
+                          return (
+                            <Chip
+                              variant="flat"
+                              color={profile.yearLevel === "-" ? "default" : "warning"}
+                              className="font-medium whitespace-nowrap"
+                            >
+                              {profile.yearLevel}
+                            </Chip>
+                          );
+
+                        if (columnKey === "role") {
+                          return <UserRoleChip role={profile.role} />;
+                        }
+
+                        if (columnKey === "roleAssignment") {
+                          const roleSelect = (
+                            <Select
+                              aria-label={`Assign role for ${profile.schoolId || profile.uid}`}
+                              selectedKeys={[profile.role]}
+                              onSelectionChange={(keys) => {
+                                const selected = Array.from(keys as Set<React.Key>)[0];
+                                if (typeof selected === "string") {
+                                  requestRoleChange(profile, selected as Role);
+                                }
+                              }}
+                              disallowEmptySelection
+                              isDisabled={savingRoleUid === profile.uid}
+                              size="sm"
+                              className="min-w-[190px]"
+                            >
+                              {roleOptions.map((role) => (
+                                <SelectItem key={role}>{formatRole(role)}</SelectItem>
+                              ))}
+                            </Select>
+                          );
+
+                          if (isSelf) {
+                            return (
+                              <Tooltip
+                                content="Changing your own role can affect your admin access after refresh."
+                                delay={300}
+                              >
+                                <div>{roleSelect}</div>
+                              </Tooltip>
+                            );
+                          }
+
+                          return roleSelect;
+                        }
+
+                        if (columnKey === "actions")
+                          return (
+                            <div className="flex justify-end">
+                              {isSelf ? (
+                                <Tooltip
+                                  content="Your own admin account cannot be removed from this screen."
+                                  delay={300}
+                                >
+                                  <div>
+                                    <Chip color="warning" variant="flat">
+                                      Protected
+                                    </Chip>
+                                  </div>
+                                </Tooltip>
+                              ) : (
+                                <Dropdown placement="bottom-end">
+                                  <DropdownTrigger>
+                                    <Button
+                                      isIconOnly
+                                      size="sm"
+                                      variant="light"
+                                      aria-label={`Actions for ${profile.schoolId || profile.uid}`}
+                                    >
+                                      <MoreHorizontal size={16} />
+                                    </Button>
+                                  </DropdownTrigger>
+                                  <DropdownMenu aria-label="User actions">
+                                    <DropdownItem
+                                      key="edit"
+                                      onPress={() => openEditProfileModal(profile)}
+                                    >
+                                      Edit profile
+                                    </DropdownItem>
+                                    <DropdownItem
+                                      key="remove"
+                                      color="danger"
+                                      className="text-danger"
+                                      onPress={() => requestRemoveAccount(profile)}
+                                    >
+                                      Remove account
+                                    </DropdownItem>
+                                  </DropdownMenu>
+                                </Dropdown>
+                              )}
+                            </div>
+                          );
+                        return null;
+                      }}
                     />
-                  }
-                  wrapperClassName="border-[#e5e7eb]"
-                  renderCell={(profile, columnKey) => {
-                    const isSelf = profile.uid === adminUid;
 
-                    if (columnKey === "schoolId")
-                      return (
-                        <div className="space-y-1">
-                          <p className="font-semibold text-campus-text-primary">
-                            {profile.schoolId || "No school ID"}
-                          </p>
-                          <p className="text-xs text-campus-text-secondary">
-                            UID: {profile.uid}
-                          </p>
-                        </div>
-                      );
+                    <div className="flex flex-col gap-3 border-t border-[#e5e7eb] pt-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium text-campus-text-primary">
+                          Showing {currentPageStart}-{currentPageEnd} of {sortedProfiles.length} matching user{sortedProfiles.length === 1 ? "" : "s"}
+                        </p>
+                        <p className="text-xs text-campus-text-secondary">
+                          Horizontal scrolling is enabled when the full directory needs more room.
+                        </p>
+                      </div>
 
-                    if (columnKey === "name")
-                      return (
-                        <div className="space-y-2">
-                          <p className="text-sm font-medium text-campus-text-primary">
-                            {profile.fullName}
-                          </p>
-                          <div className="flex flex-wrap gap-2">
-                            <Chip
-                              color={
-                                profile.accountStatus === "Active"
-                                  ? "success"
-                                  : "default"
-                              }
-                              variant="flat"
-                              size="sm"
-                            >
-                              Account: {profile.accountStatus}
-                            </Chip>
-                            <Chip
-                              color={
-                                profile.fingerprintStatus === "Active"
-                                  ? "primary"
-                                  : "default"
-                              }
-                              variant="flat"
-                              size="sm"
-                            >
-                              Fingerprint: {profile.fingerprintStatus}
-                            </Chip>
-                            <Chip
-                              color={
-                                profile.clearanceReady ? "success" : "default"
-                              }
-                              variant="flat"
-                              size="sm"
-                            >
-                              Clearance:{" "}
-                              {profile.clearanceReady ? "Ready" : "Pending"}
-                            </Chip>
-                          </div>
-                        </div>
-                      );
-
-                    if (columnKey === "studentId")
-                      return (
-                        <Chip
-                          variant="flat"
-                          color={profile.studentId === "-" ? "default" : "primary"}
-                          className="font-medium"
-                        >
-                          {profile.studentId}
-                        </Chip>
-                      );
-
-                    if (columnKey === "email")
-                      return hasEmail(profile) ? (
-                        <div className="space-y-1">
-                          <p className="break-all text-sm text-campus-text-primary">
-                            {profile.email}
-                          </p>
-                          <p className="text-xs text-campus-text-secondary">
-                            Contact-ready account
-                          </p>
-                        </div>
-                      ) : (
-                        <Chip variant="flat" color="warning" className="font-medium">
-                          No email on file
-                        </Chip>
-                      );
-
-                    if (columnKey === "course")
-                      return (
-                        <Chip
-                          variant="flat"
-                          color={profile.course === "-" ? "default" : "secondary"}
-                          className="font-medium"
-                        >
-                          {profile.course}
-                        </Chip>
-                      );
-
-                    if (columnKey === "yearLevel")
-                      return (
-                        <Chip
-                          variant="flat"
-                          color={profile.yearLevel === "-" ? "default" : "warning"}
-                          className="font-medium"
-                        >
-                          {profile.yearLevel}
-                        </Chip>
-                      );
-
-                    if (columnKey === "role") return <UserRoleChip role={profile.role} />;
-
-                    if (columnKey === "roleAssignment") {
-                      const roleSelect = (
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
                         <Select
-                          aria-label={`Assign role for ${profile.schoolId || profile.uid}`}
-                          selectedKeys={[profile.role]}
+                          label="Rows per page"
+                          size="sm"
+                          selectedKeys={[String(userPageSize)]}
                           onSelectionChange={(keys) => {
                             const selected = Array.from(keys as Set<React.Key>)[0];
                             if (typeof selected === "string") {
-                              requestRoleChange(profile, selected as Role);
+                              const nextPageSize = Number.parseInt(selected, 10);
+                              if (
+                                USER_PAGE_SIZE_OPTIONS.includes(
+                                  nextPageSize as (typeof USER_PAGE_SIZE_OPTIONS)[number],
+                                )
+                              ) {
+                                setUserPageSize(
+                                  nextPageSize as (typeof USER_PAGE_SIZE_OPTIONS)[number],
+                                );
+                                setUserPage(1);
+                              }
                             }
                           }}
                           disallowEmptySelection
-                          isDisabled={savingRoleUid === profile.uid}
-                          size="sm"
+                          className="w-full sm:w-40"
                         >
-                          {roleOptions.map((role) => (
-                            <SelectItem key={role}>{formatRole(role)}</SelectItem>
+                          {USER_PAGE_SIZE_OPTIONS.map((size) => (
+                            <SelectItem key={String(size)}>{size} rows</SelectItem>
                           ))}
                         </Select>
-                      );
 
-                      if (isSelf) {
-                        return (
-                          <Tooltip
-                            content="Changing your own role can affect your admin access after refresh."
-                            delay={300}
-                          >
-                            <div>{roleSelect}</div>
-                          </Tooltip>
-                        );
-                      }
-
-                      return roleSelect;
-                    }
-
-                    if (columnKey === "actions")
-                      return (
-                        <div className="flex justify-end">
-                          {isSelf ? (
-                            <Tooltip
-                              content="Your own admin account cannot be removed from this screen."
-                              delay={300}
-                            >
-                              <div>
-                                <Chip color="warning" variant="flat">
-                                  Protected
-                                </Chip>
-                              </div>
-                            </Tooltip>
-                          ) : (
-                            <Dropdown placement="bottom-end">
-                              <DropdownTrigger>
-                                <Button
-                                  isIconOnly
-                                  size="sm"
-                                  variant="light"
-                                  aria-label={`Actions for ${profile.schoolId || profile.uid}`}
-                                >
-                                  <MoreHorizontal size={16} />
-                                </Button>
-                              </DropdownTrigger>
-                              <DropdownMenu aria-label="User actions">
-                                <DropdownItem
-                                  key="edit"
-                                  onPress={() => openEditProfileModal(profile)}
-                                >
-                                  Edit profile
-                                </DropdownItem>
-                                <DropdownItem
-                                  key="remove"
-                                  color="danger"
-                                  className="text-danger"
-                                  onPress={() => requestRemoveAccount(profile)}
-                                >
-                                  Remove account
-                                </DropdownItem>
-                              </DropdownMenu>
-                            </Dropdown>
-                          )}
-                        </div>
-                      );
-                    return null;
-                  }}
-                />
+                        {sortedProfiles.length > 0 ? (
+                          <div className="flex flex-col items-start gap-1 sm:items-end">
+                            <p className="text-xs uppercase tracking-[0.18em] text-campus-text-secondary">
+                              Page {safeUserPage} of {totalUserPages}
+                            </p>
+                            <Pagination
+                              showControls
+                              page={safeUserPage}
+                              total={totalUserPages}
+                              onChange={(nextPage) => setUserPage(nextPage)}
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </CardBody>
+                </Card>
               </div>
             )}
             <BulkStudentImportModal
@@ -2695,6 +2939,67 @@ export default function AdminDashboardPage() {
             </div>
           </Tab>
         </Tabs>
+
+        <Modal
+          isOpen={showDeactivateStudentsModal}
+          onOpenChange={(open) => {
+            if (!open && !deactivatingStudents) {
+              setShowDeactivateStudentsModal(false);
+            }
+          }}
+          size="md"
+        >
+          <ModalContent>
+            {(onClose) => (
+              <>
+                <ModalHeader>Make all students inactive</ModalHeader>
+                <ModalBody className="space-y-3">
+                  <p className="text-base font-semibold text-campus-text-primary">
+                    This affects every account whose role is currently set to student.
+                  </p>
+                  <p className="text-sm text-campus-text-secondary">
+                    This action does not delete accounts. It only changes student account status to inactive and leaves admin, teacher, EC member, and other privileged accounts untouched.
+                  </p>
+                  <div className="rounded-2xl border bg-amber-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-amber-700">
+                      Impact summary
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Chip color="warning" variant="flat">
+                        {activeStudentAccounts} active student account{activeStudentAccounts === 1 ? "" : "s"}
+                      </Chip>
+                      <Chip variant="bordered">
+                        {totalStudentAccounts} total student account{totalStudentAccounts === 1 ? "" : "s"}
+                      </Chip>
+                    </div>
+                  </div>
+                </ModalBody>
+                <ModalFooter className="justify-between">
+                  <Button
+                    variant="bordered"
+                    onPress={() => {
+                      setShowDeactivateStudentsModal(false);
+                      onClose();
+                    }}
+                    isDisabled={deactivatingStudents}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    color="warning"
+                    onPress={() => {
+                      void confirmDeactivateAllStudents();
+                    }}
+                    isLoading={deactivatingStudents}
+                    isDisabled={activeStudentAccounts === 0}
+                  >
+                    Make students inactive
+                  </Button>
+                </ModalFooter>
+              </>
+            )}
+          </ModalContent>
+        </Modal>
 
         <Modal
           isOpen={Boolean(pendingRoleChange)}

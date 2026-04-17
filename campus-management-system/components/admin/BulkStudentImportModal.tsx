@@ -30,6 +30,7 @@ import {
 } from "@/lib/bulkStudentImport";
 import {
   adminBulkImportStudents,
+  type BulkStudentImportResult,
   getCampusFunctions,
 } from "@/lib/firebase-functions";
 
@@ -49,23 +50,9 @@ export default function BulkStudentImportModal({
   const [previewRows, setPreviewRows] = useState<BulkStudentImportPreviewRow[]>([]);
   const [parsing, setParsing] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<{
-    totalRows: number;
-    importedCount: number;
-    failedCount: number;
-    skippedCount: number;
-    rowResults: Array<{
-      schoolId: string;
-      lastName: string;
-      firstName: string;
-      course: string;
-      yearLevel: string;
-      status: string;
-      success: boolean;
-      skipped?: boolean;
-      error?: string;
-    }>;
-  } | null>(null);
+  const [importResult, setImportResult] = useState<BulkStudentImportResult | null>(
+    null,
+  );
   const [parseError, setParseError] = useState<string>("");
 
   const totalRows = previewRows.length;
@@ -80,6 +67,7 @@ export default function BulkStudentImportModal({
       schoolId: row.schoolId,
       lastName: row.lastName,
       firstName: row.firstName,
+      fullName: row.fullName || undefined,
       course: row.course,
       yearLevel: row.yearLevel,
       status: row.status,
@@ -105,10 +93,38 @@ export default function BulkStudentImportModal({
       setPreviewRows(rows);
       if (rows.length === 1 && rows[0].errors.length > 0 && rows[0].rowIndex === 1) {
         setParseError(rows[0].errors.join(" "));
+        campusToast.error({
+          title: "Upload failed",
+          description: "Please check the file format and try again.",
+          dedupeKey: `admin:bulk-import:parse-error:${file.name}`,
+        });
+        return;
+      }
+
+      const nextValidRows = rows.filter((row) => row.isValid).length;
+      const nextIssueRows = rows.length - nextValidRows;
+      if (nextValidRows > 0) {
+        campusToast.success({
+          title: "Student CSV uploaded successfully",
+          description: `${nextValidRows} valid row${nextValidRows === 1 ? "" : "s"} ready for import.`,
+          dedupeKey: `admin:bulk-import:preview-success:${file.name}:${nextValidRows}`,
+        });
+      }
+      if (nextIssueRows > 0) {
+        campusToast.warning({
+          title: "Some rows need attention",
+          description: `${nextIssueRows} row${nextIssueRows === 1 ? "" : "s"} need fixes before import.`,
+          dedupeKey: `admin:bulk-import:preview-warning:${file.name}:${nextIssueRows}`,
+        });
       }
     } catch {
       setPreviewRows([]);
       setParseError("Unable to parse the CSV file. Please verify the format.");
+      campusToast.error({
+        title: "Upload failed",
+        description: "Please check the file format.",
+        dedupeKey: `admin:bulk-import:parse-failed:${file.name}`,
+      });
     } finally {
       setParsing(false);
     }
@@ -157,11 +173,6 @@ export default function BulkStudentImportModal({
       return;
     }
 
-    const shouldContinue = window.confirm(
-      `You are about to import ${parsedRows.length} valid students. Continue?`,
-    );
-    if (!shouldContinue) return;
-
     setImporting(true);
     try {
       const result = await adminBulkImportStudents(getCampusFunctions(), {
@@ -171,15 +182,24 @@ export default function BulkStudentImportModal({
       setImportResult(result);
       if (result.importedCount > 0) {
         campusToast.success({
-          title: "Import complete",
-          description: `${result.importedCount} students imported successfully.`,
-          dedupeKey: "admin:bulk-import:success",
+          title: "Student CSV uploaded successfully",
+          description: `${result.importedCount} student account${result.importedCount === 1 ? "" : "s"} created.`,
+          dedupeKey: `admin:bulk-import:success:${result.importedCount}:${result.failedCount}:${result.skippedCount}`,
         });
-      } else {
+      }
+
+      const issueCount = result.failedCount + result.skippedCount;
+      if (issueCount > 0) {
+        campusToast.warning({
+          title: "Import completed with issues",
+          description: `${issueCount} row${issueCount === 1 ? "" : "s"} were skipped or failed due to invalid data.`,
+          dedupeKey: `admin:bulk-import:warning:${issueCount}`,
+        });
+      } else if (result.importedCount === 0) {
         campusToast.warning({
           title: "No students imported",
           description: "No valid rows were imported. Check the preview and fix errors.",
-          dedupeKey: "admin:bulk-import:warning",
+          dedupeKey: "admin:bulk-import:no-imported-rows",
         });
       }
     } catch (error: unknown) {
@@ -280,6 +300,7 @@ export default function BulkStudentImportModal({
                 </p>
                 <ul className="grid gap-2 text-sm text-campus-text-secondary">
                   <li>Required fields: SchoolId, LastName, FirstName, Course, YearLevel.</li>
+                  <li>Legacy files that use <span className="font-medium">FullName</span> or <span className="font-medium">Name</span> are still accepted.</li>
                   <li>The template opens cleanly in Excel, Google Sheets, and other spreadsheet apps.</li>
                   <li>Course accepts CAMPUS course labels and common codes like BSCpE.</li>
                   <li>Do not include email. Student email is collected later.</li>

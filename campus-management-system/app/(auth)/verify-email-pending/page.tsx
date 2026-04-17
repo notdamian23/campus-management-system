@@ -5,7 +5,12 @@ import { useRouter } from "next/navigation";
 import { Alert } from "@heroui/alert";
 import { Button } from "@heroui/button";
 import { Chip } from "@heroui/chip";
-import { onAuthStateChanged, signOut, verifyBeforeUpdateEmail } from "firebase/auth";
+import {
+  onAuthStateChanged,
+  sendEmailVerification,
+  signOut,
+  verifyBeforeUpdateEmail,
+} from "firebase/auth";
 import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
 import { auth } from "@/lib/firebase";
 import {
@@ -15,9 +20,11 @@ import {
 } from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
 import {
+  buildEmailActionSettings,
   clearCampusCookies,
   finalizeVerifiedProfile,
   getOnboardingRedirect,
+  resolveCampusVerificationEmailTarget,
   type CampusProfileDoc,
   resolveRoleHome,
   setCampusCookies,
@@ -125,7 +132,13 @@ export default function VerifyEmailPendingPage() {
 
   const resendVerification = async () => {
     const user = auth.currentUser;
-    const pendingEmail = String(profile?.pendingEmail ?? "").trim().toLowerCase();
+    const verificationTarget = resolveCampusVerificationEmailTarget(
+      profile,
+      user?.email,
+    );
+    const verificationEmail = verificationTarget?.email ?? "";
+    const usesCurrentAuthEmail =
+      verificationTarget?.mode === "current-auth-email";
 
     if (!user) {
       setGeneralError("Please sign in again before resending the verification email.");
@@ -133,8 +146,8 @@ export default function VerifyEmailPendingPage() {
       return;
     }
 
-    if (!pendingEmail) {
-      setGeneralError("No pending email address was found for this account.");
+    if (!verificationEmail) {
+      setGeneralError("No verifiable email address was found for this account.");
       return;
     }
 
@@ -146,33 +159,46 @@ export default function VerifyEmailPendingPage() {
       if (!currentUser) {
         throw new Error("No authenticated user is available for resend.");
       }
-      const actionCodeSettings = {
-        url: `${(process.env.NEXT_PUBLIC_APP_URL?.trim() || "https://campusportal.site").replace(/\/+$/, "")}/auth/action`,
-        handleCodeInApp: false,
-      };
+      const actionCodeSettings = buildEmailActionSettings();
       logCampusAuthEvent("info", "Resending verification email", {
-        firebaseMethod: "verifyBeforeUpdateEmail",
+        firebaseMethod: usesCurrentAuthEmail ?
+          "sendEmailVerification" :
+          "verifyBeforeUpdateEmail",
         currentUser: user.email ? "present" : "present-without-email",
         authCurrentUser: auth.currentUser ? "present" : "missing",
-        pendingEmailDomain: pendingEmail.split("@")[1] ?? "",
+        pendingEmailDomain: verificationEmail.split("@")[1] ?? "",
         hasActionUrl: Boolean(actionCodeSettings.url),
         handleCodeInApp: actionCodeSettings.handleCodeInApp,
       });
-      await verifyBeforeUpdateEmail(currentUser, pendingEmail, actionCodeSettings);
+
+      // Existing auth emails need a normal verification email. Pending email
+      // changes still use Firebase's verify-before-update flow.
+      if (usesCurrentAuthEmail) {
+        await sendEmailVerification(currentUser, actionCodeSettings);
+      } else {
+        await verifyBeforeUpdateEmail(
+          currentUser,
+          verificationEmail,
+          actionCodeSettings,
+        );
+      }
+
       logCampusAuthEvent("info", "Resend verification email accepted by Firebase", {
-        firebaseMethod: "verifyBeforeUpdateEmail",
+        firebaseMethod: usesCurrentAuthEmail ?
+          "sendEmailVerification" :
+          "verifyBeforeUpdateEmail",
         hasCurrentUserEmail: Boolean(currentUser.email),
-        pendingEmailDomain: pendingEmail.split("@")[1] ?? "",
+        pendingEmailDomain: verificationEmail.split("@")[1] ?? "",
       });
       const refreshedProfile =
-        await savePendingEmailVerificationForCurrentUser(pendingEmail);
+        await savePendingEmailVerificationForCurrentUser(verificationEmail);
       if (refreshedProfile) {
         setProfile(refreshedProfile as CampusProfileDoc);
       }
       campusToast.success({
-        title: "Verification email resent",
-        description: `A new verification link was sent to ${pendingEmail}.`,
-        dedupeKey: `verify-email-pending:resent:${pendingEmail}`,
+        title: "Verification email sent",
+        description: `A verification link was sent to ${verificationEmail}.`,
+        dedupeKey: `verify-email-pending:resent:${verificationEmail}`,
       });
     } catch (error: unknown) {
       const authError = error as { code?: string; message?: string };
@@ -180,16 +206,22 @@ export default function VerifyEmailPendingPage() {
         `${authError.code}: ${authError.message ?? "Unknown Firebase error."}` :
         authError.message || "Failed to resend the verification email.";
       logCampusAuthEvent("error", "Resend verification email failed", {
-        firebaseMethod: "verifyBeforeUpdateEmail",
+        firebaseMethod: usesCurrentAuthEmail ?
+          "sendEmailVerification" :
+          "verifyBeforeUpdateEmail",
         code: authError.code ?? "unknown",
         message: authError.message ?? "Unknown resend error",
         hasCurrentUserEmail: Boolean(auth.currentUser?.email),
-        pendingEmailDomain: pendingEmail.split("@")[1] ?? "",
+        pendingEmailDomain: verificationEmail.split("@")[1] ?? "",
       });
       if (authError.code === "auth/requires-recent-login") {
         setGeneralError(exactErrorMessage);
         router.replace("/login?next=/verify-email-pending");
       } else if (authError.code === "auth/invalid-email") {
+        setGeneralError(exactErrorMessage);
+      } else if (authError.code === "auth/missing-email") {
+        setGeneralError(exactErrorMessage);
+      } else if (authError.code === "auth/too-many-requests") {
         setGeneralError(exactErrorMessage);
       } else if (authError.code === "auth/network-request-failed") {
         setGeneralError(exactErrorMessage);
@@ -214,7 +246,13 @@ export default function VerifyEmailPendingPage() {
     return <CampusAuthShellSkeleton />;
   }
 
-  const pendingEmail = String(profile?.pendingEmail ?? "").trim();
+  const verificationTarget = resolveCampusVerificationEmailTarget(
+    profile,
+    auth.currentUser?.email,
+  );
+  const verificationEmail = verificationTarget?.email ?? "";
+  const usesCurrentAuthEmail =
+    verificationTarget?.mode === "current-auth-email";
 
   return (
     <CampusAuthShell
@@ -244,22 +282,27 @@ export default function VerifyEmailPendingPage() {
           <Alert
             color="primary"
             variant="flat"
-            title="Check your inbox"
-            description="Open the verification link we sent, then return here and refresh your status."
+            title="Verify your email"
+            description="Open the verification link we sent, then return here and refresh your verification status."
           />
         )}
 
         <div className="rounded-2xl border border-border bg-white/80 px-4 py-4">
           <p className="text-sm font-semibold text-campus-text-primary">
-            Pending email
+            Verification email
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Chip color="primary" variant="flat">
-              {pendingEmail || "No pending email stored"}
+              {verificationEmail || "No verifiable email stored"}
             </Chip>
             {profile?.emailVerificationPending ? (
               <Chip color="warning" variant="flat">
                 Awaiting verification
+              </Chip>
+            ) : null}
+            {usesCurrentAuthEmail ? (
+              <Chip color="secondary" variant="flat">
+                Current auth email
               </Chip>
             ) : null}
           </div>
@@ -275,7 +318,7 @@ export default function VerifyEmailPendingPage() {
             isLoading={refreshing}
             isDisabled={!signedIn || refreshing || resending}
           >
-            Refresh status
+            Refresh verification status
           </Button>
           <Button
             className="bg-primary-500 font-semibold text-white"
@@ -283,9 +326,9 @@ export default function VerifyEmailPendingPage() {
               void resendVerification();
             }}
             isLoading={resending}
-            isDisabled={!signedIn || !pendingEmail || refreshing || resending}
+            isDisabled={!signedIn || !verificationEmail || refreshing || resending}
           >
-            Resend verification
+            Send verification email
           </Button>
           <Button variant="light" onPress={() => void handleBackToLogin()}>
             Back to login

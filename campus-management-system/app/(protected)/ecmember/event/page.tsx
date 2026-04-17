@@ -219,7 +219,10 @@ type RemoteStudent = {
   studentName?: string;
   name?: string;
   course?: string;
+  yearLevel?: string;
   year?: string;
+  status?: string;
+  role?: string;
 };
 
 type StudentLookup = {
@@ -229,6 +232,8 @@ type StudentLookup = {
   course: string;
   year: string;
   searchText: string;
+  status: string;
+  role: string;
 };
 
 type NotificationListStatus = "scheduled" | "sent";
@@ -297,6 +302,16 @@ type EventParticipantRow = {
   attendanceTimeIn: string;
   attendanceTimeOut: string;
   sortMs: number;
+};
+
+type AttendanceExportRow = {
+  schoolId: string;
+  studentName: string;
+  course: string;
+  year: string;
+  attendanceStatus: string;
+  attendanceTimeIn: string;
+  attendanceTimeOut: string;
 };
 
 const ONE_MB_IN_BYTES = 1024 * 1024;
@@ -477,6 +492,166 @@ function splitCommaValues(raw: string | undefined) {
     .filter((item) => item.length > 0);
 }
 
+function normalizeLookupText(value: unknown) {
+  return String(value ?? "").trim();
+}
+
+function normalizeLowerLookupText(value: unknown) {
+  return normalizeLookupText(value).toLowerCase();
+}
+
+function toEventTargetList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeLookupText(item)).filter(Boolean);
+  }
+
+  return splitCommaValues(
+    typeof value === "string" ? value : String(value ?? ""),
+  );
+}
+
+function matchesEventTargetList(
+  targetValue: unknown,
+  studentValue: string,
+  allLabel: string,
+) {
+  const targets = toEventTargetList(targetValue);
+  if (targets.length === 0) return true;
+
+  if (
+    targets.some(
+      (item) => normalizeLowerLookupText(item) === normalizeLowerLookupText(allLabel),
+    )
+  ) {
+    return true;
+  }
+
+  return targets.some(
+    (item) =>
+      normalizeLowerLookupText(item) === normalizeLowerLookupText(studentValue),
+  );
+}
+
+function matchesSpecificEventStudentTarget(
+  targetValue: unknown,
+  schoolId: string,
+  studentName: string,
+) {
+  const rawTarget = normalizeLookupText(targetValue);
+  if (!rawTarget) return true;
+
+  const normalizedSchoolId = normalizeLowerLookupText(schoolId);
+  const normalizedStudentName = normalizeLowerLookupText(studentName);
+  if (!normalizedSchoolId && !normalizedStudentName) return false;
+
+  const parts = rawTarget
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  for (const part of parts.length > 0 ? parts : [rawTarget]) {
+    const normalized = normalizeLowerLookupText(part);
+    const withoutParens = normalizeLowerLookupText(
+      part.replace(/\([^)]*\)/g, " ").trim(),
+    );
+    const parenMatch = part.match(/\(([^)]+)\)/);
+    const insideParen = normalizeLowerLookupText(parenMatch?.[1] ?? "");
+
+    if (
+      normalized === normalizedSchoolId ||
+      normalized === normalizedStudentName
+    ) {
+      return true;
+    }
+
+    if (insideParen && insideParen === normalizedSchoolId) {
+      return true;
+    }
+
+    if (
+      withoutParens &&
+      (withoutParens === normalizedStudentName ||
+        normalizedStudentName.includes(withoutParens) ||
+        withoutParens.includes(normalizedStudentName))
+    ) {
+      return true;
+    }
+
+    if (normalizedSchoolId && normalized.includes(normalizedSchoolId)) {
+      return true;
+    }
+
+    if (normalizedStudentName && normalized.includes(normalizedStudentName)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function sortStudentLookups(rows: StudentLookup[]) {
+  return [...rows].sort(
+    (left, right) =>
+      left.studentName.localeCompare(right.studentName) ||
+      left.schoolId.localeCompare(right.schoolId),
+  );
+}
+
+function resolveRequiredEventAudience(
+  event: Pick<
+    EventDoc,
+    "course" | "courses" | "yearLevel" | "yearLevels" | "targetStudent"
+  >,
+  students: StudentLookup[],
+) {
+  const courseTargets =
+    Array.isArray(event.courses) && event.courses.length > 0
+      ? event.courses.map((item) => normalizeLookupText(item)).filter(Boolean)
+      : toEventTargetList(event.course);
+  const yearTargets =
+    Array.isArray(event.yearLevels) && event.yearLevels.length > 0
+      ? event.yearLevels.map((item) => normalizeLookupText(item)).filter(Boolean)
+      : toEventTargetList(event.yearLevel);
+  const hasSpecificTarget = Boolean(normalizeLookupText(event.targetStudent));
+  const hasExplicitAudience =
+    courseTargets.length > 0 || yearTargets.length > 0 || hasSpecificTarget;
+
+  if (!hasExplicitAudience) {
+    return {
+      resolved: false,
+      students: [] as StudentLookup[],
+    };
+  }
+
+  const activeStudents = students.filter(
+    (student) => normalizeLowerLookupText(student.status) !== "inactive",
+  );
+
+  const matchedStudents = activeStudents.filter((student) => {
+    const courseMatch = matchesEventTargetList(
+      courseTargets,
+      student.course,
+      "All Courses",
+    );
+    const yearMatch = matchesEventTargetList(
+      yearTargets,
+      student.year,
+      "All Years",
+    );
+    const studentMatch = matchesSpecificEventStudentTarget(
+      event.targetStudent,
+      student.schoolId,
+      student.studentName,
+    );
+    return courseMatch && yearMatch && studentMatch;
+  });
+
+  return {
+    resolved: true,
+    students: sortStudentLookups(matchedStudents),
+  };
+}
+
 function parseTargetStudents(
   targetStudent: string | undefined,
   allStudents: StudentLookup[],
@@ -532,6 +707,8 @@ function parseTargetStudents(
       course: "",
       year: "",
       searchText: `${fallbackName} ${fallbackSchoolId}`.toLowerCase(),
+      status: "Unknown",
+      role: "student",
     });
   });
 
@@ -584,6 +761,79 @@ function formatDateTime(value: any): string {
   const ms = toMillis(value);
   if (!ms) return "-";
   return new Date(ms).toLocaleString();
+}
+
+function isPresentAttendanceStatus(status: string) {
+  const normalized = normalizeLowerLookupText(status);
+  return normalized === "present" || normalized === "timed in";
+}
+
+function buildAttendanceMetadataRows(
+  event: Pick<
+    EventDoc,
+    "title" | "date" | "scheduledTime" | "timeStart" | "timeEnd" | "location"
+  >,
+  generatedAt: string,
+) {
+  return [
+    ["Event Title", String(event.title ?? "").trim() || "-"],
+    ["Date", String(event.date ?? "").trim() || "-"],
+    [
+      "Scheduled Time In / Start Time",
+      String(event.scheduledTime || event.timeStart || "").trim() || "-",
+    ],
+    [
+      "Scheduled Time Out / End Time",
+      String(event.timeEnd || "").trim() || "-",
+    ],
+    ["Location", String(event.location ?? "").trim() || "-"],
+    ["Generated At", generatedAt],
+    [],
+  ];
+}
+
+function buildAttendanceSheetRows(
+  event: Pick<
+    EventDoc,
+    "title" | "date" | "scheduledTime" | "timeStart" | "timeEnd" | "location"
+  >,
+  rows: AttendanceExportRow[],
+  generatedAt: string,
+  includeTimeColumns: boolean,
+) {
+  const metadataRows = buildAttendanceMetadataRows(event, generatedAt);
+  const headerRow = includeTimeColumns
+    ? [
+        "School ID",
+        "Student Name",
+        "Course",
+        "Year",
+        "Attendance Status",
+        "Attendance Time In",
+        "Attendance Time Out",
+      ]
+    : ["School ID", "Student Name", "Course", "Year", "Attendance Status"];
+  const bodyRows = rows.map((row) =>
+    includeTimeColumns
+      ? [
+          row.schoolId,
+          row.studentName,
+          row.course,
+          row.year,
+          row.attendanceStatus,
+          row.attendanceTimeIn,
+          row.attendanceTimeOut,
+        ]
+      : [
+          row.schoolId,
+          row.studentName,
+          row.course,
+          row.year,
+          row.attendanceStatus,
+        ],
+  );
+
+  return [...metadataRows, headerRow, ...bodyRows];
 }
 
 function formatEventScheduleLabel(event: Pick<EventDoc, "scheduledTime" | "timeStart" | "timeEnd">) {
@@ -745,6 +995,91 @@ function buildEventParticipantRows(
   });
 }
 
+function sortAttendanceExportRows(rows: AttendanceExportRow[]) {
+  return [...rows].sort(
+    (left, right) =>
+      left.studentName.localeCompare(right.studentName) ||
+      left.schoolId.localeCompare(right.schoolId),
+  );
+}
+
+function toPresentAttendanceExportRow(
+  student: StudentLookup,
+  participantRow: EventParticipantRow,
+): AttendanceExportRow {
+  return {
+    schoolId: participantRow.schoolId || student.schoolId,
+    studentName: participantRow.studentName || student.studentName,
+    course: participantRow.course || student.course || "-",
+    year: participantRow.year || student.year || "-",
+    attendanceStatus: "Present",
+    attendanceTimeIn: participantRow.attendanceTimeIn || "-",
+    attendanceTimeOut: participantRow.attendanceTimeOut || "-",
+  };
+}
+
+function toAbsentAttendanceExportRow(student: StudentLookup): AttendanceExportRow {
+  return {
+    schoolId: student.schoolId,
+    studentName: student.studentName,
+    course: student.course || "-",
+    year: student.year || "-",
+    attendanceStatus: "Absent",
+    attendanceTimeIn: "",
+    attendanceTimeOut: "",
+  };
+}
+
+async function downloadAttendanceWorkbook(
+  event: EventDoc,
+  presentRows: AttendanceExportRow[],
+  absentRows: AttendanceExportRow[],
+) {
+  const generatedAt = new Date().toLocaleString();
+  const presentSheetData = buildAttendanceSheetRows(
+    event,
+    presentRows,
+    generatedAt,
+    true,
+  );
+  const absentSheetData = buildAttendanceSheetRows(
+    event,
+    absentRows,
+    generatedAt,
+    false,
+  );
+  const XLSX = await import("xlsx");
+  const workbook = XLSX.utils.book_new();
+  const presentSheet = XLSX.utils.aoa_to_sheet(presentSheetData);
+  const absentsSheet = XLSX.utils.aoa_to_sheet(absentSheetData);
+
+  presentSheet["!cols"] = [
+    { wch: 16 },
+    { wch: 30 },
+    { wch: 24 },
+    { wch: 10 },
+    { wch: 18 },
+    { wch: 24 },
+    { wch: 24 },
+  ];
+  absentsSheet["!cols"] = [
+    { wch: 16 },
+    { wch: 30 },
+    { wch: 24 },
+    { wch: 10 },
+    { wch: 18 },
+  ];
+
+  XLSX.utils.book_append_sheet(workbook, presentSheet, "Present");
+  XLSX.utils.book_append_sheet(workbook, absentsSheet, "Absents");
+
+  const slug = (event.title || event.id)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  XLSX.writeFile(workbook, `${slug || event.id}-attendance.xlsx`);
+}
+
 function getDateTimeMs(date: string, time12?: string) {
   const raw = String(date ?? "").trim();
   if (!raw) return 0;
@@ -769,14 +1104,6 @@ function computeNotificationStatus(
   const when = getDateTimeMs(date, scheduledTime);
   if (!when) return "sent";
   return when > Date.now() ? "scheduled" : "sent";
-}
-
-function csvCell(value: string | number) {
-  const raw = String(value ?? "");
-  if (raw.includes(",") || raw.includes('"') || raw.includes("\n")) {
-    return `"${raw.replace(/"/g, '""')}"`;
-  }
-  return raw;
 }
 
 function getFileExtension(filename: string) {
@@ -1175,7 +1502,9 @@ export default function EventDashboard() {
             schoolId || uid,
           );
           const course = String(s.course ?? "").trim();
-          const year = String(s.year ?? "").trim();
+          const year = String(s.year ?? s.yearLevel ?? "").trim();
+          const status = String(s.status ?? "").trim() || "Active";
+          const role = String(s.role ?? "").trim();
 
           if (!uid) return null;
 
@@ -1188,6 +1517,8 @@ export default function EventDashboard() {
             course,
             year,
             searchText,
+            status,
+            role,
           } as StudentLookup;
         })
         .filter((s): s is StudentLookup => Boolean(s))
@@ -1833,10 +2164,8 @@ export default function EventDashboard() {
   );
   const selectedEventPresentCount = useMemo(
     () =>
-      selectedEventParticipantRows.filter(
-        (row) =>
-          row.attendanceStatus === "Present" ||
-          row.attendanceStatus === "Timed In",
+      selectedEventParticipantRows.filter((row) =>
+        isPresentAttendanceStatus(row.attendanceStatus),
       ).length,
     [selectedEventParticipantRows],
   );
@@ -3382,7 +3711,7 @@ export default function EventDashboard() {
     }
   };
 
-  const exportEventAttendanceCSV = async (ev: EventDoc) => {
+  const exportEventAttendanceWorkbook = async (ev: EventDoc) => {
     setExportMsg("");
     setExportError("");
     setExportingEventId(ev.id);
@@ -3393,176 +3722,123 @@ export default function EventDashboard() {
         getDocs(collection(db, "events", ev.id, "registrations")),
       ]);
 
-      const rowsByUid = new Map<
-        string,
-        {
-          schoolId: string;
-          studentName: string;
-          course: string;
-          year: string;
-          attendanceStatus: string;
-          attendanceTimeIn: string;
-          attendanceTimeOut: string;
+      const registrations = registrationsSnap.docs.map((registrationDoc) => {
+        const data = registrationDoc.data() as Partial<RegistrationDoc>;
+        return {
+          id: registrationDoc.id,
+          uid: String(data.uid ?? registrationDoc.id).trim(),
+          schoolId: String(data.schoolId ?? "").trim(),
+          studentName: String(data.studentName ?? "").trim(),
+          course: String(data.course ?? "").trim(),
+          year: String(data.year ?? "").trim(),
+          createdAt: data.createdAt,
+          updatedAt: data.updatedAt,
+          registeredAt: data.registeredAt,
+          waitlistedAt: data.waitlistedAt,
+          cancelledAt: data.cancelledAt,
+          status: parseRegistrationStatus(data.status),
+        } as RegistrationDoc;
+      });
+      const attendanceRows = attendanceSnap.docs.map((attendanceDoc) => ({
+        id: attendanceDoc.id,
+        ...(attendanceDoc.data() as Omit<EventAttendanceDoc, "id">),
+      }));
+      const participantRows = buildEventParticipantRows(
+        ev,
+        registrations,
+        attendanceRows,
+      );
+      const participantRowsByUid = new Map<string, EventParticipantRow>();
+      const participantRowsBySchoolId = new Map<string, EventParticipantRow>();
+
+      participantRows.forEach((row) => {
+        participantRowsByUid.set(row.uid, row);
+        const schoolId = String(row.schoolId ?? "").trim();
+        if (schoolId) {
+          participantRowsBySchoolId.set(schoolId, row);
         }
-      >();
-
-      registrationsSnap.docs.forEach((d) => {
-        const data = d.data() as Partial<RegistrationDoc>;
-        const uid = String(data.uid ?? d.id);
-        if (!uid) return;
-        const registrationStatus = parseRegistrationStatus(data.status);
-
-        rowsByUid.set(uid, {
-          schoolId: String(data.schoolId ?? ""),
-          studentName: String(data.studentName ?? ""),
-          course: String(data.course ?? ""),
-          year: String(data.year ?? ""),
-          attendanceStatus: formatRegistrationStatus(registrationStatus),
-          attendanceTimeIn: "-",
-          attendanceTimeOut: "-",
-        });
       });
 
-      attendanceSnap.docs.forEach((d) => {
-        const data = d.data() as {
-          uid?: string;
-          studentUid?: string;
-          schoolId?: string;
-          studentName?: string;
-          name?: string;
-          course?: string;
-          yearLevel?: string;
-          year?: string;
-          status?: string;
-          attendanceStatus?: string;
-          present?: boolean;
-          timeIn?: any;
-          timeInIso?: string;
-          timeOut?: any;
-          timeOutIso?: string;
-          timestamp?: any;
-          deviceTimestampIso?: string;
-          createdAt?: any;
-          updatedAt?: any;
-        };
-
-        const uid = String(data.uid ?? data.studentUid ?? d.id);
-        if (!uid) return;
-
-        const existing = rowsByUid.get(uid);
-        const fallbackStatus =
-          typeof data.present === "boolean"
-            ? data.present
-              ? "Present"
-              : "Absent"
-            : "";
-        const timeInValue = formatDateTime(
-          data.timeInIso ||
-            data.timeIn ||
-            data.timestamp ||
-            data.updatedAt ||
-            data.createdAt,
-        );
-        const timeOutValue = formatDateTime(data.timeOutIso || data.timeOut);
-        const derivedStatus =
-          timeInValue !== "-" && timeOutValue !== "-"
-            ? "Present"
-            : timeInValue !== "-"
-              ? "Timed In"
-              : "";
-        const status =
-          String(
-            data.attendanceStatus ?? data.status ?? fallbackStatus ?? "",
-          ).trim() ||
-          derivedStatus ||
-          existing?.attendanceStatus ||
-          "Recorded";
-
-        rowsByUid.set(uid, {
-          schoolId: String(data.schoolId ?? existing?.schoolId ?? ""),
-          studentName: String(
-            data.studentName ?? data.name ?? existing?.studentName ?? "",
-          ),
-          course: String(data.course ?? existing?.course ?? ""),
-          year: String(data.yearLevel ?? data.year ?? existing?.year ?? ""),
-          attendanceStatus: status,
-          attendanceTimeIn:
-            timeInValue !== "-"
-              ? timeInValue
-              : (existing?.attendanceTimeIn ?? "-"),
-          attendanceTimeOut:
-            timeOutValue !== "-"
-              ? timeOutValue
-              : (existing?.attendanceTimeOut ?? "-"),
-        });
-      });
-
-      if (computeStatus(ev) === "completed") {
-        rowsByUid.forEach((row) => {
-          if (
-            row.attendanceStatus === "Pre-registered" &&
-            row.attendanceTimeIn === "-"
-          ) {
-            row.attendanceStatus = "Missed";
-          }
-        });
+      let allStudents = studentOptions;
+      if (allStudents.length === 0) {
+        allStudents = await loadStudentsForNotifications();
       }
 
-      const rows = Array.from(rowsByUid.values()).sort((a, b) => {
-        const byName = a.studentName.localeCompare(b.studentName);
-        if (byName !== 0) return byName;
-        return a.schoolId.localeCompare(b.schoolId);
-      });
+      const audience = resolveRequiredEventAudience(ev, allStudents);
+      let presentRows: AttendanceExportRow[] = [];
+      let absentRows: AttendanceExportRow[] = [];
 
-      if (rows.length === 0) {
+      if (audience.resolved) {
+        audience.students.forEach((student) => {
+          const participantRow =
+            participantRowsByUid.get(student.uid) ??
+            participantRowsBySchoolId.get(student.schoolId);
+
+          if (participantRow && isPresentAttendanceStatus(participantRow.attendanceStatus)) {
+            presentRows.push(toPresentAttendanceExportRow(student, participantRow));
+            return;
+          }
+
+          absentRows.push(toAbsentAttendanceExportRow(student));
+        });
+
+        presentRows = sortAttendanceExportRows(presentRows);
+        absentRows = sortAttendanceExportRows(absentRows);
+      } else {
+        // Older events do not always store explicit audience filters. In that
+        // case we preserve the previous export data and leave the absents sheet
+        // empty instead of inferring absences from the whole roster.
+        presentRows = sortAttendanceExportRows(
+          participantRows.map((row) => ({
+            schoolId: row.schoolId,
+            studentName: row.studentName,
+            course: row.course,
+            year: row.year,
+            attendanceStatus: row.attendanceStatus,
+            attendanceTimeIn: row.attendanceTimeIn,
+            attendanceTimeOut: row.attendanceTimeOut,
+          })),
+        );
+      }
+
+      if (!audience.resolved && presentRows.length === 0) {
         setExportError(
           "No registration or attendance records found for this event.",
         );
+        addToast({
+          title: "Nothing to export",
+          description: "No registration or attendance records were found for this event.",
+          color: "warning",
+          timeout: 5000,
+        });
         return;
       }
 
-      const csvLines = [
-        `Event Title,${csvCell(ev.title)}`,
-        `Date,${csvCell(ev.date)}`,
-        `Scheduled Time Start,${csvCell(ev.scheduledTime || ev.timeStart || "-")}`,
-        `Scheduled Time End,${csvCell(ev.timeEnd || "-")}`,
-        `Location,${csvCell(ev.location ?? "-")}`,
-        `Generated At,${csvCell(new Date().toLocaleString())}`,
-        "",
-        "School ID,Student Name,Course,Year,Attendance Status,Attendance Time In,Attendance Time Out",
-        ...rows.map((row) =>
-          [
-            csvCell(row.schoolId),
-            csvCell(row.studentName),
-            csvCell(row.course),
-            csvCell(row.year),
-            csvCell(row.attendanceStatus),
-            csvCell(row.attendanceTimeIn),
-            csvCell(row.attendanceTimeOut),
-          ].join(","),
-        ),
-      ];
+      await downloadAttendanceWorkbook(ev, presentRows, absentRows);
 
-      const blob = new Blob([csvLines.join("\n")], {
-        type: "text/csv;charset=utf-8;",
+      const description = audience.resolved
+        ? `Downloaded ${presentRows.length} present and ${absentRows.length} absent row(s).`
+        : "Downloaded the attendance workbook. Audience rules were unavailable, so the Absents sheet was left empty.";
+      setExportMsg(
+        audience.resolved
+          ? `Exported ${presentRows.length} present and ${absentRows.length} absent row(s) for "${ev.title}".`
+          : `Exported attendance rows for "${ev.title}" with an empty Absents sheet.`,
+      );
+      addToast({
+        title: "Attendance export ready",
+        description,
+        color: "success",
+        timeout: 5500,
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      const slug = (ev.title || ev.id)
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "");
-
-      a.href = url;
-      a.download = `${slug || ev.id}-attendance.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-
-      setExportMsg(`Exported ${rows.length} row(s) for "${ev.title}".`);
     } catch (err: any) {
-      setExportError(err?.message || "Failed to export attendance.");
+      const message = err?.message || "Failed to export attendance.";
+      setExportError(message);
+      addToast({
+        title: "Export failed",
+        description: message,
+        color: "danger",
+        timeout: 5500,
+      });
     } finally {
       setExportingEventId(null);
     }
@@ -5313,14 +5589,14 @@ export default function EventDashboard() {
                                 color="primary"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  void exportEventAttendanceCSV(ev);
+                                  void exportEventAttendanceWorkbook(ev);
                                 }}
                                 isDisabled={exportingEventId === ev.id}
                                 className="px-3 text-xs"
                               >
                                 {exportingEventId === ev.id
                                   ? "Exporting..."
-                                  : "Export Attendance CSV"}
+                                  : "Export Attendance"}
                               </Button>
                             </div>
 
@@ -6315,13 +6591,13 @@ export default function EventDashboard() {
                             color="primary"
                             variant="flat"
                             startContent={<Download size={16} />}
-                            onPress={() => void exportEventAttendanceCSV(selectedEvent)}
+                            onPress={() => void exportEventAttendanceWorkbook(selectedEvent)}
                             isDisabled={exportingEventId === selectedEvent.id}
                             isLoading={exportingEventId === selectedEvent.id}
                           >
                             {exportingEventId === selectedEvent.id
                               ? "Exporting..."
-                              : "Export Attendance CSV"}
+                              : "Export Attendance"}
                           </Button>
                         </div>
 
