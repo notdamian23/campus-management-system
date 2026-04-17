@@ -102,6 +102,10 @@ import {
 } from "@internationalized/date";
 import { createCampusLogger } from "@/lib/campus-logger";
 import { campusToast } from "@/lib/toast";
+import {
+  formatStudentFullName,
+  formatStudentReferenceList,
+} from "@/lib/student-name";
 
 type Role = "teacher" | "student" | "ec";
 type EventStatus = "upcoming" | "ongoing" | "completed";
@@ -209,6 +213,9 @@ type PaymentLinkOption = {
 type RemoteStudent = {
   uid?: string;
   schoolId?: string;
+  firstName?: string;
+  lastName?: string;
+  fullName?: string;
   studentName?: string;
   name?: string;
   course?: string;
@@ -486,7 +493,9 @@ function parseTargetStudents(
 
   tokens.forEach((token, index) => {
     const match = token.match(/^(.*)\(([^)]+)\)$/);
-    const studentName = String(match?.[1] ?? token).trim();
+    const studentName = formatStudentFullName({
+      name: String(match?.[1] ?? token).trim(),
+    });
     const schoolId = String(match?.[2] ?? "").trim();
 
     const fromOptions =
@@ -643,10 +652,13 @@ function buildEventParticipantRows(
     rowsByUid.set(uid, {
       uid,
       schoolId: String(registration.schoolId ?? "").trim() || uid,
-      studentName:
-        String(registration.studentName ?? "").trim() ||
-        String(registration.schoolId ?? "").trim() ||
-        uid,
+      studentName: formatStudentFullName(
+        {
+          studentName: registration.studentName,
+          schoolId: registration.schoolId,
+        },
+        String(registration.schoolId ?? "").trim() || uid,
+      ),
       course: String(registration.course ?? "").trim() || "-",
       year: String(registration.year ?? "").trim() || "-",
       attendanceStatus: formatRegistrationStatus(
@@ -694,12 +706,14 @@ function buildEventParticipantRows(
     rowsByUid.set(uid, {
       uid,
       schoolId: String(rowDoc.schoolId ?? existing?.schoolId ?? "").trim() || uid,
-      studentName:
-        String(
-          rowDoc.studentName ?? rowDoc.name ?? existing?.studentName ?? "",
-        ).trim() ||
-        String(rowDoc.schoolId ?? existing?.schoolId ?? "").trim() ||
-        uid,
+      studentName: formatStudentFullName(
+        {
+          studentName: rowDoc.studentName ?? existing?.studentName,
+          name: rowDoc.name,
+          schoolId: rowDoc.schoolId ?? existing?.schoolId,
+        },
+        String(rowDoc.schoolId ?? existing?.schoolId ?? "").trim() || uid,
+      ),
       course: String(rowDoc.course ?? existing?.course ?? "").trim() || "-",
       year:
         String(rowDoc.yearLevel ?? rowDoc.year ?? existing?.year ?? "").trim() ||
@@ -1149,8 +1163,17 @@ export default function EventDashboard() {
         .map((s) => {
           const uid = String(s.uid ?? "").trim();
           const schoolId = String(s.schoolId ?? "").trim();
-          const studentName =
-            String(s.studentName ?? s.name ?? "").trim() || schoolId || uid;
+          const studentName = formatStudentFullName(
+            {
+              firstName: s.firstName,
+              lastName: s.lastName,
+              fullName: s.fullName,
+              studentName: s.studentName,
+              name: s.name,
+              schoolId,
+            },
+            schoolId || uid,
+          );
           const course = String(s.course ?? "").trim();
           const year = String(s.year ?? "").trim();
 
@@ -6260,7 +6283,11 @@ export default function EventDashboard() {
                             />
                             <EventDetailInfoRow
                               label="Target student"
-                              value={selectedEvent.targetStudent || "Not restricted to specific students"}
+                              value={
+                                selectedEvent.targetStudent
+                                  ? formatStudentReferenceList(selectedEvent.targetStudent)
+                                  : "Not restricted to specific students"
+                              }
                             />
                             {selectedEvent.isPreReg && typeof selectedEvent.preRegSlots === "number" ? (
                               <EventDetailInfoRow

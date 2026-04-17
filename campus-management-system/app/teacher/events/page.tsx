@@ -35,6 +35,7 @@ import {
 import type { CampusTableColumn } from "@/components/ui";
 import { CampusMetricSkeleton } from "@/components/ui";
 import { db } from "@/lib/firebase";
+import { formatStudentFullName } from "@/lib/student-name";
 import { campusToast } from "@/lib/toast";
 import {
   TeacherDataTable,
@@ -427,8 +428,13 @@ export default function TeacherEventsPage() {
 
         rowsByUid.set(uid, {
           schoolId: String(data.schoolId ?? existing?.schoolId ?? ""),
-          studentName: String(
-            data.studentName ?? data.name ?? existing?.studentName ?? "",
+          studentName: formatStudentFullName(
+            {
+              studentName: data.studentName ?? existing?.studentName,
+              name: data.name,
+              schoolId: data.schoolId ?? existing?.schoolId,
+            },
+            String(data.schoolId ?? existing?.schoolId ?? ""),
           ),
           course: String(data.course ?? existing?.course ?? ""),
           year: String(data.yearLevel ?? data.year ?? existing?.year ?? ""),

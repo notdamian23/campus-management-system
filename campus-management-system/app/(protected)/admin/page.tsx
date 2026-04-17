@@ -53,7 +53,7 @@ import {
   CampusLayoutLoadingState,
   CampusMetricSkeleton,
 } from "@/components/ui";
-import { app, auth, db } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
 import { campusToast } from "@/lib/toast";
 import {
   collection,
@@ -79,9 +79,13 @@ import {
   type CampusUserProjectionSource,
   type CampusUserRow,
 } from "@/lib/campus-user-rows";
-import { getBulkStudentImportTemplateCsv } from "@/lib/bulkStudentImport";
+import {
+  downloadCsv,
+  getBulkStudentImportTemplateCsv,
+} from "@/lib/bulkStudentImport";
 import { CAMPUS_COURSE_OPTIONS } from "@/lib/courseOptions";
 import { getCampusFunctions } from "@/lib/firebase-functions";
+import { formatStudentFullName } from "@/lib/student-name";
 
 const roleOptions = ["student", "teacher", "ec", "admin"] as const;
 const yearOptions = [
@@ -692,6 +696,9 @@ export default function AdminDashboardPage() {
         [
           profile.schoolId,
           profile.fullName,
+          profile.rawFullName,
+          profile.firstName,
+          profile.lastName,
           profile.studentId,
           profile.email,
           profile.role,
@@ -1256,14 +1263,33 @@ export default function AdminDashboardPage() {
   async function saveProfileChanges() {
     if (!editingProfile) return;
 
-    const name = editProfileName.trim();
+    const submittedName = editProfileName.trim();
     const schoolId = editProfileSchoolId.trim();
     const course = editProfileCourse.trim();
     const yearLevel = editProfileYearLevel.trim();
     const allowsBlankAcademicFields =
       editingProfile.role === "teacher" || editingProfile.role === "admin";
+    const originalRawName = String(editingProfile.rawFullName ?? "").trim();
+    const originalDisplayName = formatStudentFullName(
+      {
+        name: originalRawName,
+        schoolId: editingProfile.schoolId,
+      },
+      editingProfile.schoolId,
+    );
+    const name =
+      submittedName === originalDisplayName && originalRawName
+        ? originalRawName
+        : submittedName;
+    const displayName = formatStudentFullName(
+      {
+        name,
+        schoolId,
+      },
+      schoolId,
+    );
 
-    if (!name) {
+    if (!submittedName) {
       campusToast.warning({
         title: "Missing name",
         description: "Name is required before you can save this profile.",
@@ -1334,7 +1360,7 @@ export default function AdminDashboardPage() {
 
       campusToast.success({
         title: "Profile updated",
-        description: `${name} was updated successfully.`,
+        description: `${displayName} was updated successfully.`,
         dedupeKey: `admin:edit-profile:${editingProfile.uid}`,
       });
       setEditingProfile(null);
@@ -2137,17 +2163,7 @@ export default function AdminDashboardPage() {
                           startContent={<Download size={16} />}
                           onPress={() => {
                             const csv = getBulkStudentImportTemplateCsv();
-                            const blob = new Blob([csv], {
-                              type: "text/csv;charset=utf-8;",
-                            });
-                            const url = URL.createObjectURL(blob);
-                            const anchor = document.createElement("a");
-                            anchor.href = url;
-                            anchor.download = "campus-student-import-template.csv";
-                            document.body.appendChild(anchor);
-                            anchor.click();
-                            document.body.removeChild(anchor);
-                            URL.revokeObjectURL(url);
+                            downloadCsv("campus-student-import-template.csv", csv);
                           }}
                         >
                           Download CSV Template

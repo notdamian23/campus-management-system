@@ -1,4 +1,9 @@
 import { resolveCampusProfileName } from "@/lib/campus-auth";
+import {
+  formatStudentFullName,
+  normalizeStudentNamePart,
+  resolveStudentRawFullName,
+} from "@/lib/student-name";
 
 export type CampusNormalizedRole = "admin" | "ec" | "teacher" | "student";
 export type CampusAccountStatus = "Active" | "Inactive";
@@ -10,6 +15,8 @@ export type CampusUserProfileSource = {
   schoolId?: string;
   studentId?: string;
   email?: string;
+  firstName?: string;
+  lastName?: string;
   fullName?: string;
   name?: string;
   displayName?: string;
@@ -27,6 +34,8 @@ export type CampusUserProjectionSource = {
   uid?: string;
   studentId?: string;
   schoolId?: string;
+  firstName?: string;
+  lastName?: string;
   fullName?: string;
   name?: string;
   studentName?: string;
@@ -46,6 +55,9 @@ export type CampusUserRow = {
   rawRole: string;
   schoolId: string;
   studentId: string;
+  firstName: string;
+  lastName: string;
+  rawFullName: string;
   fullName: string;
   email: string;
   course: string;
@@ -128,18 +140,25 @@ function resolveFullName(
   projection?: CampusUserProjectionSource | null,
   missingNameLabel = "Unnamed User",
 ) {
-  return (
-    [
-      trimValue(profile?.name),
-      trimValue(projection?.name),
-      trimValue(profile?.fullName),
-      trimValue(projection?.fullName),
-      trimValue(profile?.displayName),
-      trimValue(profile?.studentName),
-      trimValue(projection?.studentName),
-      trimValue(profile?.teacherName),
-      resolveCampusProfileName(profile),
-    ].find(Boolean) ?? missingNameLabel
+  return formatStudentFullName(
+    {
+      firstName:
+        normalizeStudentNamePart(profile?.firstName) ||
+        normalizeStudentNamePart(projection?.firstName),
+      lastName:
+        normalizeStudentNamePart(profile?.lastName) ||
+        normalizeStudentNamePart(projection?.lastName),
+      name: trimValue(profile?.name) || trimValue(projection?.name),
+      fullName:
+        trimValue(profile?.fullName) || trimValue(projection?.fullName),
+      displayName: trimValue(profile?.displayName),
+      studentName:
+        trimValue(profile?.studentName) || trimValue(projection?.studentName),
+      teacherName: trimValue(profile?.teacherName),
+      schoolId:
+        trimValue(profile?.schoolId) || trimValue(projection?.schoolId),
+    },
+    resolveCampusProfileName(profile) || missingNameLabel,
   );
 }
 
@@ -163,6 +182,24 @@ export function normalizeCampusUserRow(
     "-";
   const rawStudentId =
     trimValue(profile?.studentId) || trimValue(projection?.studentId);
+  const firstName =
+    normalizeStudentNamePart(profile?.firstName) ||
+    normalizeStudentNamePart(projection?.firstName);
+  const lastName =
+    normalizeStudentNamePart(profile?.lastName) ||
+    normalizeStudentNamePart(projection?.lastName);
+  const rawFullName =
+    resolveStudentRawFullName({
+      firstName,
+      lastName,
+      name: trimValue(profile?.name) || trimValue(projection?.name),
+      fullName:
+        trimValue(profile?.fullName) || trimValue(projection?.fullName),
+      displayName: trimValue(profile?.displayName),
+      studentName:
+        trimValue(profile?.studentName) || trimValue(projection?.studentName),
+      teacherName: trimValue(profile?.teacherName),
+    }) || missingNameLabel;
   const studentId =
     rawStudentId ||
     ((role === "student" || role === "ec") && fallbackSchoolIdToStudentId
@@ -182,6 +219,9 @@ export function normalizeCampusUserRow(
     rawRole: trimValue(profile?.role),
     schoolId,
     studentId,
+    firstName,
+    lastName,
+    rawFullName,
     fullName: resolveFullName(profile, projection, missingNameLabel),
     email: trimValue(profile?.email),
     course:

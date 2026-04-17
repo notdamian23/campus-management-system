@@ -46,12 +46,19 @@ import {
   type ECStatItem,
 } from "@/components/ecmember";
 import { campusToast } from "@/lib/toast";
+import {
+  formatStudentFullName,
+  formatStudentReferenceList,
+} from "@/lib/student-name";
 
 type PaymentStudentStatus = "Paid" | "Unpaid";
 
 type RemoteStudent = {
   uid?: string;
   schoolId?: string;
+  firstName?: string;
+  lastName?: string;
+  fullName?: string;
   studentName?: string;
   name?: string;
   course?: string;
@@ -141,9 +148,17 @@ function toErrorMessage(error: unknown, fallback: string) {
 function mapRemoteStudent(data: RemoteStudent): StudentProfile {
   const uid = String(data.uid ?? "").trim();
   const schoolId = String(data.schoolId ?? "").trim() || uid;
-  const studentName = String(data.studentName ?? "").trim();
-  const fallbackName = String(data.name ?? "").trim();
-  const name = studentName || fallbackName || schoolId;
+  const name = formatStudentFullName(
+    {
+      firstName: data.firstName,
+      lastName: data.lastName,
+      fullName: data.fullName,
+      studentName: data.studentName,
+      name: data.name,
+      schoolId,
+    },
+    schoolId,
+  );
   const course = String(data.course ?? "").trim() || "Unassigned";
   const year = normalizeYear(data.year);
   const section = String(data.section ?? "").trim() || "-";
@@ -1366,7 +1381,10 @@ export default function PaymentDashboard() {
                         {(p.targetStudent || p.yearLevel || p.course) && (
                           <div className="mb-4 space-y-1 text-sm text-campus-text-secondary">
                             {p.targetStudent && (
-                              <p>Specific students: {p.targetStudent}</p>
+                              <p>
+                                Specific students:{" "}
+                                {formatStudentReferenceList(p.targetStudent)}
+                              </p>
                             )}
                             {(p.yearLevel || p.course) && (
                               <p>

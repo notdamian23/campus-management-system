@@ -12,6 +12,14 @@ export const CAMPUS_COURSE_OPTIONS = [
 
 export type CampusCourse = (typeof CAMPUS_COURSE_OPTIONS)[number];
 
+const COURSE_ALIASES: Record<string, CampusCourse> = {
+  bscpe: "Computer Engineering",
+  bsie: "Industrial Engineering",
+  bsee: "Electrical Engineering",
+  bsme: "Mechanical Engineering",
+  bsece: "Electronics Engineering",
+};
+
 export function isValidCourse(value: string): value is CampusCourse {
   return CAMPUS_COURSE_OPTIONS.includes(value as CampusCourse);
 }
@@ -21,5 +29,7 @@ export function normalizeCourse(raw: string): string {
   if (isValidCourse(trimmed)) {
     return trimmed;
   }
-  return "";
+
+  const aliasKey = trimmed.toLowerCase().replace(/[\s.-]+/g, "");
+  return COURSE_ALIASES[aliasKey] ?? "";
 }

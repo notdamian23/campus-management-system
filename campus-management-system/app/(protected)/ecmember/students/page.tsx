@@ -69,6 +69,7 @@ import {
   type CampusUserProjectionSource,
 } from "@/lib/campus-user-rows";
 import { campusToast } from "@/lib/toast";
+import { formatStudentFullName } from "@/lib/student-name";
 
 type StudentAccountStatus = "Active" | "Inactive";
 type StudentFingerprintStatus = "Active" | "Inactive";
@@ -79,6 +80,7 @@ type Student = {
   id: string;
   studentId: string;
   name: string;
+  rawName: string;
   course: string;
   year: string;
   status: StudentAccountStatus;
@@ -161,6 +163,8 @@ type RemoteStudent = {
   role?: string;
   studentId?: string;
   schoolId?: string;
+  firstName?: string;
+  lastName?: string;
   fullName?: string;
   studentName?: string;
   name?: string;
@@ -177,6 +181,8 @@ type StudentDirectoryProjection = {
   uid?: string;
   studentId?: string;
   schoolId?: string;
+  firstName?: string;
+  lastName?: string;
   fullName?: string;
   name?: string;
   studentName?: string;
@@ -196,6 +202,7 @@ type StudentPatch = Partial<
     | "id"
     | "studentId"
     | "name"
+    | "rawName"
     | "course"
     | "year"
     | "status"
@@ -463,6 +470,7 @@ function mapNormalizedRowToStudent(
     id: row.schoolId,
     studentId: row.studentId,
     name: row.fullName,
+    rawName: row.rawFullName,
     course: row.course,
     year: row.yearLevel,
     status: row.accountStatus,
@@ -486,6 +494,8 @@ function mapRemoteStudent(
       schoolId: data.schoolId,
       studentId: data.studentId,
       email: data.email,
+      firstName: data.firstName,
+      lastName: data.lastName,
       fullName: data.fullName,
       name: data.name,
       studentName: data.studentName,
@@ -877,6 +887,7 @@ export default function ECStudentLookup() {
           const nextId = patch.id ?? student.id;
           const nextStudentId = patch.studentId ?? student.studentId;
           const nextName = patch.name ?? student.name;
+          const nextRawName = patch.rawName ?? student.rawName;
           const nextCourse = patch.course ?? student.course;
           const nextYear = patch.year ?? student.year;
           const nextStatus = patch.status ?? student.status;
@@ -890,6 +901,7 @@ export default function ECStudentLookup() {
             nextId === student.id &&
             nextStudentId === student.studentId &&
             nextName === student.name &&
+            nextRawName === student.rawName &&
             nextCourse === student.course &&
             nextYear === student.year &&
             nextStatus === student.status &&
@@ -907,6 +919,7 @@ export default function ECStudentLookup() {
             id: nextId,
             studentId: nextStudentId,
             name: nextName,
+            rawName: nextRawName,
             course: nextCourse,
             year: nextYear,
             status: nextStatus,
@@ -926,6 +939,7 @@ export default function ECStudentLookup() {
         const nextId = patch.id ?? prev.id;
         const nextStudentId = patch.studentId ?? prev.studentId;
         const nextName = patch.name ?? prev.name;
+        const nextRawName = patch.rawName ?? prev.rawName;
         const nextCourse = patch.course ?? prev.course;
         const nextYear = patch.year ?? prev.year;
         const nextStatus = patch.status ?? prev.status;
@@ -939,6 +953,7 @@ export default function ECStudentLookup() {
           nextId === prev.id &&
           nextStudentId === prev.studentId &&
           nextName === prev.name &&
+          nextRawName === prev.rawName &&
           nextCourse === prev.course &&
           nextYear === prev.year &&
           nextStatus === prev.status &&
@@ -955,6 +970,7 @@ export default function ECStudentLookup() {
           id: nextId,
           studentId: nextStudentId,
           name: nextName,
+          rawName: nextRawName,
           course: nextCourse,
           year: nextYear,
           status: nextStatus,
@@ -1554,13 +1570,25 @@ export default function ECStudentLookup() {
       return;
     }
 
-    const name = editProfileName.trim();
+    const submittedName = editProfileName.trim();
     const schoolId = editProfileSchoolId.trim();
     const course = editProfileCourse.trim();
     const yearLevel = editProfileYearLevel.trim();
     const allowsBlankAcademicFields = selectedStudentRole === "teacher";
+    const originalRawName = String(selectedStudent.rawName ?? "").trim();
+    const originalDisplayName = formatStudentFullName(
+      {
+        name: originalRawName,
+        schoolId: selectedStudent.id,
+      },
+      selectedStudent.id,
+    );
+    const name =
+      submittedName === originalDisplayName && originalRawName
+        ? originalRawName
+        : submittedName;
 
-    if (!name) {
+    if (!submittedName) {
       campusToast.warning({
         title: "Missing name",
         description: "Name is required before you can save this profile.",
@@ -1672,6 +1700,7 @@ export default function ECStudentLookup() {
         id: updatedStudent.id,
         studentId: updatedStudent.studentId,
         name: updatedStudent.name,
+        rawName: updatedStudent.rawName,
         course: updatedStudent.course,
         year: updatedStudent.year,
         email: updatedStudent.email,

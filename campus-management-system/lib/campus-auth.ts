@@ -1,5 +1,6 @@
 import type { User } from "firebase/auth";
 import { finalizeVerifiedCampusProfileForCurrentUser } from "@/lib/firebase-functions";
+import { formatStudentFullName } from "@/lib/student-name";
 
 export type CampusRole = "teacher" | "student" | "ec" | "admin";
 
@@ -18,6 +19,8 @@ export type CampusProfileDoc = {
   name?: string;
   fullName?: string;
   displayName?: string;
+  firstName?: string;
+  lastName?: string;
   course?: string;
   year?: string;
   yearLevel?: string;
@@ -41,19 +44,25 @@ function trimProfileText(value: unknown) {
 export function resolveCampusProfileName(
   profile?:
     | {
+        firstName?: unknown;
+        lastName?: unknown;
         name?: unknown;
         fullName?: unknown;
+        studentName?: unknown;
         displayName?: unknown;
+        teacherName?: unknown;
       }
     | null,
 ) {
-  return (
-    [
-      trimProfileText(profile?.name),
-      trimProfileText(profile?.fullName),
-      trimProfileText(profile?.displayName),
-    ].find(Boolean) ?? ""
-  );
+  return formatStudentFullName({
+    firstName: profile?.firstName,
+    lastName: profile?.lastName,
+    name: profile?.name,
+    fullName: profile?.fullName,
+    studentName: profile?.studentName,
+    displayName: profile?.displayName,
+    teacherName: profile?.teacherName,
+  });
 }
 
 export function resolveCampusDisplayName(

@@ -55,6 +55,8 @@ type CampusProfilePayload = {
   name?: string;
   fullName?: string;
   displayName?: string;
+  firstName?: string;
+  lastName?: string;
   course?: string;
   year?: string;
   yearLevel?: string;
@@ -70,119 +72,16 @@ const VALID_COURSES = [
   "Mechanical Engineering",
   "Electronics Engineering",
 ] as const;
+const COURSE_ALIASES: Record<string, typeof VALID_COURSES[number]> = {
+  bscpe: "Computer Engineering",
+  bsie: "Industrial Engineering",
+  bsee: "Electrical Engineering",
+  bsme: "Mechanical Engineering",
+  bsece: "Electronics Engineering",
+};
 
 function isValidCourse(value: string): boolean {
   return VALID_COURSES.includes(value as typeof VALID_COURSES[number]);
-}
-
-const LOWERCASE_PARTICLES = new Set([
-  "de",
-  "del",
-  "della",
-  "dela",
-  "di",
-  "da",
-  "dos",
-  "das",
-  "van",
-  "von",
-  "mit",
-  "und",
-  "et",
-  "and",
-  "y",
-  "o",
-]);
-
-const UPPERCASE_SUFFIXES = new Set([
-  "jr",
-  "sr",
-  "ii",
-  "iii",
-  "iv",
-  "v",
-  "esq",
-  "phd",
-  "md",
-  "dds",
-  "dvm",
-]);
-
-function isSuffix(word: string): boolean {
-  const lower = word.toLowerCase().replace(/\.$/g, "");
-  return UPPERCASE_SUFFIXES.has(lower);
-}
-
-function isParticle(word: string): boolean {
-  return LOWERCASE_PARTICLES.has(word.toLowerCase());
-}
-
-function shouldLowercase(word: string, index: number, totalWords: number): boolean {
-  if (index === 0 || index === totalWords - 1) {
-    return false;
-  }
-  if (isSuffix(word)) {
-    return false;
-  }
-  if (isParticle(word)) {
-    return true;
-  }
-  return false;
-}
-
-function formatWord(word: string): string {
-  if (!word) return "";
-
-  if (word.includes("-")) {
-    return word
-      .split("-")
-      .map((part) => {
-        if (!part) return "";
-        if (isSuffix(part)) {
-          return part.toUpperCase().replace(/\.$/, "");
-        }
-        return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
-      })
-      .join("-");
-  }
-
-  if (word.includes("'")) {
-    return word
-      .split("'")
-      .map((part) => {
-        if (!part) return "";
-        return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
-      })
-      .join("'");
-  }
-
-  const hasPeriod = word.endsWith(".");
-  const cleanWord = word.replace(/\.$/g, "");
-
-  if (isSuffix(cleanWord)) {
-    const suffix = cleanWord.toUpperCase();
-    return hasPeriod ? `${suffix}.` : suffix;
-  }
-
-  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-}
-
-function normalizePersonName(rawName: string): string {
-  if (!rawName) return "";
-
-  const trimmed = normalizeText(rawName).trim().replace(/\s+/g, " ");
-  const words = trimmed.split(/\s+/);
-
-  if (words.length === 0) return "";
-
-  const formattedWords = words.map((word, index) => {
-    if (shouldLowercase(word, index, words.length)) {
-      return word.toLowerCase();
-    }
-    return formatWord(word);
-  });
-
-  return formattedWords.join(" ");
 }
 
 function serverTimestamp() {
@@ -200,6 +99,26 @@ function normalizeLower(value: unknown): string {
 function optionalText(value: unknown): string | undefined {
   const normalized = normalizeText(value);
   return normalized || undefined;
+}
+
+function normalizeNamePart(value: unknown): string {
+  return normalizeText(value).replace(/\s+/g, " ");
+}
+
+function buildStudentFullName(firstName: unknown, lastName: unknown): string {
+  const normalizedFirstName = normalizeNamePart(firstName);
+  const normalizedLastName = normalizeNamePart(lastName);
+  return [normalizedFirstName, normalizedLastName].filter(Boolean).join(" ");
+}
+
+function normalizeCourseLabel(value: unknown): string {
+  const normalized = normalizeText(value).replace(/\s+/g, " ");
+  if (isValidCourse(normalized)) {
+    return normalized;
+  }
+
+  const aliasKey = normalized.toLowerCase().replace(/[\s.-]+/g, "");
+  return COURSE_ALIASES[aliasKey] ?? "";
 }
 
 function optionalBoolean(value: unknown): boolean | undefined {
@@ -227,6 +146,8 @@ function buildCampusProfilePayload(
     name: optionalText(data.name),
     fullName: optionalText(data.fullName),
     displayName: optionalText(data.displayName),
+    firstName: optionalText(data.firstName),
+    lastName: optionalText(data.lastName),
     course: optionalText(data.course),
     year: optionalText(data.year) || optionalText(data.yearLevel),
     yearLevel: optionalText(data.yearLevel) || optionalText(data.year),
@@ -719,9 +640,10 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
     const validatedRows = rows.map((rawRow, index) => {
       const row = asRecord(rawRow);
       const schoolId = normalizeText(row.schoolId);
-      const nameRaw = normalizeText(row.name);
-      const name = normalizePersonName(nameRaw);
-      const course = normalizeText(row.course);
+      const lastName = normalizeNamePart(row.lastName);
+      const firstName = normalizeNamePart(row.firstName);
+      const fullName = buildStudentFullName(firstName, lastName);
+      const course = normalizeCourseLabel(row.course);
       const yearLevelRaw = normalizeText(row.yearLevel);
       const status = normalizeBulkStudentStatus(row.status);
       const normalizedYear = normalizeYear(yearLevelRaw);
@@ -732,11 +654,12 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
       } else if (!isValidBulkSchoolId(schoolId)) {
         errors.push("School ID must be alphanumeric and at least 4 characters.");
       }
-      if (!name) errors.push("Name is required.");
+      if (!lastName) errors.push("Last name is required.");
+      if (!firstName) errors.push("First name is required.");
       if (!course) {
         errors.push("Course is required.");
       } else if (!isValidCourse(course)) {
-        errors.push("Invalid course. Use one of: Computer Engineering, Industrial Engineering, Electrical Engineering, Mechanical Engineering, Electronics Engineering.");
+        errors.push("Invalid course. Use a CAMPUS course label such as Computer Engineering or BSCpE.");
       }
       if (!yearLevelRaw) {
         errors.push("Year level is required.");
@@ -750,7 +673,9 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
       return {
         rowIndex: index + 1,
         schoolId,
-        name,
+        lastName,
+        firstName,
+        fullName,
         course,
         yearLevel: normalizedYear,
         status: status || "active",
@@ -771,45 +696,11 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
     const uniqueSchoolIds = Array.from(schoolIdCounts.keys());
     const existingSchoolIds = await fetchExistingProfileSchoolIds(uniqueSchoolIds);
 
-    const previewRows = validatedRows.map((row) => {
-      const schoolId = String(row.schoolId || "");
-      const errors = Array.isArray(row.errors) ? [...row.errors] : [];
-      if (schoolId && schoolIdCounts.get(schoolId)! > 1) {
-        errors.push("Duplicate schoolId in CSV.");
-      }
-      if (schoolId && existingSchoolIds.has(schoolId)) {
-        errors.push("Existing schoolId already exists in CAMPUS.");
-      }
-
-      return {
-        schoolId,
-        name: String(row.name || "").trim(),
-        course: String(row.course || "").trim(),
-        yearLevel: String(row.yearLevel || "").trim(),
-        status: String(row.status || "active").trim(),
-        errors,
-        rowIndex: Number(row.rowIndex || 0),
-      } as Record<string, unknown>;
-    });
-
-    const rowResults: Array<Record<string, unknown>> = previewRows.map((row) => {
-      const errorList = Array.isArray(row.errors) ? row.errors : [];
-      const isValid = errorList.length === 0;
-      return {
-        schoolId: String(row.schoolId || ""),
-        name: String(row.name || ""),
-        course: String(row.course || ""),
-        yearLevel: String(row.yearLevel || ""),
-        status: String(row.status || "active"),
-        success: false,
-        skipped: !isValid,
-        error: isValid ? undefined : errorList.join(" "),
-      };
-    });
-
     const finalResults = validatedRows.map((row) => ({ ...row })) as Array<{
       schoolId: string;
-      name: string;
+      lastName: string;
+      firstName: string;
+      fullName: string;
       course: string;
       yearLevel: string;
       status: string;
@@ -817,7 +708,22 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
       skipped?: boolean;
       error?: string;
       uid?: string;
+      errors?: string[];
     }>;
+
+    finalResults.forEach((row) => {
+      const errors = Array.isArray(row.errors) ? [...row.errors] : [];
+      if (row.schoolId && schoolIdCounts.get(row.schoolId)! > 1) {
+        errors.push("Duplicate schoolId in CSV.");
+      }
+      if (row.schoolId && existingSchoolIds.has(row.schoolId)) {
+        errors.push("Existing schoolId already exists in CAMPUS.");
+      }
+      if (errors.length > 0) {
+        row.skipped = true;
+        row.error = errors.join(" ");
+      }
+    });
 
     let importedCount = 0;
     let failedCount = 0;
@@ -839,9 +745,15 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
         });
         const uid = userRecord.uid;
         createdUid = uid;
+        const fullName = resultRow.fullName ||
+          buildStudentFullName(resultRow.firstName, resultRow.lastName);
 
         const profilePayload: FirebaseFirestore.DocumentData = {
-          name: resultRow.name,
+          firstName: resultRow.firstName,
+          lastName: resultRow.lastName,
+          name: fullName,
+          fullName,
+          studentName: fullName,
           schoolId: resultRow.schoolId,
           email: "",
           role: "student",
@@ -863,8 +775,11 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
         await db.doc(`students/${uid}`).set(
           {
             schoolId: resultRow.schoolId,
-            studentName: resultRow.name,
-            name: resultRow.name,
+            firstName: resultRow.firstName,
+            lastName: resultRow.lastName,
+            fullName,
+            studentName: fullName,
+            name: fullName,
             course: resultRow.course,
             year: resultRow.yearLevel,
             yearLevel: resultRow.yearLevel,
@@ -1045,6 +960,13 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
     const students = profileSnapshot.docs.map((profileDoc) => {
       const profileData = profileDoc.data() ?? {};
       const studentData = studentByUid.get(profileDoc.id) ?? {};
+      const firstName =
+        normalizeNamePart(profileData.firstName) ||
+        normalizeNamePart(studentData.firstName);
+      const lastName =
+        normalizeNamePart(profileData.lastName) ||
+        normalizeNamePart(studentData.lastName);
+      const combinedFullName = buildStudentFullName(firstName, lastName);
 
         return {
           uid: profileDoc.id,
@@ -1053,21 +975,26 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
             normalizeText(profileData.schoolId) ||
             normalizeText(studentData.schoolId) ||
           profileDoc.id,
+        firstName,
+        lastName,
         fullName:
           normalizeText(profileData.fullName) ||
-          normalizeText(studentData.fullName),
+          normalizeText(studentData.fullName) ||
+          combinedFullName,
         studentName:
           normalizeText(profileData.studentName) ||
           normalizeText(studentData.studentName) ||
           normalizeText(profileData.name) ||
-          normalizeText(studentData.name),
+          normalizeText(studentData.name) ||
+          combinedFullName,
         name:
           normalizeText(profileData.name) ||
           normalizeText(profileData.fullName) ||
           normalizeText(studentData.name) ||
           normalizeText(studentData.fullName) ||
           normalizeText(profileData.studentName) ||
-          normalizeText(studentData.studentName),
+          normalizeText(studentData.studentName) ||
+          combinedFullName,
         course:
           normalizeText(profileData.course) ||
           normalizeText(studentData.course) ||

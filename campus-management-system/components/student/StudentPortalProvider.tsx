@@ -20,6 +20,7 @@ import {
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { resolveCampusProfileName } from "@/lib/campus-auth";
 import { app, auth, db } from "@/lib/firebase";
+import { formatStudentFullName } from "@/lib/student-name";
 
 type LifecycleStatus = "upcoming" | "ongoing" | "completed";
 export type StudentAccountStatus = "Active" | "Inactive";
@@ -243,6 +244,8 @@ type ManagePreRegistrationResult = {
 type ProfileDocData = {
   role?: string;
   schoolId?: string;
+  firstName?: string;
+  lastName?: string;
   studentName?: string;
   name?: string;
   fullName?: string;
@@ -257,8 +260,11 @@ type ProfileDocData = {
 type StudentProjectionDocData = {
   status?: string;
   schoolId?: string;
+  firstName?: string;
+  lastName?: string;
   studentName?: string;
   name?: string;
+  fullName?: string;
   course?: string;
   year?: string;
   yearLevel?: string;
@@ -564,14 +570,23 @@ export function StudentPortalProvider({
         String(
           latestProfileData.schoolId ?? latestStudentData?.schoolId ?? "",
         ).trim() || uid;
-      const name =
-        resolveCampusProfileName(latestProfileData) ||
-        String(
-          latestStudentData?.name ??
-            latestStudentData?.studentName ??
-            latestProfileData.studentName ??
-            "",
-        ).trim();
+      const name = formatStudentFullName(
+        {
+          firstName:
+            latestProfileData.firstName ?? latestStudentData?.firstName,
+          lastName:
+            latestProfileData.lastName ?? latestStudentData?.lastName,
+          name:
+            resolveCampusProfileName(latestProfileData) ||
+            latestStudentData?.name,
+          fullName:
+            latestProfileData.fullName ?? latestStudentData?.fullName,
+          studentName:
+            latestStudentData?.studentName ?? latestProfileData.studentName,
+          schoolId,
+        },
+        schoolId,
+      );
       const studentName = name || schoolId;
 
       setProfile({

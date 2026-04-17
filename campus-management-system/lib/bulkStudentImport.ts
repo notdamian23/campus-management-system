@@ -1,9 +1,13 @@
 import { isValidCourse, normalizeCourse } from "./courseOptions";
-import { normalizePersonName } from "./normalizePersonName";
+import {
+  formatStudentFullName,
+  normalizeStudentNamePart,
+} from "./student-name";
 
 export type BulkStudentCsvRow = {
   schoolId: string;
-  name: string;
+  lastName: string;
+  firstName: string;
   course: string;
   yearLevel: string;
   status: string;
@@ -11,6 +15,7 @@ export type BulkStudentCsvRow = {
 };
 
 export type BulkStudentImportPreviewRow = BulkStudentCsvRow & {
+  displayName: string;
   statusLabel: string;
   errors: string[];
   isValid: boolean;
@@ -18,7 +23,8 @@ export type BulkStudentImportPreviewRow = BulkStudentCsvRow & {
 
 export type BulkStudentImportRowPayload = {
   schoolId: string;
-  name: string;
+  lastName: string;
+  firstName: string;
   course: string;
   yearLevel: string;
   status: string;
@@ -41,10 +47,13 @@ export type BulkStudentImportResult = {
 
 const REQUIRED_HEADERS = [
   "schoolid",
-  "name",
+  "lastname",
+  "firstname",
   "course",
   "yearlevel",
+  "status",
 ];
+const REQUIRED_HEADER_LINE = "SchoolId,LastName,FirstName,Course,YearLevel,Status";
 
 function normalizeText(value: unknown) {
   return String(value ?? "").trim();
@@ -52,6 +61,12 @@ function normalizeText(value: unknown) {
 
 function normalizeHeader(value: string) {
   return value.trim().toLowerCase();
+}
+
+function normalizeImportedValue(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
 function parseCsv(content: string): string[][] {
@@ -130,15 +145,16 @@ function isValidSchoolId(raw: string) {
 
 function buildRowPayload(raw: Record<string, string>, rowIndex: number): BulkStudentCsvRow {
   const schoolId = normalizeText(raw.schoolId);
-  const nameRaw = normalizeText(raw.name);
-  const name = normalizePersonName(nameRaw);
+  const lastName = normalizeStudentNamePart(raw.lastName);
+  const firstName = normalizeStudentNamePart(raw.firstName);
   const course = normalizeCourse(raw.course);
   const yearLevel = normalizeYearLevel(raw.yearLevel);
   const status = normalizeStatus(raw.status);
 
   return {
     schoolId,
-    name,
+    lastName,
+    firstName,
     course,
     yearLevel,
     status,
@@ -148,9 +164,8 @@ function buildRowPayload(raw: Record<string, string>, rowIndex: number): BulkStu
 
 export function getBulkStudentImportTemplateCsv(): string {
   const lines = [
-    "schoolId,name,course,yearLevel,status",
-    "20240001,Juan Dela Cruz,Computer Engineering,1,active",
-    "20240002,Maria Santos,Computer Engineering,2,active",
+    REQUIRED_HEADER_LINE,
+    "20175330,ABALA,MC JERREL,BSCpE,3,active",
   ];
   return lines.join("\n");
 }
@@ -180,14 +195,18 @@ function buildPreviewRow(
     errors.push("School ID must be alphanumeric and at least 4 characters.");
   }
 
-  if (!row.name) {
-    errors.push("Name is required.");
+  if (!row.lastName) {
+    errors.push("Last name is required.");
+  }
+
+  if (!row.firstName) {
+    errors.push("First name is required.");
   }
 
   if (!row.course) {
     errors.push("Course is required.");
   } else if (!isValidCourse(row.course)) {
-    errors.push("Invalid course. Use one of: Computer Engineering, Industrial Engineering, Electrical Engineering, Mechanical Engineering, Electronics Engineering.");
+    errors.push("Invalid course. Use a CAMPUS course label such as Computer Engineering or BSCpE.");
   }
 
   if (!row.yearLevel) {
@@ -210,6 +229,11 @@ function buildPreviewRow(
 
   return {
     ...row,
+    displayName: formatStudentFullName({
+      firstName: row.firstName,
+      lastName: row.lastName,
+      schoolId: row.schoolId,
+    }),
     statusLabel: isValid ? "Valid" : "Invalid",
     errors,
     isValid,
@@ -224,25 +248,23 @@ export function buildBulkStudentImportPreviewRows(
   if (rows.length === 0) return [];
 
   const headers = rows[0].map(normalizeHeader);
-  const headerIndex: Record<string, number> = {};
-  headers.forEach((header, index) => {
-    if (REQUIRED_HEADERS.includes(header)) {
-      headerIndex[header] = index;
-    }
-  });
+  const hasExactHeaderOrder =
+    headers.length >= REQUIRED_HEADERS.length &&
+    REQUIRED_HEADERS.every((header, index) => headers[index] === header);
 
-  const missingHeaders = REQUIRED_HEADERS.filter((required) => !(required in headerIndex));
-  if (missingHeaders.length > 0) {
+  if (!hasExactHeaderOrder) {
     const errorRow: BulkStudentImportPreviewRow = {
       schoolId: "",
-      name: "",
+      lastName: "",
+      firstName: "",
       course: "",
       yearLevel: "",
       status: "",
       rowIndex: 1,
+      displayName: "",
       statusLabel: "Invalid",
       errors: [
-        `CSV header must include: ${REQUIRED_HEADERS.join(", ")}.`,
+        `CSV header must match exactly: ${REQUIRED_HEADER_LINE}.`,
       ],
       isValid: false,
     };
@@ -255,16 +277,18 @@ export function buildBulkStudentImportPreviewRows(
   for (let index = 1; index < rows.length; index += 1) {
     const rawRow = rows[index];
     const rowValues = {
-      schoolId: normalizeText(rawRow[headerIndex.schoolid] ?? ""),
-      name: normalizeText(rawRow[headerIndex.name] ?? ""),
-      course: normalizeText(rawRow[headerIndex.course] ?? ""),
-      yearLevel: normalizeText(rawRow[headerIndex.yearlevel] ?? ""),
-      status: normalizeText(rawRow[headerIndex.status] ?? ""),
+      schoolId: normalizeImportedValue(rawRow[0] ?? ""),
+      lastName: normalizeImportedValue(rawRow[1] ?? ""),
+      firstName: normalizeImportedValue(rawRow[2] ?? ""),
+      course: normalizeImportedValue(rawRow[3] ?? ""),
+      yearLevel: normalizeImportedValue(rawRow[4] ?? ""),
+      status: normalizeImportedValue(rawRow[5] ?? ""),
     };
 
     if (
       !rowValues.schoolId &&
-      !rowValues.name &&
+      !rowValues.lastName &&
+      !rowValues.firstName &&
       !rowValues.course &&
       !rowValues.yearLevel &&
       !rowValues.status
@@ -301,7 +325,7 @@ export function buildBulkStudentImportErrorCsv(
   rowResults: BulkStudentImportResultRow[],
 ): string {
   const lines = [
-    "schoolId,name,course,yearLevel,status,error",
+    "SchoolId,LastName,FirstName,Course,YearLevel,Status,Error",
   ];
   rowResults.forEach((row) => {
     if (row.success) return;
@@ -314,7 +338,8 @@ export function buildBulkStudentImportErrorCsv(
     };
     lines.push([
       escaped(row.schoolId),
-      escaped(row.name),
+      escaped(row.lastName),
+      escaped(row.firstName),
       escaped(row.course),
       escaped(row.yearLevel),
       escaped(row.status),

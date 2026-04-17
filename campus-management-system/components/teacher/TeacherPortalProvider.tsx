@@ -16,6 +16,7 @@ import {
   getOnboardingRedirect,
   resolveCampusProfileName,
 } from "@/lib/campus-auth";
+import { formatStudentFullName } from "@/lib/student-name";
 
 export type TeacherAccessState =
   | "loading"
@@ -467,8 +468,14 @@ export function TeacherPortalProvider({
               if (!uid) return null;
 
               const schoolId = String(data.schoolId ?? "").trim() || uid;
-              const studentName =
-                String(data.studentName ?? data.name ?? "").trim() || schoolId;
+              const studentName = formatStudentFullName(
+                {
+                  studentName: data.studentName,
+                  name: data.name,
+                  schoolId,
+                },
+                schoolId,
+              );
 
               return {
                 id: attendanceDoc.id,

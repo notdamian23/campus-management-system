@@ -181,7 +181,8 @@ export async function savePendingEmailVerificationForCurrentUser(
 
 export type BulkStudentImportRowPayload = {
   schoolId: string;
-  name: string;
+  lastName: string;
+  firstName: string;
   course: string;
   yearLevel: string;
   status: string;

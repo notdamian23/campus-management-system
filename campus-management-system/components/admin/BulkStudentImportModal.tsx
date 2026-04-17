@@ -56,7 +56,8 @@ export default function BulkStudentImportModal({
     skippedCount: number;
     rowResults: Array<{
       schoolId: string;
-      name: string;
+      lastName: string;
+      firstName: string;
       course: string;
       yearLevel: string;
       status: string;
@@ -77,7 +78,8 @@ export default function BulkStudentImportModal({
   const parsedRows = useMemo(
     () => validRows.map((row) => ({
       schoolId: row.schoolId,
-      name: row.name,
+      lastName: row.lastName,
+      firstName: row.firstName,
       course: row.course,
       yearLevel: row.yearLevel,
       status: row.status,
@@ -248,10 +250,10 @@ export default function BulkStudentImportModal({
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-xl font-semibold text-gray-900">
-                      Bulk student CSV import
+                      Bulk student import
                     </h2>
                     <p className="text-sm text-gray-600">
-                      Upload a CSV file to create student accounts in the CAMPUS School ID flow.
+                      Upload a CSV file using the CAMPUS spreadsheet template to create student accounts.
                     </p>
                   </div>
                   <Button
@@ -273,13 +275,13 @@ export default function BulkStudentImportModal({
             <div className="grid gap-4 lg:grid-cols-[1fr_auto]">
               <div className="space-y-3 rounded-2xl border border-[#e5e7eb] bg-white p-4">
                 <p className="text-sm text-campus-text-secondary">
-                  Accepted columns: <span className="font-medium">schoolId, name, course, yearLevel, status</span>.
-                  Leave <span className="font-semibold">status</span> blank for active students.
+                  Accepted columns: <span className="font-medium">SchoolId, LastName, FirstName, Course, YearLevel, Status</span>.
+                  Leave <span className="font-semibold">Status</span> blank for active students.
                 </p>
                 <ul className="grid gap-2 text-sm text-campus-text-secondary">
-                  <li>Required fields: schoolId, name, course, yearLevel.</li>
-                  <li>Use full course names exactly as shown in the Add Student dropdown.</li>
-                  <li>Do not use abbreviations.</li>
+                  <li>Required fields: SchoolId, LastName, FirstName, Course, YearLevel.</li>
+                  <li>The template opens cleanly in Excel, Google Sheets, and other spreadsheet apps.</li>
+                  <li>Course accepts CAMPUS course labels and common codes like BSCpE.</li>
                   <li>Do not include email. Student email is collected later.</li>
                   <li>Duplicate school IDs in the CSV or existing system rows are rejected.</li>
                 </ul>
@@ -377,7 +379,7 @@ export default function BulkStudentImportModal({
                   <TableHeader columns={[
                     { key: "row", label: "Row" },
                     { key: "schoolId", label: "School ID" },
-                    { key: "name", label: "Name" },
+                    { key: "name", label: "Student Name" },
                     { key: "course", label: "Course" },
                     { key: "yearLevel", label: "Year Level" },
                     { key: "status", label: "Status" },
@@ -402,7 +404,7 @@ export default function BulkStudentImportModal({
                       <TableRow key={`row-${row.rowIndex}`}>
                         <TableCell>{row.rowIndex}</TableCell>
                         <TableCell>{row.schoolId || "-"}</TableCell>
-                        <TableCell>{row.name || "-"}</TableCell>
+                        <TableCell>{row.displayName || "-"}</TableCell>
                         <TableCell>{row.course || "-"}</TableCell>
                         <TableCell>{row.yearLevel || "-"}</TableCell>
                         <TableCell>{row.status || "active"}</TableCell>
