@@ -12,7 +12,13 @@ import {
   DropdownTrigger,
 } from "@heroui/dropdown";
 import { Input } from "@heroui/input";
-import { Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/modal";
+import {
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+} from "@heroui/modal";
 import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import { Tab, Tabs } from "@heroui/tabs";
@@ -55,6 +61,13 @@ import {
   useIsBelowBreakpoint,
 } from "@/components/ecmember";
 import { app, db } from "@/lib/firebase";
+import {
+  buildCampusProfileUpdatePayload,
+  type CampusNormalizedRole,
+  normalizeCampusUserRow,
+  type CampusUserProfileSource,
+  type CampusUserProjectionSource,
+} from "@/lib/campus-user-rows";
 import { campusToast } from "@/lib/toast";
 
 type StudentAccountStatus = "Active" | "Inactive";
@@ -62,7 +75,9 @@ type StudentFingerprintStatus = "Active" | "Inactive";
 
 type Student = {
   uid: string;
+  role: CampusNormalizedRole;
   id: string;
+  studentId: string;
   name: string;
   course: string;
   year: string;
@@ -143,11 +158,15 @@ type SelectOption = {
 
 type RemoteStudent = {
   uid?: string;
+  role?: string;
+  studentId?: string;
   schoolId?: string;
+  fullName?: string;
   studentName?: string;
   name?: string;
   course?: string;
   year?: string;
+  yearLevel?: string;
   status?: string;
   readyForClearance?: boolean;
   email?: string;
@@ -158,6 +177,8 @@ type StudentDirectoryProjection = {
   uid?: string;
   studentId?: string;
   schoolId?: string;
+  fullName?: string;
+  name?: string;
   studentName?: string;
   course?: string;
   year?: string;
@@ -168,6 +189,22 @@ type StudentDirectoryProjection = {
   fingerprintTemplateId?: number | string;
   templateId?: number | string;
 };
+
+type StudentPatch = Partial<
+  Pick<
+    Student,
+    | "id"
+    | "studentId"
+    | "name"
+    | "course"
+    | "year"
+    | "status"
+    | "fingerprintStatus"
+    | "readyForClearance"
+    | "email"
+    | "role"
+  >
+>;
 
 const DEFAULT_COURSES = [
   "Computer Engineering",
@@ -389,24 +426,6 @@ function matchesSpecificStudentTarget(
   return false;
 }
 
-function normalizeYear(raw: unknown) {
-  const value = String(raw ?? "").trim();
-  if (!value) return "Unassigned";
-
-  if (value === "1" || value.toLowerCase() === "1st year") return "1st Year";
-  if (value === "2" || value.toLowerCase() === "2nd year") return "2nd Year";
-  if (value === "3" || value.toLowerCase() === "3rd year") return "3rd Year";
-  if (value === "4" || value.toLowerCase() === "4th year") return "4th Year";
-  if (value === "5" || value.toLowerCase() === "5th year") return "5th Year";
-
-  return value;
-}
-
-function normalizeCourse(raw: unknown) {
-  const value = String(raw ?? "").trim();
-  return value || "Unassigned";
-}
-
 function normalizeStudentAccountStatus(raw: unknown): StudentAccountStatus {
   return normalizeText(raw) === "inactive" ? "Inactive" : "Active";
 }
@@ -435,43 +454,57 @@ function getFingerprintStatus(
     : "Inactive";
 }
 
-function mapRemoteStudent(data: RemoteStudent): Student {
-  const uid = String(data.uid ?? "").trim();
-  const schoolId = String(data.schoolId ?? "").trim() || uid;
-  const studentName = String(data.studentName ?? "").trim();
-  const fallbackName = String(data.name ?? "").trim();
-  const name = studentName || fallbackName || schoolId;
-  const status = normalizeStudentAccountStatus(data.status);
-
+function mapNormalizedRowToStudent(
+  row: ReturnType<typeof normalizeCampusUserRow>,
+): Student {
   return {
-    uid,
-    id: schoolId,
-    name,
-    course: normalizeCourse(data.course),
-    year: normalizeYear(data.year),
-    status,
-    fingerprintStatus: "Inactive",
-    readyForClearance: normalizeReadyForClearance(data.readyForClearance),
-    email: String(data.email ?? "").trim() || undefined,
-    createdAt:
-      typeof data.createdAtMs === "number" ? data.createdAtMs : undefined,
+    uid: row.uid,
+    role: row.role,
+    id: row.schoolId,
+    studentId: row.studentId,
+    name: row.fullName,
+    course: row.course,
+    year: row.yearLevel,
+    status: row.accountStatus,
+    fingerprintStatus: row.fingerprintStatus,
+    readyForClearance: row.clearanceReady,
+    email: row.email || undefined,
+    createdAt: row.createdAt,
   };
 }
 
-function mergeStudentProjection(
-  student: Student,
+function mapRemoteStudent(
+  data: RemoteStudent,
   projection?: StudentDirectoryProjection,
-) {
-  if (!projection) return student;
+): Student {
+  const uid = String(data.uid ?? "").trim();
+  const normalizedRow = normalizeCampusUserRow(
+    uid,
+    {
+      uid,
+      role: data.role,
+      schoolId: data.schoolId,
+      studentId: data.studentId,
+      email: data.email,
+      fullName: data.fullName,
+      name: data.name,
+      studentName: data.studentName,
+      course: data.course,
+      year: data.year,
+      yearLevel: data.yearLevel,
+      status: data.status,
+      readyForClearance: data.readyForClearance,
+      createdAt:
+        typeof data.createdAtMs === "number" ? data.createdAtMs : undefined,
+    } satisfies CampusUserProfileSource,
+    projection satisfies CampusUserProjectionSource | undefined,
+    {
+      missingCourseLabel: "Unassigned",
+      missingYearLevelLabel: "Unassigned",
+    },
+  );
 
-  return {
-    ...student,
-    status: normalizeStudentAccountStatus(projection.status ?? student.status),
-    readyForClearance: normalizeReadyForClearance(
-      projection.readyForClearance ?? student.readyForClearance,
-    ),
-    fingerprintStatus: getFingerprintStatus(projection),
-  };
+  return mapNormalizedRowToStudent(normalizedRow);
 }
 
 function toErrorMessage(error: unknown, fallback: string) {
@@ -486,6 +519,14 @@ function toErrorMessage(error: unknown, fallback: string) {
   }
   if (error instanceof Error) return error.message;
   return fallback;
+}
+
+function toEditableFieldValue(value: unknown) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized || normalized === "-" || normalized === "Unassigned") {
+    return "";
+  }
+  return normalized;
 }
 
 function formatEventDate(date: Date | null, fallback: string) {
@@ -525,12 +566,18 @@ export default function ECStudentLookup() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [statusModalOpen, setStatusModalOpen] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
+  const [editProfileModalOpen, setEditProfileModalOpen] = useState(false);
+  const [editProfileName, setEditProfileName] = useState("");
+  const [editProfileSchoolId, setEditProfileSchoolId] = useState("");
+  const [editProfileCourse, setEditProfileCourse] = useState("");
+  const [editProfileYearLevel, setEditProfileYearLevel] = useState("");
   const [updatingStudentUid, setUpdatingStudentUid] = useState<string | null>(
     null,
   );
   const [markingClearanceStudentUid, setMarkingClearanceStudentUid] = useState<
     string | null
   >(null);
+  const [savingProfileUid, setSavingProfileUid] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<Notice | null>(null);
   const [statusTab, setStatusTab] = useState<StudentStatusTab>("attended");
   const [attendedSearch, setAttendedSearch] = useState("");
@@ -572,13 +619,12 @@ export default function ECStudentLookup() {
         // Student status controls should still load even if the portable projection is unavailable.
       }
 
-      const rows = (res.data?.students ?? []).map((remoteStudent) => {
-        const student = mapRemoteStudent(remoteStudent);
-        return mergeStudentProjection(
-          student,
-          projectionByUid.get(student.uid),
-        );
-      });
+      const rows = (res.data?.students ?? []).map((remoteStudent) =>
+        mapRemoteStudent(
+          remoteStudent,
+          projectionByUid.get(String(remoteStudent.uid ?? "").trim()),
+        ),
+      );
 
       rows.sort(
         (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
@@ -814,6 +860,7 @@ export default function ECStudentLookup() {
   const selectedStudentUid = selectedStudent?.uid ?? "";
   const selectedStudentId = selectedStudent?.id ?? "";
   const selectedStudentName = selectedStudent?.name ?? "";
+  const selectedStudentRole = selectedStudent?.role ?? "student";
   const selectedStudentCourse = selectedStudent?.course ?? "";
   const selectedStudentYear = selectedStudent?.year ?? "";
   const selectedStudentStatus = selectedStudent?.status ?? "Active";
@@ -821,26 +868,35 @@ export default function ECStudentLookup() {
     selectedStudent?.readyForClearance ?? false;
 
   const updateStudentState = useCallback(
-    (
-      studentUid: string,
-      patch: Partial<
-        Pick<Student, "status" | "fingerprintStatus" | "readyForClearance">
-      >,
-    ) => {
+    (studentUid: string, patch: StudentPatch) => {
       setStudents((prev) => {
         let changed = false;
         const next = prev.map((student) => {
           if (student.uid !== studentUid) return student;
 
+          const nextId = patch.id ?? student.id;
+          const nextStudentId = patch.studentId ?? student.studentId;
+          const nextName = patch.name ?? student.name;
+          const nextCourse = patch.course ?? student.course;
+          const nextYear = patch.year ?? student.year;
           const nextStatus = patch.status ?? student.status;
           const nextFingerprintStatus =
             patch.fingerprintStatus ?? student.fingerprintStatus;
           const nextReadyForClearance =
             patch.readyForClearance ?? student.readyForClearance;
+          const nextEmail = patch.email ?? student.email;
+          const nextRole = patch.role ?? student.role;
           if (
+            nextId === student.id &&
+            nextStudentId === student.studentId &&
+            nextName === student.name &&
+            nextCourse === student.course &&
+            nextYear === student.year &&
             nextStatus === student.status &&
             nextFingerprintStatus === student.fingerprintStatus &&
-            nextReadyForClearance === student.readyForClearance
+            nextReadyForClearance === student.readyForClearance &&
+            nextEmail === student.email &&
+            nextRole === student.role
           ) {
             return student;
           }
@@ -848,9 +904,16 @@ export default function ECStudentLookup() {
           changed = true;
           return {
             ...student,
+            id: nextId,
+            studentId: nextStudentId,
+            name: nextName,
+            course: nextCourse,
+            year: nextYear,
             status: nextStatus,
             fingerprintStatus: nextFingerprintStatus,
             readyForClearance: nextReadyForClearance,
+            email: nextEmail,
+            role: nextRole,
           };
         });
 
@@ -860,24 +923,45 @@ export default function ECStudentLookup() {
       setSelectedStudent((prev) => {
         if (!prev || prev.uid !== studentUid) return prev;
 
+        const nextId = patch.id ?? prev.id;
+        const nextStudentId = patch.studentId ?? prev.studentId;
+        const nextName = patch.name ?? prev.name;
+        const nextCourse = patch.course ?? prev.course;
+        const nextYear = patch.year ?? prev.year;
         const nextStatus = patch.status ?? prev.status;
         const nextFingerprintStatus =
           patch.fingerprintStatus ?? prev.fingerprintStatus;
         const nextReadyForClearance =
           patch.readyForClearance ?? prev.readyForClearance;
+        const nextEmail = patch.email ?? prev.email;
+        const nextRole = patch.role ?? prev.role;
         if (
+          nextId === prev.id &&
+          nextStudentId === prev.studentId &&
+          nextName === prev.name &&
+          nextCourse === prev.course &&
+          nextYear === prev.year &&
           nextStatus === prev.status &&
           nextFingerprintStatus === prev.fingerprintStatus &&
-          nextReadyForClearance === prev.readyForClearance
+          nextReadyForClearance === prev.readyForClearance &&
+          nextEmail === prev.email &&
+          nextRole === prev.role
         ) {
           return prev;
         }
 
         return {
           ...prev,
+          id: nextId,
+          studentId: nextStudentId,
+          name: nextName,
+          course: nextCourse,
+          year: nextYear,
           status: nextStatus,
           fingerprintStatus: nextFingerprintStatus,
           readyForClearance: nextReadyForClearance,
+          email: nextEmail,
+          role: nextRole,
         };
       });
     },
@@ -1217,6 +1301,15 @@ export default function ECStudentLookup() {
     setStatusModalOpen(true);
   };
 
+  const openEditProfileModal = (student: Student) => {
+    setEditProfileName(student.name);
+    setEditProfileSchoolId(student.id);
+    setEditProfileCourse(toEditableFieldValue(student.course));
+    setEditProfileYearLevel(toEditableFieldValue(student.year));
+    setStatusNotice(null);
+    setEditProfileModalOpen(true);
+  };
+
   async function toggleStudentStatus(student: Student) {
     if (!student.uid) {
       setStatusNotice({
@@ -1310,7 +1403,7 @@ export default function ECStudentLookup() {
     }
   }
 
-  async function markStudentReadyForClearance(student: Student) {
+  async function setStudentClearanceReady(student: Student, nextReady: boolean) {
     if (!student.uid) {
       setStatusNotice({
         type: "err",
@@ -1324,11 +1417,13 @@ export default function ECStudentLookup() {
       return;
     }
 
-    if (student.readyForClearance) {
+    if (student.readyForClearance === nextReady) {
       campusToast.info({
-        title: "Already ready for clearance",
-        description: `${student.name} is already marked ready for clearance signing.`,
-        dedupeKey: `ec-students:clearance:already-ready:${student.uid}`,
+        title: nextReady ? "Already ready for clearance" : "Already removed",
+        description: nextReady
+          ? `${student.name} is already marked ready for clearance signing.`
+          : `${student.name} is already removed from clearance-ready status.`,
+        dedupeKey: `ec-students:clearance:no-change:${student.uid}:${nextReady}`,
       });
       return;
     }
@@ -1347,10 +1442,11 @@ export default function ECStudentLookup() {
           schoolId: student.id,
           studentName: student.name,
           name: student.name,
+          fullName: student.name,
           course: student.course,
           year: student.year,
           yearLevel: student.year,
-          readyForClearance: true,
+          readyForClearance: nextReady,
           updatedAt: timestamp,
         },
         { merge: true },
@@ -1360,7 +1456,7 @@ export default function ECStudentLookup() {
         await setDoc(
           doc(db, "profiles", student.uid),
           {
-            readyForClearance: true,
+            readyForClearance: nextReady,
             updatedAt: timestamp,
           },
           { merge: true },
@@ -1373,39 +1469,43 @@ export default function ECStudentLookup() {
       }
 
       let notificationError = "";
-      try {
-        await setDoc(
-          doc(
-            db,
-            "profiles",
-            student.uid,
-            "notifications",
-            clearanceReadyNotificationId,
-          ),
-          {
-            title: "Clearance Ready",
-            message: "You are now ready for clearance signing.",
-            type: "announcement",
-            createdAt: timestamp,
-            date: "",
-            scheduledTime: "",
-            read: false,
-            targetUid: student.uid,
-          },
-          { merge: true },
-        );
-      } catch (error: unknown) {
-        notificationError = toErrorMessage(
-          error,
-          "The readiness update was saved, but the notification could not be sent.",
-        );
+      if (nextReady) {
+        try {
+          await setDoc(
+            doc(
+              db,
+              "profiles",
+              student.uid,
+              "notifications",
+              clearanceReadyNotificationId,
+            ),
+            {
+              title: "Clearance Ready",
+              message: "You are now ready for clearance signing.",
+              type: "announcement",
+              createdAt: timestamp,
+              date: "",
+              scheduledTime: "",
+              read: false,
+              targetUid: student.uid,
+            },
+            { merge: true },
+          );
+        } catch (error: unknown) {
+          notificationError = toErrorMessage(
+            error,
+            "The readiness update was saved, but the notification could not be sent.",
+          );
+        }
       }
 
-      updateStudentState(student.uid, { readyForClearance: true });
+      updateStudentState(student.uid, { readyForClearance: nextReady });
 
       const successMessage = notificationError
         ? `${student.name} is ready for clearance signing, but the notification could not be sent.`
-        : "Student marked ready for clearance.";
+        : nextReady
+          ? "Student marked ready for clearance."
+          : "Clearance-ready status removed.";
 
       setStatusNotice({
         type: "ok",
@@ -1420,9 +1520,9 @@ export default function ECStudentLookup() {
         });
       } else {
         campusToast.success({
-          title: "Clearance ready",
+          title: nextReady ? "Clearance ready" : "Clearance ready removed",
           description: successMessage,
-          dedupeKey: `ec-students:clearance:${student.uid}`,
+          dedupeKey: `ec-students:clearance:${student.uid}:${nextReady}`,
         });
       }
     } catch (error: unknown) {
@@ -1441,6 +1541,165 @@ export default function ECStudentLookup() {
       });
     } finally {
       setMarkingClearanceStudentUid(null);
+    }
+  }
+
+  async function saveStudentProfileChanges() {
+    if (!selectedStudent?.uid) {
+      campusToast.error({
+        title: "Profile unavailable",
+        description: "Select a student record before editing the profile.",
+        dedupeKey: "ec-students:edit-profile:no-student",
+      });
+      return;
+    }
+
+    const name = editProfileName.trim();
+    const schoolId = editProfileSchoolId.trim();
+    const course = editProfileCourse.trim();
+    const yearLevel = editProfileYearLevel.trim();
+    const allowsBlankAcademicFields = selectedStudentRole === "teacher";
+
+    if (!name) {
+      campusToast.warning({
+        title: "Missing name",
+        description: "Name is required before you can save this profile.",
+        dedupeKey: "ec-students:edit-profile:missing-name",
+      });
+      return;
+    }
+
+    if (!schoolId) {
+      campusToast.warning({
+        title: "Missing school ID",
+        description: "School ID is required before you can save this profile.",
+        dedupeKey: "ec-students:edit-profile:missing-school-id",
+      });
+      return;
+    }
+
+    if (!allowsBlankAcademicFields && !course) {
+      campusToast.warning({
+        title: "Missing course",
+        description: "Course is required for student and EC member profiles.",
+        dedupeKey: "ec-students:edit-profile:missing-course",
+      });
+      return;
+    }
+
+    if (!allowsBlankAcademicFields && !yearLevel) {
+      campusToast.warning({
+        title: "Missing year level",
+        description: "Year level is required for student and EC member profiles.",
+        dedupeKey: "ec-students:edit-profile:missing-year",
+      });
+      return;
+    }
+
+    setSavingProfileUid(selectedStudent.uid);
+    setStatusNotice(null);
+
+    try {
+      const timestamp = serverTimestamp();
+      const { profilePatch, studentPatch } = buildCampusProfileUpdatePayload({
+        role: selectedStudentRole,
+        name,
+        schoolId,
+        course,
+        yearLevel,
+      });
+
+      await setDoc(
+        doc(db, "profiles", selectedStudent.uid),
+        {
+          ...profilePatch,
+          updatedAt: timestamp,
+        },
+        { merge: true },
+      );
+
+      if (studentPatch) {
+        await setDoc(
+          doc(db, "students", selectedStudent.uid),
+          {
+            uid: selectedStudent.uid,
+            ...studentPatch,
+            updatedAt: timestamp,
+          },
+          { merge: true },
+        );
+      }
+
+      const updatedStudent = mapRemoteStudent(
+        {
+          uid: selectedStudent.uid,
+          role: selectedStudentRole,
+          schoolId,
+          studentId: selectedStudent.studentId,
+          fullName: name,
+          name,
+          studentName: name,
+          course,
+          yearLevel,
+          status: selectedStudent.status,
+          readyForClearance: selectedStudent.readyForClearance,
+          email: selectedStudent.email,
+          createdAtMs:
+            typeof selectedStudent.createdAt === "number"
+              ? selectedStudent.createdAt
+              : null,
+        },
+        studentPatch
+          ? {
+              studentId: selectedStudent.studentId,
+              schoolId,
+              fullName: name,
+              name,
+              studentName: name,
+              course,
+              yearLevel,
+              status: selectedStudent.status,
+              readyForClearance: selectedStudent.readyForClearance,
+              fingerprintStatus:
+                selectedStudent.fingerprintStatus === "Active"
+                  ? "active"
+                  : "inactive",
+            }
+          : undefined,
+      );
+
+      updateStudentState(selectedStudent.uid, {
+        id: updatedStudent.id,
+        studentId: updatedStudent.studentId,
+        name: updatedStudent.name,
+        course: updatedStudent.course,
+        year: updatedStudent.year,
+        email: updatedStudent.email,
+        role: updatedStudent.role,
+      });
+
+      setEditProfileModalOpen(false);
+      setStatusNotice({
+        type: "ok",
+        msg: `${updatedStudent.name} profile updated successfully.`,
+      });
+      campusToast.success({
+        title: "Profile updated",
+        description: `${updatedStudent.name} now shows ${updatedStudent.id} in the roster.`,
+        dedupeKey: `ec-students:edit-profile:${selectedStudent.uid}`,
+      });
+    } catch (error: unknown) {
+      const message = toErrorMessage(
+        error,
+        "Failed to save profile changes.",
+      );
+      campusToast.error({
+        title: "Profile update failed",
+        description: message,
+        dedupeKey: `ec-students:edit-profile-error:${selectedStudent.uid}`,
+      });
+    } finally {
+      setSavingProfileUid(null);
     }
   }
 
@@ -1952,6 +2211,11 @@ export default function ECStudentLookup() {
           setStatusModalOpen(open);
           if (!open) {
             setSelectedStudent(null);
+            setEditProfileModalOpen(false);
+            setEditProfileName("");
+            setEditProfileSchoolId("");
+            setEditProfileCourse("");
+            setEditProfileYearLevel("");
             setStatusEvents([]);
             setStatusPayments([]);
             setStatusError(null);
@@ -1966,6 +2230,7 @@ export default function ECStudentLookup() {
             setPaymentSortMode("paid");
             setUpdatingStudentUid(null);
             setMarkingClearanceStudentUid(null);
+            setSavingProfileUid(null);
           }
         }}
         size={isCompactViewport ? "full" : "5xl"}
@@ -2037,7 +2302,8 @@ export default function ECStudentLookup() {
                           }
                           isLoading={updatingStudentUid === selectedStudent.uid}
                           isDisabled={
-                            markingClearanceStudentUid === selectedStudent.uid
+                            markingClearanceStudentUid === selectedStudent.uid ||
+                            savingProfileUid === selectedStudent.uid
                           }
                         >
                           Set account{" "}
@@ -2047,28 +2313,44 @@ export default function ECStudentLookup() {
                         </Button>
                         <Button
                           size="sm"
-                          variant={
-                            selectedStudent.readyForClearance ? "flat" : "solid"
-                          }
-                          className={
+                          color={
                             selectedStudent.readyForClearance
-                              ? "bg-emerald-100 text-emerald-700"
-                              : "bg-emerald-600 text-white"
+                              ? "warning"
+                              : "success"
+                          }
+                          variant={
+                            selectedStudent.readyForClearance
+                              ? "flat"
+                              : "solid"
                           }
                           onPress={() =>
-                            void markStudentReadyForClearance(selectedStudent)
+                            void setStudentClearanceReady(
+                              selectedStudent,
+                              !selectedStudent.readyForClearance,
+                            )
                           }
                           isLoading={
                             markingClearanceStudentUid === selectedStudent.uid
                           }
                           isDisabled={
-                            selectedStudent.readyForClearance ||
-                            updatingStudentUid === selectedStudent.uid
+                            updatingStudentUid === selectedStudent.uid ||
+                            savingProfileUid === selectedStudent.uid
                           }
                         >
                           {selectedStudent.readyForClearance
-                            ? "Already ready for clearance"
+                            ? "Remove clearance ready"
                             : "Mark ready for clearance"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="bordered"
+                          onPress={() => openEditProfileModal(selectedStudent)}
+                          isDisabled={
+                            updatingStudentUid === selectedStudent.uid ||
+                            markingClearanceStudentUid === selectedStudent.uid
+                          }
+                        >
+                          Edit Profile
                         </Button>
                       </div>
                     )}
@@ -2330,6 +2612,99 @@ export default function ECStudentLookup() {
                   </Button>
                 </div>
               </ModalBody>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      <Modal
+        isOpen={editProfileModalOpen}
+        onOpenChange={(open) => {
+          if (!open && savingProfileUid !== selectedStudentUid) {
+            setEditProfileModalOpen(false);
+          } else if (open) {
+            setEditProfileModalOpen(true);
+          }
+        }}
+        size={isCompactViewport ? "full" : "2xl"}
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>Edit Profile</ModalHeader>
+              <ModalBody className="space-y-4 pb-2">
+                <Input
+                  label="Name"
+                  value={editProfileName}
+                  onValueChange={setEditProfileName}
+                  placeholder="Enter full name"
+                  isRequired
+                />
+                <Input
+                  label="School ID"
+                  value={editProfileSchoolId}
+                  onValueChange={setEditProfileSchoolId}
+                  placeholder="Enter school ID"
+                  isRequired
+                />
+                <Select
+                  label="Course"
+                  selectedKeys={editProfileCourse ? [editProfileCourse] : []}
+                  onSelectionChange={(keys) => {
+                    const selected = Array.from(keys)[0];
+                    if (typeof selected === "string") {
+                      setEditProfileCourse(selected);
+                    }
+                  }}
+                  placeholder="Select course"
+                  isRequired={selectedStudentRole !== "teacher"}
+                >
+                  {courseOptions.map((course) => (
+                    <SelectItem key={course}>{course}</SelectItem>
+                  ))}
+                </Select>
+                <Select
+                  label="Year Level"
+                  selectedKeys={
+                    editProfileYearLevel ? [editProfileYearLevel] : []
+                  }
+                  onSelectionChange={(keys) => {
+                    const selected = Array.from(keys)[0];
+                    if (typeof selected === "string") {
+                      setEditProfileYearLevel(selected);
+                    }
+                  }}
+                  placeholder="Select year level"
+                  isRequired={selectedStudentRole !== "teacher"}
+                >
+                  {yearOptions.map((yearLevel) => (
+                    <SelectItem key={yearLevel}>{yearLevel}</SelectItem>
+                  ))}
+                </Select>
+              </ModalBody>
+              <ModalFooter className="justify-between">
+                <Button
+                  variant="bordered"
+                  onPress={() => {
+                    if (savingProfileUid === selectedStudentUid) return;
+                    setEditProfileModalOpen(false);
+                    onClose();
+                  }}
+                  isDisabled={savingProfileUid === selectedStudentUid}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  className="bg-[#7b0000] font-semibold text-white"
+                  onPress={() => {
+                    void saveStudentProfileChanges();
+                  }}
+                  isLoading={savingProfileUid === selectedStudentUid}
+                  isDisabled={savingProfileUid === selectedStudentUid}
+                >
+                  Save Changes
+                </Button>
+              </ModalFooter>
             </>
           )}
         </ModalContent>

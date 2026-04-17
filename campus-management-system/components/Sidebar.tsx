@@ -163,26 +163,29 @@ export function Sidebar({
     width: number;
     height: number;
     className: string;
-  }) => (
-    <button
-      type="button"
-      onClick={handleRefreshPage}
-      aria-label="Refresh page"
-      title="Refresh page"
-      className="rounded-[28px] transition-transform hover:scale-[1.01] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-    >
-      <Image
-        src="/new campus-logo.jpg"
-        alt="Campus Logo"
-        width={width}
-        height={height}
-        className={clsx(
-          "cursor-pointer h-auto max-w-full object-contain drop-shadow-md",
-          className,
-        )}
-      />
-    </button>
-  );
+  }) => {
+    const logoSrc = pathname.startsWith('/ecmember') ? '/campus-ecview-logo.png' : '/new campus-logo.jpg';
+    return (
+      <button
+        type="button"
+        onClick={handleRefreshPage}
+        aria-label="Refresh page"
+        title="Refresh page"
+        className="rounded-[28px] transition-transform hover:scale-[1.01] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+      >
+        <Image
+          src={logoSrc}
+          alt="Campus Logo"
+          width={width}
+          height={height}
+          className={clsx(
+            "cursor-pointer h-auto max-w-full object-contain drop-shadow-md",
+            className,
+          )}
+        />
+      </button>
+    );
+  };
 
   const LogoSection = ({ size = logoSize }: { size?: number }) => (
     <div className="mb-4 mt-6 flex w-full justify-center px-4">

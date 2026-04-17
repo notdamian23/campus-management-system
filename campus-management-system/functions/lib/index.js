@@ -23,7 +23,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminDeleteUser = exports.adminCreateUser = void 0;
+exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
 const https_1 = require("firebase-functions/v2/https");
 const campusLogger_1 = require("./campusLogger");
@@ -33,6 +33,116 @@ if (admin.apps.length === 0) {
 const db = admin.firestore();
 const REGION = "asia-southeast1";
 const authLogger = (0, campusLogger_1.createCampusLogger)("CAMPUS auth");
+const STUDENT_LOOKUP_PROFILE_ROLES = ["student", "ec", "ecmember"];
+const VALID_COURSES = [
+    "Computer Engineering",
+    "Industrial Engineering",
+    "Electrical Engineering",
+    "Mechanical Engineering",
+    "Electronics Engineering",
+];
+function isValidCourse(value) {
+    return VALID_COURSES.includes(value);
+}
+const LOWERCASE_PARTICLES = new Set([
+    "de",
+    "del",
+    "della",
+    "dela",
+    "di",
+    "da",
+    "dos",
+    "das",
+    "van",
+    "von",
+    "mit",
+    "und",
+    "et",
+    "and",
+    "y",
+    "o",
+]);
+const UPPERCASE_SUFFIXES = new Set([
+    "jr",
+    "sr",
+    "ii",
+    "iii",
+    "iv",
+    "v",
+    "esq",
+    "phd",
+    "md",
+    "dds",
+    "dvm",
+]);
+function isSuffix(word) {
+    const lower = word.toLowerCase().replace(/\.$/g, "");
+    return UPPERCASE_SUFFIXES.has(lower);
+}
+function isParticle(word) {
+    return LOWERCASE_PARTICLES.has(word.toLowerCase());
+}
+function shouldLowercase(word, index, totalWords) {
+    if (index === 0 || index === totalWords - 1) {
+        return false;
+    }
+    if (isSuffix(word)) {
+        return false;
+    }
+    if (isParticle(word)) {
+        return true;
+    }
+    return false;
+}
+function formatWord(word) {
+    if (!word)
+        return "";
+    if (word.includes("-")) {
+        return word
+            .split("-")
+            .map((part) => {
+            if (!part)
+                return "";
+            if (isSuffix(part)) {
+                return part.toUpperCase().replace(/\.$/, "");
+            }
+            return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+        })
+            .join("-");
+    }
+    if (word.includes("'")) {
+        return word
+            .split("'")
+            .map((part) => {
+            if (!part)
+                return "";
+            return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+        })
+            .join("'");
+    }
+    const hasPeriod = word.endsWith(".");
+    const cleanWord = word.replace(/\.$/g, "");
+    if (isSuffix(cleanWord)) {
+        const suffix = cleanWord.toUpperCase();
+        return hasPeriod ? `${suffix}.` : suffix;
+    }
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+}
+function normalizePersonName(rawName) {
+    if (!rawName)
+        return "";
+    const trimmed = normalizeText(rawName).trim().replace(/\s+/g, " ");
+    const words = trimmed.split(/\s+/);
+    if (words.length === 0)
+        return "";
+    const formattedWords = words.map((word, index) => {
+        if (shouldLowercase(word, index, words.length)) {
+            return word.toLowerCase();
+        }
+        return formatWord(word);
+    });
+    return formattedWords.join(" ");
+}
 function serverTimestamp() {
     return admin.firestore.FieldValue.serverTimestamp();
 }
@@ -389,6 +499,225 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
         throw new https_1.HttpsError("internal", authError.message || "Failed to create user.");
     }
 });
+function normalizeBulkStudentStatus(raw) {
+    const normalized = normalizeText(raw).toLowerCase();
+    if (!normalized || normalized === "active")
+        return "active";
+    if (normalized === "inactive")
+        return "inactive";
+    if (normalized === "pending")
+        return "pending";
+    return "";
+}
+function isValidBulkSchoolId(value) {
+    return Boolean(value) && /^[A-Za-z0-9]{4,}$/.test(value);
+}
+async function fetchExistingProfileSchoolIds(schoolIds) {
+    const existing = new Set();
+    const chunks = [];
+    const ids = schoolIds.filter(Boolean);
+    for (let i = 0; i < ids.length; i += 10) {
+        chunks.push(ids.slice(i, i + 10));
+    }
+    for (const chunk of chunks) {
+        const snap = await db
+            .collection("profiles")
+            .where("schoolId", "in", chunk)
+            .get();
+        snap.docs.forEach((doc) => {
+            const data = doc.data();
+            const schoolId = normalizeText(data.schoolId);
+            if (schoolId) {
+                existing.add(schoolId);
+            }
+        });
+    }
+    return existing;
+}
+exports.adminBulkImportStudents = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a, _b;
+    await requireAdmin(request);
+    const body = asRecord(request.data);
+    const filename = normalizeText(body.filename) || "student-import.csv";
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    const actorUid = normalizeText((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid);
+    const callerProfileSnap = await db.doc(`profiles/${actorUid}`).get();
+    const actorSchoolId = normalizeText((_b = callerProfileSnap.data()) === null || _b === void 0 ? void 0 : _b.schoolId);
+    const timestamp = serverTimestamp();
+    const validatedRows = rows.map((rawRow, index) => {
+        const row = asRecord(rawRow);
+        const schoolId = normalizeText(row.schoolId);
+        const nameRaw = normalizeText(row.name);
+        const name = normalizePersonName(nameRaw);
+        const course = normalizeText(row.course);
+        const yearLevelRaw = normalizeText(row.yearLevel);
+        const status = normalizeBulkStudentStatus(row.status);
+        const normalizedYear = normalizeYear(yearLevelRaw);
+        const errors = [];
+        if (!schoolId) {
+            errors.push("School ID is required.");
+        }
+        else if (!isValidBulkSchoolId(schoolId)) {
+            errors.push("School ID must be alphanumeric and at least 4 characters.");
+        }
+        if (!name)
+            errors.push("Name is required.");
+        if (!course) {
+            errors.push("Course is required.");
+        }
+        else if (!isValidCourse(course)) {
+            errors.push("Invalid course. Use one of: Computer Engineering, Industrial Engineering, Electrical Engineering, Mechanical Engineering, Electronics Engineering.");
+        }
+        if (!yearLevelRaw) {
+            errors.push("Year level is required.");
+        }
+        else if (!normalizedYear) {
+            errors.push("Invalid year level.");
+        }
+        if (!status) {
+            errors.push("Invalid status. Use active, inactive, or pending.");
+        }
+        return {
+            rowIndex: index + 1,
+            schoolId,
+            name,
+            course,
+            yearLevel: normalizedYear,
+            status: status || "active",
+            errors,
+            success: false,
+            skipped: false,
+        };
+    });
+    const schoolIdCounts = new Map();
+    validatedRows.forEach((row) => {
+        var _a;
+        const schoolId = String(row.schoolId || "");
+        if (schoolId) {
+            schoolIdCounts.set(schoolId, ((_a = schoolIdCounts.get(schoolId)) !== null && _a !== void 0 ? _a : 0) + 1);
+        }
+    });
+    const uniqueSchoolIds = Array.from(schoolIdCounts.keys());
+    const existingSchoolIds = await fetchExistingProfileSchoolIds(uniqueSchoolIds);
+    const previewRows = validatedRows.map((row) => {
+        const schoolId = String(row.schoolId || "");
+        const errors = Array.isArray(row.errors) ? [...row.errors] : [];
+        if (schoolId && schoolIdCounts.get(schoolId) > 1) {
+            errors.push("Duplicate schoolId in CSV.");
+        }
+        if (schoolId && existingSchoolIds.has(schoolId)) {
+            errors.push("Existing schoolId already exists in CAMPUS.");
+        }
+        return {
+            schoolId,
+            name: String(row.name || "").trim(),
+            course: String(row.course || "").trim(),
+            yearLevel: String(row.yearLevel || "").trim(),
+            status: String(row.status || "active").trim(),
+            errors,
+            rowIndex: Number(row.rowIndex || 0),
+        };
+    });
+    const rowResults = previewRows.map((row) => {
+        const errorList = Array.isArray(row.errors) ? row.errors : [];
+        const isValid = errorList.length === 0;
+        return {
+            schoolId: String(row.schoolId || ""),
+            name: String(row.name || ""),
+            course: String(row.course || ""),
+            yearLevel: String(row.yearLevel || ""),
+            status: String(row.status || "active"),
+            success: false,
+            skipped: !isValid,
+            error: isValid ? undefined : errorList.join(" "),
+        };
+    });
+    const finalResults = rowResults.map((row) => (Object.assign({}, row)));
+    let importedCount = 0;
+    let failedCount = 0;
+    let skippedCount = 0;
+    for (const resultRow of finalResults) {
+        if (resultRow.skipped || resultRow.error) {
+            skippedCount += 1;
+            continue;
+        }
+        const email = `${resultRow.schoolId}@campus.local`;
+        let createdUid = null;
+        try {
+            const userRecord = await admin.auth().createUser({
+                email,
+                password: resultRow.schoolId,
+                disabled: false,
+            });
+            const uid = userRecord.uid;
+            createdUid = uid;
+            const profilePayload = {
+                name: resultRow.name,
+                schoolId: resultRow.schoolId,
+                email: "",
+                role: "student",
+                course: resultRow.course,
+                year: resultRow.yearLevel,
+                yearLevel: resultRow.yearLevel,
+                mustChangePassword: true,
+                emailVerified: false,
+                emailVerificationPending: false,
+                pendingEmail: null,
+                firstLoginCompleted: false,
+                status: resultRow.status || "active",
+                createdAt: timestamp,
+                updatedAt: timestamp,
+                readyForClearance: false,
+            };
+            await db.doc(`profiles/${uid}`).set(profilePayload, { merge: true });
+            await db.doc(`students/${uid}`).set({
+                schoolId: resultRow.schoolId,
+                studentName: resultRow.name,
+                name: resultRow.name,
+                course: resultRow.course,
+                year: resultRow.yearLevel,
+                yearLevel: resultRow.yearLevel,
+                status: resultRow.status || "active",
+                readyForClearance: false,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+            }, { merge: true });
+            resultRow.success = true;
+            resultRow.uid = uid;
+            importedCount += 1;
+        }
+        catch (error) {
+            const authError = error;
+            if (createdUid) {
+                await admin.auth().deleteUser(createdUid).catch(() => undefined);
+            }
+            resultRow.success = false;
+            resultRow.error = authError.message || "Unable to create student account.";
+            if (authError.code === "auth/email-already-exists") {
+                resultRow.error = "Account already exists for this School ID.";
+            }
+            failedCount += 1;
+        }
+    }
+    await db.collection("logs").add({
+        action: "bulk_student_import",
+        actorUid,
+        actorSchoolId,
+        importedCount,
+        failedCount,
+        skippedCount,
+        totalRows: finalResults.length,
+        fileName: filename,
+        createdAt: timestamp,
+    });
+    return {
+        totalRows: finalResults.length,
+        importedCount,
+        failedCount,
+        skippedCount,
+        rowResults: finalResults,
+    };
+});
 exports.adminDeleteUser = (0, https_1.onCall)({ region: REGION }, async (request) => {
     var _a, _b, _c, _d;
     await requireAdmin(request);
@@ -420,9 +749,11 @@ exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request)
     const limit = Number.isFinite(rawLimit) ?
         Math.min(Math.max(rawLimit, 1), 5000) :
         2000;
+    // EC members are still part of the student roster, so the lookup includes
+    // both student and ecmember roles.
     const profileSnapshot = await db
         .collection("profiles")
-        .where("role", "==", "student")
+        .where("role", "in", [...STUDENT_LOOKUP_PROFILE_ROLES])
         .limit(limit)
         .get();
     const studentRefs = profileSnapshot.docs.map((profileDoc) => db.doc(`students/${profileDoc.id}`));
@@ -437,33 +768,39 @@ exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request)
         studentByUid.set(studentSnap.id, (_a = studentSnap.data()) !== null && _a !== void 0 ? _a : {});
     });
     const students = profileSnapshot.docs.map((profileDoc) => {
-        var _a, _b, _c, _d, _e;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j;
         const profileData = (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {};
         const studentData = (_b = studentByUid.get(profileDoc.id)) !== null && _b !== void 0 ? _b : {};
         return {
             uid: profileDoc.id,
+            role: normalizeText(profileData.role),
             schoolId: normalizeText(profileData.schoolId) ||
                 normalizeText(studentData.schoolId) ||
                 profileDoc.id,
+            fullName: normalizeText(profileData.fullName) ||
+                normalizeText(studentData.fullName),
             studentName: normalizeText(profileData.studentName) ||
                 normalizeText(studentData.studentName) ||
                 normalizeText(profileData.name) ||
                 normalizeText(studentData.name),
             name: normalizeText(profileData.name) ||
+                normalizeText(profileData.fullName) ||
                 normalizeText(studentData.name) ||
+                normalizeText(studentData.fullName) ||
                 normalizeText(profileData.studentName) ||
                 normalizeText(studentData.studentName),
             course: normalizeText(profileData.course) ||
                 normalizeText(studentData.course) ||
                 "Unassigned",
-            year: normalizeYear((_d = (_c = profileData.year) !== null && _c !== void 0 ? _c : studentData.year) !== null && _d !== void 0 ? _d : studentData.yearLevel),
+            yearLevel: normalizeYear((_e = (_d = (_c = profileData.year) !== null && _c !== void 0 ? _c : profileData.yearLevel) !== null && _d !== void 0 ? _d : studentData.year) !== null && _e !== void 0 ? _e : studentData.yearLevel),
+            year: normalizeYear((_h = (_g = (_f = profileData.year) !== null && _f !== void 0 ? _f : profileData.yearLevel) !== null && _g !== void 0 ? _g : studentData.year) !== null && _h !== void 0 ? _h : studentData.yearLevel),
             readyForClearance: studentData.readyForClearance === true ||
                 profileData.readyForClearance === true,
             status: normalizeText(studentData.status) ||
                 normalizeText(profileData.status) ||
                 "Active",
             email: normalizeText(profileData.email),
-            createdAtMs: toMillis((_e = profileData.createdAt) !== null && _e !== void 0 ? _e : studentData.createdAt),
+            createdAtMs: toMillis((_j = profileData.createdAt) !== null && _j !== void 0 ? _j : studentData.createdAt),
         };
     });
     return { students };

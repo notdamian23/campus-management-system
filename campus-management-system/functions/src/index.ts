@@ -1,5 +1,5 @@
 import * as admin from "firebase-admin";
-import {HttpsError, onCall, type CallableRequest} from "firebase-functions/v2/https";
+import {HttpsError, onCall, onRequest, type CallableRequest} from "firebase-functions/v2/https";
 import {createCampusLogger} from "./campusLogger";
 
 if (admin.apps.length === 0) {
@@ -8,6 +8,32 @@ if (admin.apps.length === 0) {
 
 const db = admin.firestore();
 const REGION = "asia-southeast1";
+
+type BulkImportContext = {
+  data: Record<string, unknown>;
+  auth: {
+    uid: string;
+    token: admin.auth.DecodedIdToken;
+    rawToken: string;
+  };
+};
+
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "https://campusportal.site",
+  "https://campus-27dd9.web.app",
+  "https://campus-27dd9.firebaseapp.com"
+];
+
+function setCorsHeaders(res: any, origin: string) {
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.set('Access-Control-Allow-Origin', origin);
+    res.set('Access-Control-Allow-Methods', 'OPTIONS, POST');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.set('Vary', 'Origin');
+  }
+}
+
 const authLogger = createCampusLogger("CAMPUS auth");
 
 type Role = "admin" | "ec" | "teacher" | "student";
@@ -34,6 +60,130 @@ type CampusProfilePayload = {
   yearLevel?: string;
   readyForClearance?: boolean;
 };
+
+const STUDENT_LOOKUP_PROFILE_ROLES = ["student", "ec", "ecmember"] as const;
+
+const VALID_COURSES = [
+  "Computer Engineering",
+  "Industrial Engineering",
+  "Electrical Engineering",
+  "Mechanical Engineering",
+  "Electronics Engineering",
+] as const;
+
+function isValidCourse(value: string): boolean {
+  return VALID_COURSES.includes(value as typeof VALID_COURSES[number]);
+}
+
+const LOWERCASE_PARTICLES = new Set([
+  "de",
+  "del",
+  "della",
+  "dela",
+  "di",
+  "da",
+  "dos",
+  "das",
+  "van",
+  "von",
+  "mit",
+  "und",
+  "et",
+  "and",
+  "y",
+  "o",
+]);
+
+const UPPERCASE_SUFFIXES = new Set([
+  "jr",
+  "sr",
+  "ii",
+  "iii",
+  "iv",
+  "v",
+  "esq",
+  "phd",
+  "md",
+  "dds",
+  "dvm",
+]);
+
+function isSuffix(word: string): boolean {
+  const lower = word.toLowerCase().replace(/\.$/g, "");
+  return UPPERCASE_SUFFIXES.has(lower);
+}
+
+function isParticle(word: string): boolean {
+  return LOWERCASE_PARTICLES.has(word.toLowerCase());
+}
+
+function shouldLowercase(word: string, index: number, totalWords: number): boolean {
+  if (index === 0 || index === totalWords - 1) {
+    return false;
+  }
+  if (isSuffix(word)) {
+    return false;
+  }
+  if (isParticle(word)) {
+    return true;
+  }
+  return false;
+}
+
+function formatWord(word: string): string {
+  if (!word) return "";
+
+  if (word.includes("-")) {
+    return word
+      .split("-")
+      .map((part) => {
+        if (!part) return "";
+        if (isSuffix(part)) {
+          return part.toUpperCase().replace(/\.$/, "");
+        }
+        return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+      })
+      .join("-");
+  }
+
+  if (word.includes("'")) {
+    return word
+      .split("'")
+      .map((part) => {
+        if (!part) return "";
+        return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+      })
+      .join("'");
+  }
+
+  const hasPeriod = word.endsWith(".");
+  const cleanWord = word.replace(/\.$/g, "");
+
+  if (isSuffix(cleanWord)) {
+    const suffix = cleanWord.toUpperCase();
+    return hasPeriod ? `${suffix}.` : suffix;
+  }
+
+  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+}
+
+function normalizePersonName(rawName: string): string {
+  if (!rawName) return "";
+
+  const trimmed = normalizeText(rawName).trim().replace(/\s+/g, " ");
+  const words = trimmed.split(/\s+/);
+
+  if (words.length === 0) return "";
+
+  const formattedWords = words.map((word, index) => {
+    if (shouldLowercase(word, index, words.length)) {
+      return word.toLowerCase();
+    }
+    return formatWord(word);
+  });
+
+  return formattedWords.join(" ");
+}
 
 function serverTimestamp() {
   return admin.firestore.FieldValue.serverTimestamp();
@@ -517,6 +667,314 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
     }
   });
 
+function normalizeBulkStudentStatus(raw: unknown): string {
+  const normalized = normalizeText(raw).toLowerCase();
+  if (!normalized || normalized === "active") return "active";
+  if (normalized === "inactive") return "inactive";
+  if (normalized === "pending") return "pending";
+  return "";
+}
+
+function isValidBulkSchoolId(value: string): boolean {
+  return Boolean(value) && /^[A-Za-z0-9]{4,}$/.test(value);
+}
+
+async function fetchExistingProfileSchoolIds(schoolIds: string[]): Promise<Set<string>> {
+  const existing = new Set<string>();
+  const chunks: string[][] = [];
+  const ids = schoolIds.filter(Boolean);
+  for (let i = 0; i < ids.length; i += 10) {
+    chunks.push(ids.slice(i, i + 10));
+  }
+
+  for (const chunk of chunks) {
+    const snap = await db
+      .collection("profiles")
+      .where("schoolId", "in", chunk)
+      .get();
+
+    snap.docs.forEach((doc) => {
+      const data = doc.data();
+      const schoolId = normalizeText(data.schoolId);
+      if (schoolId) {
+        existing.add(schoolId);
+      }
+    });
+  }
+
+  return existing;
+}
+
+async function adminBulkImportStudentsLogic(context: BulkImportContext) {
+    await requireAdmin({ auth: context.auth });
+
+    const body = asRecord(context.data);
+    const filename = normalizeText(body.filename) || "student-import.csv";
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    const actorUid = context.auth.uid;
+    const callerProfileSnap = await db.doc(`profiles/${actorUid}`).get();
+    const actorSchoolId = normalizeText(callerProfileSnap.data()?.schoolId);
+    const timestamp = serverTimestamp();
+
+    const validatedRows = rows.map((rawRow, index) => {
+      const row = asRecord(rawRow);
+      const schoolId = normalizeText(row.schoolId);
+      const nameRaw = normalizeText(row.name);
+      const name = normalizePersonName(nameRaw);
+      const course = normalizeText(row.course);
+      const yearLevelRaw = normalizeText(row.yearLevel);
+      const status = normalizeBulkStudentStatus(row.status);
+      const normalizedYear = normalizeYear(yearLevelRaw);
+      const errors: string[] = [];
+
+      if (!schoolId) {
+        errors.push("School ID is required.");
+      } else if (!isValidBulkSchoolId(schoolId)) {
+        errors.push("School ID must be alphanumeric and at least 4 characters.");
+      }
+      if (!name) errors.push("Name is required.");
+      if (!course) {
+        errors.push("Course is required.");
+      } else if (!isValidCourse(course)) {
+        errors.push("Invalid course. Use one of: Computer Engineering, Industrial Engineering, Electrical Engineering, Mechanical Engineering, Electronics Engineering.");
+      }
+      if (!yearLevelRaw) {
+        errors.push("Year level is required.");
+      } else if (!normalizedYear) {
+        errors.push("Invalid year level.");
+      }
+      if (!status) {
+        errors.push("Invalid status. Use active, inactive, or pending.");
+      }
+
+      return {
+        rowIndex: index + 1,
+        schoolId,
+        name,
+        course,
+        yearLevel: normalizedYear,
+        status: status || "active",
+        errors,
+        success: false,
+        skipped: false,
+      } as Record<string, unknown>;
+    });
+
+    const schoolIdCounts = new Map<string, number>();
+    validatedRows.forEach((row) => {
+      const schoolId = String(row.schoolId || "");
+      if (schoolId) {
+        schoolIdCounts.set(schoolId, (schoolIdCounts.get(schoolId) ?? 0) + 1);
+      }
+    });
+
+    const uniqueSchoolIds = Array.from(schoolIdCounts.keys());
+    const existingSchoolIds = await fetchExistingProfileSchoolIds(uniqueSchoolIds);
+
+    const previewRows = validatedRows.map((row) => {
+      const schoolId = String(row.schoolId || "");
+      const errors = Array.isArray(row.errors) ? [...row.errors] : [];
+      if (schoolId && schoolIdCounts.get(schoolId)! > 1) {
+        errors.push("Duplicate schoolId in CSV.");
+      }
+      if (schoolId && existingSchoolIds.has(schoolId)) {
+        errors.push("Existing schoolId already exists in CAMPUS.");
+      }
+
+      return {
+        schoolId,
+        name: String(row.name || "").trim(),
+        course: String(row.course || "").trim(),
+        yearLevel: String(row.yearLevel || "").trim(),
+        status: String(row.status || "active").trim(),
+        errors,
+        rowIndex: Number(row.rowIndex || 0),
+      } as Record<string, unknown>;
+    });
+
+    const rowResults: Array<Record<string, unknown>> = previewRows.map((row) => {
+      const errorList = Array.isArray(row.errors) ? row.errors : [];
+      const isValid = errorList.length === 0;
+      return {
+        schoolId: String(row.schoolId || ""),
+        name: String(row.name || ""),
+        course: String(row.course || ""),
+        yearLevel: String(row.yearLevel || ""),
+        status: String(row.status || "active"),
+        success: false,
+        skipped: !isValid,
+        error: isValid ? undefined : errorList.join(" "),
+      };
+    });
+
+    const finalResults = validatedRows.map((row) => ({ ...row })) as Array<{
+      schoolId: string;
+      name: string;
+      course: string;
+      yearLevel: string;
+      status: string;
+      success: boolean;
+      skipped?: boolean;
+      error?: string;
+      uid?: string;
+    }>;
+
+    let importedCount = 0;
+    let failedCount = 0;
+    let skippedCount = 0;
+
+    for (const resultRow of finalResults) {
+      if (resultRow.skipped || resultRow.error) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const email = `${resultRow.schoolId}@campus.local`;
+      let createdUid: string | null = null;
+      try {
+        const userRecord = await admin.auth().createUser({
+          email,
+          password: resultRow.schoolId,
+          disabled: false,
+        });
+        const uid = userRecord.uid;
+        createdUid = uid;
+
+        const profilePayload: FirebaseFirestore.DocumentData = {
+          name: resultRow.name,
+          schoolId: resultRow.schoolId,
+          email: "",
+          role: "student",
+          course: resultRow.course,
+          year: resultRow.yearLevel,
+          yearLevel: resultRow.yearLevel,
+          mustChangePassword: true,
+          emailVerified: false,
+          emailVerificationPending: false,
+          pendingEmail: null,
+          firstLoginCompleted: false,
+          status: resultRow.status || "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          readyForClearance: false,
+        };
+
+        await db.doc(`profiles/${uid}`).set(profilePayload, {merge: true});
+        await db.doc(`students/${uid}`).set(
+          {
+            schoolId: resultRow.schoolId,
+            studentName: resultRow.name,
+            name: resultRow.name,
+            course: resultRow.course,
+            year: resultRow.yearLevel,
+            yearLevel: resultRow.yearLevel,
+            status: resultRow.status || "active",
+            readyForClearance: false,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+          {merge: true},
+        );
+
+        resultRow.success = true;
+        resultRow.uid = uid;
+        importedCount += 1;
+      } catch (error: unknown) {
+        const authError = error as {code?: string; message?: string};
+        if (createdUid) {
+          await admin.auth().deleteUser(createdUid).catch(() => undefined);
+        }
+        resultRow.success = false;
+        resultRow.error = authError.message || "Unable to create student account.";
+        if (authError.code === "auth/email-already-exists") {
+          resultRow.error = "Account already exists for this School ID.";
+        }
+        failedCount += 1;
+      }
+    }
+
+    await db.collection("logs").add({
+      action: "bulk_student_import",
+      actorUid,
+      actorSchoolId,
+      importedCount,
+      failedCount,
+      skippedCount,
+      totalRows: finalResults.length,
+      fileName: filename,
+      createdAt: timestamp,
+    });
+
+    return {
+      totalRows: finalResults.length,
+      importedCount,
+      failedCount,
+      skippedCount,
+      rowResults: finalResults,
+    };
+  }
+
+export const adminBulkImportStudents = onRequest({region: REGION}, async (req, res) => {
+  const origin = req.headers.origin;
+  if (!origin || !ALLOWED_ORIGINS.includes(origin)) {
+    res.status(403).json({error: {status: 'PERMISSION_DENIED', message: 'Origin not allowed'}});
+    return;
+  }
+
+  setCorsHeaders(res, origin);
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({error: {status: 'FAILED_PRECONDITION', message: 'Method not allowed'}});
+    return;
+  }
+
+  const body = req.body;
+
+  if (!body || typeof body !== 'object' || !('data' in body)) {
+    res.status(400).json({error: {status: 'FAILED_PRECONDITION', message: 'Bad request'}});
+    return;
+  }
+
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({error: {status: 'UNAUTHENTICATED', message: 'Unauthorized'}});
+    return;
+  }
+
+  const idToken = authHeader.split('Bearer ')[1];
+
+  let decodedToken;
+
+  try {
+    decodedToken = await admin.auth().verifyIdToken(idToken);
+  } catch {
+    res.status(401).json({error: {status: 'UNAUTHENTICATED', message: 'Unauthorized'}});
+    return;
+  }
+
+  const context: BulkImportContext = {
+    data: body.data,
+    auth: { uid: decodedToken.uid, token: decodedToken, rawToken: idToken }
+  };
+
+  try {
+    const result = await adminBulkImportStudentsLogic(context);
+    res.json({result});
+  } catch (error) {
+    if (error instanceof HttpsError) {
+      res.status(400).json({error: {status: error.code, message: error.message}});
+    } else {
+      res.status(500).json({error: {status: 'INTERNAL', message: 'Internal error'}});
+    }
+  }
+});
+
 export const adminDeleteUser = onCall({region: REGION}, async (request) => {
     await requireAdmin(request);
 
@@ -563,9 +1021,11 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
       Math.min(Math.max(rawLimit, 1), 5000) :
       2000;
 
+    // EC members are still part of the student roster, so the lookup includes
+    // both student and ecmember roles.
     const profileSnapshot = await db
       .collection("profiles")
-      .where("role", "==", "student")
+      .where("role", "in", [...STUDENT_LOOKUP_PROFILE_ROLES])
       .limit(limit)
       .get();
 
@@ -588,10 +1048,14 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
 
         return {
           uid: profileDoc.id,
+          role: normalizeText(profileData.role),
           schoolId:
             normalizeText(profileData.schoolId) ||
             normalizeText(studentData.schoolId) ||
           profileDoc.id,
+        fullName:
+          normalizeText(profileData.fullName) ||
+          normalizeText(studentData.fullName),
         studentName:
           normalizeText(profileData.studentName) ||
           normalizeText(studentData.studentName) ||
@@ -599,15 +1063,24 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
           normalizeText(studentData.name),
         name:
           normalizeText(profileData.name) ||
+          normalizeText(profileData.fullName) ||
           normalizeText(studentData.name) ||
+          normalizeText(studentData.fullName) ||
           normalizeText(profileData.studentName) ||
           normalizeText(studentData.studentName),
         course:
           normalizeText(profileData.course) ||
           normalizeText(studentData.course) ||
           "Unassigned",
+        yearLevel: normalizeYear(
+          profileData.year ??
+          profileData.yearLevel ??
+          studentData.year ??
+          studentData.yearLevel
+        ),
         year: normalizeYear(
           profileData.year ??
+          profileData.yearLevel ??
           studentData.year ??
           studentData.yearLevel
         ),

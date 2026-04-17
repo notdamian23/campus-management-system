@@ -37,11 +37,13 @@ import {
   Search,
   ShieldAlert,
   TriangleAlert,
+  Upload,
   UserPlus,
   Users2,
 } from "lucide-react";
 import { ScrollShadow } from "@heroui/scroll-shadow";
 import LogoutButton from "@/components/LogoutButton";
+import BulkStudentImportModal from "@/components/admin/BulkStudentImportModal";
 import {
   CampusDataTable,
   CampusEmptyState,
@@ -62,15 +64,24 @@ import {
   onSnapshot,
   orderBy,
   query,
+  serverTimestamp,
+  setDoc,
   updateDoc,
 } from "firebase/firestore";
-import { getFunctions, httpsCallable } from "firebase/functions";
+import { httpsCallable } from "firebase/functions";
 import {
   type CampusProfileDoc,
   getOnboardingRedirect,
-  resolveCampusDisplayName,
-  resolveCampusProfileName,
 } from "@/lib/campus-auth";
+import {
+  buildCampusProfileUpdatePayload,
+  normalizeCampusUserRow,
+  type CampusUserProjectionSource,
+  type CampusUserRow,
+} from "@/lib/campus-user-rows";
+import { getBulkStudentImportTemplateCsv } from "@/lib/bulkStudentImport";
+import { CAMPUS_COURSE_OPTIONS } from "@/lib/courseOptions";
+import { getCampusFunctions } from "@/lib/firebase-functions";
 
 const roleOptions = ["student", "teacher", "ec", "admin"] as const;
 const yearOptions = [
@@ -80,13 +91,7 @@ const yearOptions = [
   "4th Year",
   "5th Year",
 ] as const;
-const courseOptions = [
-  "Computer Engineering",
-  "Industrial Engineering",
-  "Electrical Engineering",
-  "Mechanical Engineering",
-  "Electronics Engineering",
-] as const;
+const courseOptions = CAMPUS_COURSE_OPTIONS;
 type Role = (typeof roleOptions)[number];
 type AdminTab = "overview" | "users" | "logs" | "exports";
 type EmailFilter = "all" | "with_email" | "without_email";
@@ -102,6 +107,7 @@ type UserSortMode =
 type Profile = {
   id: string;
   schoolId?: string;
+  studentId?: string;
   email?: string;
   role: Role;
   name?: string;
@@ -113,6 +119,8 @@ type Profile = {
   year?: string;
   yearLevel?: string;
   createdAt?: unknown;
+  status?: string;
+  readyForClearance?: boolean;
 };
 type LogItem = {
   id: string;
@@ -142,7 +150,7 @@ type ExportSummary = {
   downloadUrl: string;
 };
 type PendingRoleChange = {
-  profile: Profile;
+  profile: CampusUserRow;
   nextRole: Role;
 };
 
@@ -173,10 +181,13 @@ const roleCards = [
   },
 ];
 
-const userColumns: CampusTableColumn<Profile>[] = [
+const userColumns: CampusTableColumn<CampusUserRow>[] = [
   { key: "schoolId", label: "School ID" },
   { key: "name", label: "Name" },
+  { key: "studentId", label: "Student ID" },
   { key: "email", label: "Email" },
+  { key: "course", label: "Course" },
+  { key: "yearLevel", label: "Year Level" },
   { key: "role", label: "Role" },
   { key: "roleAssignment", label: "Role Assignment" },
   { key: "actions", label: "Actions", align: "end", className: "text-right" },
@@ -304,24 +315,8 @@ function roleRank(role: Role) {
   return 3;
 }
 
-function hasEmail(profile: Profile) {
+function hasEmail(profile: Pick<CampusUserRow, "email">) {
   return Boolean(String(profile.email ?? "").trim());
-}
-
-function resolveProfileName(
-  profile: Pick<Profile, "name" | "fullName" | "displayName">,
-) {
-  return resolveCampusProfileName(profile);
-}
-
-function compareResolvedNames(left: Profile, right: Profile) {
-  const leftName = resolveProfileName(left);
-  const rightName = resolveProfileName(right);
-
-  if (leftName && rightName) return leftName.localeCompare(rightName);
-  if (leftName) return -1;
-  if (rightName) return 1;
-  return 0;
 }
 
 function getRoleDescription(role: Role) {
@@ -480,7 +475,7 @@ function UsersRolesSkeleton() {
       </Card>
       <Card shadow="sm" className="border">
         <CardBody className="p-0">
-          <CampusTableBodySkeleton rows={6} columns={6} />
+          <CampusTableBodySkeleton rows={6} columns={9} />
         </CardBody>
       </Card>
     </div>
@@ -489,11 +484,13 @@ function UsersRolesSkeleton() {
 
 export default function AdminDashboardPage() {
   const router = useRouter();
-  const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
   const [tab, setTab] = useState<AdminTab>("overview");
   const [checking, setChecking] = useState(true);
   const [adminUid, setAdminUid] = useState<string | null>(null);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [profileDocs, setProfileDocs] = useState<Profile[]>([]);
+  const [studentProjections, setStudentProjections] = useState<
+    Record<string, CampusUserProjectionSource>
+  >({});
   const [profilesLoading, setProfilesLoading] = useState(true);
   const [userSearch, setUserSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<"all" | Role>("all");
@@ -501,6 +498,7 @@ export default function AdminDashboardPage() {
   const [userSortMode, setUserSortMode] =
     useState<UserSortMode>("school_id_asc");
   const [savingRoleUid, setSavingRoleUid] = useState<string | null>(null);
+  const [savingProfileUid, setSavingProfileUid] = useState<string | null>(null);
   const [newSchoolId, setNewSchoolId] = useState("");
   const [newRole, setNewRole] = useState<Role>("student");
   const [newEcName, setNewEcName] = useState("");
@@ -509,12 +507,20 @@ export default function AdminDashboardPage() {
   const [newCourse, setNewCourse] = useState("");
   const [newYear, setNewYear] = useState("");
   const [newEmail, setNewEmail] = useState("");
+  const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [deletingUid, setDeletingUid] = useState<string | null>(null);
   const [pendingRoleChange, setPendingRoleChange] =
     useState<PendingRoleChange | null>(null);
   const [pendingDeleteProfile, setPendingDeleteProfile] =
-    useState<Profile | null>(null);
+    useState<CampusUserRow | null>(null);
+  const [editingProfile, setEditingProfile] = useState<CampusUserRow | null>(
+    null,
+  );
+  const [editProfileName, setEditProfileName] = useState("");
+  const [editProfileSchoolId, setEditProfileSchoolId] = useState("");
+  const [editProfileCourse, setEditProfileCourse] = useState("");
+  const [editProfileYearLevel, setEditProfileYearLevel] = useState("");
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [logsLoading, setLogsLoading] = useState(true);
   const [events, setEvents] = useState<EventItem[]>([]);
@@ -561,7 +567,7 @@ export default function AdminDashboardPage() {
     return onSnapshot(
       query(collection(db, "profiles"), orderBy("role", "asc"), limit(500)),
       (snap) => {
-        setProfiles(
+        setProfileDocs(
           snap.docs.map((profileDoc) => ({
             id: profileDoc.id,
             ...(profileDoc.data() as Omit<Profile, "id">),
@@ -570,12 +576,38 @@ export default function AdminDashboardPage() {
         setProfilesLoading(false);
       },
       () => {
-        setProfiles([]);
+        setProfileDocs([]);
         setProfilesLoading(false);
         campusToast.error({
           title: "Profiles unavailable",
           description: "Failed to load profiles.",
           dedupeKey: "admin:profiles-load-error",
+        });
+      },
+    );
+  }, [adminUid]);
+
+  useEffect(() => {
+    if (!adminUid) return;
+    return onSnapshot(
+      query(collection(db, "students"), limit(500)),
+      (snap) => {
+        const next: Record<string, CampusUserProjectionSource> = {};
+        snap.docs.forEach((studentDoc) => {
+          next[studentDoc.id] = {
+            uid: studentDoc.id,
+            ...(studentDoc.data() as CampusUserProjectionSource),
+          };
+        });
+        setStudentProjections(next);
+      },
+      () => {
+        setStudentProjections({});
+        campusToast.error({
+          title: "Student roster unavailable",
+          description:
+            "Student roster projections could not be loaded for admin review.",
+          dedupeKey: "admin:students-load-error",
         });
       },
     );
@@ -639,6 +671,19 @@ export default function AdminDashboardPage() {
     );
   }, [adminUid]);
 
+  const profiles = useMemo(
+    () =>
+      profileDocs.map((profile) =>
+        normalizeCampusUserRow(
+          profile.id,
+          profile,
+          studentProjections[profile.id],
+          { fallbackSchoolIdToStudentId: true },
+        ),
+      ),
+    [profileDocs, studentProjections],
+  );
+
   const filteredProfiles = useMemo(() => {
     const search = userSearch.trim().toLowerCase();
     return profiles.filter((profile) => {
@@ -646,10 +691,13 @@ export default function AdminDashboardPage() {
         !search ||
         [
           profile.schoolId,
-          resolveProfileName(profile),
+          profile.fullName,
+          profile.studentId,
           profile.email,
           profile.role,
-          profile.id,
+          profile.course,
+          profile.yearLevel,
+          profile.uid,
         ]
           .join(" ")
           .toLowerCase()
@@ -682,13 +730,13 @@ export default function AdminDashboardPage() {
       }
       if (userSortMode === "name_asc") {
         return (
-          compareResolvedNames(left, right) ||
+          left.fullName.localeCompare(right.fullName) ||
           String(left.schoolId ?? "").localeCompare(String(right.schoolId ?? ""))
         );
       }
       if (userSortMode === "name_desc") {
         return (
-          compareResolvedNames(right, left) ||
+          right.fullName.localeCompare(left.fullName) ||
           String(left.schoolId ?? "").localeCompare(String(right.schoolId ?? ""))
         );
       }
@@ -723,6 +771,10 @@ export default function AdminDashboardPage() {
       ),
     [profiles],
   );
+
+  const existingSchoolIds = useMemo(() => {
+    return new Set(profiles.map((profile) => profile.schoolId).filter(Boolean));
+  }, [profiles]);
 
   const usersWithEmailCount = useMemo(
     () => profiles.filter((profile) => hasEmail(profile)).length,
@@ -980,20 +1032,20 @@ export default function AdminDashboardPage() {
     [events.length, logs.length, profiles.length, roleCounts.admin],
   );
 
-  async function updateRole(profile: Profile, role: Role) {
+  async function updateRole(profile: CampusUserRow, role: Role) {
     try {
-      setSavingRoleUid(profile.id);
-      await updateDoc(doc(db, "profiles", profile.id), { role });
+      setSavingRoleUid(profile.uid);
+      await updateDoc(doc(db, "profiles", profile.uid), { role });
       campusToast.success({
         title: "Role updated",
-        description: `${profile.schoolId || profile.id} is now ${formatRole(role)}.`,
-        dedupeKey: `admin:role-updated:${profile.id}:${role}`,
+        description: `${profile.schoolId || profile.uid} is now ${formatRole(role)}.`,
+        dedupeKey: `admin:role-updated:${profile.uid}:${role}`,
       });
     } catch {
       campusToast.error({
         title: "Role update failed",
         description: "Failed to update role.",
-        dedupeKey: `admin:role-update-error:${profile.id}`,
+        dedupeKey: `admin:role-update-error:${profile.uid}`,
       });
     } finally {
       setSavingRoleUid(null);
@@ -1099,7 +1151,7 @@ export default function AdminDashboardPage() {
           yearLevel?: string | null;
         },
         { uid?: string }
-      >(functions, "adminCreateUser");
+      >(getCampusFunctions(), "adminCreateUser");
       const result = await fn({
         schoolId,
         role: newRole,
@@ -1130,7 +1182,7 @@ export default function AdminDashboardPage() {
     setDeletingUid(uid);
     try {
       await httpsCallable<{ uid: string }, unknown>(
-        functions,
+        getCampusFunctions(),
         "adminDeleteUser",
       )({ uid });
       campusToast.success({
@@ -1149,11 +1201,11 @@ export default function AdminDashboardPage() {
     }
   }
 
-  function requestRoleChange(profile: Profile, nextRole: Role) {
+  function requestRoleChange(profile: CampusUserRow, nextRole: Role) {
     if (nextRole === profile.role) return;
 
     const isSensitiveChange =
-      nextRole === "admin" || profile.role === "admin" || profile.id === adminUid;
+      nextRole === "admin" || profile.role === "admin" || profile.uid === adminUid;
 
     if (isSensitiveChange) {
       setPendingRoleChange({ profile, nextRole });
@@ -1170,8 +1222,8 @@ export default function AdminDashboardPage() {
     setPendingRoleChange(null);
   }
 
-  function requestRemoveAccount(profile: Profile) {
-    if (profile.id === adminUid) {
+  function requestRemoveAccount(profile: CampusUserRow) {
+    if (profile.uid === adminUid) {
       campusToast.warning({
         title: "Account protected",
         description: "You cannot remove your own admin account.",
@@ -1185,16 +1237,124 @@ export default function AdminDashboardPage() {
   async function confirmRemoveAccount() {
     if (!pendingDeleteProfile) return;
     const target = pendingDeleteProfile;
-    await removeAccount(target.id);
+    await removeAccount(target.uid);
     setPendingDeleteProfile(null);
+  }
+
+  function openEditProfileModal(profile: CampusUserRow) {
+    setEditingProfile(profile);
+    setEditProfileName(profile.fullName);
+    setEditProfileSchoolId(profile.schoolId);
+    setEditProfileCourse(
+      profile.course === "-" ? "" : String(profile.course ?? "").trim(),
+    );
+    setEditProfileYearLevel(
+      profile.yearLevel === "-" ? "" : String(profile.yearLevel ?? "").trim(),
+    );
+  }
+
+  async function saveProfileChanges() {
+    if (!editingProfile) return;
+
+    const name = editProfileName.trim();
+    const schoolId = editProfileSchoolId.trim();
+    const course = editProfileCourse.trim();
+    const yearLevel = editProfileYearLevel.trim();
+    const allowsBlankAcademicFields =
+      editingProfile.role === "teacher" || editingProfile.role === "admin";
+
+    if (!name) {
+      campusToast.warning({
+        title: "Missing name",
+        description: "Name is required before you can save this profile.",
+        dedupeKey: "admin:edit-profile:missing-name",
+      });
+      return;
+    }
+
+    if (!schoolId) {
+      campusToast.warning({
+        title: "Missing school ID",
+        description: "School ID is required before you can save this profile.",
+        dedupeKey: "admin:edit-profile:missing-school-id",
+      });
+      return;
+    }
+
+    if (!allowsBlankAcademicFields && !course) {
+      campusToast.warning({
+        title: "Missing course",
+        description: `${formatRole(editingProfile.role)} accounts require a course.`,
+        dedupeKey: `admin:edit-profile:missing-course:${editingProfile.uid}`,
+      });
+      return;
+    }
+
+    if (!allowsBlankAcademicFields && !yearLevel) {
+      campusToast.warning({
+        title: "Missing year level",
+        description: `${formatRole(editingProfile.role)} accounts require a year level.`,
+        dedupeKey: `admin:edit-profile:missing-year:${editingProfile.uid}`,
+      });
+      return;
+    }
+
+    setSavingProfileUid(editingProfile.uid);
+
+    try {
+      const timestamp = serverTimestamp();
+      const { profilePatch, studentPatch } = buildCampusProfileUpdatePayload({
+        role: editingProfile.role,
+        name,
+        schoolId,
+        course,
+        yearLevel,
+      });
+
+      await setDoc(
+        doc(db, "profiles", editingProfile.uid),
+        {
+          ...profilePatch,
+          updatedAt: timestamp,
+        },
+        { merge: true },
+      );
+
+      if (studentPatch) {
+        await setDoc(
+          doc(db, "students", editingProfile.uid),
+          {
+            uid: editingProfile.uid,
+            ...studentPatch,
+            updatedAt: timestamp,
+          },
+          { merge: true },
+        );
+      }
+
+      campusToast.success({
+        title: "Profile updated",
+        description: `${name} was updated successfully.`,
+        dedupeKey: `admin:edit-profile:${editingProfile.uid}`,
+      });
+      setEditingProfile(null);
+    } catch (error: unknown) {
+      campusToast.error({
+        title: "Profile update failed",
+        description: toErrorMessage(error, "Failed to save profile changes."),
+        dedupeKey: `admin:edit-profile-error:${editingProfile.uid}`,
+      });
+    } finally {
+      setSavingProfileUid(null);
+    }
   }
 
   const roleChangeModalCopy = useMemo(() => {
     if (!pendingRoleChange) return null;
 
     const { profile, nextRole } = pendingRoleChange;
-    const profileLabel = profile.schoolId || profile.id;
-    const isSelfChange = profile.id === adminUid;
+    const profileLabel = profile.schoolId || profile.uid;
+    const isSelfChange = profile.uid === adminUid;
 
     if (isSelfChange) {
       return {
@@ -1964,6 +2124,35 @@ export default function AdminDashboardPage() {
                         default password remains the school ID and the user
                         will be prompted to change it on first sign in.
                       </p>
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        <Button
+                          variant="flat"
+                          startContent={<Upload size={16} />}
+                          onPress={() => setIsBulkImportOpen(true)}
+                        >
+                          Upload CSV
+                        </Button>
+                        <Button
+                          variant="bordered"
+                          startContent={<Download size={16} />}
+                          onPress={() => {
+                            const csv = getBulkStudentImportTemplateCsv();
+                            const blob = new Blob([csv], {
+                              type: "text/csv;charset=utf-8;",
+                            });
+                            const url = URL.createObjectURL(blob);
+                            const anchor = document.createElement("a");
+                            anchor.href = url;
+                            anchor.download = "campus-student-import-template.csv";
+                            document.body.appendChild(anchor);
+                            anchor.click();
+                            document.body.removeChild(anchor);
+                            URL.revokeObjectURL(url);
+                          }}
+                        >
+                          Download CSV Template
+                        </Button>
+                      </div>
                     </div>
                   </CardHeader>
                   <CardBody className="space-y-4 p-5 pt-3">
@@ -2042,7 +2231,7 @@ export default function AdminDashboardPage() {
                   columns={userColumns}
                   items={sortedProfiles}
                   isLoading={profilesLoading}
-                  loadingContent={<CampusTableBodySkeleton rows={6} columns={6} />}
+                  loadingContent={<CampusTableBodySkeleton rows={6} columns={9} />}
                   emptyContent={
                     <CampusEmptyState
                       title="No users match the current filters"
@@ -2063,7 +2252,7 @@ export default function AdminDashboardPage() {
                   }
                   wrapperClassName="border-[#e5e7eb]"
                   renderCell={(profile, columnKey) => {
-                    const isSelf = profile.id === adminUid;
+                    const isSelf = profile.uid === adminUid;
 
                     if (columnKey === "schoolId")
                       return (
@@ -2072,27 +2261,64 @@ export default function AdminDashboardPage() {
                             {profile.schoolId || "No school ID"}
                           </p>
                           <p className="text-xs text-campus-text-secondary">
-                            UID: {profile.id}
+                            UID: {profile.uid}
                           </p>
                         </div>
                       );
 
-                    if (columnKey === "name") {
-                      const profileName = resolveProfileName(profile);
-                      const displayName = resolveCampusDisplayName(profile);
-
+                    if (columnKey === "name")
                       return (
-                        <p
-                          className={
-                            profileName
-                              ? "text-sm font-medium text-campus-text-primary"
-                              : "text-sm text-campus-text-secondary"
-                          }
-                        >
-                          {displayName}
-                        </p>
+                        <div className="space-y-2">
+                          <p className="text-sm font-medium text-campus-text-primary">
+                            {profile.fullName}
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            <Chip
+                              color={
+                                profile.accountStatus === "Active"
+                                  ? "success"
+                                  : "default"
+                              }
+                              variant="flat"
+                              size="sm"
+                            >
+                              Account: {profile.accountStatus}
+                            </Chip>
+                            <Chip
+                              color={
+                                profile.fingerprintStatus === "Active"
+                                  ? "primary"
+                                  : "default"
+                              }
+                              variant="flat"
+                              size="sm"
+                            >
+                              Fingerprint: {profile.fingerprintStatus}
+                            </Chip>
+                            <Chip
+                              color={
+                                profile.clearanceReady ? "success" : "default"
+                              }
+                              variant="flat"
+                              size="sm"
+                            >
+                              Clearance:{" "}
+                              {profile.clearanceReady ? "Ready" : "Pending"}
+                            </Chip>
+                          </div>
+                        </div>
                       );
-                    }
+
+                    if (columnKey === "studentId")
+                      return (
+                        <Chip
+                          variant="flat"
+                          color={profile.studentId === "-" ? "default" : "primary"}
+                          className="font-medium"
+                        >
+                          {profile.studentId}
+                        </Chip>
+                      );
 
                     if (columnKey === "email")
                       return hasEmail(profile) ? (
@@ -2110,12 +2336,34 @@ export default function AdminDashboardPage() {
                         </Chip>
                       );
 
+                    if (columnKey === "course")
+                      return (
+                        <Chip
+                          variant="flat"
+                          color={profile.course === "-" ? "default" : "secondary"}
+                          className="font-medium"
+                        >
+                          {profile.course}
+                        </Chip>
+                      );
+
+                    if (columnKey === "yearLevel")
+                      return (
+                        <Chip
+                          variant="flat"
+                          color={profile.yearLevel === "-" ? "default" : "warning"}
+                          className="font-medium"
+                        >
+                          {profile.yearLevel}
+                        </Chip>
+                      );
+
                     if (columnKey === "role") return <UserRoleChip role={profile.role} />;
 
                     if (columnKey === "roleAssignment") {
                       const roleSelect = (
                         <Select
-                          aria-label={`Assign role for ${profile.schoolId || profile.id}`}
+                          aria-label={`Assign role for ${profile.schoolId || profile.uid}`}
                           selectedKeys={[profile.role]}
                           onSelectionChange={(keys) => {
                             const selected = Array.from(keys as Set<React.Key>)[0];
@@ -2124,7 +2372,7 @@ export default function AdminDashboardPage() {
                             }
                           }}
                           disallowEmptySelection
-                          isDisabled={savingRoleUid === profile.id}
+                          isDisabled={savingRoleUid === profile.uid}
                           size="sm"
                         >
                           {roleOptions.map((role) => (
@@ -2168,12 +2416,18 @@ export default function AdminDashboardPage() {
                                   isIconOnly
                                   size="sm"
                                   variant="light"
-                                  aria-label={`Actions for ${profile.schoolId || profile.id}`}
+                                  aria-label={`Actions for ${profile.schoolId || profile.uid}`}
                                 >
                                   <MoreHorizontal size={16} />
                                 </Button>
                               </DropdownTrigger>
                               <DropdownMenu aria-label="User actions">
+                                <DropdownItem
+                                  key="edit"
+                                  onPress={() => openEditProfileModal(profile)}
+                                >
+                                  Edit profile
+                                </DropdownItem>
                                 <DropdownItem
                                   key="remove"
                                   color="danger"
@@ -2192,6 +2446,11 @@ export default function AdminDashboardPage() {
                 />
               </div>
             )}
+            <BulkStudentImportModal
+              open={isBulkImportOpen}
+              onClose={() => setIsBulkImportOpen(false)}
+              existingSchoolIds={existingSchoolIds}
+            />
           </Tab>
           <Tab
             key="logs"
@@ -2447,7 +2706,7 @@ export default function AdminDashboardPage() {
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <Chip variant="bordered">
                           {pendingRoleChange.profile.schoolId ||
-                            pendingRoleChange.profile.id}
+                            pendingRoleChange.profile.uid}
                         </Chip>
                         <span className="text-sm text-campus-text-secondary">
                           to
@@ -2475,7 +2734,7 @@ export default function AdminDashboardPage() {
                     }}
                     isLoading={Boolean(
                       pendingRoleChange &&
-                        savingRoleUid === pendingRoleChange.profile.id,
+                        savingRoleUid === pendingRoleChange.profile.uid,
                     )}
                   >
                     {roleChangeModalCopy?.confirmLabel || "Confirm"}
@@ -2511,7 +2770,7 @@ export default function AdminDashboardPage() {
                         Account to remove
                       </p>
                       <p className="mt-2 font-semibold text-danger-900">
-                        {pendingDeleteProfile.schoolId || pendingDeleteProfile.id}
+                        {pendingDeleteProfile.schoolId || pendingDeleteProfile.uid}
                       </p>
                       <p className="mt-1 break-all text-sm text-danger-800">
                         {pendingDeleteProfile.email || "No email on file"}
@@ -2537,10 +2796,110 @@ export default function AdminDashboardPage() {
                     }}
                     isLoading={Boolean(
                       pendingDeleteProfile &&
-                        deletingUid === pendingDeleteProfile.id,
+                        deletingUid === pendingDeleteProfile.uid,
                     )}
                   >
                     Delete account
+                  </Button>
+                </ModalFooter>
+              </>
+            )}
+          </ModalContent>
+        </Modal>
+
+        <Modal
+          isOpen={Boolean(editingProfile)}
+          onOpenChange={(open) => {
+            if (!open && !savingProfileUid) setEditingProfile(null);
+          }}
+          size="lg"
+        >
+          <ModalContent>
+            {(onClose) => (
+              <>
+                <ModalHeader>Edit profile</ModalHeader>
+                <ModalBody className="space-y-4">
+                  <Input
+                    label="Name"
+                    value={editProfileName}
+                    onValueChange={setEditProfileName}
+                    placeholder="Enter full name"
+                    isRequired
+                  />
+                  <Input
+                    label="School ID"
+                    value={editProfileSchoolId}
+                    onValueChange={setEditProfileSchoolId}
+                    placeholder="Enter school ID"
+                    isRequired
+                  />
+                  <Select
+                    label="Course"
+                    selectedKeys={editProfileCourse ? [editProfileCourse] : []}
+                    onSelectionChange={(keys) => {
+                      const selected = Array.from(keys as Set<React.Key>)[0];
+                      if (typeof selected === "string") {
+                        setEditProfileCourse(selected);
+                      }
+                    }}
+                    placeholder="Select course"
+                    isRequired={
+                      editingProfile?.role !== "teacher" &&
+                      editingProfile?.role !== "admin"
+                    }
+                  >
+                    {courseOptions.map((course) => (
+                      <SelectItem key={course}>{course}</SelectItem>
+                    ))}
+                  </Select>
+                  <Select
+                    label="Year Level"
+                    selectedKeys={
+                      editProfileYearLevel ? [editProfileYearLevel] : []
+                    }
+                    onSelectionChange={(keys) => {
+                      const selected = Array.from(keys as Set<React.Key>)[0];
+                      if (typeof selected === "string") {
+                        setEditProfileYearLevel(selected);
+                      }
+                    }}
+                    placeholder="Select year level"
+                    isRequired={
+                      editingProfile?.role !== "teacher" &&
+                      editingProfile?.role !== "admin"
+                    }
+                  >
+                    {yearOptions.map((year) => (
+                      <SelectItem key={year}>{year}</SelectItem>
+                    ))}
+                  </Select>
+                </ModalBody>
+                <ModalFooter className="justify-between">
+                  <Button
+                    variant="bordered"
+                    onPress={() => {
+                      setEditingProfile(null);
+                      onClose();
+                    }}
+                    isDisabled={Boolean(savingProfileUid)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    className="bg-[#7b0000] font-semibold text-white"
+                    onPress={() => {
+                      void saveProfileChanges();
+                    }}
+                    isLoading={Boolean(
+                      editingProfile &&
+                        savingProfileUid === editingProfile.uid,
+                    )}
+                    isDisabled={Boolean(
+                      editingProfile &&
+                        savingProfileUid === editingProfile.uid,
+                    )}
+                  >
+                    Save Changes
                   </Button>
                 </ModalFooter>
               </>

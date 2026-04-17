@@ -41,7 +41,7 @@ function trimValue(value: unknown) {
   return String(value ?? "").trim();
 }
 
-function getCampusFunctions() {
+export function getCampusFunctions() {
   return getFunctions(app, CAMPUS_FUNCTIONS_REGION);
 }
 
@@ -179,6 +179,29 @@ export async function savePendingEmailVerificationForCurrentUser(
   return result.data?.profile ?? null;
 }
 
+export type BulkStudentImportRowPayload = {
+  schoolId: string;
+  name: string;
+  course: string;
+  yearLevel: string;
+  status: string;
+};
+
+export type BulkStudentImportResultRow = BulkStudentImportRowPayload & {
+  success: boolean;
+  skipped?: boolean;
+  error?: string;
+  uid?: string;
+};
+
+export type BulkStudentImportResult = {
+  totalRows: number;
+  importedCount: number;
+  failedCount: number;
+  skippedCount: number;
+  rowResults: BulkStudentImportResultRow[];
+};
+
 export async function finalizeVerifiedCampusProfileForCurrentUser(): Promise<{
   finalized: boolean;
   profile: CampusProfileDoc | null;
@@ -195,6 +218,27 @@ export async function finalizeVerifiedCampusProfileForCurrentUser(): Promise<{
     finalized: result.data?.finalized === true,
     profile: result.data?.profile ?? null,
   };
+}
+
+export async function adminBulkImportStudents(
+  functions: ReturnType<typeof getCampusFunctions>,
+  payload: {
+    filename: string;
+    rows: BulkStudentImportRowPayload[];
+  },
+): Promise<BulkStudentImportResult> {
+  logAuthEvent("info", "Starting bulk student import request", {
+    fileName: payload.filename,
+    rowCount: payload.rows.length,
+  });
+
+  const callable = httpsCallable<
+    { filename: string; rows: BulkStudentImportRowPayload[] },
+    BulkStudentImportResult
+  >(functions, "adminBulkImportStudents");
+
+  const result = await callable(payload);
+  return result.data;
 }
 
 export function logCampusAuthEvent(
