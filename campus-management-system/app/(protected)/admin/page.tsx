@@ -87,6 +87,9 @@ import {
 import { CAMPUS_COURSE_OPTIONS } from "@/lib/courseOptions";
 import {
   adminDeactivateAllStudents,
+  adminDeleteDuplicateStudentSchoolIds,
+  adminFindDuplicateStudentSchoolIds,
+  type AdminDuplicateStudentSchoolIdReport,
   getCampusFunctions,
 } from "@/lib/firebase-functions";
 import { formatStudentFullName } from "@/lib/student-name";
@@ -103,6 +106,7 @@ const courseOptions = CAMPUS_COURSE_OPTIONS;
 type Role = (typeof roleOptions)[number];
 type AdminTab = "overview" | "users" | "logs" | "exports";
 type EmailFilter = "all" | "with_email" | "without_email";
+type DuplicateFilter = "all" | "duplicates_only" | "non_duplicates_only";
 type UserSortMode =
   | "school_id_asc"
   | "school_id_desc"
@@ -351,6 +355,44 @@ function csvCell(value: string | number) {
   return raw;
 }
 
+function buildDuplicateSchoolIdAuditCsv(
+  report: AdminDuplicateStudentSchoolIdReport,
+) {
+  const lines = [
+    [
+      "SchoolId",
+      "DuplicateCount",
+      "PrimaryRecord",
+      "UID",
+      "Name",
+      "Email",
+      "Status",
+      "Role",
+      "Source",
+    ].join(","),
+  ];
+
+  report.duplicates.forEach((group) => {
+    group.entries.forEach((entry) => {
+      lines.push(
+        [
+          csvCell(group.schoolId),
+          csvCell(group.count),
+          csvCell(entry.isPrimary ? "Yes" : "No"),
+          csvCell(entry.uid),
+          csvCell(entry.name),
+          csvCell(entry.email),
+          csvCell(entry.status),
+          csvCell(entry.role),
+          csvCell(entry.source),
+        ].join(","),
+      );
+    });
+  });
+
+  return lines.join("\r\n");
+}
+
 function formatRole(role: Role) {
   return role === "ec"
     ? "EC Member"
@@ -551,6 +593,8 @@ export default function AdminDashboardPage() {
   const [userSearch, setUserSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<"all" | Role>("all");
   const [emailFilter, setEmailFilter] = useState<EmailFilter>("all");
+  const [duplicateFilter, setDuplicateFilter] =
+    useState<DuplicateFilter>("all");
   const [userSortMode, setUserSortMode] =
     useState<UserSortMode>("school_id_asc");
   const [userPage, setUserPage] = useState(1);
@@ -576,6 +620,15 @@ export default function AdminDashboardPage() {
   const [showDeactivateStudentsModal, setShowDeactivateStudentsModal] =
     useState(false);
   const [deactivatingStudents, setDeactivatingStudents] = useState(false);
+  const [duplicateAuditReport, setDuplicateAuditReport] =
+    useState<AdminDuplicateStudentSchoolIdReport | null>(null);
+  const [duplicateAuditLoading, setDuplicateAuditLoading] = useState(false);
+  const [checkingDuplicateSchoolIds, setCheckingDuplicateSchoolIds] =
+    useState(false);
+  const [showDeleteDuplicateSchoolIdsModal, setShowDeleteDuplicateSchoolIdsModal] =
+    useState(false);
+  const [deletingDuplicateSchoolIds, setDeletingDuplicateSchoolIds] =
+    useState(false);
   const [editingProfile, setEditingProfile] = useState<CampusUserRow | null>(
     null,
   );
@@ -627,7 +680,9 @@ export default function AdminDashboardPage() {
     if (!adminUid) return;
     setProfilesLoading(true);
     return onSnapshot(
-      query(collection(db, "profiles"), orderBy("role", "asc"), limit(500)),
+      // Load the full admin directory so the count, search, filters, and
+      // pagination operate on the real account set instead of a capped slice.
+      query(collection(db, "profiles"), orderBy("role", "asc")),
       (snap) => {
         setProfileDocs(
           snap.docs.map((profileDoc) => ({
@@ -652,7 +707,7 @@ export default function AdminDashboardPage() {
   useEffect(() => {
     if (!adminUid) return;
     return onSnapshot(
-      query(collection(db, "students"), limit(500)),
+      collection(db, "students"),
       (snap) => {
         const next: Record<string, CampusUserProjectionSource> = {};
         snap.docs.forEach((studentDoc) => {
@@ -733,6 +788,15 @@ export default function AdminDashboardPage() {
     );
   }, [adminUid]);
 
+  useEffect(() => {
+    if (!adminUid) {
+      setDuplicateAuditReport(null);
+      return;
+    }
+
+    void refreshDuplicateSchoolIdReport().catch(() => undefined);
+  }, [adminUid]);
+
   const profiles = useMemo(
     () =>
       profileDocs.map((profile) =>
@@ -746,9 +810,35 @@ export default function AdminDashboardPage() {
     [profileDocs, studentProjections],
   );
 
+  const duplicateRowsByUid = useMemo(() => {
+    const lookup = new Map<
+      string,
+      {
+        schoolId: string;
+        count: number;
+        cleanupCandidateCount: number;
+        isPrimary: boolean;
+      }
+    >();
+
+    duplicateAuditReport?.duplicates.forEach((group) => {
+      group.entries.forEach((entry) => {
+        lookup.set(entry.uid, {
+          schoolId: group.schoolId,
+          count: group.count,
+          cleanupCandidateCount: group.cleanupCandidateCount,
+          isPrimary: entry.isPrimary,
+        });
+      });
+    });
+
+    return lookup;
+  }, [duplicateAuditReport]);
+
   const filteredProfiles = useMemo(() => {
     const search = userSearch.trim().toLowerCase();
     return profiles.filter((profile) => {
+      const duplicateMeta = duplicateRowsByUid.get(profile.uid);
       const matchesSearch =
         !search ||
         [
@@ -775,10 +865,16 @@ export default function AdminDashboardPage() {
           : emailFilter === "with_email"
             ? hasEmail(profile)
             : !hasEmail(profile);
+      const matchesDuplicateFilter =
+        duplicateFilter === "all"
+          ? true
+          : duplicateFilter === "duplicates_only"
+            ? Boolean(duplicateMeta)
+            : !duplicateMeta;
 
-      return matchesSearch && matchesRole && matchesEmail;
+      return matchesSearch && matchesRole && matchesEmail && matchesDuplicateFilter;
     });
-  }, [profiles, userSearch, roleFilter, emailFilter]);
+  }, [profiles, userSearch, roleFilter, emailFilter, duplicateFilter, duplicateRowsByUid]);
 
   const sortedProfiles = useMemo(() => {
     const next = [...filteredProfiles];
@@ -860,6 +956,10 @@ export default function AdminDashboardPage() {
     () => profiles.filter((profile) => profile.role === "student").length,
     [profiles],
   );
+  const duplicateGroupCount = duplicateAuditReport?.duplicateGroupCount ?? 0;
+  const duplicateEntryCount = duplicateAuditReport?.duplicateEntryCount ?? 0;
+  const duplicateCleanupCandidateCount =
+    duplicateAuditReport?.cleanupCandidateCount ?? 0;
   const activeStudentAccounts = useMemo(
     () =>
       profiles.filter(
@@ -899,7 +999,10 @@ export default function AdminDashboardPage() {
   );
   const usersInitialLoading = profilesLoading && profiles.length === 0;
   const hasActiveUserFilters =
-    Boolean(userSearch.trim()) || roleFilter !== "all" || emailFilter !== "all";
+    Boolean(userSearch.trim()) ||
+    roleFilter !== "all" ||
+    emailFilter !== "all" ||
+    duplicateFilter !== "all";
   const canResetCreateForm =
     Boolean(newSchoolId.trim()) ||
     Boolean(newEcName.trim()) ||
@@ -912,7 +1015,7 @@ export default function AdminDashboardPage() {
 
   useEffect(() => {
     setUserPage(1);
-  }, [userSearch, roleFilter, emailFilter, userSortMode]);
+  }, [userSearch, roleFilter, emailFilter, duplicateFilter, userSortMode]);
 
   useEffect(() => {
     setUserPage((previous) => Math.min(Math.max(previous, 1), totalUserPages));
@@ -933,6 +1036,7 @@ export default function AdminDashboardPage() {
     setUserSearch("");
     setRoleFilter("all");
     setEmailFilter("all");
+    setDuplicateFilter("all");
     setUserSortMode("school_id_asc");
     setUserPage(1);
   };
@@ -1041,6 +1145,20 @@ export default function AdminDashboardPage() {
       });
     }
 
+    if (!duplicateAuditLoading && duplicateGroupCount > 0) {
+      items.push({
+        id: "duplicate-school-ids",
+        color: "danger",
+        title: "Duplicate School IDs detected",
+        description: `${duplicateGroupCount} duplicate School ID group${duplicateGroupCount === 1 ? "" : "s"} are still present across ${duplicateEntryCount} student record${duplicateEntryCount === 1 ? "" : "s"}.`,
+        actionLabel: "Review duplicates",
+        onPress: () => {
+          setTab("users");
+          setDuplicateFilter("duplicates_only");
+        },
+      });
+    }
+
     if (!logsLoading && logs.length === 0) {
       items.push({
         id: "no-logs",
@@ -1089,6 +1207,9 @@ export default function AdminDashboardPage() {
     profiles.length,
     profilesLoading,
     roleCounts.admin,
+    duplicateAuditLoading,
+    duplicateEntryCount,
+    duplicateGroupCount,
     usersWithoutEmailCount,
   ]);
 
@@ -1267,6 +1388,7 @@ export default function AdminDashboardPage() {
         description: `UID: ${result?.data?.uid ?? "-"}`,
         dedupeKey: `admin:create-account:${result?.data?.uid ?? schoolId}`,
       });
+      await refreshDuplicateSchoolIdReport().catch(() => undefined);
       resetCreateForm();
       setTab("users");
     } catch (error: unknown) {
@@ -1292,6 +1414,7 @@ export default function AdminDashboardPage() {
         description: `${uid} was removed successfully.`,
         dedupeKey: `admin:remove-account:${uid}`,
       });
+      await refreshDuplicateSchoolIdReport().catch(() => undefined);
     } catch (error: unknown) {
       campusToast.error({
         title: "Remove account failed",
@@ -1389,6 +1512,131 @@ export default function AdminDashboardPage() {
       });
     } finally {
       setDeactivatingStudents(false);
+    }
+  }
+
+  async function refreshDuplicateSchoolIdReport() {
+    setDuplicateAuditLoading(true);
+
+    try {
+      const report = await adminFindDuplicateStudentSchoolIds(
+        getCampusFunctions(),
+        5000,
+      );
+      setDuplicateAuditReport(report);
+      return report;
+    } catch (error: unknown) {
+      setDuplicateAuditReport(null);
+      throw error;
+    } finally {
+      setDuplicateAuditLoading(false);
+    }
+  }
+
+  async function checkDuplicateStudentSchoolIds() {
+    setCheckingDuplicateSchoolIds(true);
+
+    try {
+      const report = await refreshDuplicateSchoolIdReport();
+
+      if (report.duplicateGroupCount === 0) {
+        campusToast.success({
+          title: "No duplicate School IDs found",
+          description: "All scanned student School IDs are unique.",
+          dedupeKey: "admin:duplicate-school-id-audit:clean",
+        });
+        return;
+      }
+
+      const csv = buildDuplicateSchoolIdAuditCsv(report);
+      downloadCsv("campus-duplicate-student-schoolids.csv", csv);
+      campusToast.warning({
+        title: "Duplicate student School IDs found",
+        description: `${report.duplicateGroupCount} duplicate School ID group${report.duplicateGroupCount === 1 ? "" : "s"} were found across ${report.duplicateEntryCount} record${report.duplicateEntryCount === 1 ? "" : "s"}. A cleanup CSV was downloaded.`,
+        dedupeKey: `admin:duplicate-school-id-audit:${report.duplicateGroupCount}:${report.duplicateEntryCount}`,
+      });
+    } catch (error: unknown) {
+      campusToast.error({
+        title: "Duplicate check failed",
+        description: toErrorMessage(
+          error,
+          "Failed to scan for duplicate student School IDs.",
+        ),
+        dedupeKey: "admin:duplicate-school-id-audit:error",
+      });
+    } finally {
+      setCheckingDuplicateSchoolIds(false);
+    }
+  }
+
+  async function openDeleteDuplicateSchoolIdsModal() {
+    try {
+      const report = await refreshDuplicateSchoolIdReport();
+      if (report.cleanupCandidateCount === 0) {
+        campusToast.info({
+          title: "No duplicate School IDs to delete",
+          description: "Student School IDs are already clean.",
+          dedupeKey: "admin:duplicate-school-id-cleanup:none",
+        });
+        return;
+      }
+
+      setShowDeleteDuplicateSchoolIdsModal(true);
+    } catch (error: unknown) {
+      campusToast.error({
+        title: "Duplicate check failed",
+        description: toErrorMessage(
+          error,
+          "Failed to prepare duplicate School ID cleanup.",
+        ),
+        dedupeKey: "admin:duplicate-school-id-cleanup:prepare-error",
+      });
+    }
+  }
+
+  async function confirmDeleteDuplicateSchoolIds() {
+    setDeletingDuplicateSchoolIds(true);
+
+    try {
+      const result = await adminDeleteDuplicateStudentSchoolIds(
+        getCampusFunctions(),
+      );
+
+      if (result.deletedCount > 0 && result.failedCount === 0) {
+        campusToast.success({
+          title: "Duplicate School IDs cleaned",
+          description: `${result.deletedCount} duplicate student account${result.deletedCount === 1 ? "" : "s"} were deleted while keeping ${result.keptCount} primary record${result.keptCount === 1 ? "" : "s"}.`,
+          dedupeKey: `admin:duplicate-school-id-cleanup:success:${result.deletedCount}:${result.keptCount}`,
+        });
+      } else if (result.deletedCount > 0) {
+        const detailPreview = result.failureDetails[0];
+        campusToast.warning({
+          title: "Duplicate cleanup completed with issues",
+          description: `${result.deletedCount} duplicate account${result.deletedCount === 1 ? "" : "s"} were deleted, but ${result.failedCount} record${result.failedCount === 1 ? "" : "s"} still need review.${detailPreview ? ` ${detailPreview}` : ""}`,
+          dedupeKey: `admin:duplicate-school-id-cleanup:partial:${result.deletedCount}:${result.failedCount}`,
+        });
+      } else {
+        const detailPreview = result.failureDetails[0];
+        campusToast.info({
+          title: "No duplicate accounts were deleted",
+          description: detailPreview || "No duplicate student accounts needed cleanup.",
+          dedupeKey: `admin:duplicate-school-id-cleanup:no-change:${result.failedCount}`,
+        });
+      }
+
+      setShowDeleteDuplicateSchoolIdsModal(false);
+      await refreshDuplicateSchoolIdReport().catch(() => undefined);
+    } catch (error: unknown) {
+      campusToast.error({
+        title: "Duplicate cleanup failed",
+        description: toErrorMessage(
+          error,
+          "Failed to delete duplicate student School IDs.",
+        ),
+        dedupeKey: "admin:duplicate-school-id-cleanup:error",
+      });
+    } finally {
+      setDeletingDuplicateSchoolIds(false);
     }
   }
 
@@ -2176,7 +2424,10 @@ export default function AdminDashboardPage() {
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <Chip color="primary" variant="flat" className="font-semibold">
-                          {sortedProfiles.length} of {profiles.length} users
+                          {profiles.length} total user{profiles.length === 1 ? "" : "s"}
+                        </Chip>
+                        <Chip variant="flat">
+                          {sortedProfiles.length} matching
                         </Chip>
                         <Chip variant="flat">
                           {usersWithEmailCount} with email
@@ -2184,10 +2435,17 @@ export default function AdminDashboardPage() {
                         <Chip variant="flat">
                           {usersWithoutEmailCount} without email
                         </Chip>
+                        <Chip
+                          color={duplicateGroupCount > 0 ? "warning" : "success"}
+                          variant="flat"
+                        >
+                          {duplicateGroupCount} duplicate School ID group
+                          {duplicateGroupCount === 1 ? "" : "s"}
+                        </Chip>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.4fr)_220px_220px_220px]">
+                    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.5fr)_220px_220px_220px_220px]">
                       <Input
                         label="Search profiles"
                         value={userSearch}
@@ -2230,6 +2488,23 @@ export default function AdminDashboardPage() {
                         <SelectItem key="without_email">No email</SelectItem>
                       </Select>
                       <Select
+                        label="Duplicate status"
+                        selectedKeys={[duplicateFilter]}
+                        onSelectionChange={(keys) => {
+                          const selected = Array.from(keys as Set<React.Key>)[0];
+                          if (typeof selected === "string") {
+                            setDuplicateFilter(selected as DuplicateFilter);
+                          }
+                        }}
+                        disallowEmptySelection
+                      >
+                        <SelectItem key="all">All accounts</SelectItem>
+                        <SelectItem key="duplicates_only">Duplicates only</SelectItem>
+                        <SelectItem key="non_duplicates_only">
+                          Non-duplicates only
+                        </SelectItem>
+                      </Select>
+                      <Select
                         label="Sort by"
                         selectedKeys={[userSortMode]}
                         onSelectionChange={(keys) => {
@@ -2252,10 +2527,40 @@ export default function AdminDashboardPage() {
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <p className="text-xs uppercase tracking-[0.18em] text-campus-text-secondary">
-                        Filters and sorting help admins review high-risk access changes quickly.
-                      </p>
+                      <div className="space-y-1">
+                        <p className="text-xs uppercase tracking-[0.18em] text-campus-text-secondary">
+                          Filters and sorting help admins review high-risk access changes quickly.
+                        </p>
+                        <p className="text-xs text-campus-text-secondary">
+                          Duplicate cleanup keeps one primary student record per normalized School ID and deletes only the extra student accounts.
+                        </p>
+                      </div>
                       <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          variant="bordered"
+                          onPress={checkDuplicateStudentSchoolIds}
+                          isLoading={checkingDuplicateSchoolIds}
+                          startContent={
+                            !checkingDuplicateSchoolIds ? (
+                              <ShieldAlert size={16} />
+                            ) : undefined
+                          }
+                        >
+                          Check duplicate School IDs
+                        </Button>
+                        <Button
+                          color="danger"
+                          variant="flat"
+                          onPress={openDeleteDuplicateSchoolIdsModal}
+                          isLoading={deletingDuplicateSchoolIds}
+                          startContent={
+                            !deletingDuplicateSchoolIds ? (
+                              <ShieldAlert size={16} />
+                            ) : undefined
+                          }
+                        >
+                          Delete duplicate School IDs
+                        </Button>
                         <Button
                           color="warning"
                           variant="flat"
@@ -2398,7 +2703,10 @@ export default function AdminDashboardPage() {
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <Chip variant="flat" className="font-semibold">
-                        Showing {currentPageStart}-{currentPageEnd} of {sortedProfiles.length}
+                        Showing {currentPageStart}-{currentPageEnd} of {sortedProfiles.length} matching
+                      </Chip>
+                      <Chip variant="flat">
+                        {profiles.length} total accounts
                       </Chip>
                       <Chip variant="flat">
                         Page {safeUserPage} of {totalUserPages}
@@ -2418,7 +2726,7 @@ export default function AdminDashboardPage() {
                       emptyContent={
                         <CampusEmptyState
                           title="No users match the current filters"
-                          description="Try another search term, adjust the role or email filters, or clear the filters to see the full CAMPUS directory."
+                          description="Try another search term, adjust the role, email, or duplicate filters, or clear the filters to see the full CAMPUS directory."
                           compact
                           action={
                             <Button
@@ -2437,6 +2745,7 @@ export default function AdminDashboardPage() {
                       tableClassName="min-w-[1520px]"
                       renderCell={(profile, columnKey) => {
                         const isSelf = profile.uid === adminUid;
+                        const duplicateMeta = duplicateRowsByUid.get(profile.uid);
 
                         if (columnKey === "schoolId")
                           return (
@@ -2444,6 +2753,11 @@ export default function AdminDashboardPage() {
                               <p className="font-semibold text-campus-text-primary">
                                 {profile.schoolId || "No school ID"}
                               </p>
+                              {duplicateMeta ? (
+                                <p className="text-xs font-medium text-danger">
+                                  Duplicate group of {duplicateMeta.count}
+                                </p>
+                              ) : null}
                               <p className="break-all font-mono text-xs text-campus-text-secondary">
                                 UID: {profile.uid}
                               </p>
@@ -2503,6 +2817,18 @@ export default function AdminDashboardPage() {
                                   Clearance:{" "}
                                   {profile.clearanceReady ? "Ready" : "Pending"}
                                 </Chip>
+                                {duplicateMeta ? (
+                                  <Chip
+                                    color={duplicateMeta.isPrimary ? "warning" : "danger"}
+                                    variant="flat"
+                                    size="sm"
+                                    className="whitespace-nowrap"
+                                  >
+                                    {duplicateMeta.isPrimary
+                                      ? `Duplicate School ID: Primary (${duplicateMeta.count})`
+                                      : `Duplicate School ID: Extra record (${duplicateMeta.count})`}
+                                  </Chip>
+                                ) : null}
                               </div>
                             </div>
                           );
@@ -2654,7 +2980,7 @@ export default function AdminDashboardPage() {
                           Showing {currentPageStart}-{currentPageEnd} of {sortedProfiles.length} matching user{sortedProfiles.length === 1 ? "" : "s"}
                         </p>
                         <p className="text-xs text-campus-text-secondary">
-                          Horizontal scrolling is enabled when the full directory needs more room.
+                          {profiles.length} total account{profiles.length === 1 ? "" : "s"} are loaded. Horizontal scrolling is enabled when the full directory needs more room.
                         </p>
                       </div>
 
@@ -2994,6 +3320,87 @@ export default function AdminDashboardPage() {
                     isDisabled={activeStudentAccounts === 0}
                   >
                     Make students inactive
+                  </Button>
+                </ModalFooter>
+              </>
+            )}
+          </ModalContent>
+        </Modal>
+
+        <Modal
+          isOpen={showDeleteDuplicateSchoolIdsModal}
+          onOpenChange={(open) => {
+            if (!open && !deletingDuplicateSchoolIds) {
+              setShowDeleteDuplicateSchoolIdsModal(false);
+            }
+          }}
+          size="lg"
+        >
+          <ModalContent>
+            {(onClose) => (
+              <>
+                <ModalHeader>Delete duplicate School IDs</ModalHeader>
+                <ModalBody className="space-y-3">
+                  <p className="text-base font-semibold text-campus-text-primary">
+                    This cleanup targets duplicate student accounts only and keeps exactly one primary record per normalized School ID.
+                  </p>
+                  <p className="text-sm text-campus-text-secondary">
+                    Extra duplicate student profiles, matching student projections, and matching Auth users are deleted. Admin, teacher, and EC member accounts are not part of this cleanup.
+                  </p>
+                  <div className="rounded-2xl border bg-rose-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-rose-700">
+                      Cleanup summary
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Chip color="danger" variant="flat">
+                        {duplicateCleanupCandidateCount} duplicate account
+                        {duplicateCleanupCandidateCount === 1 ? "" : "s"} to delete
+                      </Chip>
+                      <Chip color="warning" variant="flat">
+                        {duplicateGroupCount} duplicate School ID group
+                        {duplicateGroupCount === 1 ? "" : "s"}
+                      </Chip>
+                      <Chip variant="bordered">
+                        {duplicateGroupCount} primary record
+                        {duplicateGroupCount === 1 ? "" : "s"} kept
+                      </Chip>
+                    </div>
+                  </div>
+                  {duplicateAuditReport?.duplicates?.length ? (
+                    <div className="rounded-2xl border bg-[#faf7f3] px-4 py-3">
+                      <p className="text-xs uppercase tracking-wide text-campus-text-secondary">
+                        Sample affected School IDs
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {duplicateAuditReport.duplicates.slice(0, 6).map((group) => (
+                          <Chip key={group.schoolIdKey} variant="flat" color="warning">
+                            {group.schoolId} ({group.cleanupCandidateCount})
+                          </Chip>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </ModalBody>
+                <ModalFooter className="justify-between">
+                  <Button
+                    variant="bordered"
+                    onPress={() => {
+                      setShowDeleteDuplicateSchoolIdsModal(false);
+                      onClose();
+                    }}
+                    isDisabled={deletingDuplicateSchoolIds}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    color="danger"
+                    onPress={() => {
+                      void confirmDeleteDuplicateSchoolIds();
+                    }}
+                    isLoading={deletingDuplicateSchoolIds}
+                    isDisabled={duplicateCleanupCandidateCount === 0}
+                  >
+                    Delete duplicate accounts
                   </Button>
                 </ModalFooter>
               </>

@@ -22,24 +22,86 @@ import { Skeleton } from "@heroui/skeleton";
 import { Download, Upload, X } from "lucide-react";
 import { campusToast } from "@/lib/toast";
 import {
+  buildBulkStudentImportPreviewDataset,
   buildBulkStudentImportErrorCsv,
-  buildBulkStudentImportPreviewRows,
   downloadCsv,
   getBulkStudentImportTemplateCsv,
   readBulkStudentImportFile,
+  type BulkStudentImportInputSchema,
   type BulkStudentImportPreviewRow,
 } from "@/lib/bulkStudentImport";
 import {
   adminBulkImportStudents,
   type BulkStudentImportResult,
+  type BulkStudentImportResultRow,
   getCampusFunctions,
 } from "@/lib/firebase-functions";
+import { formatStudentFullName } from "@/lib/student-name";
 
 type BulkStudentImportModalProps = {
   open: boolean;
   onClose: () => void;
   existingSchoolIds: Set<string>;
 };
+
+function toBulkImportPayloadRows(rows: BulkStudentImportPreviewRow[]) {
+  return rows.map((row) => ({
+    nameSchema: row.nameSchema,
+    rowIndex: row.rowIndex,
+    schoolId: row.schoolId,
+    lastName: row.lastName,
+    firstName: row.firstName,
+    fullName: row.fullName || undefined,
+    course: row.course,
+    yearLevel: row.yearLevel,
+    status: row.status,
+  }));
+}
+
+function mergeServerPreviewRows(
+  localRows: BulkStudentImportPreviewRow[],
+  rowResults: BulkStudentImportResultRow[],
+): BulkStudentImportPreviewRow[] {
+  return localRows.map((row, index) => {
+    const serverRow = rowResults[index];
+    if (!serverRow) {
+      return row;
+    }
+
+    const errors =
+      Array.isArray(serverRow.errors) && serverRow.errors.length > 0
+        ? serverRow.errors
+        : typeof serverRow.error === "string" && serverRow.error.trim()
+          ? [serverRow.error]
+          : [];
+    const isValid = errors.length === 0;
+    const firstName = serverRow.firstName ?? row.firstName;
+    const lastName = serverRow.lastName ?? row.lastName;
+    const fullName = serverRow.fullName ?? row.fullName;
+    const schoolId = serverRow.schoolId ?? row.schoolId;
+
+    return {
+      ...row,
+      nameSchema: serverRow.nameSchema ?? row.nameSchema,
+      schoolId,
+      firstName,
+      lastName,
+      fullName,
+      course: serverRow.course ?? row.course,
+      yearLevel: serverRow.yearLevel ?? row.yearLevel,
+      status: serverRow.status ?? row.status,
+      displayName: formatStudentFullName({
+        firstName,
+        lastName,
+        fullName,
+        schoolId,
+      }),
+      errors,
+      isValid,
+      statusLabel: isValid ? "Valid" : "Invalid",
+    };
+  });
+}
 
 export default function BulkStudentImportModal({
   open,
@@ -54,6 +116,8 @@ export default function BulkStudentImportModal({
   const [importResult, setImportResult] = useState<BulkStudentImportResult | null>(
     null,
   );
+  const [inputSchema, setInputSchema] =
+    useState<BulkStudentImportInputSchema>("split");
   const [parseError, setParseError] = useState<string>("");
 
   const totalRows = previewRows.length;
@@ -63,18 +127,7 @@ export default function BulkStudentImportModal({
     row.errors.some((error) => error.toLowerCase().includes("duplicate")),
   ).length;
 
-  const parsedRows = useMemo(
-    () => validRows.map((row) => ({
-      schoolId: row.schoolId,
-      lastName: row.lastName,
-      firstName: row.firstName,
-      fullName: row.fullName || undefined,
-      course: row.course,
-      yearLevel: row.yearLevel,
-      status: row.status,
-    })),
-    [validRows],
-  );
+  const parsedRows = useMemo(() => toBulkImportPayloadRows(validRows), [validRows]);
 
   function handleOpenFilePicker() {
     fileInputRef.current?.click();
@@ -90,10 +143,19 @@ export default function BulkStudentImportModal({
 
     try {
       const text = await readBulkStudentImportFile(file);
-      const rows = buildBulkStudentImportPreviewRows(text, existingSchoolIds);
-      setPreviewRows(rows);
-      if (rows.length === 1 && rows[0].errors.length > 0 && rows[0].rowIndex === 1) {
-        setParseError(rows[0].errors.join(" "));
+      const preview = buildBulkStudentImportPreviewDataset(
+        text,
+        existingSchoolIds,
+      );
+      const localRows = preview.rows;
+      setInputSchema(preview.inputSchema);
+      setPreviewRows(localRows);
+      if (
+        localRows.length === 1 &&
+        localRows[0].errors.length > 0 &&
+        localRows[0].rowIndex === 1
+      ) {
+        setParseError(localRows[0].errors.join(" "));
         campusToast.error({
           title: "Upload failed",
           description: "Please check the file format and try again.",
@@ -101,6 +163,15 @@ export default function BulkStudentImportModal({
         });
         return;
       }
+
+      const serverPreview = await adminBulkImportStudents(getCampusFunctions(), {
+        filename: file.name,
+        inputSchema: preview.inputSchema,
+        rows: toBulkImportPayloadRows(localRows),
+        previewOnly: true,
+      });
+      const rows = mergeServerPreviewRows(localRows, serverPreview.rowResults);
+      setPreviewRows(rows);
 
       const nextValidRows = rows.filter((row) => row.isValid).length;
       const nextIssueRows = rows.length - nextValidRows;
@@ -118,12 +189,14 @@ export default function BulkStudentImportModal({
           dedupeKey: `admin:bulk-import:preview-warning:${file.name}:${nextIssueRows}`,
         });
       }
-    } catch {
+    } catch (error: unknown) {
       setPreviewRows([]);
-      setParseError("Unable to parse the CSV file. Please verify the format.");
+      setParseError(
+        "Unable to validate the CSV against the CAMPUS import service. Please try again.",
+      );
       campusToast.error({
         title: "Upload failed",
-        description: "Please check the file format.",
+        description: getImportErrorMessage(error),
         dedupeKey: `admin:bulk-import:parse-failed:${file.name}`,
       });
     } finally {
@@ -178,6 +251,7 @@ export default function BulkStudentImportModal({
     try {
       const result = await adminBulkImportStudents(getCampusFunctions(), {
         filename: fileName || "student-import.csv",
+        inputSchema,
         rows: parsedRows,
       });
       setImportResult(result);
@@ -228,7 +302,10 @@ export default function BulkStudentImportModal({
 
   function handleDownloadErrors() {
     if (!importResult) return;
-    const errorCsv = buildBulkStudentImportErrorCsv(importResult.rowResults);
+    const errorCsv = buildBulkStudentImportErrorCsv(
+      importResult.rowResults,
+      importResult.inputSchema || inputSchema,
+    );
     if (!errorCsv) {
       campusToast.warning({
         title: "No failed rows",
@@ -243,6 +320,7 @@ export default function BulkStudentImportModal({
   function resetState() {
     setFileName("");
     setPreviewRows([]);
+    setInputSchema("split");
     setParseError("");
     setImportResult(null);
     setParsing(false);

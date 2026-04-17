@@ -1,14 +1,18 @@
 import { isValidCourse, normalizeCourse } from "./courseOptions";
 import {
+  buildRawStudentFullName,
   formatStudentFullName,
   normalizeStudentNamePart,
 } from "./student-name";
 
+export type BulkStudentImportInputSchema = "split" | "legacy";
+
 export type BulkStudentCsvRow = {
+  nameSchema: BulkStudentImportInputSchema;
   schoolId: string;
   lastName: string;
   firstName: string;
-  fullName: string;
+  fullName?: string;
   course: string;
   yearLevel: string;
   status: string;
@@ -23,6 +27,8 @@ export type BulkStudentImportPreviewRow = BulkStudentCsvRow & {
 };
 
 export type BulkStudentImportRowPayload = {
+  nameSchema: BulkStudentImportInputSchema;
+  rowIndex?: number;
   schoolId: string;
   lastName: string;
   firstName: string;
@@ -36,10 +42,12 @@ export type BulkStudentImportResultRow = BulkStudentImportRowPayload & {
   success: boolean;
   skipped?: boolean;
   error?: string;
+  errors?: string[];
   uid?: string;
 };
 
 export type BulkStudentImportResult = {
+  inputSchema: BulkStudentImportInputSchema;
   totalRows: number;
   importedCount: number;
   failedCount: number;
@@ -47,10 +55,16 @@ export type BulkStudentImportResult = {
   rowResults: BulkStudentImportResultRow[];
 };
 
+export type BulkStudentImportPreviewDataset = {
+  inputSchema: BulkStudentImportInputSchema;
+  rows: BulkStudentImportPreviewRow[];
+};
+
 const REQUIRED_HEADER_LINE = "SchoolId,LastName,FirstName,Course,YearLevel,Status";
 const LEGACY_NAME_HEADER_LINE = "SchoolId,FullName,Course,YearLevel,Status";
 
 type BulkStudentCsvHeaderMap = {
+  inputSchema: BulkStudentImportInputSchema;
   schoolId: number;
   lastName?: number;
   firstName?: number;
@@ -135,8 +149,10 @@ function buildHeaderMap(headers: string[]): BulkStudentCsvHeaderMap | null {
   }
 
   const statusIndex = resolveHeaderIndex(headers, HEADER_ALIASES.status);
+  const hasSplitNameHeaders = lastNameIndex >= 0 && firstNameIndex >= 0;
 
   return {
+    inputSchema: hasSplitNameHeaders ? "split" : "legacy",
     schoolId: schoolIdIndex,
     lastName: lastNameIndex >= 0 ? lastNameIndex : undefined,
     firstName: firstNameIndex >= 0 ? firstNameIndex : undefined,
@@ -222,19 +238,24 @@ function isValidSchoolId(raw: string) {
 }
 
 function buildRowPayload(raw: Record<string, string>, rowIndex: number): BulkStudentCsvRow {
+  const nameSchema: BulkStudentImportInputSchema =
+    raw.nameSchema === "legacy" ? "legacy" : "split";
   const schoolId = normalizeText(raw.schoolId);
   const lastName = normalizeStudentNamePart(raw.lastName);
   const firstName = normalizeStudentNamePart(raw.firstName);
-  const fullName = normalizeStudentNamePart(raw.fullName);
+  const explicitFullName = normalizeStudentNamePart(raw.fullName);
+  const derivedFullName = buildRawStudentFullName(firstName, lastName);
+  const fullName = explicitFullName || derivedFullName;
   const course = normalizeCourse(raw.course);
   const yearLevel = normalizeYearLevel(raw.yearLevel);
   const status = normalizeStatus(raw.status);
 
   return {
+    nameSchema,
     schoolId,
     lastName,
     firstName,
-    fullName,
+    fullName: fullName || undefined,
     course,
     yearLevel,
     status,
@@ -243,11 +264,10 @@ function buildRowPayload(raw: Record<string, string>, rowIndex: number): BulkStu
 }
 
 export function getBulkStudentImportTemplateCsv(): string {
-  const lines = [
+  return [
     REQUIRED_HEADER_LINE,
-    "20175330,DELA PEÑA,NIÑO ALBERT,BSCpE,3,active",
-  ];
-  return lines.join("\n");
+    "20175330,ABALA,MC JERREL,BSCpE,3,active",
+  ].join("\n");
 }
 
 export function downloadCsv(filename: string, csv: string) {
@@ -294,13 +314,8 @@ function buildPreviewRow(
   row: BulkStudentCsvRow,
   csvDuplicates: Set<string>,
   existingSchoolIds: Set<string>,
-  headerMap: BulkStudentCsvHeaderMap,
 ): BulkStudentImportPreviewRow {
   const errors: string[] = [];
-  const hasLegacyFullName = Boolean(row.fullName);
-  const hasLegacyFullNameColumn = headerMap.fullName != null;
-  const hasSplitNameColumns =
-    headerMap.lastName != null && headerMap.firstName != null;
 
   if (!row.schoolId) {
     errors.push("SchoolId is required.");
@@ -308,16 +323,16 @@ function buildPreviewRow(
     errors.push("SchoolId must be alphanumeric and at least 4 characters.");
   }
 
-  if (!hasLegacyFullName) {
-    if (hasSplitNameColumns) {
-      if (!row.lastName) {
-        errors.push("LastName is required.");
-      }
-      if (!row.firstName) {
-        errors.push("FirstName is required.");
-      }
-    } else if (hasLegacyFullNameColumn) {
+  if (row.nameSchema === "legacy") {
+    if (!row.fullName) {
       errors.push("FullName is required.");
+    }
+  } else {
+    if (!row.lastName) {
+      errors.push("LastName is required.");
+    }
+    if (!row.firstName) {
+      errors.push("FirstName is required.");
     }
   }
 
@@ -348,9 +363,9 @@ function buildPreviewRow(
   return {
     ...row,
     displayName: formatStudentFullName({
-      firstName: row.firstName,
-      lastName: row.lastName,
-      fullName: row.fullName,
+      firstName: row.nameSchema === "split" ? row.firstName : "",
+      lastName: row.nameSchema === "split" ? row.lastName : "",
+      fullName: row.nameSchema === "legacy" ? row.fullName : "",
       schoolId: row.schoolId,
     }),
     statusLabel: isValid ? "Valid" : "Invalid",
@@ -359,22 +374,27 @@ function buildPreviewRow(
   };
 }
 
-export function buildBulkStudentImportPreviewRows(
+export function buildBulkStudentImportPreviewDataset(
   csvText: string,
   existingSchoolIds: Set<string>,
-): BulkStudentImportPreviewRow[] {
+): BulkStudentImportPreviewDataset {
   const rows = parseCsv(csvText);
-  if (rows.length === 0) return [];
+  if (rows.length === 0) {
+    return {
+      inputSchema: "split",
+      rows: [],
+    };
+  }
 
   const headers = rows[0].map(normalizeHeader);
   const headerMap = buildHeaderMap(headers);
 
   if (!headerMap) {
     const errorRow: BulkStudentImportPreviewRow = {
+      nameSchema: "split",
       schoolId: "",
       lastName: "",
       firstName: "",
-      fullName: "",
       course: "",
       yearLevel: "",
       status: "",
@@ -386,7 +406,10 @@ export function buildBulkStudentImportPreviewRows(
       ],
       isValid: false,
     };
-    return [errorRow];
+    return {
+      inputSchema: "split",
+      rows: [errorRow],
+    };
   }
 
   const parsedRows: BulkStudentCsvRow[] = [];
@@ -395,6 +418,7 @@ export function buildBulkStudentImportPreviewRows(
   for (let index = 1; index < rows.length; index += 1) {
     const rawRow = rows[index];
     const rowValues = {
+      nameSchema: headerMap.inputSchema,
       schoolId: normalizeImportedValue(rawRow[headerMap.schoolId] ?? ""),
       lastName: normalizeImportedValue(
         headerMap.lastName != null ? rawRow[headerMap.lastName] ?? "" : "",
@@ -444,17 +468,29 @@ export function buildBulkStudentImportPreviewRows(
     lowerExistingSchoolIds.add(schoolId.trim());
   });
 
-  return parsedRows.map((row) =>
-    buildPreviewRow(row, csvDuplicates, lowerExistingSchoolIds, headerMap),
-  );
+  return {
+    inputSchema: headerMap.inputSchema,
+    rows: parsedRows.map((row) =>
+      buildPreviewRow(row, csvDuplicates, lowerExistingSchoolIds),
+    ),
+  };
+}
+
+export function buildBulkStudentImportPreviewRows(
+  csvText: string,
+  existingSchoolIds: Set<string>,
+): BulkStudentImportPreviewRow[] {
+  return buildBulkStudentImportPreviewDataset(csvText, existingSchoolIds).rows;
 }
 
 export function buildBulkStudentImportErrorCsv(
   rowResults: BulkStudentImportResultRow[],
+  inputSchema: BulkStudentImportInputSchema,
 ): string {
-  const lines = [
-    "SchoolId,LastName,FirstName,FullName,Course,YearLevel,Status,Error",
-  ];
+  const lines =
+    inputSchema === "legacy"
+      ? ["SchoolId,FullName,Course,YearLevel,Status,Error"]
+      : ["SchoolId,LastName,FirstName,Course,YearLevel,Status,Error"];
   rowResults.forEach((row) => {
     if (row.success) return;
     const escaped = (value: string) => {
@@ -464,11 +500,23 @@ export function buildBulkStudentImportErrorCsv(
       }
       return raw;
     };
+
+    if (inputSchema === "legacy") {
+      lines.push([
+        escaped(row.schoolId),
+        escaped(row.fullName ?? ""),
+        escaped(row.course),
+        escaped(row.yearLevel),
+        escaped(row.status),
+        escaped(row.error ?? ""),
+      ].join(","));
+      return;
+    }
+
     lines.push([
       escaped(row.schoolId),
       escaped(row.lastName),
       escaped(row.firstName),
-      escaped(row.fullName ?? ""),
       escaped(row.course),
       escaped(row.yearLevel),
       escaped(row.status),

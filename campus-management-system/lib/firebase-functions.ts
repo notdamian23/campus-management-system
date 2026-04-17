@@ -2,6 +2,7 @@ import { getFunctions, httpsCallable } from "firebase/functions";
 import { app } from "@/lib/firebase";
 import type { CampusProfileDoc } from "@/lib/campus-auth";
 import { createCampusLogger } from "@/lib/campus-logger";
+import type { BulkStudentImportInputSchema } from "@/lib/bulkStudentImport";
 
 export const CAMPUS_FUNCTIONS_REGION =
   process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_REGION?.trim() ||
@@ -180,6 +181,8 @@ export async function savePendingEmailVerificationForCurrentUser(
 }
 
 export type BulkStudentImportRowPayload = {
+  nameSchema: BulkStudentImportInputSchema;
+  rowIndex?: number;
   schoolId: string;
   lastName: string;
   firstName: string;
@@ -193,10 +196,12 @@ export type BulkStudentImportResultRow = BulkStudentImportRowPayload & {
   success: boolean;
   skipped?: boolean;
   error?: string;
+  errors?: string[];
   uid?: string;
 };
 
 export type BulkStudentImportResult = {
+  inputSchema: BulkStudentImportInputSchema;
   totalRows: number;
   importedCount: number;
   failedCount: number;
@@ -207,6 +212,42 @@ export type BulkStudentImportResult = {
 export type AdminDeactivateAllStudentsResult = {
   totalStudentCount: number;
   updatedCount: number;
+};
+
+export type DuplicateStudentSchoolIdEntry = {
+  uid: string;
+  name: string;
+  email: string;
+  status: string;
+  role: string;
+  source: "profile" | "student_projection";
+  createdAtMs: number;
+  isPrimary: boolean;
+};
+
+export type DuplicateStudentSchoolIdGroup = {
+  schoolId: string;
+  schoolIdKey: string;
+  primaryUid: string;
+  count: number;
+  cleanupCandidateCount: number;
+  entries: DuplicateStudentSchoolIdEntry[];
+};
+
+export type AdminDuplicateStudentSchoolIdReport = {
+  duplicateGroupCount: number;
+  duplicateEntryCount: number;
+  cleanupCandidateCount: number;
+  duplicates: DuplicateStudentSchoolIdGroup[];
+};
+
+export type AdminDeleteDuplicateStudentSchoolIdsResult = {
+  duplicateGroupCount: number;
+  keptCount: number;
+  deletedCount: number;
+  deletedAuthCount: number;
+  failedCount: number;
+  failureDetails: string[];
 };
 
 export async function finalizeVerifiedCampusProfileForCurrentUser(): Promise<{
@@ -231,7 +272,9 @@ export async function adminBulkImportStudents(
   functions: ReturnType<typeof getCampusFunctions>,
   payload: {
     filename: string;
+    inputSchema: BulkStudentImportInputSchema;
     rows: BulkStudentImportRowPayload[];
+    previewOnly?: boolean;
   },
 ): Promise<BulkStudentImportResult> {
   logAuthEvent("info", "Starting bulk student import request", {
@@ -240,7 +283,12 @@ export async function adminBulkImportStudents(
   });
 
   const callable = httpsCallable<
-    { filename: string; rows: BulkStudentImportRowPayload[] },
+    {
+      filename: string;
+      inputSchema: BulkStudentImportInputSchema;
+      rows: BulkStudentImportRowPayload[];
+      previewOnly?: boolean;
+    },
     BulkStudentImportResult
   >(functions, "adminBulkImportStudents");
 
@@ -257,6 +305,37 @@ export async function adminDeactivateAllStudents(
     Record<string, never>,
     AdminDeactivateAllStudentsResult
   >(functions, "adminDeactivateAllStudents");
+
+  const result = await callable({});
+  return result.data;
+}
+
+export async function adminFindDuplicateStudentSchoolIds(
+  functions: ReturnType<typeof getCampusFunctions>,
+  limit = 50,
+): Promise<AdminDuplicateStudentSchoolIdReport> {
+  logAuthEvent("info", "Starting duplicate student school ID audit", {
+    limit,
+  });
+
+  const callable = httpsCallable<
+    { limit: number },
+    AdminDuplicateStudentSchoolIdReport
+  >(functions, "adminFindDuplicateStudentSchoolIds");
+
+  const result = await callable({ limit });
+  return result.data;
+}
+
+export async function adminDeleteDuplicateStudentSchoolIds(
+  functions: ReturnType<typeof getCampusFunctions>,
+): Promise<AdminDeleteDuplicateStudentSchoolIdsResult> {
+  logAuthEvent("info", "Starting duplicate student school ID cleanup");
+
+  const callable = httpsCallable<
+    Record<string, never>,
+    AdminDeleteDuplicateStudentSchoolIdsResult
+  >(functions, "adminDeleteDuplicateStudentSchoolIds");
 
   const result = await callable({});
   return result.data;

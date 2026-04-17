@@ -8,6 +8,8 @@ if (admin.apps.length === 0) {
 
 const db = admin.firestore();
 const REGION = "asia-southeast1";
+const STUDENT_SCHOOL_ID_INDEX_COLLECTION = "studentSchoolIds";
+const STUDENT_SCHOOL_ID_RESERVATION_TTL_MS = 10 * 60 * 1000;
 
 type BulkImportContext = {
   data: Record<string, unknown>;
@@ -16,6 +18,42 @@ type BulkImportContext = {
     token: admin.auth.DecodedIdToken;
     rawToken: string;
   };
+};
+
+type BulkStudentImportInputSchema = "split" | "legacy";
+type StudentSchoolIdReservationSource =
+  | "admin_create_student"
+  | "ec_create_student"
+  | "bulk_student_import";
+type StudentSchoolIdDuplicateSource =
+  | "index"
+  | "profile"
+  | "student"
+  | "reservation";
+type DuplicateStudentSchoolIdEntrySource = "profile" | "student_projection";
+type DuplicateStudentSchoolIdEntry = {
+  uid: string;
+  name: string;
+  email: string;
+  status: string;
+  role: string;
+  source: DuplicateStudentSchoolIdEntrySource;
+  createdAtMs: number;
+  isPrimary: boolean;
+};
+type DuplicateStudentSchoolIdGroup = {
+  schoolId: string;
+  schoolIdKey: string;
+  primaryUid: string;
+  count: number;
+  cleanupCandidateCount: number;
+  entries: DuplicateStudentSchoolIdEntry[];
+};
+type DuplicateStudentSchoolIdReport = {
+  duplicateGroupCount: number;
+  duplicateEntryCount: number;
+  cleanupCandidateCount: number;
+  duplicates: DuplicateStudentSchoolIdGroup[];
 };
 
 const ALLOWED_ORIGINS = [
@@ -96,9 +134,18 @@ function normalizeLower(value: unknown): string {
   return normalizeText(value).toLowerCase();
 }
 
+function normalizeSchoolIdKey(value: unknown): string {
+  return normalizeLower(value);
+}
+
 function optionalText(value: unknown): string | undefined {
   const normalized = normalizeText(value);
   return normalized || undefined;
+}
+
+function toPositiveNumber(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 function normalizeNamePart(value: unknown): string {
@@ -120,8 +167,38 @@ function resolveBulkImportFullName(row: Record<string, unknown>): string {
   return (
     normalizeNamePart(row.fullName) ||
     normalizeNamePart(row.name) ||
-    normalizeNamePart(row.studentName)
+    normalizeNamePart(row.studentName) ||
+    buildStudentFullName(row.firstName, row.lastName)
   );
+}
+
+function normalizeBulkStudentImportInputSchema(
+  value: unknown,
+): BulkStudentImportInputSchema | "" {
+  const normalized = normalizeLower(value);
+  if (normalized === "legacy") return "legacy";
+  if (normalized === "split") return "split";
+  return "";
+}
+
+function resolveBulkStudentImportInputSchema(
+  row: Record<string, unknown>,
+  fallbackSchema?: BulkStudentImportInputSchema,
+): BulkStudentImportInputSchema {
+  const explicitSchema = normalizeBulkStudentImportInputSchema(row.nameSchema);
+  if (explicitSchema) {
+    return explicitSchema;
+  }
+
+  if (fallbackSchema) {
+    return fallbackSchema;
+  }
+
+  if ("lastName" in row || "firstName" in row) {
+    return "split";
+  }
+
+  return "legacy";
 }
 
 function normalizeCourseLabel(value: unknown): string {
@@ -136,6 +213,552 @@ function normalizeCourseLabel(value: unknown): string {
 
 function isValidEmailAddress(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function studentSchoolIdIndexRef(schoolIdKey: string) {
+  return db.collection(STUDENT_SCHOOL_ID_INDEX_COLLECTION).doc(schoolIdKey);
+}
+
+function schoolIdAlreadyExistsError(message = "School ID already exists.") {
+  return new HttpsError("already-exists", message);
+}
+
+function isHttpsErrorCode(error: unknown, code: string): boolean {
+  if (error instanceof HttpsError) {
+    return error.code === code;
+  }
+
+  return typeof error === "object" && error !== null &&
+    (error as {code?: string}).code === code;
+}
+
+async function findExistingSchoolIdDocument(
+  collectionName: "profiles" | "students",
+  schoolId: string,
+  schoolIdKey: string,
+): Promise<{uid: string; schoolId: string; role: string} | null> {
+  if (!schoolId || !schoolIdKey) {
+    return null;
+  }
+
+  const collectionRef = db.collection(collectionName);
+  const keyedSnapshot = await collectionRef
+    .where("schoolIdKey", "==", schoolIdKey)
+    .limit(1)
+    .get();
+
+  if (!keyedSnapshot.empty) {
+    const keyedDoc = keyedSnapshot.docs[0];
+    const keyedData = keyedDoc.data() ?? {};
+    return {
+      uid: keyedDoc.id,
+      schoolId: normalizeText(keyedData.schoolId) || schoolId,
+      role: normalizeText(keyedData.role),
+    };
+  }
+
+  const exactSnapshot = await collectionRef
+    .where("schoolId", "==", schoolId)
+    .limit(1)
+    .get();
+
+  if (exactSnapshot.empty) {
+    return null;
+  }
+
+  const exactDoc = exactSnapshot.docs[0];
+  const exactData = exactDoc.data() ?? {};
+  return {
+    uid: exactDoc.id,
+    schoolId: normalizeText(exactData.schoolId) || schoolId,
+    role: normalizeText(exactData.role),
+  };
+}
+
+async function syncStudentSchoolIdIndex(
+  schoolId: string,
+  schoolIdKey: string,
+  uid: string,
+  source: StudentSchoolIdDuplicateSource,
+): Promise<void> {
+  await studentSchoolIdIndexRef(schoolIdKey).set({
+    schoolId,
+    schoolIdKey,
+    uid,
+    role: "student",
+    status: "active",
+    source,
+    updatedAt: serverTimestamp(),
+    activatedAt: serverTimestamp(),
+  }, {merge: true});
+}
+
+async function findExistingStudentSchoolId(
+  schoolId: string,
+): Promise<{
+  schoolId: string;
+  schoolIdKey: string;
+  uid?: string;
+  source: StudentSchoolIdDuplicateSource;
+} | null> {
+  const normalizedSchoolId = normalizeText(schoolId);
+  const schoolIdKey = normalizeSchoolIdKey(normalizedSchoolId);
+
+  if (!normalizedSchoolId || !schoolIdKey) {
+    return null;
+  }
+
+  const indexRef = studentSchoolIdIndexRef(schoolIdKey);
+  const [indexSnapshot, profileMatch, studentMatch] = await Promise.all([
+    indexRef.get(),
+    findExistingSchoolIdDocument("profiles", normalizedSchoolId, schoolIdKey),
+    findExistingSchoolIdDocument("students", normalizedSchoolId, schoolIdKey),
+  ]);
+
+  if (profileMatch) {
+    await syncStudentSchoolIdIndex(
+      profileMatch.schoolId,
+      schoolIdKey,
+      profileMatch.uid,
+      "profile",
+    );
+    return {
+      schoolId: profileMatch.schoolId,
+      schoolIdKey,
+      uid: profileMatch.uid,
+      source: "profile",
+    };
+  }
+
+  if (studentMatch) {
+    await syncStudentSchoolIdIndex(
+      studentMatch.schoolId,
+      schoolIdKey,
+      studentMatch.uid,
+      "student",
+    );
+    return {
+      schoolId: studentMatch.schoolId,
+      schoolIdKey,
+      uid: studentMatch.uid,
+      source: "student",
+    };
+  }
+
+  if (!indexSnapshot.exists) {
+    return null;
+  }
+
+  const indexData = indexSnapshot.data() ?? {};
+  const indexedSchoolId = normalizeText(indexData.schoolId) || normalizedSchoolId;
+  const indexedUid = normalizeText(indexData.uid);
+  const indexedStatus = normalizeLower(indexData.status);
+  const reservedAtMs = toPositiveNumber(indexData.reservedAtMs);
+
+  if (indexedUid || indexedStatus === "active") {
+    return {
+      schoolId: indexedSchoolId,
+      schoolIdKey,
+      uid: indexedUid || undefined,
+      source: "index",
+    };
+  }
+
+  if (reservedAtMs && Date.now() - reservedAtMs <= STUDENT_SCHOOL_ID_RESERVATION_TTL_MS) {
+    return {
+      schoolId: indexedSchoolId,
+      schoolIdKey,
+      source: "reservation",
+    };
+  }
+
+  await indexRef.delete().catch(() => undefined);
+  return null;
+}
+
+async function reserveUniqueStudentSchoolId(
+  schoolId: string,
+  source: StudentSchoolIdReservationSource,
+): Promise<{
+  schoolId: string;
+  schoolIdKey: string;
+  activate: (uid: string) => Promise<void>;
+  release: () => Promise<void>;
+}> {
+  const normalizedSchoolId = normalizeText(schoolId);
+  const schoolIdKey = normalizeSchoolIdKey(normalizedSchoolId);
+
+  if (!normalizedSchoolId || !schoolIdKey) {
+    throw new HttpsError("invalid-argument", "School ID is required.");
+  }
+
+  const existingMatch = await findExistingStudentSchoolId(normalizedSchoolId);
+  if (existingMatch) {
+    const duplicateMessage =
+      existingMatch.source === "reservation" ?
+        "School ID is already being created. Please try again." :
+        "School ID already exists.";
+    throw schoolIdAlreadyExistsError(duplicateMessage);
+  }
+
+  const indexRef = studentSchoolIdIndexRef(schoolIdKey);
+  const reservedAtMs = Date.now();
+
+  await db.runTransaction(async (transaction) => {
+    const reservationSnapshot = await transaction.get(indexRef);
+    if (reservationSnapshot.exists) {
+      const reservationData = reservationSnapshot.data() ?? {};
+      const reservationUid = normalizeText(reservationData.uid);
+      const reservationStatus = normalizeLower(reservationData.status);
+      const previousReservedAtMs = toPositiveNumber(reservationData.reservedAtMs);
+      const isStaleReservation =
+        previousReservedAtMs > 0 &&
+        Date.now() - previousReservedAtMs > STUDENT_SCHOOL_ID_RESERVATION_TTL_MS;
+
+      if (reservationUid || reservationStatus === "active" || !isStaleReservation) {
+        throw schoolIdAlreadyExistsError(
+          reservationUid || reservationStatus === "active" ?
+            "School ID already exists." :
+            "School ID is already being created. Please try again.",
+        );
+      }
+    }
+
+    transaction.set(indexRef, {
+      schoolId: normalizedSchoolId,
+      schoolIdKey,
+      role: "student",
+      status: "reserved",
+      source,
+      reservedAtMs,
+      reservedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }, {merge: true});
+  });
+
+  return {
+    schoolId: normalizedSchoolId,
+    schoolIdKey,
+    activate: async (uid: string) => {
+      await indexRef.set({
+        schoolId: normalizedSchoolId,
+        schoolIdKey,
+        uid,
+        role: "student",
+        status: "active",
+        source,
+        updatedAt: serverTimestamp(),
+        activatedAt: serverTimestamp(),
+      }, {merge: true});
+    },
+    release: async () => {
+      await indexRef.delete().catch(() => undefined);
+    },
+  };
+}
+
+async function fetchExistingStudentSchoolIds(schoolIds: string[]): Promise<Set<string>> {
+  const normalizedIds = Array.from(
+    new Set(schoolIds.map((value) => normalizeText(value)).filter(Boolean)),
+  );
+  const existing = new Set<string>();
+
+  if (normalizedIds.length === 0) {
+    return existing;
+  }
+
+  const indexedIdsByKey = new Map<string, string>();
+  normalizedIds.forEach((schoolId) => {
+    indexedIdsByKey.set(normalizeSchoolIdKey(schoolId), schoolId);
+  });
+
+  for (let i = 0; i < normalizedIds.length; i += 10) {
+    const chunk = normalizedIds.slice(i, i + 10);
+    const chunkKeys = chunk.map((schoolId) => normalizeSchoolIdKey(schoolId));
+    const chunkLookup = new Map<string, string>();
+    chunk.forEach((schoolId) => {
+      chunkLookup.set(normalizeSchoolIdKey(schoolId), schoolId);
+    });
+
+    const indexSnapshots = await db.getAll(
+      ...chunkKeys.map((schoolIdKey) => studentSchoolIdIndexRef(schoolIdKey)),
+    );
+
+    indexSnapshots.forEach((snapshot, index) => {
+      if (!snapshot.exists) {
+        return;
+      }
+
+      const data = snapshot.data() ?? {};
+      const indexedUid = normalizeText(data.uid);
+      const indexedStatus = normalizeLower(data.status);
+      const reservedAtMs = toPositiveNumber(data.reservedAtMs);
+      if (
+        indexedUid ||
+        indexedStatus === "active" ||
+        (reservedAtMs &&
+          Date.now() - reservedAtMs <= STUDENT_SCHOOL_ID_RESERVATION_TTL_MS)
+      ) {
+        existing.add(chunk[index]);
+      }
+    });
+
+    const [
+      profileSchoolIdSnapshot,
+      profileKeySnapshot,
+      studentSchoolIdSnapshot,
+      studentKeySnapshot,
+    ] = await Promise.all([
+      db.collection("profiles").where("schoolId", "in", chunk).get(),
+      db.collection("profiles").where("schoolIdKey", "in", chunkKeys).get(),
+      db.collection("students").where("schoolId", "in", chunk).get(),
+      db.collection("students").where("schoolIdKey", "in", chunkKeys).get(),
+    ]);
+
+    const snapshots = [
+      profileSchoolIdSnapshot,
+      profileKeySnapshot,
+      studentSchoolIdSnapshot,
+      studentKeySnapshot,
+    ];
+
+    snapshots.forEach((snapshot) => {
+      snapshot.docs.forEach((doc) => {
+        const data = doc.data() ?? {};
+        const docSchoolId = normalizeText(data.schoolId);
+        const docSchoolIdKey = normalizeSchoolIdKey(
+          data.schoolIdKey || data.schoolId,
+        );
+        const matchedSchoolId =
+          chunkLookup.get(docSchoolIdKey) ||
+          indexedIdsByKey.get(docSchoolIdKey) ||
+          docSchoolId;
+        if (matchedSchoolId) {
+          existing.add(matchedSchoolId);
+        }
+      });
+    });
+  }
+
+  return existing;
+}
+
+function resolveDuplicateStudentRecordName(
+  data: FirebaseFirestore.DocumentData,
+): string {
+  const firstName = normalizeNamePart(data.firstName);
+  const lastName = normalizeNamePart(data.lastName);
+  const combinedName = buildStudentFullName(firstName, lastName);
+  return (
+    combinedName ||
+    normalizeNamePart(data.fullName) ||
+    normalizeNamePart(data.studentName) ||
+    normalizeNamePart(data.name)
+  );
+}
+
+function sortDuplicateStudentRecords(
+  left: {
+    uid: string;
+    hasProfile: boolean;
+    hasStudentProjection: boolean;
+    createdAtMs: number;
+  },
+  right: {
+    uid: string;
+    hasProfile: boolean;
+    hasStudentProjection: boolean;
+    createdAtMs: number;
+  },
+) {
+  if (left.hasProfile !== right.hasProfile) {
+    return left.hasProfile ? -1 : 1;
+  }
+
+  if (left.hasStudentProjection !== right.hasStudentProjection) {
+    return left.hasStudentProjection ? -1 : 1;
+  }
+
+  const leftCreatedAt = left.createdAtMs > 0 ? left.createdAtMs : Number.MAX_SAFE_INTEGER;
+  const rightCreatedAt = right.createdAtMs > 0 ? right.createdAtMs : Number.MAX_SAFE_INTEGER;
+  if (leftCreatedAt !== rightCreatedAt) {
+    return leftCreatedAt - rightCreatedAt;
+  }
+
+  return left.uid.localeCompare(right.uid);
+}
+
+function duplicateEntrySourceToIndexSource(
+  source: DuplicateStudentSchoolIdEntrySource,
+): StudentSchoolIdDuplicateSource {
+  return source === "profile" ? "profile" : "student";
+}
+
+async function buildDuplicateStudentSchoolIdReport(
+  limit = Number.MAX_SAFE_INTEGER,
+): Promise<DuplicateStudentSchoolIdReport> {
+  const [profileSnapshot, studentSnapshot] = await Promise.all([
+    db.collection("profiles").where("role", "==", "student").get(),
+    db.collection("students").get(),
+  ]);
+
+  const mergedRecords = new Map<string, {
+    uid: string;
+    schoolId: string;
+    schoolIdKey: string;
+    name: string;
+    email: string;
+    status: string;
+    role: string;
+    createdAtMs: number;
+    hasProfile: boolean;
+    hasStudentProjection: boolean;
+  }>();
+
+  profileSnapshot.docs.forEach((profileDoc) => {
+    const profileData = profileDoc.data() ?? {};
+    const schoolId = normalizeText(profileData.schoolId);
+    const schoolIdKey = normalizeSchoolIdKey(profileData.schoolIdKey || schoolId);
+    if (!schoolId || !schoolIdKey) {
+      return;
+    }
+
+    const currentRecord = mergedRecords.get(profileDoc.id) || {
+      uid: profileDoc.id,
+      schoolId,
+      schoolIdKey,
+      name: "",
+      email: "",
+      status: "",
+      role: "student",
+      createdAtMs: 0,
+      hasProfile: false,
+      hasStudentProjection: false,
+    };
+
+    currentRecord.schoolId = schoolId;
+    currentRecord.schoolIdKey = schoolIdKey;
+    currentRecord.name =
+      resolveDuplicateStudentRecordName(profileData) || currentRecord.name;
+    currentRecord.email = normalizeText(profileData.email) || currentRecord.email;
+    currentRecord.status = normalizeText(profileData.status) || currentRecord.status;
+    currentRecord.role = normalizeText(profileData.role) || currentRecord.role;
+    currentRecord.createdAtMs = currentRecord.createdAtMs > 0 ?
+      Math.min(currentRecord.createdAtMs, toMillis(profileData.createdAt)) :
+      toMillis(profileData.createdAt);
+    currentRecord.hasProfile = true;
+
+    mergedRecords.set(profileDoc.id, currentRecord);
+  });
+
+  studentSnapshot.docs.forEach((studentDoc) => {
+    const studentData = studentDoc.data() ?? {};
+    const schoolId = normalizeText(studentData.schoolId);
+    const schoolIdKey = normalizeSchoolIdKey(studentData.schoolIdKey || schoolId);
+    if (!schoolId || !schoolIdKey) {
+      return;
+    }
+
+    const currentRecord = mergedRecords.get(studentDoc.id) || {
+      uid: studentDoc.id,
+      schoolId,
+      schoolIdKey,
+      name: "",
+      email: "",
+      status: "",
+      role: "student",
+      createdAtMs: 0,
+      hasProfile: false,
+      hasStudentProjection: false,
+    };
+
+    if (!currentRecord.schoolId) {
+      currentRecord.schoolId = schoolId;
+    }
+    if (!currentRecord.schoolIdKey) {
+      currentRecord.schoolIdKey = schoolIdKey;
+    }
+    currentRecord.name =
+      currentRecord.name || resolveDuplicateStudentRecordName(studentData);
+    currentRecord.status = currentRecord.status || normalizeText(studentData.status);
+    const studentCreatedAtMs = toMillis(studentData.createdAt);
+    currentRecord.createdAtMs = currentRecord.createdAtMs > 0 && studentCreatedAtMs > 0 ?
+      Math.min(currentRecord.createdAtMs, studentCreatedAtMs) :
+      currentRecord.createdAtMs || studentCreatedAtMs;
+    currentRecord.hasStudentProjection = true;
+
+    mergedRecords.set(studentDoc.id, currentRecord);
+  });
+
+  const groupedDuplicates = new Map<string, Array<{
+    uid: string;
+    schoolId: string;
+    schoolIdKey: string;
+    name: string;
+    email: string;
+    status: string;
+    role: string;
+    createdAtMs: number;
+    hasProfile: boolean;
+    hasStudentProjection: boolean;
+  }>>();
+
+  mergedRecords.forEach((record) => {
+    if (!record.schoolId || !record.schoolIdKey) {
+      return;
+    }
+
+    const currentGroup = groupedDuplicates.get(record.schoolIdKey) || [];
+    currentGroup.push(record);
+    groupedDuplicates.set(record.schoolIdKey, currentGroup);
+  });
+
+  const duplicates = Array.from(groupedDuplicates.values())
+    .filter((group) => group.length > 1)
+    .map((group) => {
+      const sortedEntries = [...group].sort(sortDuplicateStudentRecords);
+      const primaryEntry = sortedEntries[0];
+
+      return {
+        schoolId: primaryEntry.schoolId,
+        schoolIdKey: primaryEntry.schoolIdKey,
+        primaryUid: primaryEntry.uid,
+        count: sortedEntries.length,
+        cleanupCandidateCount: Math.max(0, sortedEntries.length - 1),
+        entries: sortedEntries.map((entry, index) => ({
+          uid: entry.uid,
+          name: entry.name,
+          email: entry.email,
+          status: entry.status,
+          role: entry.role,
+          source: entry.hasProfile ? "profile" : "student_projection",
+          createdAtMs: entry.createdAtMs,
+          isPrimary: index === 0,
+        })),
+      } satisfies DuplicateStudentSchoolIdGroup;
+    })
+    .sort((left, right) => {
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+      return left.schoolId.localeCompare(right.schoolId);
+    });
+
+  const duplicateEntryCount = duplicates.reduce(
+    (total, group) => total + group.count,
+    0,
+  );
+  const cleanupCandidateCount = duplicates.reduce(
+    (total, group) => total + group.cleanupCandidateCount,
+    0,
+  );
+
+  return {
+    duplicateGroupCount: duplicates.length,
+    duplicateEntryCount,
+    cleanupCandidateCount,
+    duplicates: duplicates.slice(0, limit),
+  };
 }
 
 function optionalBoolean(value: unknown): boolean | undefined {
@@ -422,6 +1045,7 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
 
     const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
+    const schoolIdKey = normalizeSchoolIdKey(schoolId);
     const role = normalizeText(body.role) as Role;
     const emailRaw = normalizeText(body.email);
     const name =
@@ -493,6 +1117,11 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
     // safely use a real contact email here when one is provided.
     const email = emailRaw || `${schoolId}@campus.local`;
     const timestamp = serverTimestamp();
+    const requiresStudentSchoolIdGuard = role === "student";
+    let schoolIdReservation:
+      | Awaited<ReturnType<typeof reserveUniqueStudentSchoolId>>
+      | null = null;
+    let createdUid: string | null = null;
 
     authLogger.debug("adminCreateUser request validated", {
       role,
@@ -504,6 +1133,15 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
     });
 
     try {
+      if (requiresStudentSchoolIdGuard) {
+        // Reserve the normalized School ID before Auth creation so duplicate
+        // student requests or double-submits cannot mint a second UID.
+        schoolIdReservation = await reserveUniqueStudentSchoolId(
+          schoolId,
+          "admin_create_student",
+        );
+      }
+
       const userRecord = await admin.auth().createUser({
         email,
         password: schoolId,
@@ -511,10 +1149,16 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
       });
 
       const uid = userRecord.uid;
+      createdUid = uid;
+
+      if (schoolIdReservation) {
+        await schoolIdReservation.activate(uid);
+      }
 
       const profilePayload: FirebaseFirestore.DocumentData = {
         name,
         schoolId,
+        schoolIdKey,
         email,
         role,
         course: course || "",
@@ -543,21 +1187,18 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
         hasYearLevel: Boolean(profilePayload.yearLevel),
       });
 
-      await db.doc(`profiles/${uid}`).set(
-        profilePayload,
-        {merge: true}
-      );
-
-      authLogger.debug("adminCreateUser profile write complete", {
-        uid,
-        role,
-        schoolId,
-      });
-
       if (role === "student") {
-        await db.doc(`students/${uid}`).set(
+        const studentBatch = db.batch();
+        studentBatch.set(
+          db.doc(`profiles/${uid}`),
+          profilePayload,
+          {merge: true},
+        );
+        studentBatch.set(
+          db.doc(`students/${uid}`),
           {
             schoolId,
+            schoolIdKey,
             studentName: name,
             name,
             course,
@@ -568,9 +1209,29 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
             updatedAt: timestamp,
             createdAt: timestamp,
           },
-          {merge: true}
+          {merge: true},
         );
+        await studentBatch.commit();
+      } else {
+        await db.doc(`profiles/${uid}`).set(
+          profilePayload,
+          {merge: true},
+        );
+      }
 
+      authLogger.debug("adminCreateUser profile write complete", {
+        uid,
+        role,
+        schoolId,
+      });
+
+      authLogger.info("adminCreateUser created account", {
+        uid,
+        role,
+        schoolId,
+      });
+
+      if (role === "student") {
         authLogger.debug("adminCreateUser student projection write complete", {
           uid,
           schoolId,
@@ -583,23 +1244,35 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
         targetUid: uid,
         targetSchoolId: schoolId,
         createdAt: timestamp,
-      });
-
-      authLogger.info("adminCreateUser created account", {
-        uid,
-        role,
-        schoolId,
+      }).catch((logError) => {
+        authLogger.warn("adminCreateUser log write failed", {
+          uid,
+          role,
+          schoolId,
+          error: logError,
+        });
       });
 
       return {uid};
     } catch (error: unknown) {
       const authError = error as {code?: string; message?: string};
+      if (createdUid) {
+        await admin.auth().deleteUser(createdUid).catch(() => undefined);
+      }
+      if (schoolIdReservation) {
+        await schoolIdReservation.release();
+      }
       authLogger.warn("adminCreateUser failed", {
         role,
         schoolId,
         code: authError.code ?? "unknown",
         message: authError.message ?? "Unknown account creation failure",
       });
+      if (isHttpsErrorCode(error, "already-exists")) {
+        throw schoolIdAlreadyExistsError(
+          authError.message || "School ID already exists.",
+        );
+      }
       if (authError.code === "auth/email-already-exists") {
         throw new HttpsError(
           "already-exists",
@@ -626,38 +1299,15 @@ function isValidBulkSchoolId(value: string): boolean {
   return Boolean(value) && /^[A-Za-z0-9]{4,}$/.test(value);
 }
 
-async function fetchExistingProfileSchoolIds(schoolIds: string[]): Promise<Set<string>> {
-  const existing = new Set<string>();
-  const chunks: string[][] = [];
-  const ids = schoolIds.filter(Boolean);
-  for (let i = 0; i < ids.length; i += 10) {
-    chunks.push(ids.slice(i, i + 10));
-  }
-
-  for (const chunk of chunks) {
-    const snap = await db
-      .collection("profiles")
-      .where("schoolId", "in", chunk)
-      .get();
-
-    snap.docs.forEach((doc) => {
-      const data = doc.data();
-      const schoolId = normalizeText(data.schoolId);
-      if (schoolId) {
-        existing.add(schoolId);
-      }
-    });
-  }
-
-  return existing;
-}
-
 async function adminBulkImportStudentsLogic(context: BulkImportContext) {
     await requireAdmin({ auth: context.auth });
 
     const body = asRecord(context.data);
     const filename = normalizeText(body.filename) || "student-import.csv";
     const rows = Array.isArray(body.rows) ? body.rows : [];
+    const requestInputSchema =
+      normalizeBulkStudentImportInputSchema(body.inputSchema) || undefined;
+    const previewOnly = body.previewOnly === true;
     const actorUid = context.auth.uid;
     const callerProfileSnap = await db.doc(`profiles/${actorUid}`).get();
     const actorSchoolId = normalizeText(callerProfileSnap.data()?.schoolId);
@@ -665,6 +1315,10 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
 
     const validatedRows = rows.map((rawRow, index) => {
       const row = asRecord(rawRow);
+      const nameSchema = resolveBulkStudentImportInputSchema(
+        row,
+        requestInputSchema,
+      );
       const schoolId = normalizeText(row.schoolId);
       const lastName = normalizeNamePart(row.lastName);
       const firstName = normalizeNamePart(row.firstName);
@@ -674,22 +1328,19 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
       const status = normalizeBulkStudentStatus(row.status);
       const normalizedYear = normalizeYear(yearLevelRaw);
       const errors: string[] = [];
-      const hasLegacyFullName = Boolean(legacyFullName);
-      const hasLegacyFullNameField =
-        "fullName" in row || "name" in row || "studentName" in row;
 
       if (!schoolId) {
         errors.push("SchoolId is required.");
       } else if (!isValidBulkSchoolId(schoolId)) {
         errors.push("SchoolId must be alphanumeric and at least 4 characters.");
       }
-      if (!hasLegacyFullName) {
-        if (hasLegacyFullNameField && !lastName && !firstName) {
+      if (nameSchema === "legacy") {
+        if (!legacyFullName) {
           errors.push("FullName is required.");
-        } else {
-          if (!lastName) errors.push("LastName is required.");
-          if (!firstName) errors.push("FirstName is required.");
         }
+      } else {
+        if (!lastName) errors.push("LastName is required.");
+        if (!firstName) errors.push("FirstName is required.");
       }
       if (!course) {
         errors.push("Course is required.");
@@ -707,6 +1358,7 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
 
       return {
         rowIndex: index + 1,
+        nameSchema,
         schoolId,
         lastName,
         firstName,
@@ -729,9 +1381,11 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
     });
 
     const uniqueSchoolIds = Array.from(schoolIdCounts.keys());
-    const existingSchoolIds = await fetchExistingProfileSchoolIds(uniqueSchoolIds);
+    const existingSchoolIds = await fetchExistingStudentSchoolIds(uniqueSchoolIds);
 
     const finalResults = validatedRows.map((row) => ({ ...row })) as Array<{
+      rowIndex: number;
+      nameSchema: BulkStudentImportInputSchema;
       schoolId: string;
       lastName: string;
       firstName: string;
@@ -742,8 +1396,8 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
       success: boolean;
       skipped?: boolean;
       error?: string;
-      uid?: string;
       errors?: string[];
+      uid?: string;
     }>;
 
     finalResults.forEach((row) => {
@@ -754,6 +1408,7 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
       if (row.schoolId && existingSchoolIds.has(row.schoolId)) {
         errors.push("Existing schoolId already exists in CAMPUS.");
       }
+      row.errors = errors;
       if (errors.length > 0) {
         row.skipped = true;
         row.error = errors.join(" ");
@@ -764,6 +1419,22 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
     let failedCount = 0;
     let skippedCount = 0;
 
+    if (previewOnly) {
+      skippedCount = finalResults.filter((row) => row.skipped || row.error).length;
+
+      return {
+        inputSchema:
+          requestInputSchema ||
+          finalResults[0]?.nameSchema ||
+          "split",
+        totalRows: finalResults.length,
+        importedCount: 0,
+        failedCount: 0,
+        skippedCount,
+        rowResults: finalResults,
+      };
+    }
+
     for (const resultRow of finalResults) {
       if (resultRow.skipped || resultRow.error) {
         skippedCount += 1;
@@ -772,7 +1443,17 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
 
       const email = `${resultRow.schoolId}@campus.local`;
       let createdUid: string | null = null;
+      let schoolIdReservation:
+        | Awaited<ReturnType<typeof reserveUniqueStudentSchoolId>>
+        | null = null;
       try {
+        // Import uses the same reservation/index as manual creation so a row
+        // previewed as valid cannot create a duplicate UID during final submit.
+        schoolIdReservation = await reserveUniqueStudentSchoolId(
+          resultRow.schoolId,
+          "bulk_student_import",
+        );
+
         const userRecord = await admin.auth().createUser({
           email,
           password: resultRow.schoolId,
@@ -780,8 +1461,10 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
         });
         const uid = userRecord.uid;
         createdUid = uid;
+        await schoolIdReservation.activate(uid);
         const fullName = resultRow.fullName ||
           buildStudentFullName(resultRow.firstName, resultRow.lastName);
+        const schoolIdKey = schoolIdReservation.schoolIdKey;
 
         const profilePayload: FirebaseFirestore.DocumentData = {
           firstName: resultRow.firstName,
@@ -790,6 +1473,7 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
           fullName,
           studentName: fullName,
           schoolId: resultRow.schoolId,
+          schoolIdKey,
           email: "",
           role: "student",
           course: resultRow.course,
@@ -806,10 +1490,13 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
           readyForClearance: false,
         };
 
-        await db.doc(`profiles/${uid}`).set(profilePayload, {merge: true});
-        await db.doc(`students/${uid}`).set(
+        const studentBatch = db.batch();
+        studentBatch.set(db.doc(`profiles/${uid}`), profilePayload, {merge: true});
+        studentBatch.set(
+          db.doc(`students/${uid}`),
           {
             schoolId: resultRow.schoolId,
+            schoolIdKey,
             firstName: resultRow.firstName,
             lastName: resultRow.lastName,
             fullName,
@@ -825,6 +1512,7 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
           },
           {merge: true},
         );
+        await studentBatch.commit();
 
         resultRow.success = true;
         resultRow.uid = uid;
@@ -833,6 +1521,20 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
         const authError = error as {code?: string; message?: string};
         if (createdUid) {
           await admin.auth().deleteUser(createdUid).catch(() => undefined);
+        }
+        if (schoolIdReservation) {
+          await schoolIdReservation.release();
+        }
+        if (isHttpsErrorCode(error, "already-exists")) {
+          resultRow.success = false;
+          resultRow.skipped = true;
+          resultRow.error = "Existing schoolId already exists in CAMPUS.";
+          resultRow.errors = [
+            ...(Array.isArray(resultRow.errors) ? resultRow.errors : []),
+            "Existing schoolId already exists in CAMPUS.",
+          ];
+          skippedCount += 1;
+          continue;
         }
         resultRow.success = false;
         resultRow.error = authError.message || "Unable to create student account.";
@@ -856,6 +1558,10 @@ async function adminBulkImportStudentsLogic(context: BulkImportContext) {
     });
 
     return {
+      inputSchema:
+        requestInputSchema ||
+        finalResults[0]?.nameSchema ||
+        "split",
       totalRows: finalResults.length,
       importedCount,
       failedCount,
@@ -946,16 +1652,26 @@ export const adminDeleteUser = onCall({region: REGION}, async (request) => {
     }
 
     const profileSnap = await db.doc(`profiles/${uid}`).get();
-    const schoolId = profileSnap.data()?.schoolId ?? null;
+    const profileData = profileSnap.data() ?? {};
+    const schoolId = normalizeText(profileData.schoolId);
+    const role = normalizeText(profileData.role);
+    const schoolIdKey = normalizeSchoolIdKey(profileData.schoolIdKey || schoolId);
 
     await admin.auth().deleteUser(uid);
     await db.doc(`profiles/${uid}`).delete().catch(() => undefined);
+    await db.doc(`students/${uid}`).delete().catch(() => undefined);
+    if (role === "student" && schoolIdKey) {
+      await studentSchoolIdIndexRef(schoolIdKey).delete().catch(() => undefined);
+      if (schoolId) {
+        await findExistingStudentSchoolId(schoolId).catch(() => undefined);
+      }
+    }
 
     await db.collection("logs").add({
       action: "DELETE_USER",
       actorUid: normalizeText(request.auth?.uid),
       targetUid: uid,
-      targetSchoolId: schoolId,
+      targetSchoolId: schoolId || null,
       createdAt: serverTimestamp(),
     });
 
@@ -1037,6 +1753,154 @@ export const adminDeactivateAllStudents = onCall({region: REGION}, async (reques
     return {
       totalStudentCount: profileDocs.length,
       updatedCount,
+    };
+  });
+
+export const adminFindDuplicateStudentSchoolIds = onCall({region: REGION}, async (request) => {
+    await requireAdmin(request);
+
+    const body = asRecord(request.data);
+    const requestedLimit = Number.parseInt(normalizeText(body.limit), 10);
+    const limit = Number.isFinite(requestedLimit) && requestedLimit > 0 ?
+      Math.min(requestedLimit, 5000) :
+      50;
+    const report = await buildDuplicateStudentSchoolIdReport(limit);
+
+    await db.collection("logs").add({
+      action: "ADMIN_FIND_DUPLICATE_STUDENT_SCHOOL_IDS",
+      actorUid: normalizeText(request.auth?.uid),
+      duplicateGroupCount: report.duplicateGroupCount,
+      duplicateEntryCount: report.duplicateEntryCount,
+      cleanupCandidateCount: report.cleanupCandidateCount,
+      returnedCount: report.duplicates.length,
+      sampleSchoolIds: report.duplicates.slice(0, 10).map((group) => group.schoolId),
+      createdAt: serverTimestamp(),
+    }).catch((logError) => {
+      authLogger.warn("adminFindDuplicateStudentSchoolIds log write failed", {
+        error: logError,
+      });
+    });
+
+    return report;
+  });
+
+export const adminDeleteDuplicateStudentSchoolIds = onCall({region: REGION}, async (request) => {
+    await requireAdmin(request);
+
+    const actorUid = normalizeText(request.auth?.uid);
+    const report = await buildDuplicateStudentSchoolIdReport();
+
+    if (report.duplicateGroupCount === 0) {
+      return {
+        duplicateGroupCount: 0,
+        keptCount: 0,
+        deletedCount: 0,
+        deletedAuthCount: 0,
+        failedCount: 0,
+        failureDetails: [] as string[],
+      };
+    }
+
+    let deletedCount = 0;
+    let deletedAuthCount = 0;
+    let failedCount = 0;
+    const failureDetails: string[] = [];
+
+    for (const group of report.duplicates) {
+      const primaryEntry =
+        group.entries.find((entry) => entry.isPrimary) || group.entries[0];
+
+      for (const duplicateEntry of group.entries.filter((entry) => !entry.isPrimary)) {
+        let deletedAuthUser = false;
+
+        try {
+          try {
+            await admin.auth().deleteUser(duplicateEntry.uid);
+            deletedAuthUser = true;
+            deletedAuthCount += 1;
+          } catch (error: unknown) {
+            const authError = error as {code?: string; message?: string};
+            if (authError.code !== "auth/user-not-found") {
+              throw new Error(authError.message || "Failed to delete duplicate auth user.");
+            }
+          }
+
+          const deleteBatch = db.batch();
+          deleteBatch.delete(db.doc(`profiles/${duplicateEntry.uid}`));
+          deleteBatch.delete(db.doc(`students/${duplicateEntry.uid}`));
+          await deleteBatch.commit();
+          deletedCount += 1;
+
+          await db.collection("logs").add({
+            action: "ADMIN_DELETE_DUPLICATE_STUDENT_SCHOOL_ID",
+            actorUid,
+            targetUid: duplicateEntry.uid,
+            targetSchoolId: group.schoolId,
+            primaryUid: primaryEntry.uid,
+            deletedAuthUser,
+            duplicateSource: duplicateEntry.source,
+            createdAt: serverTimestamp(),
+          }).catch((logError) => {
+            authLogger.warn("adminDeleteDuplicateStudentSchoolIds per-entry log failed", {
+              schoolId: group.schoolId,
+              targetUid: duplicateEntry.uid,
+              error: logError,
+            });
+          });
+        } catch (error: unknown) {
+          failedCount += 1;
+          const failureMessage = `${group.schoolId} (${duplicateEntry.uid}): ${
+            error instanceof Error ? error.message : "Cleanup failed."
+          }`;
+          if (failureDetails.length < 25) {
+            failureDetails.push(failureMessage);
+          }
+          authLogger.warn("adminDeleteDuplicateStudentSchoolIds failed for entry", {
+            schoolId: group.schoolId,
+            primaryUid: primaryEntry.uid,
+            duplicateUid: duplicateEntry.uid,
+            error,
+          });
+        }
+      }
+
+      await syncStudentSchoolIdIndex(
+        group.schoolId,
+        group.schoolIdKey,
+        primaryEntry.uid,
+        duplicateEntrySourceToIndexSource(primaryEntry.source),
+      ).catch((error) => {
+        authLogger.warn("adminDeleteDuplicateStudentSchoolIds index sync failed", {
+          schoolId: group.schoolId,
+          primaryUid: primaryEntry.uid,
+          error,
+        });
+      });
+    }
+
+    await db.collection("logs").add({
+      action: "ADMIN_DELETE_DUPLICATE_STUDENT_SCHOOL_IDS",
+      actorUid,
+      duplicateGroupCount: report.duplicateGroupCount,
+      cleanupCandidateCount: report.cleanupCandidateCount,
+      keptCount: report.duplicateGroupCount,
+      deletedCount,
+      deletedAuthCount,
+      failedCount,
+      createdAt: serverTimestamp(),
+    }).catch((logError) => {
+      authLogger.warn("adminDeleteDuplicateStudentSchoolIds summary log failed", {
+        error: logError,
+      });
+    });
+
+    return {
+      duplicateGroupCount: report.duplicateGroupCount,
+      keptCount: report.duplicateGroupCount,
+      deletedCount,
+      deletedAuthCount,
+      failedCount,
+      failureDetails,
     };
   });
 
@@ -1144,6 +2008,7 @@ export const ecCreateStudent = onCall({region: REGION}, async (request) => {
 
     const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
+    const schoolIdKey = normalizeSchoolIdKey(schoolId);
     const studentName = normalizeText(body.studentName);
     const course = normalizeText(body.course);
     const yearRaw = normalizeText(body.year);
@@ -1187,20 +2052,17 @@ export const ecCreateStudent = onCall({region: REGION}, async (request) => {
       );
     }
 
-    const existingProfileSnapshot = await db
-      .collection("profiles")
-      .where("schoolId", "==", schoolId)
-      .limit(1)
-      .get();
-
-    if (!existingProfileSnapshot.empty) {
-      throw new HttpsError(
-        "already-exists",
-        "Student with this School ID already exists."
-      );
-    }
+    let schoolIdReservation:
+      | Awaited<ReturnType<typeof reserveUniqueStudentSchoolId>>
+      | null = null;
+    let createdUid: string | null = null;
 
     try {
+      schoolIdReservation = await reserveUniqueStudentSchoolId(
+        schoolId,
+        "ec_create_student",
+      );
+
       const userRecord = await admin.auth().createUser({
         email,
         password: schoolId,
@@ -1208,11 +2070,16 @@ export const ecCreateStudent = onCall({region: REGION}, async (request) => {
       });
 
       const uid = userRecord.uid;
+      createdUid = uid;
       const timestamp = serverTimestamp();
+      await schoolIdReservation.activate(uid);
 
-        await db.doc(`profiles/${uid}`).set(
+      const studentBatch = db.batch();
+      studentBatch.set(
+        db.doc(`profiles/${uid}`),
           {
             schoolId,
+            schoolIdKey,
             email,
             role: "student",
             studentName,
@@ -1232,11 +2099,13 @@ export const ecCreateStudent = onCall({region: REGION}, async (request) => {
         {merge: true}
       );
 
-        await db.doc(`students/${uid}`).set(
+      studentBatch.set(
+        db.doc(`students/${uid}`),
           {
             uid,
             studentId: uid,
             schoolId,
+            schoolIdKey,
             studentName,
             name: studentName,
             course,
@@ -1249,6 +2118,7 @@ export const ecCreateStudent = onCall({region: REGION}, async (request) => {
         },
         {merge: true}
       );
+      await studentBatch.commit();
 
       await db.collection("logs").add({
         action: "ec_create_student",
@@ -1256,11 +2126,28 @@ export const ecCreateStudent = onCall({region: REGION}, async (request) => {
         targetUid: uid,
         targetSchoolId: schoolId,
         createdAt: timestamp,
+      }).catch((logError) => {
+        authLogger.warn("ecCreateStudent log write failed", {
+          uid,
+          schoolId,
+          error: logError,
+        });
       });
 
       return {uid};
     } catch (error: unknown) {
       const authError = error as {code?: string; message?: string};
+      if (createdUid) {
+        await admin.auth().deleteUser(createdUid).catch(() => undefined);
+      }
+      if (schoolIdReservation) {
+        await schoolIdReservation.release();
+      }
+      if (isHttpsErrorCode(error, "already-exists")) {
+        throw schoolIdAlreadyExistsError(
+          authError.message || "School ID already exists.",
+        );
+      }
       if (authError.code === "auth/email-already-exists") {
         throw new HttpsError(
           "already-exists",
