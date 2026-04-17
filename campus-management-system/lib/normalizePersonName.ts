@@ -41,6 +41,8 @@ const UPPERCASE_SUFFIXES = new Set([
   "dvm",
 ]);
 
+const APOSTROPHE_SEPARATORS = ["'", "’"] as const;
+
 function isSuffix(word: string): boolean {
   const lower = word.toLowerCase().replace(/\.$/g, "");
   return UPPERCASE_SUFFIXES.has(lower);
@@ -86,15 +88,18 @@ function formatWord(word: string): string {
       .join("-");
   }
 
-  // Handle apostrophe names (e.g., "o'brien", "o'connor")
-  if (word.includes("'")) {
+  // Preserve both straight and curly apostrophes for names like O'Brien/O’Brien.
+  const apostropheSeparator = APOSTROPHE_SEPARATORS.find((separator) =>
+    word.includes(separator),
+  );
+  if (apostropheSeparator) {
     return word
-      .split("'")
+      .split(apostropheSeparator)
       .map((part) => {
         if (!part) return "";
         return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
       })
-      .join("'");
+      .join(apostropheSeparator);
   }
 
   // Handle suffixes with periods (e.g., "Jr.", "Sr.")

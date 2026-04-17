@@ -70,8 +70,12 @@ const HEADER_ALIASES = {
   status: ["status"],
 } as const;
 
+function normalizeUnicodeValue(value: unknown) {
+  return String(value ?? "").normalize("NFC");
+}
+
 function normalizeText(value: unknown) {
-  return String(value ?? "").trim();
+  return normalizeUnicodeValue(value).trim();
 }
 
 function normalizeHeader(value: string) {
@@ -83,9 +87,24 @@ function normalizeHeader(value: string) {
 }
 
 function normalizeImportedValue(value: unknown) {
-  return String(value ?? "")
+  return normalizeUnicodeValue(value)
     .trim()
     .replace(/\s+/g, " ");
+}
+
+function decodeCsvBytes(
+  bytes: Uint8Array,
+  encoding: string,
+  options?: TextDecoderOptions,
+) {
+  return new TextDecoder(encoding, options).decode(bytes).normalize("NFC");
+}
+
+function hasByteOrderMark(
+  bytes: Uint8Array,
+  expected: readonly number[],
+): boolean {
+  return expected.every((value, index) => bytes[index] === value);
 }
 
 function resolveHeaderIndex(
@@ -226,13 +245,14 @@ function buildRowPayload(raw: Record<string, string>, rowIndex: number): BulkStu
 export function getBulkStudentImportTemplateCsv(): string {
   const lines = [
     REQUIRED_HEADER_LINE,
-    "20175330,ABALA,MC JERREL,BSCpE,3,active",
+    "20175330,DELA PEÑA,NIÑO ALBERT,BSCpE,3,active",
   ];
   return lines.join("\n");
 }
 
 export function downloadCsv(filename: string, csv: string) {
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const csvWithBom = csv.startsWith("\uFEFF") ? csv : `\uFEFF${csv}`;
+  const blob = new Blob([csvWithBom], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -241,6 +261,33 @@ export function downloadCsv(filename: string, csv: string) {
   anchor.click();
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
+}
+
+export async function readBulkStudentImportFile(file: Blob): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.length === 0) {
+    return "";
+  }
+
+  if (hasByteOrderMark(bytes, [0xef, 0xbb, 0xbf])) {
+    return decodeCsvBytes(bytes, "utf-8");
+  }
+
+  if (hasByteOrderMark(bytes, [0xff, 0xfe])) {
+    return decodeCsvBytes(bytes, "utf-16le");
+  }
+
+  if (hasByteOrderMark(bytes, [0xfe, 0xff])) {
+    return decodeCsvBytes(bytes, "utf-16be");
+  }
+
+  try {
+    return decodeCsvBytes(bytes, "utf-8", { fatal: true });
+  } catch {
+    // Excel-generated CSVs on Windows may still use Windows-1252 bytes, so we
+    // fall back here to preserve names like Peña or Niño instead of mangling them.
+    return decodeCsvBytes(bytes, "windows-1252");
+  }
 }
 
 function buildPreviewRow(

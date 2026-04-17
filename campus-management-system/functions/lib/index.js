@@ -79,7 +79,12 @@ function optionalText(value) {
     return normalized || undefined;
 }
 function normalizeNamePart(value) {
-    return normalizeText(value).replace(/\s+/g, " ");
+    // Preserve Unicode student names such as Peña, Niño, and Muñoz while still
+    // trimming pasted/imported whitespace.
+    return String(value !== null && value !== void 0 ? value : "")
+        .normalize("NFC")
+        .trim()
+        .replace(/\s+/g, " ");
 }
 function buildStudentFullName(firstName, lastName) {
     const normalizedFirstName = normalizeNamePart(firstName);

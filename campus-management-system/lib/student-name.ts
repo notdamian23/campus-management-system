@@ -13,6 +13,7 @@ export type StudentNameSource = {
 
 function normalizeNameValue(value: unknown) {
   return String(value ?? "")
+    .normalize("NFC")
     .trim()
     .replace(/\s+/g, " ");
 }

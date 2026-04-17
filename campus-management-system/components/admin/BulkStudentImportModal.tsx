@@ -26,6 +26,7 @@ import {
   buildBulkStudentImportPreviewRows,
   downloadCsv,
   getBulkStudentImportTemplateCsv,
+  readBulkStudentImportFile,
   type BulkStudentImportPreviewRow,
 } from "@/lib/bulkStudentImport";
 import {
@@ -88,7 +89,7 @@ export default function BulkStudentImportModal({
     setImportResult(null);
 
     try {
-      const text = await file.text();
+      const text = await readBulkStudentImportFile(file);
       const rows = buildBulkStudentImportPreviewRows(text, existingSchoolIds);
       setPreviewRows(rows);
       if (rows.length === 1 && rows[0].errors.length > 0 && rows[0].rowIndex === 1) {
