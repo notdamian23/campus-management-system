@@ -25,6 +25,7 @@ import {
   TriangleAlert,
   UserRound,
 } from "lucide-react";
+import { CampusDetailTile } from "@/components/ui";
 import type {
   TeacherAttendanceStatus,
   TeacherEvent,
@@ -514,19 +515,7 @@ function MiniInfoCard({
   label: string;
   value: string;
 }) {
-  return (
-    <div className="rounded-[22px] border border-border/70 bg-slate-50/70 p-4">
-      <div className="flex items-center gap-2 text-campus-text-secondary">
-        <Icon size={15} />
-        <p className="text-xs font-semibold uppercase tracking-[0.18em]">
-          {label}
-        </p>
-      </div>
-      <p className="mt-2 text-sm font-medium text-campus-text-primary">
-        {value}
-      </p>
-    </div>
-  );
+  return <CampusDetailTile icon={Icon} label={label} value={value} />;
 }
 
 function SectionHeading({
@@ -553,14 +542,5 @@ function DetailRow({
   label: string;
   value: ReactNode;
 }) {
-  return (
-    <div className="rounded-[20px] border border-border/70 bg-slate-50/70 p-4">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
-        {label}
-      </p>
-      <div className="mt-2 break-words text-sm text-campus-text-primary">
-        {value}
-      </div>
-    </div>
-  );
+  return <CampusDetailTile label={label} value={value} />;
 }

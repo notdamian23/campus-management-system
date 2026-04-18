@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@heroui/button";
-import { Card, CardBody } from "@heroui/card";
+import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import {
   AlertCircle,
@@ -13,7 +13,7 @@ import {
   ShieldCheck,
   Users,
 } from "lucide-react";
-import { CampusMetricSkeleton } from "@/components/ui";
+import { CampusMetricSkeleton, CampusSectionCard } from "@/components/ui";
 import {
   TeacherEmptyState,
   TeacherEventSnapshotCard,
@@ -135,30 +135,19 @@ export default function TeacherDashboard() {
       )}
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.95fr)]">
-        <Card
-          shadow="none"
-          className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+        <CampusSectionCard
+          title="Event Snapshot"
+          description="Upcoming and recent events pulled from the live teacher-visible event board."
+          action={
+            <Button
+              color="primary"
+              variant="light"
+              onPress={() => router.push("/teacher/events")}
+            >
+              Open events
+            </Button>
+          }
         >
-          <CardBody className="space-y-4 p-5">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div className="space-y-1">
-                <h2 className="text-lg font-semibold text-campus-text-primary">
-                  Event Snapshot
-                </h2>
-                <p className="text-sm text-campus-text-secondary">
-                  Upcoming and recent events pulled from the live teacher-visible event board.
-                </p>
-              </div>
-
-              <Button
-                color="primary"
-                variant="light"
-                onPress={() => router.push("/teacher/events")}
-              >
-                Open events
-              </Button>
-            </div>
-
             {loading ? (
               <TeacherEventSnapshotSkeleton rows={3} />
             ) : recentEvents.length === 0 ? (
@@ -188,23 +177,12 @@ export default function TeacherDashboard() {
                 ))}
               </div>
             )}
-          </CardBody>
-        </Card>
+        </CampusSectionCard>
 
-        <Card
-          shadow="none"
-          className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+        <CampusSectionCard
+          title="Students Needing Attention"
+          description="Based on missed attendance in teacher-visible event records."
         >
-          <CardBody className="space-y-4 p-5">
-            <div className="space-y-1">
-              <h2 className="text-lg font-semibold text-campus-text-primary">
-                Students Needing Attention
-              </h2>
-              <p className="text-sm text-campus-text-secondary">
-                Based on missed attendance in teacher-visible event records.
-              </p>
-            </div>
-
             {loading ? (
               <TeacherEventSnapshotSkeleton rows={3} />
             ) : attentionStudents.length === 0 ? (
@@ -223,7 +201,7 @@ export default function TeacherDashboard() {
                     shadow="none"
                     className="border border-border/70 bg-slate-50/70"
                   >
-                    <CardBody className="gap-3 p-4">
+                    <CardHeader className="flex items-start justify-between gap-3 p-4 sm:p-5">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="font-semibold text-campus-text-primary">
@@ -237,7 +215,9 @@ export default function TeacherDashboard() {
                           {student.absentCount} missed
                         </Chip>
                       </div>
+                    </CardHeader>
 
+                    <CardBody className="space-y-3 px-4 pb-4 pt-0 sm:px-5 sm:pb-5">
                       <div className="flex flex-wrap gap-2 text-xs">
                         <Chip size="sm" className="bg-emerald-100 text-emerald-700">
                           Present: {student.presentCount}
@@ -255,8 +235,7 @@ export default function TeacherDashboard() {
                 ))}
               </div>
             )}
-          </CardBody>
-        </Card>
+        </CampusSectionCard>
       </div>
     </div>
   );

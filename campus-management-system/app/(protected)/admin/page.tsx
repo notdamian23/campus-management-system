@@ -47,12 +47,15 @@ import LogoutButton from "@/components/LogoutButton";
 import BulkStudentImportModal from "@/components/admin/BulkStudentImportModal";
 import {
   CampusDataTable,
+  CampusSectionCard,
   CampusEmptyState,
   CampusTableBodySkeleton,
   type CampusTableColumn,
   CampusDetailSkeleton,
   CampusLayoutLoadingState,
+  CampusMetricCard,
   CampusMetricSkeleton,
+  CampusWorkspaceHeaderCard,
 } from "@/components/ui";
 import { auth, db } from "@/lib/firebase";
 import { campusToast } from "@/lib/toast";
@@ -2053,36 +2056,26 @@ export default function AdminDashboardPage() {
   return (
     <div className="min-h-screen bg-[#f2f2f2] p-3 sm:p-6 lg:p-10">
       <div className="mx-auto max-w-7xl space-y-5">
-        <Card
-          shadow="sm"
-          className="overflow-hidden border-0 bg-gradient-to-br from-[#7b0000] via-[#991515] to-[#ef6b4a] text-white"
-        >
-          <CardBody className="flex flex-col gap-4 p-4 sm:p-6 lg:flex-row lg:items-center lg:justify-between">
-            <div className="space-y-3">
-              <div className="space-y-1.5">
-                <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/70">
-                  Admin Dashboard
-                </p>
-                <h1 className="text-2xl font-black sm:text-3xl">
-                  Campus Management Control Center
-                </h1>
-                <p className="max-w-2xl text-sm text-white/80">
-                  Supervise users, logs, and attendance exports from one
-                  mobile-friendly control room.
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Chip variant="flat" className="bg-white/15 text-white">
-                  {profiles.length} accounts
-                </Chip>
-                <Chip variant="flat" className="bg-white/15 text-white">
-                  {logs.length} logs
-                </Chip>
-                <Chip variant="flat" className="bg-white/15 text-white">
-                  {events.length} events
-                </Chip>
-              </div>
-            </div>
+        <CampusWorkspaceHeaderCard
+          variant="hero"
+          eyebrow="Admin Dashboard"
+          title="Campus Management Control Center"
+          description="Supervise users, logs, and attendance exports from one mobile-friendly control room."
+          surfaceClassName="border-0 bg-gradient-to-br from-[#7b0000] via-[#991515] to-[#ef6b4a] text-white"
+          meta={
+            <>
+              <Chip variant="flat" className="bg-white/15 text-white">
+                {profiles.length} accounts
+              </Chip>
+              <Chip variant="flat" className="bg-white/15 text-white">
+                {logs.length} logs
+              </Chip>
+              <Chip variant="flat" className="bg-white/15 text-white">
+                {events.length} events
+              </Chip>
+            </>
+          }
+          action={
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="flat"
@@ -2094,8 +2087,8 @@ export default function AdminDashboardPage() {
               </Button>
               <LogoutButton className="bg-white text-[#7b0000] data-[hover=true]:bg-white/90" />
             </div>
-          </CardBody>
-        </Card>
+          }
+        />
 
         <Tabs
           selectedKey={tab}
@@ -2128,111 +2121,66 @@ export default function AdminDashboardPage() {
                   {overviewStats.map((item) => {
                     const Icon = item.icon;
                     return (
-                      <Card
+                      <CampusMetricCard
                         key={item.id}
-                        shadow="sm"
-                        className="border border-white/70 bg-white/90"
-                      >
-                        <CardBody className="space-y-4 p-5">
-                          <div className="flex items-start justify-between gap-4">
-                            <div className="space-y-1">
-                              <p className="text-sm font-semibold text-campus-text-primary">
-                                {item.label}
-                              </p>
-                              <p className="text-xs text-campus-text-secondary">
-                                {item.description}
-                              </p>
-                            </div>
-                            <div
-                              className={`flex h-11 w-11 items-center justify-center rounded-2xl ${item.iconClassName}`}
-                            >
-                              <Icon size={18} />
-                            </div>
-                          </div>
-                          <div className="flex items-end justify-between gap-3">
-                            <h2 className={`text-3xl font-black ${item.tone}`}>
-                              {item.value}
-                            </h2>
-                            <Chip variant="flat" className="font-medium">
-                              Live
-                            </Chip>
-                          </div>
-                        </CardBody>
-                      </Card>
+                        label={item.label}
+                        description={item.description}
+                        value={item.value}
+                        icon={Icon}
+                        surfaceClassName="border-white/70 bg-white/90"
+                        iconClassName={item.iconClassName}
+                        valueClassName={item.tone}
+                        badge={
+                          <Chip variant="flat" className="font-medium">
+                            Live
+                          </Chip>
+                        }
+                      />
                     );
                   })}
                 </div>
 
-                <Card shadow="sm" className="border border-white/70 bg-white/95">
-                  <CardHeader className="px-5 pt-5">
-                    <div className="space-y-1">
-                      <h2 className="text-xl font-bold text-gray-900">
-                        Quick actions
-                      </h2>
-                      <p className="text-sm text-gray-600">
-                        Start with the operational tasks admins reach for most
-                        often.
-                      </p>
-                    </div>
-                  </CardHeader>
-                  <CardBody className="grid gap-4 p-5 pt-3 md:grid-cols-3">
+                <CampusSectionCard
+                  title="Quick actions"
+                  description="Start with the operational tasks admins reach for most often."
+                  className="border-white/70 bg-white/95"
+                  bodyClassName="grid gap-4 p-5 pt-4 sm:p-6 sm:pt-4 md:grid-cols-3"
+                >
                     {quickActions.map((item) => {
                       const Icon = item.icon;
                       return (
-                        <Card
+                        <CampusSectionCard
                           key={item.id}
-                          shadow="none"
-                          className="border border-[#efe7e4] bg-[#fcfbfa]"
+                          title={item.title}
+                          description={item.description}
+                          icon={Icon}
+                          action={
+                            <Chip variant="flat" className="font-medium">
+                              {item.helper}
+                            </Chip>
+                          }
+                          className="border-[#efe7e4] bg-[#fcfbfa] shadow-none"
+                          iconClassName="bg-[#7b0000]/10 text-[#7b0000]"
+                          bodyClassName="space-y-4 p-5 pt-4"
                         >
-                          <CardBody className="space-y-4 p-5">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#7b0000]/10 text-[#7b0000]">
-                                <Icon size={20} />
-                              </div>
-                              <Chip variant="flat" className="font-medium">
-                                {item.helper}
-                              </Chip>
-                            </div>
-                            <div className="space-y-2">
-                              <h3 className="text-lg font-semibold text-campus-text-primary">
-                                {item.title}
-                              </h3>
-                              <p className="text-sm text-campus-text-secondary">
-                                {item.description}
-                              </p>
-                            </div>
-                            <Button
-                              className="w-full bg-[#7b0000] font-semibold text-white sm:w-auto"
-                              onPress={item.onPress}
-                              endContent={<ArrowRight size={16} />}
-                            >
-                              {item.title}
-                            </Button>
-                          </CardBody>
-                        </Card>
+                          <Button
+                            className="w-full bg-[#7b0000] font-semibold text-white sm:w-auto"
+                            onPress={item.onPress}
+                            endContent={<ArrowRight size={16} />}
+                          >
+                            {item.title}
+                          </Button>
+                        </CampusSectionCard>
                       );
                     })}
-                  </CardBody>
-                </Card>
+                </CampusSectionCard>
 
                 <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.7fr)]">
-                  <Card
-                    shadow="sm"
-                    className="border border-white/70 bg-white/95"
-                  >
-                    <CardHeader className="flex items-center justify-between gap-4 px-5 pt-5">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <Activity size={18} className="text-[#7b0000]" />
-                          <h2 className="text-xl font-bold text-gray-900">
-                            Recent activity
-                          </h2>
-                        </div>
-                        <p className="text-sm text-gray-600">
-                          Live admin-facing events from the current CAMPUS log
-                          stream.
-                        </p>
-                      </div>
+                  <CampusSectionCard
+                    title="Recent activity"
+                    description="Live admin-facing events from the current CAMPUS log stream."
+                    icon={Activity}
+                    action={
                       <Button
                         variant="light"
                         className="px-0 font-semibold text-[#7b0000] data-[hover=true]:bg-transparent"
@@ -2240,8 +2188,10 @@ export default function AdminDashboardPage() {
                       >
                         Open logs
                       </Button>
-                    </CardHeader>
-                    <CardBody className="p-5 pt-3">
+                    }
+                    className="border-white/70 bg-white/95"
+                    iconClassName="bg-[#7b0000]/10 text-[#7b0000]"
+                  >
                       {recentActivityItems.length ? (
                         <ScrollShadow className="max-h-[340px] space-y-3 pr-2">
                           {recentActivityItems.map((item) => (
@@ -2273,28 +2223,15 @@ export default function AdminDashboardPage() {
                           className="border-none bg-transparent px-0 py-6"
                         />
                       )}
-                    </CardBody>
-                  </Card>
+                  </CampusSectionCard>
 
-                  <Card
-                    shadow="sm"
-                    className="border border-white/70 bg-white/95"
+                  <CampusSectionCard
+                    title="Attention needed"
+                    description="Signals pulled from current dashboard data to help admins spot follow-up items quickly."
+                    icon={TriangleAlert}
+                    className="border-white/70 bg-white/95"
+                    iconClassName="bg-amber-100 text-amber-700"
                   >
-                    <CardHeader className="px-5 pt-5">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <TriangleAlert size={18} className="text-amber-600" />
-                          <h2 className="text-xl font-bold text-gray-900">
-                            Attention needed
-                          </h2>
-                        </div>
-                        <p className="text-sm text-gray-600">
-                          Signals pulled from current dashboard data to help
-                          admins spot follow-up items quickly.
-                        </p>
-                      </div>
-                    </CardHeader>
-                    <CardBody className="space-y-3 p-5 pt-3">
                       {attentionItems.length ? (
                         attentionItems.map((item) => (
                           <div
@@ -2335,65 +2272,46 @@ export default function AdminDashboardPage() {
                           className="border-none bg-transparent px-0 py-6"
                         />
                       )}
-                    </CardBody>
-                  </Card>
+                  </CampusSectionCard>
                 </div>
 
-                <Card shadow="sm" className="border border-white/70 bg-white/95">
-                  <CardHeader className="px-5 pt-5">
-                    <div className="space-y-1">
-                      <h2 className="text-xl font-bold text-gray-900">
-                        Role overview
-                      </h2>
-                      <p className="text-sm text-gray-600">
-                        Review how access is distributed, then jump directly
-                        into the filtered Users & Roles workspace.
-                      </p>
-                    </div>
-                  </CardHeader>
-                  <CardBody className="grid gap-4 p-5 pt-3 md:grid-cols-2 xl:grid-cols-4">
+                <CampusSectionCard
+                  title="Role overview"
+                  description="Review how access is distributed, then jump directly into the filtered Users & Roles workspace."
+                  className="border-white/70 bg-white/95"
+                  bodyClassName="grid gap-4 p-5 pt-4 sm:p-6 sm:pt-4 md:grid-cols-2 xl:grid-cols-4"
+                >
                     {roleCards.map((item) => (
-                      <Card
+                      <CampusSectionCard
                         key={item.role}
-                        shadow="none"
-                        className="border border-[#efe7e4] bg-[#fcfbfa]"
+                        title={item.role}
+                        description={item.summary}
+                        action={<Chip variant="flat" className="font-semibold">{roleCounts[item.key]}</Chip>}
+                        className="border-[#efe7e4] bg-[#fcfbfa] shadow-none"
+                        bodyClassName="space-y-4 p-5 pt-4"
                       >
-                        <CardBody className="space-y-4 p-5">
-                          <div className="flex items-center justify-between gap-3">
-                            <UserRoleChip role={item.key} />
-                            <Chip variant="flat" className="font-semibold">
-                              {roleCounts[item.key]}
+                        <div className="flex items-start justify-between gap-3">
+                          <UserRoleChip role={item.key} />
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <Tooltip content={`Primary route: ${item.route}`} delay={300}>
+                            <Chip variant="bordered" className="w-fit text-xs text-gray-700">
+                              {item.route}
                             </Chip>
-                          </div>
-                          <div className="space-y-2">
-                            <h3 className="text-lg font-semibold text-campus-text-primary">
-                              {item.role}
-                            </h3>
-                            <p className="min-h-16 text-sm text-campus-text-secondary">
-                              {item.summary}
-                            </p>
-                          </div>
-                          <div className="flex items-center justify-between gap-3">
-                            <Tooltip content={`Primary route: ${item.route}`} delay={300}>
-                              <Chip variant="bordered" className="w-fit text-xs text-gray-700">
-                                {item.route}
-                              </Chip>
-                            </Tooltip>
-                            <Button
-                              size="sm"
-                              variant="light"
-                              className="px-0 font-semibold text-[#7b0000] data-[hover=true]:bg-transparent"
-                              onPress={() => openRoleView(item.key)}
-                              endContent={<ArrowRight size={14} />}
-                            >
-                              View users
-                            </Button>
-                          </div>
-                        </CardBody>
-                      </Card>
+                          </Tooltip>
+                          <Button
+                            size="sm"
+                            variant="light"
+                            className="px-0 font-semibold text-[#7b0000] data-[hover=true]:bg-transparent"
+                            onPress={() => openRoleView(item.key)}
+                            endContent={<ArrowRight size={14} />}
+                          >
+                            View users
+                          </Button>
+                        </div>
+                      </CampusSectionCard>
                     ))}
-                  </CardBody>
-                </Card>
+                </CampusSectionCard>
               </div>
             )}
           </Tab>
@@ -2410,41 +2328,27 @@ export default function AdminDashboardPage() {
               <UsersRolesSkeleton />
             ) : (
               <div className="space-y-5">
-                <Card shadow="sm" className="border">
-                  <CardBody className="space-y-4 p-5">
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                      <div className="space-y-1">
-                        <h2 className="text-xl font-bold text-gray-900">
-                          Users and roles
-                        </h2>
-                        <p className="text-sm text-gray-600">
-                          Search profiles, filter access levels, and manage
-                          sensitive role assignments from one admin workspace.
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Chip color="primary" variant="flat" className="font-semibold">
-                          {profiles.length} total user{profiles.length === 1 ? "" : "s"}
-                        </Chip>
-                        <Chip variant="flat">
-                          {sortedProfiles.length} matching
-                        </Chip>
-                        <Chip variant="flat">
-                          {usersWithEmailCount} with email
-                        </Chip>
-                        <Chip variant="flat">
-                          {usersWithoutEmailCount} without email
-                        </Chip>
-                        <Chip
-                          color={duplicateGroupCount > 0 ? "warning" : "success"}
-                          variant="flat"
-                        >
-                          {duplicateGroupCount} duplicate School ID group
-                          {duplicateGroupCount === 1 ? "" : "s"}
-                        </Chip>
-                      </div>
+                <CampusSectionCard
+                  title="Users and roles"
+                  description="Search profiles, filter access levels, and manage sensitive role assignments from one admin workspace."
+                  action={
+                    <div className="flex flex-wrap gap-2">
+                      <Chip color="primary" variant="flat" className="font-semibold">
+                        {profiles.length} total user{profiles.length === 1 ? "" : "s"}
+                      </Chip>
+                      <Chip variant="flat">{sortedProfiles.length} matching</Chip>
+                      <Chip variant="flat">{usersWithEmailCount} with email</Chip>
+                      <Chip variant="flat">{usersWithoutEmailCount} without email</Chip>
+                      <Chip
+                        color={duplicateGroupCount > 0 ? "warning" : "success"}
+                        variant="flat"
+                      >
+                        {duplicateGroupCount} duplicate School ID group
+                        {duplicateGroupCount === 1 ? "" : "s"}
+                      </Chip>
                     </div>
-
+                  }
+                >
                     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.5fr)_220px_220px_220px_220px]">
                       <Input
                         label="Search profiles"
@@ -2580,8 +2484,7 @@ export default function AdminDashboardPage() {
                         </Button>
                       </div>
                     </div>
-                  </CardBody>
-                </Card>
+                </CampusSectionCard>
 
                 <Card shadow="sm" className="border">
                   <CardHeader className="px-5 pt-5">

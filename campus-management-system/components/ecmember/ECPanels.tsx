@@ -12,6 +12,7 @@ import {
 } from "@heroui/drawer";
 import { ScrollShadow } from "@heroui/scroll-shadow";
 import { Download, FileText, Trash2 } from "lucide-react";
+import { CampusDetailTile } from "@/components/ui";
 import { ECDetailPanelSkeleton } from "./ECSkeletons";
 import { ECEmptyState } from "./ECShared";
 
@@ -148,8 +149,8 @@ function ECDocumentDetailsContent({
   }
 
   return (
-    <div className="space-y-5 p-5">
-      <div className="rounded-[24px] border border-border/70 bg-slate-50/80 p-4">
+    <div className="space-y-6 p-5 sm:p-6">
+      <div className="rounded-[24px] border border-border/70 bg-slate-50/80 p-5">
         <div className="flex items-start gap-3">
           <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-50 text-primary-700">
             <FileText size={18} />
@@ -205,16 +206,7 @@ function DetailRow({
   label: string;
   value: ReactNode;
 }) {
-  return (
-    <div className="rounded-[20px] border border-border/70 bg-slate-50/70 p-4">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
-        {label}
-      </p>
-      <div className="mt-2 break-words text-sm text-campus-text-primary">
-        {value}
-      </div>
-    </div>
-  );
+  return <CampusDetailTile label={label} value={value} />;
 }
 
 function ActionButton({

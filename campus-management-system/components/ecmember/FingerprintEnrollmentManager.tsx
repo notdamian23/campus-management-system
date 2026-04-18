@@ -28,6 +28,7 @@ import {
   type PortableDeviceEnrollmentSessionStudentDoc,
   type PortableDeviceEnrollmentStudentStatus,
 } from "@/lib/portableDevice";
+import { useIsBelowBreakpoint } from "./useIsBelowBreakpoint";
 
 type StudentAccountStatus = "Active" | "Inactive";
 type StudentFingerprintStatus = "Active" | "Inactive";
@@ -270,13 +271,17 @@ function mapSessionStudentRow(
 
 export function FingerprintEnrollmentManager({
   students,
+  buttonClassName,
 }: {
   students: StudentRosterRow[];
+  buttonClassName?: string;
 }) {
   const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
+  const isCompactViewport = useIsBelowBreakpoint(768);
   const [isOpen, setIsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<EnrollmentTab>("create");
   const [studentSearch, setStudentSearch] = useState("");
+  const [eligibleStudentsPage, setEligibleStudentsPage] = useState(1);
   const [selectedStudentIds, setSelectedStudentIds] = useState<Set<string>>(
     new Set(),
   );
@@ -331,6 +336,49 @@ export function FingerprintEnrollmentManager({
         .includes(search);
     });
   }, [eligibleStudents, studentSearch]);
+
+  const eligibleStudentsPerPage = 10;
+  const eligibleStudentsTotalPages = useMemo(
+    () =>
+      Math.max(
+        1,
+        Math.ceil(filteredEligibleStudents.length / eligibleStudentsPerPage),
+      ),
+    [filteredEligibleStudents.length],
+  );
+  const safeEligibleStudentsPage = Math.min(
+    Math.max(eligibleStudentsPage, 1),
+    eligibleStudentsTotalPages,
+  );
+  const paginatedEligibleStudents = useMemo(() => {
+    const startIndex =
+      (safeEligibleStudentsPage - 1) * eligibleStudentsPerPage;
+    return filteredEligibleStudents.slice(
+      startIndex,
+      startIndex + eligibleStudentsPerPage,
+    );
+  }, [
+    eligibleStudentsPerPage,
+    filteredEligibleStudents,
+    safeEligibleStudentsPage,
+  ]);
+  const visibleSelectedStudentIds = useMemo(
+    () =>
+      new Set(
+        paginatedEligibleStudents
+          .filter((student) => selectedStudentIds.has(student.uid))
+          .map((student) => student.uid),
+      ),
+    [paginatedEligibleStudents, selectedStudentIds],
+  );
+  const eligiblePageStart =
+    filteredEligibleStudents.length === 0
+      ? 0
+      : (safeEligibleStudentsPage - 1) * eligibleStudentsPerPage + 1;
+  const eligiblePageEnd = Math.min(
+    safeEligibleStudentsPage * eligibleStudentsPerPage,
+    filteredEligibleStudents.length,
+  );
 
   const selectedStudents = useMemo(() => {
     return eligibleStudents.filter((student) =>
@@ -457,13 +505,45 @@ export function FingerprintEnrollmentManager({
     return () => window.clearInterval(intervalId);
   }, [activeSessionId, isOpen, loadSessionDetail]);
 
+  useEffect(() => {
+    setEligibleStudentsPage(1);
+  }, [studentSearch]);
+
+  useEffect(() => {
+    setEligibleStudentsPage(1);
+  }, [students]);
+
+  useEffect(() => {
+    setEligibleStudentsPage((previous) =>
+      Math.min(Math.max(previous, 1), eligibleStudentsTotalPages),
+    );
+  }, [eligibleStudentsTotalPages]);
+
+  useEffect(() => {
+    const eligibleIds = new Set(eligibleStudents.map((student) => student.uid));
+    setSelectedStudentIds((previous) => {
+      let changed = false;
+      const next = new Set<string>();
+
+      previous.forEach((studentId) => {
+        if (eligibleIds.has(studentId)) {
+          next.add(studentId);
+          return;
+        }
+        changed = true;
+      });
+
+      return changed ? next : previous;
+    });
+  }, [eligibleStudents]);
+
   const selectVisibleStudents = useCallback(() => {
     setSelectedStudentIds((previous) => {
       const next = new Set(previous);
-      filteredEligibleStudents.forEach((student) => next.add(student.uid));
+      paginatedEligibleStudents.forEach((student) => next.add(student.uid));
       return next;
     });
-  }, [filteredEligibleStudents]);
+  }, [paginatedEligibleStudents]);
 
   const clearStudentSelection = useCallback(() => {
     setSelectedStudentIds(new Set());
@@ -583,8 +663,12 @@ export function FingerprintEnrollmentManager({
         onPress={() => {
           setIsOpen(true);
           setActiveTab("create");
+          setEligibleStudentsPage(1);
         }}
-        className="w-full border-[#7b0000] font-semibold text-[#7b0000] xl:w-auto"
+        className={[
+          "min-h-12 w-full justify-center border-[#7b0000] font-semibold text-[#7b0000] xl:w-auto",
+          buttonClassName ?? "",
+        ].join(" ")}
       >
         Enroll Fingerprint
       </Button>
@@ -660,7 +744,7 @@ export function FingerprintEnrollmentManager({
                           <Button
                             variant="flat"
                             onPress={selectVisibleStudents}
-                            isDisabled={!filteredEligibleStudents.length}
+                            isDisabled={!paginatedEligibleStudents.length}
                           >
                             Select Visible
                           </Button>
@@ -677,7 +761,7 @@ export function FingerprintEnrollmentManager({
                       <CampusDataTable
                         ariaLabel="Students without fingerprints"
                         columns={enrollmentCandidateColumns}
-                        items={filteredEligibleStudents}
+                        items={paginatedEligibleStudents}
                         getRowKey={(student) => student.uid}
                         renderCell={(student, columnKey) => {
                           if (columnKey === "name") {
@@ -734,21 +818,100 @@ export function FingerprintEnrollmentManager({
                         emptyTitle="No eligible students"
                         emptyDescription="No students are waiting for fingerprint enrollment."
                         selectionMode="multiple"
-                        selectedKeys={selectedStudentIds}
+                        selectedKeys={visibleSelectedStudentIds}
                         onSelectionChange={(keys) => {
-                          setSelectedStudentIds(
-                            selectionToSet(
-                              keys,
-                              filteredEligibleStudents.map(
-                                (student) => student.uid,
-                              ),
-                            ),
+                          const visibleIds = paginatedEligibleStudents.map(
+                            (student) => student.uid,
                           );
+                          const visibleSelection = selectionToSet(keys, visibleIds);
+
+                          // Preserve selections from other pages while replacing
+                          // only the visible page's checkbox state.
+                          setSelectedStudentIds((previous) => {
+                            const next = new Set(previous);
+                            visibleIds.forEach((studentId) => next.delete(studentId));
+                            visibleSelection.forEach((studentId) =>
+                              next.add(studentId),
+                            );
+                            return next;
+                          });
                         }}
                         showSelectionCheckboxes
                         tableClassName="min-w-[720px]"
                         wrapperClassName="border-[#f0e7df]"
                       />
+
+                      <div className="flex flex-col gap-3 border-t border-[#f0e7df] pt-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="space-y-1">
+                          <p className="text-sm font-medium text-campus-text-primary">
+                            Showing {eligiblePageStart}-{eligiblePageEnd} of{" "}
+                            {filteredEligibleStudents.length} visible eligible
+                            student
+                            {filteredEligibleStudents.length === 1 ? "" : "s"}
+                          </p>
+                          <p className="text-xs text-campus-text-secondary">
+                            {eligibleStudents.length} total eligible and{" "}
+                            {selectedStudents.length} selected across all pages.
+                          </p>
+                        </div>
+
+                        {eligibleStudentsTotalPages > 1 ? (
+                          <div className="flex flex-col gap-2 sm:items-end">
+                            <p className="text-xs uppercase tracking-[0.18em] text-campus-text-secondary">
+                              Page {safeEligibleStudentsPage} of{" "}
+                              {eligibleStudentsTotalPages}
+                            </p>
+                            <div
+                              className={[
+                                "grid gap-2",
+                                isCompactViewport
+                                  ? "grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] w-full"
+                                  : "grid-cols-[auto_auto_auto]",
+                              ].join(" ")}
+                            >
+                              <Button
+                                variant="bordered"
+                                size="sm"
+                                onPress={() =>
+                                  setEligibleStudentsPage((previous) =>
+                                    Math.max(previous - 1, 1),
+                                  )
+                                }
+                                isDisabled={safeEligibleStudentsPage <= 1}
+                                className={isCompactViewport ? "w-full" : ""}
+                              >
+                                Previous
+                              </Button>
+                              <Chip
+                                variant="flat"
+                                className="justify-center px-3 text-center font-medium"
+                              >
+                                {safeEligibleStudentsPage} /{" "}
+                                {eligibleStudentsTotalPages}
+                              </Chip>
+                              <Button
+                                variant="bordered"
+                                size="sm"
+                                onPress={() =>
+                                  setEligibleStudentsPage((previous) =>
+                                    Math.min(
+                                      previous + 1,
+                                      eligibleStudentsTotalPages,
+                                    ),
+                                  )
+                                }
+                                isDisabled={
+                                  safeEligibleStudentsPage >=
+                                  eligibleStudentsTotalPages
+                                }
+                                className={isCompactViewport ? "w-full" : ""}
+                              >
+                                Next
+                              </Button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
                     </CardBody>
                   </Card>
 

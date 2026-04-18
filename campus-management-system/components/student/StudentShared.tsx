@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import clsx from "clsx";
-import { Card, CardBody } from "@heroui/card";
+import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Tab, Tabs } from "@heroui/tabs";
 import { Tooltip } from "@heroui/tooltip";
@@ -26,6 +26,10 @@ import type {
   StudentNotificationType,
   StudentPayment,
 } from "./StudentPortalProvider";
+import {
+  CampusMetricCard,
+  CampusWorkspaceHeaderCard,
+} from "@/components/ui";
 import {
   buildStudentAudienceLabel,
   formatStudentCurrency,
@@ -71,75 +75,18 @@ export function StudentPageHeader({
   className,
   variant = "default",
 }: StudentPageHeaderProps) {
-  const isHero = variant === "hero";
-
   return (
-    <Card
-      shadow="none"
-      className={clsx(
-        "overflow-hidden",
-        isHero
-          ? "border-none bg-gradient-to-br from-primary-700 via-primary-600 to-[#f19b4c] text-white shadow-[var(--shadow-card)]"
-          : "border border-border/70 bg-white/90 shadow-[var(--shadow-soft)]",
-        className,
-      )}
-    >
-      <CardBody className="gap-5 p-5 sm:p-6">
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-          <div className="flex flex-1 items-start gap-4">
-            {Icon ? (
-              <div
-                className={clsx(
-                  "flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl",
-                  isHero
-                    ? "bg-white/15 text-white"
-                    : "bg-primary-50 text-primary-700",
-                )}
-              >
-                <Icon size={20} />
-              </div>
-            ) : null}
-
-            <div className="min-w-0 space-y-2">
-              <p
-                className={clsx(
-                  "text-xs font-semibold uppercase tracking-[0.2em]",
-                  isHero ? "text-white/75" : "text-primary-700",
-                )}
-              >
-                {eyebrow}
-              </p>
-              <h1
-                className={clsx(
-                  "text-2xl font-bold sm:text-3xl",
-                  isHero ? "text-white" : "text-campus-text-primary",
-                )}
-              >
-                {title}
-              </h1>
-              <p
-                className={clsx(
-                  "max-w-3xl text-sm leading-6",
-                  isHero ? "text-white/85" : "text-campus-text-secondary",
-                )}
-              >
-                {description}
-              </p>
-            </div>
-          </div>
-
-          {aside ? (
-            <div className="w-full shrink-0 lg:w-auto lg:min-w-[320px]">{aside}</div>
-          ) : action ? (
-            <div className="shrink-0">{action}</div>
-          ) : null}
-        </div>
-
-        {meta ? (
-          <div className="flex flex-wrap items-center gap-2">{meta}</div>
-        ) : null}
-      </CardBody>
-    </Card>
+    <CampusWorkspaceHeaderCard
+      title={title}
+      description={description}
+      eyebrow={eyebrow}
+      icon={Icon}
+      meta={meta}
+      action={action}
+      aside={aside}
+      className={className}
+      variant={variant}
+    />
   );
 }
 
@@ -176,49 +123,15 @@ function StudentStatCard({
   const toneClasses = getStudentToneClasses(tone);
 
   return (
-    <Card
-      shadow="none"
-      className={clsx(
-        "border border-border/70 shadow-[var(--shadow-soft)]",
-        surfaceTone ? toneClasses.surface : "bg-white/95",
-      )}
-    >
-      <CardBody className="gap-4 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="space-y-1">
-            <p className="text-sm font-medium text-campus-text-secondary">
-              {label}
-            </p>
-            {description ? (
-              <p className="text-xs leading-5 text-campus-text-secondary">
-                {description}
-              </p>
-            ) : null}
-          </div>
-
-          {Icon ? (
-            <div
-              className={clsx(
-                "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl",
-                toneClasses.icon,
-              )}
-            >
-              <Icon size={18} />
-            </div>
-          ) : null}
-        </div>
-
-        <div
-          className={clsx(
-            "text-3xl font-bold",
-            toneClasses.value,
-            valueClassName,
-          )}
-        >
-          {value}
-        </div>
-      </CardBody>
-    </Card>
+    <CampusMetricCard
+      label={label}
+      value={value}
+      description={description}
+      icon={Icon}
+      surfaceClassName={surfaceTone ? toneClasses.surface : undefined}
+      iconClassName={toneClasses.icon}
+      valueClassName={clsx(toneClasses.value, valueClassName)}
+    />
   );
 }
 
@@ -418,53 +331,53 @@ export function StudentEventCard({
         className,
       )}
     >
-      <CardBody className="flex h-full flex-col gap-4 p-4 sm:p-5">
-        <div className="flex flex-1 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0 space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <StudentEventStatusBadge status={status} />
-              {audienceLabel ? (
-                <Chip size="sm" className="bg-slate-100 text-slate-700">
-                  {audienceLabel}
-                </Chip>
-              ) : null}
-            </div>
-
-            <div className="space-y-1">
-              <h3 className="text-base font-semibold text-campus-text-primary">
-                {title}
-              </h3>
-              {description ? (
-                <p className="text-sm leading-6 text-campus-text-secondary">
-                  {description}
-                </p>
-              ) : null}
-            </div>
-
-            <div className="flex flex-col gap-2 text-sm text-campus-text-secondary sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
-              <span className="inline-flex items-center gap-1.5">
-                <CalendarDays size={14} />
-                {dateLabel}
-                {timeLabel ? ` | ${timeLabel}` : ""}
-              </span>
-              {location ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <MapPin size={14} />
-                  {location}
-                </span>
-              ) : null}
-            </div>
+      <CardHeader className="flex flex-col gap-4 p-4 sm:p-5 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 flex-1 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <StudentEventStatusBadge status={status} />
+            {audienceLabel ? (
+              <Chip size="sm" className="bg-slate-100 text-slate-700">
+                {audienceLabel}
+              </Chip>
+            ) : null}
           </div>
 
-          {action ? <div className="shrink-0 lg:pt-1">{action}</div> : null}
+          <div className="space-y-1.5">
+            <h3 className="text-base font-semibold text-campus-text-primary">
+              {title}
+            </h3>
+            {description ? (
+              <p className="text-sm leading-6 text-campus-text-secondary">
+                {description}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="flex flex-col gap-2 text-sm text-campus-text-secondary sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
+            <span className="inline-flex items-center gap-1.5">
+              <CalendarDays size={14} />
+              {dateLabel}
+              {timeLabel ? ` | ${timeLabel}` : ""}
+            </span>
+            {location ? (
+              <span className="inline-flex items-center gap-1.5">
+                <MapPin size={14} />
+                {location}
+              </span>
+            ) : null}
+          </div>
         </div>
 
-        {footer ? (
-          <div className={clsx("rounded-[20px] p-3", toneClasses.surface)}>
+        {action ? <div className="w-full shrink-0 lg:w-auto lg:pt-1">{action}</div> : null}
+      </CardHeader>
+
+      {footer ? (
+        <CardBody className="px-4 pb-4 pt-0 sm:px-5 sm:pb-5">
+          <div className={clsx("rounded-[20px] p-3.5 sm:p-4", toneClasses.surface)}>
             {footer}
           </div>
-        ) : null}
-      </CardBody>
+        </CardBody>
+      ) : null}
     </Card>
   );
 }
@@ -505,50 +418,50 @@ export function StudentPaymentCard({
         className,
       )}
     >
-      <CardBody className="gap-4 p-4 sm:p-5">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0 flex-1 space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <Chip size="sm" className={toneClasses.chip}>
-                {status}
-              </Chip>
-              <Chip size="sm" className="bg-slate-100 text-slate-700">
-                Ref: {ref}
-              </Chip>
-            </div>
-
-            <div className="space-y-1">
-              <h3 className="text-base font-semibold text-campus-text-primary">
-                {title}
-              </h3>
-              <p className="text-sm text-campus-text-secondary">Due: {dateLabel}</p>
-              {details ? (
-                <p className="text-sm leading-6 text-campus-text-secondary">
-                  {details}
-                </p>
-              ) : null}
-            </div>
+      <CardHeader className="flex flex-col gap-4 p-4 sm:p-5 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Chip size="sm" className={toneClasses.chip}>
+              {status}
+            </Chip>
+            <Chip size="sm" className="bg-slate-100 text-slate-700">
+              Ref: {ref}
+            </Chip>
           </div>
 
-          <div className="shrink-0 space-y-3 sm:text-right">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
-                Amount
+          <div className="space-y-1.5">
+            <h3 className="text-base font-semibold text-campus-text-primary">
+              {title}
+            </h3>
+            <p className="text-sm text-campus-text-secondary">Due: {dateLabel}</p>
+            {details ? (
+              <p className="text-sm leading-6 text-campus-text-secondary">
+                {details}
               </p>
-              <p className={clsx("mt-1 text-2xl font-bold", toneClasses.value)}>
-                {formatStudentCurrency(amount)}
-              </p>
-            </div>
-            {action ? action : null}
+            ) : null}
           </div>
         </div>
 
-        {footer ? (
-          <div className={clsx("rounded-[20px] p-3", toneClasses.surface)}>
+        <div className="w-full shrink-0 space-y-3 sm:w-auto sm:text-right">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-campus-text-secondary">
+              Amount
+            </p>
+            <p className={clsx("mt-1 text-2xl font-bold", toneClasses.value)}>
+              {formatStudentCurrency(amount)}
+            </p>
+          </div>
+          {action ? action : null}
+        </div>
+      </CardHeader>
+
+      {footer ? (
+        <CardBody className="px-4 pb-4 pt-0 sm:px-5 sm:pb-5">
+          <div className={clsx("rounded-[20px] p-3.5 sm:p-4", toneClasses.surface)}>
             {footer}
           </div>
-        ) : null}
-      </CardBody>
+        </CardBody>
+      ) : null}
     </Card>
   );
 }
@@ -589,56 +502,56 @@ export function StudentNotificationCard({
         className,
       )}
     >
-      <CardBody className="gap-4 p-4 sm:p-5">
-        <div className="flex items-start gap-3">
-          <div
-            className={clsx(
-              "mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl",
-              toneClasses.icon,
-            )}
-          >
-            <MetaIcon size={18} />
-          </div>
-
-          <div className="min-w-0 flex-1 space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <Chip size="sm" className={toneClasses.chip}>
-                {meta.label}
-              </Chip>
-              {unread ? (
-                <Chip size="sm" className="bg-primary-50 text-primary-700">
-                  Unread
-                </Chip>
-              ) : (
-                <Chip size="sm" className="bg-slate-100 text-slate-700">
-                  Read
-                </Chip>
-              )}
-            </div>
-
-            <div className="space-y-1">
-              <h3 className="text-base font-semibold text-campus-text-primary">
-                {title}
-              </h3>
-              <p className="text-sm leading-6 text-campus-text-secondary">
-                {description}
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 text-xs text-campus-text-secondary">
-              <span>{displayDate}</span>
-              {relativeDate ? <span>| {relativeDate}</span> : null}
-            </div>
-          </div>
+      <CardHeader className="items-start gap-4 p-4 sm:p-5">
+        <div
+          className={clsx(
+            "mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-[1.2rem] sm:h-12 sm:w-12",
+            toneClasses.icon,
+          )}
+        >
+          <MetaIcon size={18} />
         </div>
 
-        {primaryAction || secondaryAction ? (
+        <div className="min-w-0 flex-1 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Chip size="sm" className={toneClasses.chip}>
+              {meta.label}
+            </Chip>
+            {unread ? (
+              <Chip size="sm" className="bg-primary-50 text-primary-700">
+                Unread
+              </Chip>
+            ) : (
+              <Chip size="sm" className="bg-slate-100 text-slate-700">
+                Read
+              </Chip>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <h3 className="text-base font-semibold text-campus-text-primary">
+              {title}
+            </h3>
+            <p className="text-sm leading-6 text-campus-text-secondary">
+              {description}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-xs text-campus-text-secondary">
+            <span>{displayDate}</span>
+            {relativeDate ? <span>| {relativeDate}</span> : null}
+          </div>
+        </div>
+      </CardHeader>
+
+      {primaryAction || secondaryAction ? (
+        <CardBody className="px-4 pb-4 pt-0 sm:px-5 sm:pb-5">
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
             {primaryAction}
             {secondaryAction}
           </div>
-        ) : null}
-      </CardBody>
+        </CardBody>
+      ) : null}
     </Card>
   );
 }

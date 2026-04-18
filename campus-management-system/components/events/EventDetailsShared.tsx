@@ -2,7 +2,7 @@
 
 import { ReactNode, useEffect, useMemo, useState } from "react";
 import { Button } from "@heroui/button";
-import { Card, CardBody } from "@heroui/card";
+import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
 import {
@@ -14,6 +14,11 @@ import {
 } from "@heroui/modal";
 import { Select, SelectItem } from "@heroui/select";
 import { Download, FileText, ImageIcon, Search } from "lucide-react";
+import {
+  CampusDetailTile,
+  CampusMetricCard,
+  CampusSectionCard,
+} from "@/components/ui";
 import {
   formatTeacherBytes,
   getTeacherToneClasses,
@@ -114,12 +119,13 @@ export function EventDetailStat({
   const toneClasses = getTeacherToneClasses(tone);
 
   return (
-    <Card shadow="none" className="border border-border/70 bg-slate-50/70">
-      <CardBody className="p-4">
-        <p className="text-sm text-campus-text-secondary">{label}</p>
-        <p className={`mt-2 text-2xl font-bold ${toneClasses.value}`}>{value}</p>
-      </CardBody>
-    </Card>
+    <CampusMetricCard
+      label={label}
+      value={value}
+      surfaceClassName="bg-slate-50/70"
+      valueClassName={toneClasses.value}
+      className="shadow-none"
+    />
   );
 }
 
@@ -130,14 +136,7 @@ export function EventDetailInfoRow({
   label: string;
   value: string;
 }) {
-  return (
-    <div>
-      <p className="text-xs uppercase tracking-[0.18em] text-campus-text-secondary">
-        {label}
-      </p>
-      <p className="mt-1 text-sm leading-6 text-campus-text-primary">{value}</p>
-    </div>
-  );
+  return <CampusDetailTile label={label} value={value} className="border-none bg-transparent" />;
 }
 
 export function EventDetailSectionCard({
@@ -148,14 +147,15 @@ export function EventDetailSectionCard({
   children: ReactNode;
 }) {
   return (
-    <Card shadow="none" className="border border-border/70 bg-slate-50/70">
-      <CardBody className="space-y-3 p-4">
-        {title ? (
-          <p className="text-sm font-semibold text-campus-text-primary">{title}</p>
-        ) : null}
-        {children}
-      </CardBody>
-    </Card>
+    <CampusSectionCard
+      title={title}
+      surfaceClassName="bg-slate-50/70"
+      bodyClassName="space-y-4 p-4 sm:p-5"
+      className="shadow-none"
+      titleClassName="text-sm"
+    >
+      {children}
+    </CampusSectionCard>
   );
 }
 
@@ -654,7 +654,7 @@ function ImagePreviewCard({
         )}
       </div>
 
-      <CardBody className="space-y-3 p-4">
+      <CardBody className="space-y-4 p-4 sm:p-5">
         <div className="space-y-2">
           <p className="line-clamp-2 text-sm font-semibold text-campus-text-primary">
             {file.name}
@@ -669,13 +669,14 @@ function ImagePreviewCard({
           </div>
         </div>
 
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <Button
             color="primary"
             variant="flat"
             startContent={<Download size={16} />}
             onPress={() => onDownloadFile(file)}
             isDisabled={!file.downloadURL}
+            className="w-full sm:w-auto"
           >
             Download
           </Button>
@@ -697,8 +698,8 @@ function DocumentListItem({
 }) {
   return (
     <Card shadow="none" className="border border-border/70 bg-slate-50/70">
-      <CardBody className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
+      <CardHeader className="flex flex-col gap-4 p-4 sm:p-5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0 flex-1">
           <p className="truncate font-semibold text-campus-text-primary">
             {file.name}
           </p>
@@ -712,7 +713,7 @@ function DocumentListItem({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex w-full flex-col gap-2 self-start sm:w-auto sm:flex-row sm:items-center sm:self-auto">
           <Button
             size="sm"
             variant="flat"
@@ -720,12 +721,13 @@ function DocumentListItem({
             startContent={<Download size={16} />}
             onPress={() => onDownloadFile(file)}
             isDisabled={!file.downloadURL}
+            className="w-full sm:w-auto"
           >
             Download
           </Button>
           {actions ? <div className="shrink-0">{actions}</div> : null}
         </div>
-      </CardBody>
+      </CardHeader>
     </Card>
   );
 }

@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { Button } from "@heroui/button";
 import {
@@ -11,7 +10,7 @@ import {
   CreditCard,
   GraduationCap,
 } from "lucide-react";
-import { CampusMetricSkeleton } from "@/components/ui";
+import { CampusMetricSkeleton, CampusSectionCard } from "@/components/ui";
 import {
   StudentAccountStatusChip,
   StudentCardStackSkeleton,
@@ -140,28 +139,17 @@ export default function StudentDashboard() {
       )}
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,1fr)]">
-        <Card
-          shadow="none"
-          className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
+        <CampusSectionCard
+          title="Events Overview"
+          description="Your next and most recent event updates in one place."
+          action={
+            <Link href="/student/event">
+              <Button color="primary" variant="flat">
+                Open events
+              </Button>
+            </Link>
+          }
         >
-          <CardBody className="space-y-4 p-5">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div className="space-y-1">
-                <h2 className="text-lg font-semibold text-campus-text-primary">
-                  Events Overview
-                </h2>
-                <p className="text-sm text-campus-text-secondary">
-                  Your next and most recent event updates in one place.
-                </p>
-              </div>
-
-              <Link href="/student/event">
-                <Button color="primary" variant="flat">
-                  Open events
-                </Button>
-              </Link>
-            </div>
-
             {loading ? (
               <StudentCardStackSkeleton rows={3} />
             ) : eventOverview.length === 0 ? (
@@ -197,41 +185,31 @@ export default function StudentDashboard() {
                 ))}
               </div>
             )}
-          </CardBody>
-        </Card>
+        </CampusSectionCard>
 
-        <Card
-          shadow="none"
-          className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
-        >
-          <CardBody className="space-y-4 p-5">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-lg font-semibold text-campus-text-primary">
-                    Recent Notifications
-                  </h2>
-                  <Chip
-                    size="sm"
-                    className={
-                      unreadNotificationsCount > 0
-                        ? "bg-rose-100 text-rose-700"
-                        : "bg-emerald-100 text-emerald-700"
-                    }
-                  >
-                    {unreadNotificationsCount} unread
-                  </Chip>
-                </div>
-                <p className="text-sm text-campus-text-secondary">
-                  Latest updates from events, payments, and EC notices.
-                </p>
-              </div>
-
-              <Link href="/student/notifications">
-                <Button variant="light">Open notifications</Button>
-              </Link>
+        <CampusSectionCard
+          title={
+            <div className="flex flex-wrap items-center gap-2">
+              <span>Recent Notifications</span>
+              <Chip
+                size="sm"
+                className={
+                  unreadNotificationsCount > 0
+                    ? "bg-rose-100 text-rose-700"
+                    : "bg-emerald-100 text-emerald-700"
+                }
+              >
+                {unreadNotificationsCount} unread
+              </Chip>
             </div>
-
+          }
+          description="Latest updates from events, payments, and EC notices."
+          action={
+            <Link href="/student/notifications">
+              <Button variant="light">Open notifications</Button>
+            </Link>
+          }
+        >
             {loading ? (
               <StudentCardStackSkeleton rows={3} />
             ) : recentNotifications.length === 0 ? (
@@ -264,8 +242,7 @@ export default function StudentDashboard() {
                 ))}
               </div>
             )}
-          </CardBody>
-        </Card>
+        </CampusSectionCard>
       </div>
     </div>
   );

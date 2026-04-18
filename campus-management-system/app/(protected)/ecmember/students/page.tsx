@@ -1838,9 +1838,9 @@ export default function ECStudentLookup() {
         </div>
 
         <ECFilterBar
-          controlsClassName="grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6"
+          controlsClassName="grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1.5fr)_220px_200px_minmax(0,1.2fr)]"
         >
-          <div className="xl:col-span-2">
+          <div>
             <Input
               aria-label="Search students"
               type="text"
@@ -1888,30 +1888,33 @@ export default function ECStudentLookup() {
             {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
           </Select>
 
-          <Button
-            variant="bordered"
-            onPress={clearFilters}
-            className="min-h-12 w-full font-medium"
-          >
-            Clear Filters
-          </Button>
+          <div className="grid grid-cols-1 gap-3 md:col-span-2 sm:grid-cols-2 xl:col-span-1 xl:grid-cols-3 xl:items-end">
+            <Button
+              variant="bordered"
+              onPress={clearFilters}
+              className="min-h-12 w-full font-medium"
+            >
+              Clear Filters
+            </Button>
 
-          <div className="flex items-end">
-            <FingerprintEnrollmentManager students={students} />
+            <FingerprintEnrollmentManager
+              students={filtered}
+              buttonClassName="w-full"
+            />
+
+            <Button
+              onPress={() => setShowAddForm((prev) => !prev)}
+              className={[
+                "min-h-12 w-full justify-center gap-2 text-sm font-medium text-white",
+                showAddForm
+                  ? "bg-gray-600 hover:bg-gray-700"
+                  : "bg-[#7b0000] hover:opacity-95",
+              ].join(" ")}
+            >
+              <FiPlus size={16} />
+              {showAddForm ? "Cancel Add Student" : "Add Student"}
+            </Button>
           </div>
-
-          <Button
-            onPress={() => setShowAddForm((prev) => !prev)}
-            className={[
-              "min-h-12 w-full justify-center gap-2 text-sm font-medium text-white",
-              showAddForm
-                ? "bg-gray-600 hover:bg-gray-700"
-                : "bg-[#7b0000] hover:opacity-95",
-            ].join(" ")}
-          >
-            <FiPlus size={16} />
-            {showAddForm ? "Cancel Add Student" : "Add Student"}
-          </Button>
         </ECFilterBar>
       </section>
 

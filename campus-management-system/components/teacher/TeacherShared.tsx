@@ -3,11 +3,15 @@
 import type { ReactNode } from "react";
 import clsx from "clsx";
 import type { Selection, SortDescriptor } from "@react-types/shared";
-import { Card, CardBody } from "@heroui/card";
+import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { ScrollShadow } from "@heroui/scroll-shadow";
 import type { LucideIcon } from "lucide-react";
 import { CalendarDays, MapPin } from "lucide-react";
+import {
+  CampusMetricCard,
+  CampusWorkspaceHeaderCard,
+} from "@/components/ui";
 import {
   CampusDataTable,
   type CampusTableColumn,
@@ -49,71 +53,17 @@ export function TeacherPageHeader({
   className,
   variant = "default",
 }: TeacherPageHeaderProps) {
-  const isHero = variant === "hero";
-
   return (
-    <Card
-      shadow="none"
-      className={clsx(
-        "overflow-hidden",
-        isHero
-          ? "border-none bg-gradient-to-br from-primary-700 via-primary-600 to-[#f19b4c] text-white shadow-[var(--shadow-card)]"
-          : "border border-border/70 bg-white/90 shadow-[var(--shadow-soft)]",
-        className,
-      )}
-    >
-      <CardBody className="gap-5 p-5 sm:p-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="flex flex-1 items-start gap-4">
-            {Icon ? (
-              <div
-                className={clsx(
-                  "flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl",
-                  isHero
-                    ? "bg-white/15 text-white"
-                    : "bg-primary-50 text-primary-700",
-                )}
-              >
-                <Icon size={20} />
-              </div>
-            ) : null}
-
-            <div className="min-w-0 space-y-2">
-              <p
-                className={clsx(
-                  "text-xs font-semibold uppercase tracking-[0.2em]",
-                  isHero ? "text-white/75" : "text-primary-700",
-                )}
-              >
-                {eyebrow}
-              </p>
-              <h1
-                className={clsx(
-                  "text-2xl font-bold sm:text-3xl",
-                  isHero ? "text-white" : "text-campus-text-primary",
-                )}
-              >
-                {title}
-              </h1>
-              <p
-                className={clsx(
-                  "max-w-3xl text-sm leading-6",
-                  isHero ? "text-white/85" : "text-campus-text-secondary",
-                )}
-              >
-                {description}
-              </p>
-            </div>
-          </div>
-
-          {action ? <div className="shrink-0">{action}</div> : null}
-        </div>
-
-        {meta ? (
-          <div className="flex flex-wrap items-center gap-2">{meta}</div>
-        ) : null}
-      </CardBody>
-    </Card>
+    <CampusWorkspaceHeaderCard
+      title={title}
+      description={description}
+      eyebrow={eyebrow}
+      icon={Icon}
+      meta={meta}
+      action={action}
+      className={className}
+      variant={variant}
+    />
   );
 }
 
@@ -148,40 +98,14 @@ function TeacherStatCard({
   const toneClasses = getTeacherToneClasses(tone);
 
   return (
-    <Card
-      shadow="none"
-      className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
-    >
-      <CardBody className="gap-4 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="space-y-1">
-            <p className="text-sm font-medium text-campus-text-secondary">
-              {label}
-            </p>
-            {description ? (
-              <p className="text-xs leading-5 text-campus-text-secondary">
-                {description}
-              </p>
-            ) : null}
-          </div>
-
-          {Icon ? (
-            <div
-              className={clsx(
-                "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl",
-                toneClasses.icon,
-              )}
-            >
-              <Icon size={18} />
-            </div>
-          ) : null}
-        </div>
-
-        <div className={clsx("text-3xl font-bold", toneClasses.value)}>
-          {value}
-        </div>
-      </CardBody>
-    </Card>
+    <CampusMetricCard
+      label={label}
+      value={value}
+      description={description}
+      icon={Icon}
+      iconClassName={toneClasses.icon}
+      valueClassName={toneClasses.value}
+    />
   );
 }
 
@@ -414,39 +338,37 @@ export function TeacherEventSnapshotCard({
         className,
       )}
     >
-      <CardBody className="gap-4 p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0 space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <Chip size="sm" className={lifecycleClasses.chip}>
-                {capitalizeTeacherLabel(lifecycle)}
-              </Chip>
-            </div>
-
-            <div className="space-y-1">
-              <h3 className="text-base font-semibold text-campus-text-primary">
-                {title}
-              </h3>
-              <div className="flex flex-wrap gap-3 text-sm text-campus-text-secondary">
-                <span className="inline-flex items-center gap-1.5">
-                  <CalendarDays size={14} />
-                  {dateLabel}
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <MapPin size={14} />
-                  {location}
-                </span>
-              </div>
-            </div>
-
-            {summaryItems.length > 0 ? (
-              <TeacherActivityChipGroup items={summaryItems} />
-            ) : null}
+      <CardHeader className="flex flex-col gap-4 p-4 sm:p-5 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 flex-1 space-y-3.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <Chip size="sm" className={lifecycleClasses.chip}>
+              {capitalizeTeacherLabel(lifecycle)}
+            </Chip>
           </div>
 
-          {action ? <div className="shrink-0 lg:pt-1">{action}</div> : null}
+          <div className="space-y-1.5">
+            <h3 className="text-base font-semibold text-campus-text-primary">
+              {title}
+            </h3>
+            <div className="flex flex-wrap gap-3 text-sm text-campus-text-secondary">
+              <span className="inline-flex items-center gap-1.5">
+                <CalendarDays size={14} />
+                {dateLabel}
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <MapPin size={14} />
+                {location}
+              </span>
+            </div>
+          </div>
+
+          {summaryItems.length > 0 ? (
+            <TeacherActivityChipGroup items={summaryItems} />
+          ) : null}
         </div>
-      </CardBody>
+
+        {action ? <div className="w-full shrink-0 lg:w-auto lg:pt-1">{action}</div> : null}
+      </CardHeader>
     </Card>
   );
 }

@@ -3,10 +3,14 @@
 import type { ReactNode } from "react";
 import clsx from "clsx";
 import type { Selection, SortDescriptor } from "@react-types/shared";
-import { Card, CardBody } from "@heroui/card";
+import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Chip } from "@heroui/chip";
 import { ScrollShadow } from "@heroui/scroll-shadow";
 import type { LucideIcon } from "lucide-react";
+import {
+  CampusMetricCard,
+  CampusWorkspaceHeaderCard,
+} from "@/components/ui";
 import {
   CampusDataTable,
   type CampusTableColumn,
@@ -44,75 +48,18 @@ export function ECPageHeader({
   className,
   variant = "default",
 }: ECPageHeaderProps) {
-  const isHero = variant === "hero";
-
   return (
-    <Card
-      shadow="none"
-      className={clsx(
-        "overflow-hidden",
-        isHero
-          ? "border-none bg-gradient-to-br from-primary-700 via-primary-600 to-[#f19b4c] text-white shadow-[var(--shadow-card)]"
-          : "border border-border/70 bg-white/90 shadow-[var(--shadow-soft)]",
-        className,
-      )}
-    >
-      <CardBody className="gap-5 p-5 sm:p-6">
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-          <div className="flex flex-1 items-start gap-4">
-            {Icon ? (
-              <div
-                className={clsx(
-                  "flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl",
-                  isHero
-                    ? "bg-white/15 text-white"
-                    : "bg-primary-50 text-primary-700",
-                )}
-              >
-                <Icon size={20} />
-              </div>
-            ) : null}
-
-            <div className="min-w-0 space-y-2">
-              <p
-                className={clsx(
-                  "text-xs font-semibold uppercase tracking-[0.2em]",
-                  isHero ? "text-white/75" : "text-primary-700",
-                )}
-              >
-                {eyebrow}
-              </p>
-              <h1
-                className={clsx(
-                  "text-2xl font-bold sm:text-3xl",
-                  isHero ? "text-white" : "text-campus-text-primary",
-                )}
-              >
-                {title}
-              </h1>
-              <p
-                className={clsx(
-                  "max-w-3xl text-sm leading-6",
-                  isHero ? "text-white/85" : "text-campus-text-secondary",
-                )}
-              >
-                {description}
-              </p>
-            </div>
-          </div>
-
-          {aside ? (
-            <div className="w-full shrink-0 lg:w-auto lg:min-w-[320px]">{aside}</div>
-          ) : action ? (
-            <div className="shrink-0">{action}</div>
-          ) : null}
-        </div>
-
-        {meta ? (
-          <div className="flex flex-wrap items-center gap-2">{meta}</div>
-        ) : null}
-      </CardBody>
-    </Card>
+    <CampusWorkspaceHeaderCard
+      title={title}
+      description={description}
+      eyebrow={eyebrow}
+      icon={Icon}
+      meta={meta}
+      action={action}
+      aside={aside}
+      className={className}
+      variant={variant}
+    />
   );
 }
 
@@ -147,40 +94,14 @@ function ECStatCard({
   const toneClasses = getECToneClasses(tone);
 
   return (
-    <Card
-      shadow="none"
-      className="border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]"
-    >
-      <CardBody className="gap-4 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="space-y-1">
-            <p className="text-sm font-medium text-campus-text-secondary">
-              {label}
-            </p>
-            {description ? (
-              <p className="text-xs leading-5 text-campus-text-secondary">
-                {description}
-              </p>
-            ) : null}
-          </div>
-
-          {Icon ? (
-            <div
-              className={clsx(
-                "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl",
-                toneClasses.icon,
-              )}
-            >
-              <Icon size={18} />
-            </div>
-          ) : null}
-        </div>
-
-        <div className={clsx("text-3xl font-bold", toneClasses.value)}>
-          {value}
-        </div>
-      </CardBody>
-    </Card>
+    <CampusMetricCard
+      label={label}
+      value={value}
+      description={description}
+      icon={Icon}
+      iconClassName={toneClasses.icon}
+      valueClassName={toneClasses.value}
+    />
   );
 }
 
@@ -368,24 +289,24 @@ export function ECQuickActionCard({
         className,
       )}
     >
-      <CardBody className="space-y-4 p-5">
-        <div className="flex items-start gap-3">
-          {Icon ? (
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-50 text-primary-700">
-              <Icon size={18} />
-            </div>
-          ) : null}
-
-          <div className="min-w-0">
-            <p className="text-base font-semibold text-campus-text-primary">
-              {title}
-            </p>
-            <p className="mt-1 text-sm leading-6 text-campus-text-secondary">
-              {description}
-            </p>
+      <CardHeader className="items-start gap-4 p-5 pb-0 sm:p-6 sm:pb-0">
+        {Icon ? (
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[1.2rem] bg-primary-50 text-primary-700 sm:h-12 sm:w-12">
+            <Icon size={18} />
           </div>
-        </div>
+        ) : null}
 
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <p className="text-base font-semibold text-campus-text-primary">
+            {title}
+          </p>
+          <p className="text-sm leading-6 text-campus-text-secondary">
+            {description}
+          </p>
+        </div>
+      </CardHeader>
+
+      <CardBody className="space-y-4 p-5 pt-4 sm:p-6 sm:pt-4">
         {meta ? <div>{meta}</div> : null}
         {action ? <div>{action}</div> : null}
       </CardBody>
