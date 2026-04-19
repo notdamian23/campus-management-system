@@ -349,11 +349,8 @@ bool clearPairedEventIfSafe(String &message) {
     return false;
   }
 
-  if (g_storage.hasUnsyncedAttendanceForEvent(g_pairedEvent.eventId)) {
-    message = "Previous event attendance not yet synced.";
-    return false;
-  }
-
+  // Attendance records keep their own event metadata, so finished events can be
+  // replaced without losing pending offline sync data.
   if (!g_storage.clearPairedEvent()) {
     message = "Unable to clear paired event.";
     return false;

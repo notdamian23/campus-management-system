@@ -1156,8 +1156,46 @@ async function resolveAuthorizedStudentIds(
   }
 
   if (event.selectedStudentIds.length > 0) {
-    event.selectedStudentIds.forEach((studentId) => {
+    const selectedStudentIds = dedupeStrings(event.selectedStudentIds);
+    const [selectedProfilesById, selectedStudentRecordsById] = await Promise.all([
+      loadDocsById("profiles", selectedStudentIds),
+      loadDocsById("students", selectedStudentIds),
+    ]);
+
+    selectedStudentIds.forEach((studentId) => {
       const registration = registrationsByStudentId.get(studentId);
+      const merged = {
+        ...selectedProfilesById.get(studentId),
+        ...selectedStudentRecordsById.get(studentId),
+      };
+      const schoolId =
+        normalizeText(merged.schoolId) ||
+        registration?.schoolId ||
+        studentId;
+      const studentName =
+        normalizeText(merged.studentName) ||
+        normalizeText(merged.name) ||
+        registration?.studentName ||
+        schoolId;
+      const course =
+        normalizeCourse(merged.course) ||
+        normalizeCourse(registration?.course);
+      const yearLevel =
+        normalizeYearLevel(merged.yearLevel ?? merged.year) ||
+        normalizeYearLevel(registration?.yearLevel);
+      const eligibility = evaluateEventEligibility(event, {
+        studentId,
+        schoolId,
+        studentName,
+        course,
+        yearLevel,
+        registrationStatus: registration?.status,
+        paymentStatus: paymentStatusesByStudentId.get(studentId),
+      });
+      if (!eligibility.allowed) {
+        return;
+      }
+
       authorized.set(studentId, {
         registrationId: registration?.registrationId ?? "",
       });

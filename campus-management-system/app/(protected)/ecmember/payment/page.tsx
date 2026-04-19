@@ -6,12 +6,14 @@ import { getFunctions, httpsCallable } from "firebase/functions";
 import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
+  type DocumentData,
   doc,
   getDoc,
   getDocs,
   increment,
   onSnapshot,
   orderBy,
+  type QueryDocumentSnapshot,
   query,
   serverTimestamp,
   setDoc,
@@ -305,6 +307,46 @@ function mapPaymentStudentRecord(
     remarks: getFirstFilledText(data.remarks, data.note, data.notes),
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,
+  };
+}
+
+function mapPaymentRecord(
+  paymentDoc: QueryDocumentSnapshot<DocumentData>,
+): Payment | null {
+  const data = paymentDoc.data() as Partial<Payment>;
+  if (String(data.status ?? "").trim().toLowerCase() === "archived") {
+    return null;
+  }
+
+  return {
+    id: paymentDoc.id,
+    title: String(data.title ?? "Untitled Payment"),
+    ref: String(data.ref ?? makePaymentRef(paymentDoc.id)),
+    amount: Number(data.amount ?? 0),
+    date: String(data.date ?? ""),
+    yearLevel:
+      typeof data.yearLevel === "string"
+        ? data.yearLevel
+        : "All Years",
+    course:
+      typeof data.course === "string" ? data.course : "All Courses",
+    targetStudent: String(data.targetStudent ?? ""),
+    details: String(data.details ?? ""),
+    totalStudents: Number(data.totalStudents ?? 0),
+    paidCount: Number(data.paidCount ?? 0),
+    unpaidCount: Number(data.unpaidCount ?? 0),
+    linkedEventId: String(data.linkedEventId ?? "").trim(),
+    linkedEventTitle: String(data.linkedEventTitle ?? "").trim(),
+    source: String(data.source ?? "").trim(),
+    status: String(data.status ?? "").trim(),
+    createdByUid: String(data.createdByUid ?? "").trim(),
+    createdByCourseScope:
+      typeof data.createdByCourseScope === "string"
+        ? data.createdByCourseScope
+        : null,
+    courseScope:
+      typeof data.courseScope === "string" ? data.courseScope : null,
+    createdAt: data.createdAt,
   };
 }
 
@@ -621,50 +663,98 @@ export default function PaymentDashboard() {
     }
 
     setPaymentsLoading(true);
-    const qy =
-      viewerIsBod && viewerCourseScope ?
-        query(collection(db, "payments"), where("course", "==", viewerCourseScope)) :
-        query(collection(db, "payments"), orderBy("createdAt", "desc"));
+    const sortRows = (rows: Payment[]) =>
+      [...rows].sort((left, right) => toMillis(right.createdAt) - toMillis(left.createdAt));
+
+    if (viewerIsBod && viewerCourseScope) {
+      let courseRows: Payment[] = [];
+      let courseScopeRows: Payment[] = [];
+      let createdByCourseScopeRows: Payment[] = [];
+
+      const syncRows = () => {
+        const merged = new Map<string, Payment>();
+        [...courseRows, ...courseScopeRows, ...createdByCourseScopeRows].forEach(
+          (payment) => {
+            merged.set(payment.id, payment);
+          },
+        );
+        setPayments(sortRows(Array.from(merged.values())));
+        setPaymentsLoading(false);
+      };
+
+      const handleLoadError = (error: unknown) => {
+        setNotice({
+          type: "err",
+          msg: toErrorMessage(error, "Failed to load payments."),
+        });
+      };
+
+      const unsubCourse = onSnapshot(
+        query(collection(db, "payments"), where("course", "==", viewerCourseScope)),
+        (snap) => {
+          courseRows = snap.docs
+            .map(mapPaymentRecord)
+            .filter((payment): payment is Payment => payment !== null);
+          syncRows();
+        },
+        (error) => {
+          courseRows = [];
+          syncRows();
+          handleLoadError(error);
+        },
+      );
+
+      const unsubCourseScope = onSnapshot(
+        query(
+          collection(db, "payments"),
+          where("courseScope", "==", viewerCourseScope),
+        ),
+        (snap) => {
+          courseScopeRows = snap.docs
+            .map(mapPaymentRecord)
+            .filter((payment): payment is Payment => payment !== null);
+          syncRows();
+        },
+        (error) => {
+          courseScopeRows = [];
+          syncRows();
+          handleLoadError(error);
+        },
+      );
+
+      const unsubCreatedByCourseScope = onSnapshot(
+        query(
+          collection(db, "payments"),
+          where("createdByCourseScope", "==", viewerCourseScope),
+        ),
+        (snap) => {
+          createdByCourseScopeRows = snap.docs
+            .map(mapPaymentRecord)
+            .filter((payment): payment is Payment => payment !== null);
+          syncRows();
+        },
+        (error) => {
+          createdByCourseScopeRows = [];
+          syncRows();
+          handleLoadError(error);
+        },
+      );
+
+      return () => {
+        unsubCourse();
+        unsubCourseScope();
+        unsubCreatedByCourseScope();
+      };
+    }
+
     const unsub = onSnapshot(
-      qy,
+      query(collection(db, "payments"), orderBy("createdAt", "desc")),
       (snap) => {
-        const rows = snap.docs.map<Payment | null>((d) => {
-          const data = d.data() as Partial<Payment>;
-          if (String(data.status ?? "").trim().toLowerCase() === "archived") {
-            return null;
-          }
-          return {
-            id: d.id,
-            title: String(data.title ?? "Untitled Payment"),
-            ref: String(data.ref ?? makePaymentRef(d.id)),
-            amount: Number(data.amount ?? 0),
-            date: String(data.date ?? ""),
-            yearLevel:
-              typeof data.yearLevel === "string"
-                ? data.yearLevel
-                : "All Years",
-            course:
-              typeof data.course === "string" ? data.course : "All Courses",
-            targetStudent: String(data.targetStudent ?? ""),
-            details: String(data.details ?? ""),
-            totalStudents: Number(data.totalStudents ?? 0),
-            paidCount: Number(data.paidCount ?? 0),
-            unpaidCount: Number(data.unpaidCount ?? 0),
-            linkedEventId: String(data.linkedEventId ?? "").trim(),
-            linkedEventTitle: String(data.linkedEventTitle ?? "").trim(),
-            source: String(data.source ?? "").trim(),
-            status: String(data.status ?? "").trim(),
-            createdByUid: String(data.createdByUid ?? "").trim(),
-            createdByCourseScope:
-              typeof data.createdByCourseScope === "string" ?
-                data.createdByCourseScope :
-                null,
-            courseScope:
-              typeof data.courseScope === "string" ? data.courseScope : null,
-            createdAt: data.createdAt,
-          };
-        }).filter((payment): payment is Payment => payment !== null);
-        setPayments(rows);
+        setPayments(
+          snap.docs
+            .map(mapPaymentRecord)
+            .filter((payment): payment is Payment => payment !== null),
+        );
         setPaymentsLoading(false);
       },
       (error) => {
@@ -744,6 +834,24 @@ export default function PaymentDashboard() {
     if (!currentEditingPayment) {
       return;
     }
+    if (
+      viewerIsBod &&
+      !(
+        canManagePayment(viewerProfileWithUid, {
+          course: currentEditingPayment.course,
+          courseScope: currentEditingPayment.courseScope,
+          createdByCourseScope: currentEditingPayment.createdByCourseScope,
+        }) ||
+        canEditPayment(viewerProfileWithUid, {
+          course: currentEditingPayment.course,
+          courseScope: currentEditingPayment.courseScope,
+          createdByUid: currentEditingPayment.createdByUid,
+          createdByCourseScope: currentEditingPayment.createdByCourseScope,
+        })
+      )
+    ) {
+      return;
+    }
 
     setSelectedPaymentStudents((prev) =>
       prev.length > 0 ?
@@ -753,7 +861,14 @@ export default function PaymentDashboard() {
           students,
         ),
     );
-  }, [editingPaymentId, payments, showAddPaymentForm, students]);
+  }, [
+    editingPaymentId,
+    payments,
+    showAddPaymentForm,
+    students,
+    viewerIsBod,
+    viewerProfileWithUid,
+  ]);
 
   const courseOptions = useMemo(() => {
     const set = new Set<string>();
@@ -808,10 +923,41 @@ export default function PaymentDashboard() {
   const hasYearFilter = yearLevel !== "All Years";
   const hasCourseFilter = selectedPaymentCourse !== "All Courses";
 
+  const canManagePaymentRecord = useMemo(
+    () =>
+      (payment: Payment) =>
+        canManagePayment(viewerProfileWithUid, {
+          course: payment.course,
+          courseScope: payment.courseScope,
+          createdByCourseScope: payment.createdByCourseScope,
+        }),
+    [viewerProfileWithUid],
+  );
+  const canEditPaymentRecord = useMemo(
+    () =>
+      (payment: Payment) =>
+        canEditPayment(viewerProfileWithUid, {
+          course: payment.course,
+          courseScope: payment.courseScope,
+          createdByUid: payment.createdByUid,
+          createdByCourseScope: payment.createdByCourseScope,
+        }),
+    [viewerProfileWithUid],
+  );
+  const visiblePayments = useMemo(
+    () =>
+      viewerIsBod
+        ? payments.filter(
+            (payment) =>
+              canManagePaymentRecord(payment) || canEditPaymentRecord(payment),
+          )
+        : payments,
+    [canEditPaymentRecord, canManagePaymentRecord, payments, viewerIsBod],
+  );
   const filteredPayments = useMemo(() => {
     const search = queryText.trim().toLowerCase();
 
-    return payments.filter((p) => {
+    return visiblePayments.filter((p) => {
       const matchesDate = !dateFilter || p.date === dateFilter;
 
       const matchesSearch =
@@ -824,7 +970,7 @@ export default function PaymentDashboard() {
 
       return matchesDate && matchesSearch;
     });
-  }, [payments, queryText, dateFilter]);
+  }, [dateFilter, queryText, visiblePayments]);
 
   const sortedFilteredPayments = useMemo(() => {
     const list = [...filteredPayments];
@@ -848,30 +994,10 @@ export default function PaymentDashboard() {
     if (paymentSortMode === "alphabetical") return "Alphabetically, A-Z";
     return "Date, new to old";
   }, [paymentSortMode]);
-  const canManagePaymentRecord = useMemo(
-    () =>
-      (payment: Payment) =>
-        canManagePayment(viewerProfileWithUid, {
-          course: payment.course,
-          courseScope: payment.courseScope,
-          createdByCourseScope: payment.createdByCourseScope,
-        }),
-    [viewerProfileWithUid],
-  );
-  const canEditPaymentRecord = useMemo(
-    () =>
-      (payment: Payment) =>
-        canEditPayment(viewerProfileWithUid, {
-          course: payment.course,
-          courseScope: payment.courseScope,
-          createdByUid: payment.createdByUid,
-          createdByCourseScope: payment.createdByCourseScope,
-        }),
-    [viewerProfileWithUid],
-  );
   const editingPayment = useMemo(
-    () => payments.find((payment) => payment.id === editingPaymentId) ?? null,
-    [editingPaymentId, payments],
+    () =>
+      visiblePayments.find((payment) => payment.id === editingPaymentId) ?? null,
+    [editingPaymentId, visiblePayments],
   );
   const paymentEditorMode: PaymentEditorMode =
     editingPayment ? "edit" : "create";
@@ -893,18 +1019,22 @@ export default function PaymentDashboard() {
   );
 
   const dashboardCounts = useMemo(() => {
-    const pending = payments.filter(
+    const pending = visiblePayments.filter(
       (payment) => payment.totalStudents > 0 && payment.unpaidCount > 0,
     ).length;
-    const completed = payments.filter(
+    const completed = visiblePayments.filter(
       (payment) => payment.totalStudents > 0 && payment.unpaidCount === 0,
     ).length;
-    return { total: payments.length, pending, completed };
-  }, [payments]);
+    return { total: visiblePayments.length, pending, completed };
+  }, [visiblePayments]);
 
   const totalPaymentValue = useMemo(
-    () => payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
-    [payments],
+    () =>
+      visiblePayments.reduce(
+        (sum, payment) => sum + Number(payment.amount || 0),
+        0,
+      ),
+    [visiblePayments],
   );
 
   const paymentSummaryItems = useMemo<ECStatItem[]>(
@@ -1238,7 +1368,7 @@ export default function PaymentDashboard() {
   }
 
   async function handleExportAllPaymentReport() {
-    const exportablePayments = [...payments.filter((payment) =>
+    const exportablePayments = [...visiblePayments.filter((payment) =>
       canManagePaymentRecord(payment),
     )];
 
@@ -1753,7 +1883,7 @@ export default function PaymentDashboard() {
         meta={
           <>
             <Chip variant="flat" className="bg-white/15 text-white">
-              {payments.length} payment records
+              {visiblePayments.length} payment records
             </Chip>
             <Chip variant="flat" className="bg-white/15 text-white">
               {students.length} students in roster scope

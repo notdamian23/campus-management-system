@@ -111,10 +111,7 @@ import {
 } from "@/lib/ec-permissions";
 import { logPermissionDeniedAttemptForCurrentUser } from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
-import {
-  formatStudentFullName,
-  formatStudentReferenceList,
-} from "@/lib/student-name";
+import { formatStudentFullName } from "@/lib/student-name";
 
 type Role = "teacher" | "student" | "ec" | "ecmember" | "admin";
 type EventStatus = "upcoming" | "ongoing" | "completed";
@@ -412,6 +409,7 @@ const EVENT_COURSE_CHOICES = [
   "Industrial Engineering",
 ];
 const ITEMS_PER_PAGE = 5;
+const PARTICIPANT_ROWS_PER_PAGE_OPTIONS = ["10", "25", "50"] as const;
 
 function pad2(n: number) {
   return String(n).padStart(2, "0");
@@ -583,6 +581,38 @@ function toEventTargetList(value: unknown): string[] {
 
 function normalizeEventIdentifierList(value: unknown) {
   return toEventTargetList(value).map((item) => normalizeLookupText(item)).filter(Boolean);
+}
+
+function countSpecificEventAudienceSelections(
+  event: Pick<EventDoc, "targetStudent" | "selectedStudentIds" | "selectedSchoolIds">,
+) {
+  const explicitSelections = new Set(
+    [
+      ...normalizeEventIdentifierList(event.selectedStudentIds).map(
+        (item) => `uid:${normalizeLowerLookupText(item)}`,
+      ),
+      ...normalizeEventIdentifierList(event.selectedSchoolIds).map(
+        (item) => `school:${normalizeLowerLookupText(item)}`,
+      ),
+    ].filter(Boolean),
+  );
+  if (explicitSelections.size > 0) {
+    return explicitSelections.size;
+  }
+
+  return new Set(
+    String(event.targetStudent ?? "")
+      .split(";")
+      .map((item) => normalizeLowerLookupText(item))
+      .filter(Boolean),
+  ).size;
+}
+
+function getSpecificEventAudienceSummary(
+  event: Pick<EventDoc, "targetStudent" | "selectedStudentIds" | "selectedSchoolIds">,
+) {
+  const count = countSpecificEventAudienceSelections(event);
+  return count > 0 ? `Specific students selected (${count})` : "";
 }
 
 function hasExplicitSelectedEventAudience(
@@ -1023,7 +1053,17 @@ function formatEventScheduleLabel(event: Pick<EventDoc, "scheduledTime" | "timeS
   return end ? `${start} - ${end}` : start;
 }
 
-function getEventTargetLabel(event: Pick<EventDoc, "course" | "yearLevel" | "targetStudent">) {
+function getEventTargetLabel(
+  event: Pick<
+    EventDoc,
+    "course" | "yearLevel" | "targetStudent" | "selectedStudentIds" | "selectedSchoolIds"
+  >,
+) {
+  const specificAudienceSummary = getSpecificEventAudienceSummary(event);
+  if (specificAudienceSummary) {
+    return specificAudienceSummary;
+  }
+
   const pieces: string[] = [];
 
   if (String(event.course ?? "").trim() && String(event.course).trim() !== "All Courses") {
@@ -1032,10 +1072,6 @@ function getEventTargetLabel(event: Pick<EventDoc, "course" | "yearLevel" | "tar
 
   if (String(event.yearLevel ?? "").trim() && String(event.yearLevel).trim() !== "All Years") {
     pieces.push(String(event.yearLevel).trim());
-  }
-
-  if (String(event.targetStudent ?? "").trim()) {
-    pieces.push(`Students: ${String(event.targetStudent).trim()}`);
   }
 
   return pieces.length > 0 ? pieces.join(" | ") : "All students";
@@ -1681,6 +1717,10 @@ export default function EventDashboard() {
   const [selectedEventTab, setSelectedEventTab] =
     useState<EventDetailsTab>("overview");
   const [participantSearch, setParticipantSearch] = useState("");
+  const [participantPage, setParticipantPage] = useState(1);
+  const [participantRowsPerPage, setParticipantRowsPerPage] = useState<string>(
+    PARTICIPANT_ROWS_PER_PAGE_OPTIONS[0],
+  );
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
@@ -2703,6 +2743,33 @@ export default function EventDashboard() {
       return haystack.includes(search);
     });
   }, [participantSearch, selectedEventParticipantRows]);
+  const participantRowsPerPageValue = useMemo(() => {
+    const value = Number(participantRowsPerPage);
+    return Number.isFinite(value) && value > 0 ?
+        value :
+        Number(PARTICIPANT_ROWS_PER_PAGE_OPTIONS[0]);
+  }, [participantRowsPerPage]);
+  const selectedEventParticipantTotalPages = useMemo(
+    () =>
+      Math.max(
+        1,
+        Math.ceil(
+          filteredSelectedParticipantRows.length / participantRowsPerPageValue,
+        ),
+      ),
+    [filteredSelectedParticipantRows.length, participantRowsPerPageValue],
+  );
+  const paginatedSelectedParticipantRows = useMemo(() => {
+    const start = (participantPage - 1) * participantRowsPerPageValue;
+    return filteredSelectedParticipantRows.slice(
+      start,
+      start + participantRowsPerPageValue,
+    );
+  }, [
+    filteredSelectedParticipantRows,
+    participantPage,
+    participantRowsPerPageValue,
+  ]);
   const selectedEventPreviewImages = useMemo(
     () => selectedEventImages.slice(0, 3),
     [selectedEventImages],
@@ -2791,8 +2858,20 @@ export default function EventDashboard() {
   useEffect(() => {
     setSelectedEventTab("overview");
     setParticipantSearch("");
+    setParticipantPage(1);
+    setParticipantRowsPerPage(PARTICIPANT_ROWS_PER_PAGE_OPTIONS[0]);
     setEventFilesTab("images");
   }, [expandedEventId]);
+
+  useEffect(() => {
+    setParticipantPage(1);
+  }, [participantRowsPerPage, participantSearch]);
+
+  useEffect(() => {
+    setParticipantPage((prev) =>
+      Math.min(Math.max(prev, 1), selectedEventParticipantTotalPages),
+    );
+  }, [selectedEventParticipantTotalPages]);
 
   useEffect(() => {
     if (!viewerIsBod || !viewerCourseScope) {
@@ -6685,9 +6764,10 @@ export default function EventDashboard() {
                             <p className="text-sm text-campus-text-primary">
                               <b>Year Level:</b> {ev.yearLevel ?? "—"}
                             </p>
-                            {ev.targetStudent && (
+                            {countSpecificEventAudienceSelections(ev) > 0 && (
                               <p className="text-sm text-campus-text-primary">
-                                <b>Target Student:</b> {ev.targetStudent}
+                                <b>Target Student:</b>{" "}
+                                {getSpecificEventAudienceSummary(ev)}
                               </p>
                             )}
                             <p className="text-sm text-campus-text-primary">
@@ -7646,9 +7726,8 @@ export default function EventDashboard() {
                             <EventDetailInfoRow
                               label="Target student"
                               value={
-                                selectedEvent.targetStudent
-                                  ? formatStudentReferenceList(selectedEvent.targetStudent)
-                                  : "Not restricted to specific students"
+                                getSpecificEventAudienceSummary(selectedEvent) ||
+                                "Not restricted to specific students"
                               }
                             />
                             {selectedEvent.isPreReg && typeof selectedEvent.preRegSlots === "number" ? (
@@ -7664,7 +7743,7 @@ export default function EventDashboard() {
 
                     <Tab key="participants" title="Participants">
                       <div className="space-y-4 pt-3">
-                        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+                        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_160px_auto]">
                           <Input
                             aria-label="Search participants"
                             value={participantSearch}
@@ -7672,6 +7751,23 @@ export default function EventDashboard() {
                             placeholder="Search participants by name, ID, course, year, or status"
                             startContent={<Search size={16} className="text-campus-text-secondary" />}
                           />
+
+                          <Select
+                            aria-label="Participant rows per page"
+                            disallowEmptySelection
+                            selectedKeys={new Set([participantRowsPerPage])}
+                            onSelectionChange={(keys) => {
+                              if (keys === "all") return;
+                              const selected = Array.from(keys)[0];
+                              if (typeof selected === "string") {
+                                setParticipantRowsPerPage(selected);
+                              }
+                            }}
+                          >
+                            {PARTICIPANT_ROWS_PER_PAGE_OPTIONS.map((value) => (
+                              <SelectItem key={value}>{value} / page</SelectItem>
+                            ))}
+                          </Select>
 
                           <Button
                             color="primary"
@@ -7715,7 +7811,7 @@ export default function EventDashboard() {
                           />
                         ) : (
                           <div className="space-y-3">
-                            {filteredSelectedParticipantRows.map((row) => (
+                            {paginatedSelectedParticipantRows.map((row) => (
                               <Card
                                 key={`${row.uid}-${row.attendanceStatus}`}
                                 shadow="none"
@@ -7758,6 +7854,18 @@ export default function EventDashboard() {
                                 </CardBody>
                               </Card>
                             ))}
+
+                            {filteredSelectedParticipantRows.length >
+                            participantRowsPerPageValue ? (
+                              <div className="flex justify-center sm:justify-end">
+                                <Pagination
+                                  showControls
+                                  page={participantPage}
+                                  total={selectedEventParticipantTotalPages}
+                                  onChange={(nextPage) => setParticipantPage(nextPage)}
+                                />
+                              </div>
+                            ) : null}
                           </div>
                         )}
                       </div>

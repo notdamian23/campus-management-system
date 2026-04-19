@@ -59,7 +59,7 @@ import {
 
 const EVENTS_PER_PAGE = 6;
 const FILE_PREVIEW_LIMIT = 3;
-const PARTICIPANTS_PER_PAGE = 4;
+const PARTICIPANT_ROWS_PER_PAGE_OPTIONS = ["10", "25", "50"] as const;
 
 const teacherEventColumns: CampusTableColumn<{
   id: string;
@@ -173,6 +173,9 @@ export default function TeacherEventsPage() {
   const [participantsCourseFilter, setParticipantsCourseFilter] = useState("all");
   const [participantsYearFilter, setParticipantsYearFilter] = useState("all");
   const [participantsPage, setParticipantsPage] = useState(1);
+  const [participantsRowsPerPage, setParticipantsRowsPerPage] = useState<string>(
+    PARTICIPANT_ROWS_PER_PAGE_OPTIONS[0],
+  );
   const [filesView, setFilesView] = useState<EventFilesView>("images");
   const [imagesModalOpen, setImagesModalOpen] = useState(false);
   const [documentsModalOpen, setDocumentsModalOpen] = useState(false);
@@ -264,15 +267,21 @@ export default function TeacherEventsPage() {
     participantsYearFilter,
     selectedParticipants,
   ]);
+  const participantsRowsPerPageValue = useMemo(() => {
+    const value = Number(participantsRowsPerPage);
+    return Number.isFinite(value) && value > 0 ?
+        value :
+        Number(PARTICIPANT_ROWS_PER_PAGE_OPTIONS[0]);
+  }, [participantsRowsPerPage]);
 
   const participantsTotalPages = Math.max(
     1,
-    Math.ceil(filteredParticipants.length / PARTICIPANTS_PER_PAGE),
+    Math.ceil(filteredParticipants.length / participantsRowsPerPageValue),
   );
   const paginatedParticipants = useMemo(() => {
-    const start = (participantsPage - 1) * PARTICIPANTS_PER_PAGE;
-    return filteredParticipants.slice(start, start + PARTICIPANTS_PER_PAGE);
-  }, [filteredParticipants, participantsPage]);
+    const start = (participantsPage - 1) * participantsRowsPerPageValue;
+    return filteredParticipants.slice(start, start + participantsRowsPerPageValue);
+  }, [filteredParticipants, participantsPage, participantsRowsPerPageValue]);
 
   const selectedFiles = useMemo(() => {
     if (!selectedEvent) return [];
@@ -329,6 +338,7 @@ export default function TeacherEventsPage() {
     setParticipantsPage(1);
   }, [
     participantsCourseFilter,
+    participantsRowsPerPage,
     participantsSearch,
     participantsStatusFilter,
     participantsYearFilter,
@@ -344,6 +354,7 @@ export default function TeacherEventsPage() {
     setParticipantsCourseFilter("all");
     setParticipantsYearFilter("all");
     setParticipantsPage(1);
+    setParticipantsRowsPerPage(PARTICIPANT_ROWS_PER_PAGE_OPTIONS[0]);
     setFilesView("images");
     setImagesModalOpen(false);
     setDocumentsModalOpen(false);
@@ -834,7 +845,7 @@ export default function TeacherEventsPage() {
 
                   <Tab key="participants" title="Participants">
                     <div className="space-y-4 pt-3">
-                      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.5fr)_180px_230px_180px]">
+                      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.5fr)_180px_230px_180px_150px]">
                         <Input
                           aria-label="Search participants"
                           value={participantsSearch}
@@ -896,6 +907,23 @@ export default function TeacherEventsPage() {
                           }}
                         >
                           {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                        </Select>
+
+                        <Select
+                          aria-label="Participant rows per page"
+                          disallowEmptySelection
+                          selectedKeys={new Set([participantsRowsPerPage])}
+                          onSelectionChange={(keys) => {
+                            if (keys === "all") return;
+                            const selected = Array.from(keys)[0];
+                            if (typeof selected === "string") {
+                              setParticipantsRowsPerPage(selected);
+                            }
+                          }}
+                        >
+                          {PARTICIPANT_ROWS_PER_PAGE_OPTIONS.map((value) => (
+                            <SelectItem key={value}>{value} / page</SelectItem>
+                          ))}
                         </Select>
                       </div>
 
@@ -977,7 +1005,7 @@ export default function TeacherEventsPage() {
                             })}
                           </div>
 
-                          {filteredParticipants.length > PARTICIPANTS_PER_PAGE ? (
+                          {filteredParticipants.length > participantsRowsPerPageValue ? (
                             <div className="flex justify-center sm:justify-end">
                               <Pagination
                                 showControls
