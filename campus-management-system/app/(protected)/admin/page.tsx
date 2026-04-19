@@ -81,12 +81,23 @@ import {
   normalizeCampusUserRow,
   type CampusUserProjectionSource,
   type CampusUserRow,
+  toStoredCampusRole,
 } from "@/lib/campus-user-rows";
 import {
   downloadCsv,
   getBulkStudentImportTemplateCsv,
 } from "@/lib/bulkStudentImport";
-import { CAMPUS_COURSE_OPTIONS } from "@/lib/courseOptions";
+import {
+  CAMPUS_COURSE_CODE_OPTIONS,
+  CAMPUS_COURSE_OPTIONS,
+  normalizeCourseCode,
+  resolveCourseFromCode,
+} from "@/lib/courseOptions";
+import {
+  EC_POSITION_OPTIONS,
+  formatBodPosition,
+  getECPositionSelectionValue,
+} from "@/lib/ec-permissions";
 import {
   adminDeactivateAllStudents,
   adminDeleteDuplicateStudentSchoolIds,
@@ -106,6 +117,7 @@ const yearOptions = [
 ] as const;
 const courseOptions = CAMPUS_COURSE_OPTIONS;
 type Role = (typeof roleOptions)[number];
+type ECPositionOption = (typeof EC_POSITION_OPTIONS)[number];
 type AdminTab = "overview" | "users" | "logs" | "exports";
 type EmailFilter = "all" | "with_email" | "without_email";
 type DuplicateFilter = "all" | "duplicates_only" | "non_duplicates_only";
@@ -123,7 +135,12 @@ type Profile = {
   schoolId?: string;
   studentId?: string;
   email?: string;
-  role: Role;
+  role?: string;
+  ecPosition?: string | null;
+  ecScope?: "all" | "course" | null;
+  assignedCourse?: string | null;
+  courseScope?: string | null;
+  isBod?: boolean;
   name?: string;
   fullName?: string;
   displayName?: string;
@@ -245,6 +262,24 @@ const userColumns: CampusTableColumn<CampusUserRow>[] = [
     label: "Role Assignment",
     className: "min-w-[220px]",
     cellClassName: "align-top min-w-[220px]",
+  },
+  {
+    key: "ecPosition",
+    label: "EC Position",
+    className: "min-w-[170px]",
+    cellClassName: "align-top min-w-[170px]",
+  },
+  {
+    key: "ecScope",
+    label: "EC Scope",
+    className: "min-w-[150px]",
+    cellClassName: "align-top min-w-[150px]",
+  },
+  {
+    key: "assignedCourse",
+    label: "Assigned Course",
+    className: "min-w-[200px]",
+    cellClassName: "align-top min-w-[200px]",
   },
   {
     key: "actions",
@@ -415,6 +450,50 @@ function roleRank(role: Role) {
   return 3;
 }
 
+function formatECScope(scope: CampusUserRow["ecScope"]) {
+  if (scope === "course") return "Course-limited";
+  if (scope === "all") return "All access";
+  return "-";
+}
+
+function buildECProfileFields(
+  role: Role,
+  ecPosition: string,
+  assignedCourse: string,
+) {
+  if (role !== "ec") {
+    return {
+      ecPosition: null,
+      ecScope: null,
+      assignedCourse: null,
+      courseScope: null,
+      isBod: false,
+    };
+  }
+
+  const normalizedPosition = getECPositionSelectionValue(ecPosition);
+  if (normalizedPosition === "B.O.D.") {
+    const normalizedAssignedCourse = normalizeCourseCode(assignedCourse);
+    return {
+      ecPosition: normalizedAssignedCourse
+        ? formatBodPosition(normalizedAssignedCourse)
+        : "B.O.D.",
+      ecScope: "course" as const,
+      assignedCourse: normalizedAssignedCourse || null,
+      courseScope: resolveCourseFromCode(normalizedAssignedCourse) || null,
+      isBod: Boolean(normalizedAssignedCourse),
+    };
+  }
+
+  return {
+    ecPosition: normalizedPosition || null,
+    ecScope: "all" as const,
+    assignedCourse: null,
+    courseScope: null,
+    isBod: false,
+  };
+}
+
 function hasEmail(profile: Pick<CampusUserRow, "email">) {
   return Boolean(String(profile.email ?? "").trim());
 }
@@ -575,7 +654,7 @@ function UsersRolesSkeleton() {
       </Card>
       <Card shadow="sm" className="border">
         <CardBody className="p-0">
-          <CampusTableBodySkeleton rows={6} columns={9} />
+          <CampusTableBodySkeleton rows={6} columns={12} />
         </CardBody>
       </Card>
     </div>
@@ -607,6 +686,8 @@ export default function AdminDashboardPage() {
   const [newSchoolId, setNewSchoolId] = useState("");
   const [newRole, setNewRole] = useState<Role>("student");
   const [newEcName, setNewEcName] = useState("");
+  const [newEcPosition, setNewEcPosition] = useState<ECPositionOption | "">("");
+  const [newBodCourse, setNewBodCourse] = useState("");
   const [newTeacherName, setNewTeacherName] = useState("");
   const [newStudentName, setNewStudentName] = useState("");
   const [newCourse, setNewCourse] = useState("");
@@ -636,8 +717,13 @@ export default function AdminDashboardPage() {
   );
   const [editProfileName, setEditProfileName] = useState("");
   const [editProfileSchoolId, setEditProfileSchoolId] = useState("");
+  const [editProfileRole, setEditProfileRole] = useState<Role>("student");
   const [editProfileCourse, setEditProfileCourse] = useState("");
   const [editProfileYearLevel, setEditProfileYearLevel] = useState("");
+  const [editProfileEcPosition, setEditProfileEcPosition] = useState<
+    ECPositionOption | ""
+  >("");
+  const [editProfileBodCourse, setEditProfileBodCourse] = useState("");
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [logsLoading, setLogsLoading] = useState(true);
   const [events, setEvents] = useState<EventItem[]>([]);
@@ -852,6 +938,10 @@ export default function AdminDashboardPage() {
           profile.studentId,
           profile.email,
           profile.role,
+          profile.ecPosition,
+          profile.ecScope,
+          profile.assignedCourse,
+          profile.assignedCourseLabel,
           profile.course,
           profile.yearLevel,
           profile.uid,
@@ -980,12 +1070,13 @@ export default function AdminDashboardPage() {
   const isStudentCreateRole = newRole === "student";
   const isTeacherCreateRole = newRole === "teacher";
   const isEcCreateRole = newRole === "ec";
+  const isNewBodRole = isEcCreateRole && newEcPosition === "B.O.D.";
   const createAccountHelperText = isStudentCreateRole
     ? "Student accounts need a name, course, and year level so roster, preregistration, and payment rules work correctly."
     : isTeacherCreateRole
       ? "Teacher accounts need a saved name so directory results and classroom-facing views stay easy to identify."
       : isEcCreateRole
-        ? "EC Member accounts need a name, course, and year level so admin and operations views stay aligned."
+        ? "EC member accounts also need an EC position. B.O.D. entries require a course assignment so course-limited permissions work correctly."
         : "Required fields are marked automatically. Optional email helps users receive verification and recovery messages.";
   const recentActivityItems = useMemo(
     () =>
@@ -1008,6 +1099,8 @@ export default function AdminDashboardPage() {
   const canResetCreateForm =
     Boolean(newSchoolId.trim()) ||
     Boolean(newEcName.trim()) ||
+    Boolean(newEcPosition) ||
+    Boolean(newBodCourse.trim()) ||
     Boolean(newTeacherName.trim()) ||
     Boolean(newStudentName.trim()) ||
     Boolean(newCourse.trim()) ||
@@ -1027,6 +1120,8 @@ export default function AdminDashboardPage() {
     setNewSchoolId("");
     setNewEmail("");
     setNewEcName("");
+    setNewEcPosition("");
+    setNewBodCourse("");
     setNewTeacherName("");
     setNewStudentName("");
     setNewCourse("");
@@ -1081,6 +1176,58 @@ export default function AdminDashboardPage() {
     </div>
   );
 
+  const renderEcPositionField = (
+    key: string,
+    value: string,
+    onChange: (value: ECPositionOption | "") => void,
+    className?: string,
+  ) => (
+    <div key={key} className={className}>
+      <Select
+        label="EC Position"
+        selectedKeys={value ? [value] : []}
+        onSelectionChange={(keys) => {
+          const selected = Array.from(keys as Set<React.Key>)[0];
+          if (typeof selected === "string") {
+            onChange(selected as ECPositionOption);
+          }
+        }}
+        placeholder="Select EC position"
+        isRequired
+      >
+        {EC_POSITION_OPTIONS.map((position) => (
+          <SelectItem key={position}>{position}</SelectItem>
+        ))}
+      </Select>
+    </div>
+  );
+
+  const renderBodCourseField = (
+    key: string,
+    value: string,
+    onChange: (value: string) => void,
+    className?: string,
+  ) => (
+    <div key={key} className={className}>
+      <Select
+        label="B.O.D. Course"
+        selectedKeys={value ? [value] : []}
+        onSelectionChange={(keys) => {
+          const selected = Array.from(keys as Set<React.Key>)[0];
+          if (typeof selected === "string") {
+            onChange(selected);
+          }
+        }}
+        placeholder="Select B.O.D. course"
+        isRequired
+      >
+        {CAMPUS_COURSE_CODE_OPTIONS.map((option) => (
+          <SelectItem key={option.code}>{option.label}</SelectItem>
+        ))}
+      </Select>
+    </div>
+  );
+
   const createAccountDetailFields = isStudentCreateRole
     ? [
         <div key="studentName">
@@ -1120,6 +1267,21 @@ export default function AdminDashboardPage() {
             </div>,
             renderCourseField("ecCourse"),
             renderYearField("ecYear"),
+            renderEcPositionField("ecPosition", newEcPosition, (value) => {
+              setNewEcPosition(value);
+              if (value !== "B.O.D.") {
+                setNewBodCourse("");
+              }
+            }),
+            ...(isNewBodRole
+              ? [
+                  renderBodCourseField(
+                    "ecBodCourse",
+                    newBodCourse,
+                    setNewBodCourse,
+                  ),
+                ]
+              : []),
           ]
         : [];
 
@@ -1260,7 +1422,18 @@ export default function AdminDashboardPage() {
   async function updateRole(profile: CampusUserRow, role: Role) {
     try {
       setSavingRoleUid(profile.uid);
-      await updateDoc(doc(db, "profiles", profile.uid), { role });
+      const rolePatch =
+        role === "ec"
+          ? { role: toStoredCampusRole(role) }
+          : {
+              role: toStoredCampusRole(role),
+              ecPosition: null,
+              ecScope: null,
+              assignedCourse: null,
+              courseScope: null,
+              isBod: false,
+            };
+      await updateDoc(doc(db, "profiles", profile.uid), rolePatch);
       campusToast.success({
         title: "Role updated",
         description: `${profile.schoolId || profile.uid} is now ${formatRole(role)}.`,
@@ -1281,6 +1454,8 @@ export default function AdminDashboardPage() {
     const schoolId = newSchoolId.trim();
     const email = newEmail.trim();
     const ecName = newEcName.trim();
+    const ecPosition = newEcPosition.trim();
+    const bodCourse = newBodCourse.trim();
     const teacherName = newTeacherName.trim();
     const studentName = newStudentName.trim();
     const course = newCourse.trim();
@@ -1297,6 +1472,11 @@ export default function AdminDashboardPage() {
         : isEcRole
           ? ecName
           : "";
+    const ecProfileFields = buildECProfileFields(
+      newRole,
+      ecPosition,
+      bodCourse,
+    );
 
     if (!schoolId) {
       campusToast.warning({
@@ -1324,6 +1504,24 @@ export default function AdminDashboardPage() {
         title: "Missing EC Member name",
         description: "EC Member name is required for EC Member accounts.",
         dedupeKey: "admin:create-account:missing-ec-name",
+      });
+      return;
+    }
+
+    if (isEcRole && !ecPosition) {
+      campusToast.error({
+        title: "Missing EC position",
+        description: "Choose an EC position before saving an EC member account.",
+        dedupeKey: "admin:create-account:missing-ec-position",
+      });
+      return;
+    }
+
+    if (isNewBodRole && !bodCourse) {
+      campusToast.error({
+        title: "Missing B.O.D. course",
+        description: "Choose the handled course before saving a B.O.D. member.",
+        dedupeKey: "admin:create-account:missing-bod-course",
       });
       return;
     }
@@ -1374,6 +1572,9 @@ export default function AdminDashboardPage() {
           name?: string | null;
           course?: string | null;
           yearLevel?: string | null;
+          ecPosition?: string | null;
+          ecScope?: "all" | "course" | null;
+          assignedCourse?: string | null;
         },
         { uid?: string }
       >(getCampusFunctions(), "adminCreateUser");
@@ -1384,6 +1585,9 @@ export default function AdminDashboardPage() {
         name: name || null,
         course: requiresCourse ? course : null,
         yearLevel: requiresYear ? year : null,
+        ecPosition: ecProfileFields.ecPosition,
+        ecScope: ecProfileFields.ecScope,
+        assignedCourse: ecProfileFields.assignedCourse,
       });
       campusToast.success({
         title: "Account created",
@@ -1431,6 +1635,17 @@ export default function AdminDashboardPage() {
   function requestRoleChange(profile: CampusUserRow, nextRole: Role) {
     if (nextRole === profile.role) return;
 
+    if (nextRole === "ec" && profile.role !== "ec") {
+      openEditProfileModal(profile, "ec");
+      campusToast.info({
+        title: "Finish EC assignment",
+        description:
+          "Set the EC position, and choose a B.O.D. course when needed, before saving.",
+        dedupeKey: `admin:role-change:open-ec-editor:${profile.uid}`,
+      });
+      return;
+    }
+
     const isSensitiveChange =
       nextRole === "admin" || profile.role === "admin" || profile.uid === adminUid;
 
@@ -1468,8 +1683,10 @@ export default function AdminDashboardPage() {
     setPendingDeleteProfile(null);
   }
 
-  function openEditProfileModal(profile: CampusUserRow) {
+  function openEditProfileModal(profile: CampusUserRow, nextRole?: Role) {
+    const resolvedRole = nextRole ?? profile.role;
     setEditingProfile(profile);
+    setEditProfileRole(resolvedRole);
     setEditProfileName(profile.fullName);
     setEditProfileSchoolId(profile.schoolId);
     setEditProfileCourse(
@@ -1477,6 +1694,18 @@ export default function AdminDashboardPage() {
     );
     setEditProfileYearLevel(
       profile.yearLevel === "-" ? "" : String(profile.yearLevel ?? "").trim(),
+    );
+    setEditProfileEcPosition(
+      resolvedRole === "ec"
+        ? ((profile.role === "ec"
+            ? getECPositionSelectionValue(profile.ecPosition)
+            : "") as ECPositionOption | "")
+        : "",
+    );
+    setEditProfileBodCourse(
+      resolvedRole === "ec" && profile.role === "ec"
+        ? String(profile.assignedCourse ?? "").trim()
+        : "",
     );
   }
 
@@ -1649,8 +1878,15 @@ export default function AdminDashboardPage() {
     const schoolId = editProfileSchoolId.trim();
     const course = editProfileCourse.trim();
     const yearLevel = editProfileYearLevel.trim();
+    const ecPosition = editProfileEcPosition.trim();
+    const bodCourse = editProfileBodCourse.trim();
     const allowsBlankAcademicFields =
-      editingProfile.role === "teacher" || editingProfile.role === "admin";
+      editProfileRole === "teacher" || editProfileRole === "admin";
+    const ecProfileFields = buildECProfileFields(
+      editProfileRole,
+      ecPosition,
+      bodCourse,
+    );
     const originalRawName = String(editingProfile.rawFullName ?? "").trim();
     const originalDisplayName = formatStudentFullName(
       {
@@ -1692,7 +1928,7 @@ export default function AdminDashboardPage() {
     if (!allowsBlankAcademicFields && !course) {
       campusToast.warning({
         title: "Missing course",
-        description: `${formatRole(editingProfile.role)} accounts require a course.`,
+        description: `${formatRole(editProfileRole)} accounts require a course.`,
         dedupeKey: `admin:edit-profile:missing-course:${editingProfile.uid}`,
       });
       return;
@@ -1701,8 +1937,26 @@ export default function AdminDashboardPage() {
     if (!allowsBlankAcademicFields && !yearLevel) {
       campusToast.warning({
         title: "Missing year level",
-        description: `${formatRole(editingProfile.role)} accounts require a year level.`,
+        description: `${formatRole(editProfileRole)} accounts require a year level.`,
         dedupeKey: `admin:edit-profile:missing-year:${editingProfile.uid}`,
+      });
+      return;
+    }
+
+    if (editProfileRole === "ec" && !ecPosition) {
+      campusToast.error({
+        title: "Missing EC position",
+        description: "Choose an EC position before saving this EC member.",
+        dedupeKey: `admin:edit-profile:missing-ec-position:${editingProfile.uid}`,
+      });
+      return;
+    }
+
+    if (editProfileRole === "ec" && ecPosition === "B.O.D." && !bodCourse) {
+      campusToast.error({
+        title: "Missing B.O.D. course",
+        description: "Choose the handled course before saving this B.O.D. member.",
+        dedupeKey: `admin:edit-profile:missing-bod-course:${editingProfile.uid}`,
       });
       return;
     }
@@ -1712,7 +1966,7 @@ export default function AdminDashboardPage() {
     try {
       const timestamp = serverTimestamp();
       const { profilePatch, studentPatch } = buildCampusProfileUpdatePayload({
-        role: editingProfile.role,
+        role: editProfileRole,
         name,
         schoolId,
         course,
@@ -1722,7 +1976,13 @@ export default function AdminDashboardPage() {
       await setDoc(
         doc(db, "profiles", editingProfile.uid),
         {
+          role: toStoredCampusRole(editProfileRole),
           ...profilePatch,
+          ecPosition: ecProfileFields.ecPosition,
+          ecScope: ecProfileFields.ecScope,
+          assignedCourse: ecProfileFields.assignedCourse,
+          courseScope: ecProfileFields.courseScope,
+          isBod: ecProfileFields.isBod,
           updatedAt: timestamp,
         },
         { merge: true },
@@ -2639,7 +2899,7 @@ export default function AdminDashboardPage() {
                       isLoading={profilesLoading}
                       isHeaderSticky
                       loadingContent={
-                        <CampusTableBodySkeleton rows={userPageSize} columns={9} />
+                        <CampusTableBodySkeleton rows={userPageSize} columns={12} />
                       }
                       emptyContent={
                         <CampusEmptyState
@@ -2660,7 +2920,7 @@ export default function AdminDashboardPage() {
                         />
                       }
                       wrapperClassName="border-[#e5e7eb]"
-                      tableClassName="min-w-[1520px]"
+                      tableClassName="min-w-[1880px]"
                       renderCell={(profile, columnKey) => {
                         const isSelf = profile.uid === adminUid;
                         const duplicateMeta = duplicateRowsByUid.get(profile.uid);
@@ -2841,6 +3101,55 @@ export default function AdminDashboardPage() {
 
                           return roleSelect;
                         }
+
+                        if (columnKey === "ecPosition")
+                          return profile.role === "ec" ? (
+                            <Chip
+                              variant="flat"
+                              color={profile.ecPosition ? "warning" : "danger"}
+                              className="max-w-full font-medium"
+                            >
+                              {profile.ecPosition || "Not set"}
+                            </Chip>
+                          ) : (
+                            <Chip variant="flat" color="default">
+                              -
+                            </Chip>
+                          );
+
+                        if (columnKey === "ecScope")
+                          return profile.role === "ec" ? (
+                            <Chip
+                              variant="flat"
+                              color={
+                                profile.ecScope === "course" ? "secondary" : "success"
+                              }
+                              className="font-medium whitespace-nowrap"
+                            >
+                              {formatECScope(profile.ecScope)}
+                            </Chip>
+                          ) : (
+                            <Chip variant="flat" color="default">
+                              -
+                            </Chip>
+                          );
+
+                        if (columnKey === "assignedCourse")
+                          return profile.role === "ec" ? (
+                            <Chip
+                              variant="flat"
+                              color={profile.assignedCourse ? "secondary" : "default"}
+                              className="max-w-full font-medium"
+                            >
+                              {profile.assignedCourse
+                                ? profile.assignedCourseLabel || profile.assignedCourse
+                                : "-"}
+                            </Chip>
+                          ) : (
+                            <Chip variant="flat" color="default">
+                              -
+                            </Chip>
+                          );
 
                         if (columnKey === "actions")
                           return (
@@ -3465,6 +3774,26 @@ export default function AdminDashboardPage() {
               <>
                 <ModalHeader>Edit profile</ModalHeader>
                 <ModalBody className="space-y-4">
+                  <Select
+                    label="Role"
+                    selectedKeys={[editProfileRole]}
+                    onSelectionChange={(keys) => {
+                      const selected = Array.from(keys as Set<React.Key>)[0];
+                      if (typeof selected === "string") {
+                        const nextRole = selected as Role;
+                        setEditProfileRole(nextRole);
+                        if (nextRole !== "ec") {
+                          setEditProfileEcPosition("");
+                          setEditProfileBodCourse("");
+                        }
+                      }
+                    }}
+                    disallowEmptySelection
+                  >
+                    {roleOptions.map((role) => (
+                      <SelectItem key={role}>{formatRole(role)}</SelectItem>
+                    ))}
+                  </Select>
                   <Input
                     label="Name"
                     value={editProfileName}
@@ -3490,8 +3819,8 @@ export default function AdminDashboardPage() {
                     }}
                     placeholder="Select course"
                     isRequired={
-                      editingProfile?.role !== "teacher" &&
-                      editingProfile?.role !== "admin"
+                      editProfileRole !== "teacher" &&
+                      editProfileRole !== "admin"
                     }
                   >
                     {courseOptions.map((course) => (
@@ -3511,14 +3840,62 @@ export default function AdminDashboardPage() {
                     }}
                     placeholder="Select year level"
                     isRequired={
-                      editingProfile?.role !== "teacher" &&
-                      editingProfile?.role !== "admin"
+                      editProfileRole !== "teacher" &&
+                      editProfileRole !== "admin"
                     }
                   >
                     {yearOptions.map((year) => (
                       <SelectItem key={year}>{year}</SelectItem>
                     ))}
                   </Select>
+                  {editProfileRole === "ec" ? (
+                    <>
+                      <Select
+                        label="EC Position"
+                        selectedKeys={
+                          editProfileEcPosition ? [editProfileEcPosition] : []
+                        }
+                        onSelectionChange={(keys) => {
+                          const selected = Array.from(keys as Set<React.Key>)[0];
+                          if (typeof selected === "string") {
+                            const nextPosition = selected as ECPositionOption;
+                            setEditProfileEcPosition(nextPosition);
+                            if (nextPosition !== "B.O.D.") {
+                              setEditProfileBodCourse("");
+                            }
+                          }
+                        }}
+                        placeholder="Select EC position"
+                        isRequired
+                      >
+                        {EC_POSITION_OPTIONS.map((position) => (
+                          <SelectItem key={position}>{position}</SelectItem>
+                        ))}
+                      </Select>
+                      {editProfileEcPosition === "B.O.D." ? (
+                        <Select
+                          label="B.O.D. Course"
+                          selectedKeys={
+                            editProfileBodCourse ? [editProfileBodCourse] : []
+                          }
+                          onSelectionChange={(keys) => {
+                            const selected = Array.from(keys as Set<React.Key>)[0];
+                            if (typeof selected === "string") {
+                              setEditProfileBodCourse(selected);
+                            }
+                          }}
+                          placeholder="Select B.O.D. course"
+                          isRequired
+                        >
+                          {CAMPUS_COURSE_CODE_OPTIONS.map((option) => (
+                            <SelectItem key={option.code}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </Select>
+                      ) : null}
+                    </>
+                  ) : null}
                 </ModalBody>
                 <ModalFooter className="justify-between">
                   <Button

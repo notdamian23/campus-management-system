@@ -13,7 +13,7 @@ namespace {
 constexpr char kCreateSessionPath[] = "/campusDeviceCreateSession";
 constexpr char kAttendanceSyncPath[] = "/campusDeviceSyncAttendance";
 constexpr char kCleanupQueuePath[] = "/campusDeviceCleanupQueue";
-constexpr char kCleanupAckPath[] = "/campusDeviceAcknowledgeCleanupQueue";
+constexpr char kCleanupAckPath[] = "/campusDeviceCleanupQueue";
 
 struct RequestTarget {
   String url;
@@ -548,10 +548,6 @@ bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
 bool BackendClient::fetchCleanupQueue(std::vector<CleanupQueueItem> &items,
                                       String &error) {
   items.clear();
-  if (!ensureSession(error)) {
-    return false;
-  }
-
   DynamicJsonDocument response(8192);
   if (!requestJson("GET",
                    String(kCleanupQueuePath) + "?limit=" +
@@ -567,7 +563,7 @@ bool BackendClient::fetchCleanupQueue(std::vector<CleanupQueueItem> &items,
 
   for (JsonObjectConst item : array) {
     CleanupQueueItem cleanupItem;
-    cleanupItem.cleanupId = String(item["cleanupId"] | "");
+    cleanupItem.cleanupId = String(item["id"] | item["cleanupId"] | "");
     cleanupItem.type = String(item["type"] | "");
     cleanupItem.templateId = item["templateId"] | -1;
     cleanupItem.studentUid =
@@ -580,6 +576,14 @@ bool BackendClient::fetchCleanupQueue(std::vector<CleanupQueueItem> &items,
     }
   }
 
+  Serial.printf("[CLEANUP] queue code=%d items=%u\n", lastHttpStatusCode_,
+                static_cast<unsigned>(items.size()));
+  for (const auto &item : items) {
+    Serial.printf("[CLEANUP] item type=%s templateId=%d schoolId=%s uid=%s\n",
+                  item.type.c_str(), item.templateId, item.schoolId.c_str(),
+                  item.studentUid.c_str());
+  }
+
   return true;
 }
 
@@ -589,25 +593,34 @@ bool BackendClient::acknowledgeCleanupQueue(
     return true;
   }
 
-  if (!ensureSession(error)) {
-    return false;
+  DynamicJsonDocument payload(2048);
+  JsonArray array = payload.createNestedArray("processedIds");
+  size_t processedIds = 0;
+  for (const auto &result : results) {
+    if (!result.processed || result.cleanupId.isEmpty()) {
+      continue;
+    }
+    array.add(result.cleanupId);
+    ++processedIds;
   }
 
-  DynamicJsonDocument payload(2048);
-  JsonArray array = payload.createNestedArray("results");
-  for (const auto &result : results) {
-    JsonObject object = array.createNestedObject();
-    object["cleanupId"] = result.cleanupId;
-    object["processed"] = result.processed;
-    object["message"] = result.message;
+  if (processedIds == 0) {
+    return true;
   }
 
   String body;
   serializeJson(payload, body);
 
   DynamicJsonDocument response(1024);
-  return requestJson("POST", kCleanupAckPath, body, response, error, true,
-                     CampusConfig::kHttpRetryAttempts, results.size());
+  if (!requestJson("POST", kCleanupAckPath, body, response, error, true,
+                   CampusConfig::kHttpRetryAttempts, results.size())) {
+    return false;
+  }
+
+  const int processed = response["processed"] | 0;
+  Serial.printf("[CLEANUP] processed confirmation code=%d processed=%d\n",
+                lastHttpStatusCode_, processed);
+  return true;
 }
 
 void BackendClient::clearSession() {
@@ -736,7 +749,8 @@ bool BackendClient::requestJson(const char *method, const String &path,
   }
 
   const bool isSessionRequest = path == kCreateSessionPath;
-  if (!isSessionRequest && !ensureSession(error)) {
+  const bool isCleanupRequest = path.startsWith(kCleanupQueuePath);
+  if (!isSessionRequest && !isCleanupRequest && !ensureSession(error)) {
     return false;
   }
 
@@ -844,7 +858,7 @@ bool BackendClient::requestJson(const char *method, const String &path,
     https->setConnectTimeout(CampusConfig::kHttpTimeoutMs);
     https->addHeader("Content-Type", "application/json");
 
-    if (isSessionRequest) {
+    if (isSessionRequest || isCleanupRequest) {
       applyDeviceSecretHeaders(*https);
     } else if (!sessionToken_.isEmpty()) {
       https->addHeader("Authorization", "Bearer " + sessionToken_);

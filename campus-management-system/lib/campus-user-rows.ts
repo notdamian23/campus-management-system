@@ -1,4 +1,12 @@
 import { resolveCampusProfileName } from "@/lib/campus-auth";
+import { resolveCourseLabelFromCode } from "@/lib/courseOptions";
+import {
+  getAssignedCourseCode,
+  getCourseScope,
+  isBOD,
+  normalizeECScope,
+  normalizeECPosition,
+} from "@/lib/ec-permissions";
 import {
   formatStudentFullName,
   normalizeStudentNamePart,
@@ -22,6 +30,11 @@ export type CampusUserProfileSource = {
   displayName?: string;
   studentName?: string;
   teacherName?: string;
+  ecPosition?: string | null;
+  ecScope?: "all" | "course" | string | null;
+  assignedCourse?: string | null;
+  courseScope?: string | null;
+  isBod?: boolean;
   course?: string;
   year?: string;
   yearLevel?: string;
@@ -39,6 +52,11 @@ export type CampusUserProjectionSource = {
   fullName?: string;
   name?: string;
   studentName?: string;
+  ecPosition?: string | null;
+  ecScope?: "all" | "course" | string | null;
+  assignedCourse?: string | null;
+  courseScope?: string | null;
+  isBod?: boolean;
   course?: string;
   year?: string;
   yearLevel?: string;
@@ -60,6 +78,12 @@ export type CampusUserRow = {
   rawFullName: string;
   fullName: string;
   email: string;
+  ecPosition: string;
+  ecScope: "all" | "course" | null;
+  assignedCourse: string | null;
+  assignedCourseLabel: string;
+  courseScope: string | null;
+  isBod: boolean;
   course: string;
   yearLevel: string;
   accountStatus: CampusAccountStatus;
@@ -98,6 +122,11 @@ function normalizeRole(value: unknown): CampusNormalizedRole {
   if (role === "teacher") return "teacher";
   if (role === "ec" || role === "ecmember") return "ec";
   return "student";
+}
+
+export function toStoredCampusRole(value: unknown) {
+  const normalizedRole = normalizeRole(value);
+  return normalizedRole === "ec" ? "ecmember" : normalizedRole;
 }
 
 function normalizeAccountStatus(value: unknown): CampusAccountStatus {
@@ -212,6 +241,11 @@ export function normalizeCampusUserRow(
     trimValue(profile?.year) ||
     trimValue(projection?.yearLevel) ||
     trimValue(projection?.year);
+  const assignedCourse = getAssignedCourseCode(profile);
+  const derivedEcScope =
+    role === "ec"
+      ? normalizeECScope(profile?.ecScope) || (isBOD(profile) ? "course" : "all")
+      : null;
 
   return {
     uid,
@@ -224,6 +258,14 @@ export function normalizeCampusUserRow(
     rawFullName,
     fullName: resolveFullName(profile, projection, missingNameLabel),
     email: trimValue(profile?.email),
+    ecPosition: normalizeECPosition(profile?.ecPosition),
+    ecScope: derivedEcScope,
+    assignedCourse,
+    assignedCourseLabel: assignedCourse
+      ? resolveCourseLabelFromCode(assignedCourse)
+      : "",
+    courseScope: getCourseScope(profile),
+    isBod: isBOD(profile),
     course:
       role === "teacher" || role === "admin"
         ? "-"

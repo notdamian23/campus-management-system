@@ -4,6 +4,7 @@ const ROLE_HOME: Record<string, string> = {
   teacher: "/teacher",
   student: "/student",
   ec: "/ecmember",
+  ecmember: "/ecmember",
   admin: "/admin",
 };
 
@@ -84,7 +85,12 @@ export function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (pathname.startsWith("/student") && role !== "student" && role !== "ec") {
+  if (
+    pathname.startsWith("/student") &&
+    role !== "student" &&
+    role !== "ec" &&
+    role !== "ecmember"
+  ) {
     const url = req.nextUrl.clone();
     url.pathname = ROLE_HOME[role ?? ""] ?? "/";
     return NextResponse.redirect(url);
@@ -93,6 +99,7 @@ export function middleware(req: NextRequest) {
   if (
     pathname.startsWith("/ecmember") &&
     role !== "ec" &&
+    role !== "ecmember" &&
     !(role === "admin" && adminCanUseEcStudentLookup)
   ) {
     const url = req.nextUrl.clone();

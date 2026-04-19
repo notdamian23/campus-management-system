@@ -1,5 +1,10 @@
 import * as admin from "firebase-admin";
 import {HttpsError, onCall, onRequest, type CallableRequest} from "firebase-functions/v2/https";
+import {
+  onDocumentCreatedWithAuthContext,
+  onDocumentDeletedWithAuthContext,
+  onDocumentUpdatedWithAuthContext,
+} from "firebase-functions/v2/firestore";
 import {createCampusLogger} from "./campusLogger";
 
 if (admin.apps.length === 0) {
@@ -58,9 +63,22 @@ type DuplicateStudentSchoolIdReport = {
 type FingerprintCleanupMappingStatus =
   | "active"
   | "stale"
+  | "needs_reenrollment"
   | "duplicate"
   | "deleted"
   | "missing_profile";
+type FingerprintCleanupReportSummary = {
+  total: number;
+  active: number;
+  stale: number;
+  duplicate: number;
+  needsReenrollment: number;
+};
+type FingerprintCleanupReportSource =
+  | "fingerprintTemplates"
+  | "profiles_fallback"
+  | "mixed"
+  | "empty";
 type FingerprintCleanupQueueType =
   | "removeMapping"
   | "deleteTemplateIfUnused"
@@ -88,11 +106,15 @@ type FingerprintCleanupReportMapping = {
 };
 type FingerprintCleanupReport = {
   generatedAtMs: number;
+  summary: FingerprintCleanupReportSummary;
   totalMappings: number;
   activeMappings: number;
   staleMappings: number;
   duplicateMappings: number;
   needsReenrollment: number;
+  source: FingerprintCleanupReportSource;
+  fallbackUsed: boolean;
+  emptyMessage: string;
   mappings: FingerprintCleanupReportMapping[];
 };
 type MutableFingerprintCleanupMapping = {
@@ -124,6 +146,14 @@ type FingerprintCleanupActionResponse = {
   queueCount: number;
   message: string;
 };
+type FingerprintCleanupBuildMappingsResponse = {
+  ok: boolean;
+  createdCount: number;
+  updatedCount: number;
+  skippedCount: number;
+  totalProfileMappings: number;
+  message: string;
+};
 
 const ALLOWED_ORIGINS = [
   "http://localhost:3000",
@@ -143,7 +173,7 @@ function setCorsHeaders(res: any, origin: string) {
 
 const authLogger = createCampusLogger("CAMPUS auth");
 
-type Role = "admin" | "ec" | "teacher" | "student";
+type Role = "admin" | "ec" | "ecmember" | "teacher" | "student";
 type CallableAuthContext = {
   auth?: CallableRequest<Record<string, unknown>>["auth"];
 };
@@ -165,12 +195,17 @@ type CampusProfilePayload = {
   firstName?: string;
   lastName?: string;
   course?: string;
+  ecScope?: "all" | "course" | null;
+  assignedCourse?: string | null;
+  courseScope?: string | null;
   year?: string;
   yearLevel?: string;
   readyForClearance?: boolean;
+  ecPosition?: string;
+  isBod?: boolean;
 };
 
-const STUDENT_LOOKUP_PROFILE_ROLES = ["student", "ec", "ecmember"] as const;
+const STUDENT_LOOKUP_PROFILE_ROLES = ["student"] as const;
 
 const VALID_COURSES = [
   "Computer Engineering",
@@ -185,6 +220,31 @@ const COURSE_ALIASES: Record<string, typeof VALID_COURSES[number]> = {
   bsee: "Electrical Engineering",
   bsme: "Mechanical Engineering",
   bsece: "Electronics Engineering",
+  cpe: "Computer Engineering",
+  ie: "Industrial Engineering",
+  ee: "Electrical Engineering",
+  me: "Mechanical Engineering",
+  ece: "Electronics Engineering",
+};
+const COURSE_CODE_TO_SCOPE: Record<string, typeof VALID_COURSES[number]> = {
+  CPE: "Computer Engineering",
+  IE: "Industrial Engineering",
+  EE: "Electrical Engineering",
+  ME: "Mechanical Engineering",
+  ECE: "Electronics Engineering",
+};
+const COURSE_SCOPE_TO_CODE = Object.entries(COURSE_CODE_TO_SCOPE).reduce<
+  Record<string, string>
+>((lookup, [code, course]) => {
+  lookup[course] = code;
+  return lookup;
+}, {});
+const BOD_POSITION_TO_COURSE_SCOPE: Record<string, typeof VALID_COURSES[number]> = {
+  "B.O.D. (ME)": "Mechanical Engineering",
+  "B.O.D. (EE)": "Electrical Engineering",
+  "B.O.D. (IE)": "Industrial Engineering",
+  "B.O.D. (CPE)": "Computer Engineering",
+  "B.O.D. (ECE)": "Electronics Engineering",
 };
 
 function isValidCourse(value: string): boolean {
@@ -278,6 +338,111 @@ function normalizeCourseLabel(value: unknown): string {
 
   const aliasKey = normalized.toLowerCase().replace(/[\s.-]+/g, "");
   return COURSE_ALIASES[aliasKey] ?? "";
+}
+
+function normalizeAssignedCourseCode(value: unknown): string {
+  const normalized = normalizeText(value).toUpperCase();
+  if (normalized && COURSE_CODE_TO_SCOPE[normalized]) {
+    return normalized;
+  }
+
+  const normalizedCourse = normalizeCourseLabel(value);
+  return normalizedCourse ? (COURSE_SCOPE_TO_CODE[normalizedCourse] ?? "") : "";
+}
+
+function isECMemberRole(value: unknown): boolean {
+  const normalized = normalizeLower(value);
+  return normalized === "ec" || normalized === "ecmember";
+}
+
+function normalizeECPosition(value: unknown): string {
+  const position = normalizeText(value);
+  if (!position) {
+    return "";
+  }
+
+  const exact = Object.keys(BOD_POSITION_TO_COURSE_SCOPE).find(
+    (item) => normalizeLower(item) === normalizeLower(position),
+  );
+  return exact ?? position;
+}
+
+function inferCourseScopeFromPosition(value: unknown): string {
+  const normalizedPosition = normalizeECPosition(value);
+  return BOD_POSITION_TO_COURSE_SCOPE[normalizedPosition] ?? "";
+}
+
+function extractAssignedCourseFromPosition(value: unknown): string {
+  const match = normalizeText(value).match(/^B\.O\.D\.\s*\(([A-Za-z]+)\)$/i);
+  if (!match) {
+    return "";
+  }
+
+  return normalizeAssignedCourseCode(match[1]);
+}
+
+function normalizeEcScope(value: unknown): "all" | "course" | "" {
+  const normalized = normalizeLower(value);
+  if (normalized === "all") return "all";
+  if (normalized === "course") return "course";
+  return "";
+}
+
+function resolveAssignedCourseCode(data: FirebaseFirestore.DocumentData): string {
+  return (
+    normalizeAssignedCourseCode(data.assignedCourse) ||
+    extractAssignedCourseFromPosition(data.ecPosition) ||
+    normalizeAssignedCourseCode(data.courseScope)
+  );
+}
+
+function resolveProfileEcScope(
+  data: FirebaseFirestore.DocumentData,
+): "all" | "course" | "" {
+  if (!isECMemberRole(data.role)) {
+    return "";
+  }
+
+  const explicitScope = normalizeEcScope(data.ecScope);
+  if (explicitScope) {
+    return explicitScope;
+  }
+
+  return resolveAssignedCourseCode(data) ? "course" : "all";
+}
+
+function resolveProfileCourseScope(data: FirebaseFirestore.DocumentData): string {
+  const assignedCourseCode = resolveAssignedCourseCode(data);
+  if (resolveProfileEcScope(data) === "course" && assignedCourseCode) {
+    return COURSE_CODE_TO_SCOPE[assignedCourseCode] ?? "";
+  }
+
+  if (resolveProfileEcScope(data) === "all") {
+    return "";
+  }
+
+  return (
+    normalizeCourseLabel(data.courseScope) ||
+    inferCourseScopeFromPosition(data.ecPosition)
+  );
+}
+
+function isBodProfileData(data: FirebaseFirestore.DocumentData): boolean {
+  const explicitEcScope = normalizeEcScope(data.ecScope);
+  if (!isECMemberRole(data.role) || explicitEcScope === "all") {
+    return false;
+  }
+
+  return isECMemberRole(data.role) &&
+    (
+      resolveProfileEcScope(data) === "course" ||
+      data.isBod === true ||
+      Boolean(inferCourseScopeFromPosition(data.ecPosition))
+    );
+}
+
+function isRegularECProfileData(data: FirebaseFirestore.DocumentData): boolean {
+  return isECMemberRole(data.role) && !isBodProfileData(data);
 }
 
 function isValidEmailAddress(value: string): boolean {
@@ -837,8 +1002,84 @@ function extractFingerprintTemplateId(
     return 0;
   }
 
-  const parsed = Number(data.fingerprintTemplateId ?? data.templateId ?? 0);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 0;
+  const candidates = [
+    data.fingerprintTemplateId,
+    data.templateId,
+    data.fingerprintId,
+    asRecord(data.fingerprint).fingerprintTemplateId,
+    asRecord(data.fingerprint).templateId,
+    asRecord(data.fingerprint).fingerprintId,
+  ];
+
+  for (const candidate of candidates) {
+    const parsed = Number(candidate ?? 0);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.trunc(parsed);
+    }
+  }
+
+  return 0;
+}
+
+function extractFingerprintStatus(
+  data: FirebaseFirestore.DocumentData | undefined,
+): string {
+  if (!data) {
+    return "";
+  }
+
+  return (
+    normalizeText(data.fingerprintStatus) ||
+    normalizeText(asRecord(data.fingerprint).status) ||
+    normalizeText(asRecord(data.fingerprint).fingerprintStatus)
+  );
+}
+
+function extractFingerprintEnrolledAt(
+  data: FirebaseFirestore.DocumentData | undefined,
+): unknown {
+  if (!data) {
+    return null;
+  }
+
+  const fingerprintData = asRecord(data.fingerprint);
+  return (
+    data.fingerprintEnrolledAt ??
+    data.enrolledAt ??
+    fingerprintData.enrolledAt ??
+    fingerprintData.fingerprintEnrolledAt ??
+    data.updatedAt ??
+    data.createdAt
+  );
+}
+
+function emptyFingerprintCleanupReport(
+  overrides?: Partial<FingerprintCleanupReport>,
+): FingerprintCleanupReport {
+  const summary: FingerprintCleanupReportSummary = {
+    total: overrides?.summary?.total ?? 0,
+    active: overrides?.summary?.active ?? 0,
+    stale: overrides?.summary?.stale ?? 0,
+    duplicate: overrides?.summary?.duplicate ?? 0,
+    needsReenrollment: overrides?.summary?.needsReenrollment ?? 0,
+  };
+
+  return {
+    generatedAtMs: overrides?.generatedAtMs ?? Date.now(),
+    summary,
+    totalMappings: overrides?.totalMappings ?? summary.total,
+    activeMappings: overrides?.activeMappings ?? summary.active,
+    staleMappings: overrides?.staleMappings ?? summary.stale,
+    duplicateMappings: overrides?.duplicateMappings ?? summary.duplicate,
+    needsReenrollment:
+      overrides?.needsReenrollment ?? summary.needsReenrollment,
+    source: overrides?.source ?? "empty",
+    fallbackUsed: overrides?.fallbackUsed ?? false,
+    emptyMessage:
+      overrides?.emptyMessage ??
+      "No fingerprint mappings found yet. Existing AS608 templates may still be on the device, but the web app has no mapping records. Run module sync or build mappings from profiles.",
+    mappings: overrides?.mappings ?? [],
+  };
 }
 
 function resolveFingerprintRecordName(
@@ -957,7 +1198,7 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
   profileSnapshot.docs.forEach((profileDoc) => {
     const profileData = profileDoc.data() ?? {};
     const templateId = extractFingerprintTemplateId(profileData);
-    const fingerprintStatus = normalizeText(profileData.fingerprintStatus);
+    const fingerprintStatus = extractFingerprintStatus(profileData);
     if (templateId <= 0 && !fingerprintStatus) {
       return;
     }
@@ -987,11 +1228,7 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
     mapping.fingerprintStatus = fingerprintStatus || mapping.fingerprintStatus;
     mapping.lastEnrolledAtMs = Math.max(
       mapping.lastEnrolledAtMs,
-      toMillis(
-        profileData.fingerprintEnrolledAt ??
-          profileData.updatedAt ??
-          profileData.createdAt,
-      ),
+      toMillis(extractFingerprintEnrolledAt(profileData)),
     );
     mapping.sourceSet.add("profile");
   });
@@ -999,7 +1236,7 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
   studentSnapshot.docs.forEach((studentDoc) => {
     const studentData = studentDoc.data() ?? {};
     const templateId = extractFingerprintTemplateId(studentData);
-    const fingerprintStatus = normalizeText(studentData.fingerprintStatus);
+    const fingerprintStatus = extractFingerprintStatus(studentData);
     if (templateId <= 0 && !fingerprintStatus) {
       return;
     }
@@ -1034,11 +1271,7 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
     mapping.fingerprintStatus = fingerprintStatus || mapping.fingerprintStatus;
     mapping.lastEnrolledAtMs = Math.max(
       mapping.lastEnrolledAtMs,
-      toMillis(
-        studentData.fingerprintEnrolledAt ??
-          studentData.updatedAt ??
-          studentData.createdAt,
-      ),
+      toMillis(extractFingerprintEnrolledAt(studentData)),
     );
     mapping.sourceSet.add("student_projection");
   });
@@ -1079,13 +1312,13 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
     }
     if (!mapping.fingerprintStatus) {
       mapping.fingerprintStatus =
-        normalizeText(templateData.fingerprintStatus) || mapping.templateDocStatus;
+        extractFingerprintStatus(templateData) || mapping.templateDocStatus;
     }
     mapping.lastEnrolledAtMs = Math.max(
       mapping.lastEnrolledAtMs,
       toMillis(
         templateData.enrolledAt ??
-          templateData.fingerprintEnrolledAt ??
+          extractFingerprintEnrolledAt(templateData) ??
           templateData.updatedAt ??
           templateData.createdAt,
       ),
@@ -1137,12 +1370,14 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
       const isDeleted =
         profileStatus === "deleted" || fingerprintStatus === "deleted";
       const isMissingProfile = !mapping.hasProfile;
+      const needsReenrollmentStatus =
+        fingerprintStatus === "needs_reenrollment";
       const isStale =
         !isDeleted &&
         !isMissingProfile &&
         (
           profileStatus === "inactive" ||
-          fingerprintStatus === "needs_reenrollment" ||
+          profileStatus === "disabled" ||
           fingerprintStatus === "stale" ||
           fingerprintStatus === "inactive" ||
           mapping.templateDocActive === false ||
@@ -1157,6 +1392,8 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
         mappingStatus = "missing_profile";
       } else if (isDuplicate) {
         mappingStatus = "duplicate";
+      } else if (needsReenrollmentStatus) {
+        mappingStatus = "needs_reenrollment";
       } else if (isStale) {
         mappingStatus = "stale";
       }
@@ -1164,15 +1401,21 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
       if (mappingStatus === "active") {
         activeMappings += 1;
       }
-      if (mappingStatus === "stale") {
+      if (
+        mappingStatus === "stale" ||
+        mappingStatus === "deleted" ||
+        mappingStatus === "missing_profile"
+      ) {
         staleMappings += 1;
       }
-      if (isDuplicate) {
+      if (mappingStatus === "duplicate") {
         duplicateMappings += 1;
       }
 
       const requiresReenrollment =
-        fingerprintStatus === "needs_reenrollment" || mappingStatus === "stale";
+        fingerprintStatus === "needs_reenrollment" ||
+        mappingStatus === "stale" ||
+        mappingStatus === "needs_reenrollment";
       if (requiresReenrollment) {
         needsReenrollment += 1;
       }
@@ -1214,13 +1457,45 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
       return left.studentName.localeCompare(right.studentName);
     });
 
+  const templateBackedCount = resolvedMappings.filter((mapping) =>
+    mapping.sources.includes("fingerprint_template"),
+  ).length;
+  const fallbackBackedCount = resolvedMappings.filter((mapping) =>
+    !mapping.sources.includes("fingerprint_template"),
+  ).length;
+  const source: FingerprintCleanupReportSource =
+    resolvedMappings.length === 0 && needsReenrollment === 0 ?
+      "empty" :
+      templateBackedCount > 0 && fallbackBackedCount > 0 ?
+        "mixed" :
+        templateBackedCount > 0 ?
+          "fingerprintTemplates" :
+          "profiles_fallback";
+
+  if (resolvedMappings.length === 0 && needsReenrollment === 0) {
+    return emptyFingerprintCleanupReport({
+      source,
+      fallbackUsed: templateSnapshot.empty,
+    });
+  }
+
   return {
     generatedAtMs: Date.now(),
+    summary: {
+      total: resolvedMappings.length,
+      active: activeMappings,
+      stale: staleMappings,
+      duplicate: duplicateMappings,
+      needsReenrollment,
+    },
     totalMappings: resolvedMappings.length,
     activeMappings,
     staleMappings,
     duplicateMappings,
     needsReenrollment,
+    source,
+    fallbackUsed: templateSnapshot.empty,
+    emptyMessage: "",
     mappings: resolvedMappings,
   };
 }
@@ -1253,9 +1528,23 @@ function buildCampusProfilePayload(
     firstName: optionalText(data.firstName),
     lastName: optionalText(data.lastName),
     course: optionalText(data.course),
+    ecScope:
+      data.ecScope === null ?
+        null :
+        (resolveProfileEcScope(data) || null),
+    assignedCourse:
+      data.assignedCourse === null ?
+        null :
+        (resolveProfileEcScope(data) === "course" ?
+          (resolveAssignedCourseCode(data) || null) :
+          null),
+    courseScope:
+      data.courseScope === null ? null : optionalText(data.courseScope) || null,
     year: optionalText(data.year) || optionalText(data.yearLevel),
     yearLevel: optionalText(data.yearLevel) || optionalText(data.year),
     readyForClearance: optionalBoolean(data.readyForClearance),
+    ecPosition: optionalText(data.ecPosition),
+    isBod: optionalBoolean(data.isBod),
   };
 }
 
@@ -1480,6 +1769,17 @@ async function callerRole(
     "";
 }
 
+async function callerProfileData(
+  context: CallableAuthContext
+): Promise<FirebaseFirestore.DocumentData> {
+  if (!context.auth) {
+    throw new HttpsError("unauthenticated", "Login required.");
+  }
+
+  const callerProfileSnap = await db.doc(`profiles/${context.auth.uid}`).get();
+  return callerProfileSnap.exists ? (callerProfileSnap.data() ?? {}) : {};
+}
+
 async function requireAdmin(
   context: CallableAuthContext
 ): Promise<void> {
@@ -1496,12 +1796,92 @@ async function requireAdminOrEC(
   context: CallableAuthContext
 ): Promise<void> {
   const role = await callerRole(context);
-  if (role !== "admin" && role !== "ec") {
+  if (role !== "admin" && !isECMemberRole(role)) {
     throw new HttpsError(
       "permission-denied",
       "EC/Admin only."
     );
   }
+}
+
+function ensureBodCourseScopeAccess(
+  actorProfile: FirebaseFirestore.DocumentData,
+  targetCourse: unknown,
+  message: string,
+): void {
+  if (!isBodProfileData(actorProfile)) {
+    return;
+  }
+
+  const actorCourseScope = resolveProfileCourseScope(actorProfile);
+  const normalizedTargetCourse = normalizeCourseLabel(targetCourse);
+  if (!actorCourseScope || actorCourseScope !== normalizedTargetCourse) {
+    throw new HttpsError("permission-denied", message);
+  }
+}
+
+function resolveProfileDisplayName(data: FirebaseFirestore.DocumentData): string {
+  return (
+    normalizeText(data.name) ||
+    normalizeText(data.fullName) ||
+    normalizeText(data.studentName) ||
+    normalizeText(data.teacherName) ||
+    buildStudentFullName(data.firstName, data.lastName) ||
+    normalizeText(data.schoolId) ||
+    "Unknown User"
+  );
+}
+
+function resolveActorPosition(data: FirebaseFirestore.DocumentData): string {
+  if (isECMemberRole(data.role)) {
+    return normalizeECPosition(data.ecPosition) || "EC Member";
+  }
+
+  const normalizedRole = normalizeText(data.role);
+  if (!normalizedRole) {
+    return "";
+  }
+
+  return normalizedRole[0].toUpperCase() + normalizedRole.slice(1);
+}
+
+async function writeStructuredAuditLog(input: {
+  actorUid?: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  const actorUid = normalizeText(input.actorUid);
+  const actorProfile = actorUid ?
+    ((await db.doc(`profiles/${actorUid}`).get()).data() ?? {}) :
+    {};
+
+  await db.collection("logs").add({
+    actorUid: actorUid || null,
+    actorName: resolveProfileDisplayName(actorProfile),
+    actorPosition: resolveActorPosition(actorProfile),
+    actorCourseScope: resolveProfileCourseScope(actorProfile) || null,
+    targetType: input.targetType,
+    targetId: input.targetId,
+    action: input.action,
+    metadata: input.metadata ?? {},
+    createdAt: serverTimestamp(),
+  });
+}
+
+function shouldSkipAuthContextAudit(event: {
+  authType?: string;
+  authId?: string;
+}): boolean {
+  if (!normalizeText(event.authId)) {
+    return true;
+  }
+
+  const authType = normalizeLower(event.authType);
+  return authType === "service_account" ||
+    authType === "system" ||
+    authType === "unauthenticated";
 }
 
 export const adminCreateUser = onCall({region: REGION}, async (request) => {
@@ -1510,12 +1890,41 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
     const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
     const schoolIdKey = normalizeSchoolIdKey(schoolId);
-    const role = normalizeText(body.role) as Role;
+    const requestedRole = normalizeText(body.role) as Role;
+    const role = requestedRole === "ec" ? "ecmember" : requestedRole;
     const emailRaw = normalizeText(body.email);
     const name =
       normalizeText(body.name) ||
       normalizeText(body.teacherName) ||
       normalizeText(body.studentName);
+    const requestedEcPosition = normalizeECPosition(body.ecPosition);
+    const requestedEcScope = normalizeEcScope(body.ecScope);
+    const requestedAssignedCourse = normalizeAssignedCourseCode(body.assignedCourse);
+    const inferredCourseScope = inferCourseScopeFromPosition(requestedEcPosition);
+    const inferredAssignedCourse = extractAssignedCourseFromPosition(
+      requestedEcPosition,
+    );
+    const bodAssignedCourse = requestedAssignedCourse || inferredAssignedCourse;
+    const isBod = role === "ecmember" &&
+      (
+        requestedEcScope === "course" ||
+        requestedEcPosition === "B.O.D." ||
+        Boolean(inferredCourseScope) ||
+        Boolean(bodAssignedCourse)
+      );
+    const ecPosition = role !== "ecmember" ?
+      "" :
+      isBod ?
+        (bodAssignedCourse ? `B.O.D. (${bodAssignedCourse})` : "B.O.D.") :
+        requestedEcPosition;
+    const ecScope = role !== "ecmember" ?
+      "" :
+      isBod ?
+        "course" :
+        "all";
+    const courseScope = isBod && bodAssignedCourse ?
+      (COURSE_CODE_TO_SCOPE[bodAssignedCourse] ?? "") :
+      "";
     const course = normalizeText(body.course);
     const yearSource = body.yearLevel ?? body.year;
     const yearRaw = normalizeText(yearSource);
@@ -1535,7 +1944,7 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
       );
     }
 
-    if (!["admin", "ec", "teacher", "student"].includes(role)) {
+    if (!["admin", "ecmember", "teacher", "student"].includes(role)) {
       throw new HttpsError(
         "invalid-argument",
         "Invalid role."
@@ -1556,24 +1965,38 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
       );
     }
 
-    if (role === "ec" && !name) {
+    if (role === "ecmember" && !name) {
       throw new HttpsError(
         "invalid-argument",
         "name is required for ec role."
       );
     }
 
-    if ((role === "student" || role === "ec") && !course) {
+    if ((role === "student" || role === "ecmember") && !course) {
       throw new HttpsError(
         "invalid-argument",
         "course is required for student and ec roles."
       );
     }
 
-    if ((role === "student" || role === "ec") && !yearRaw) {
+    if ((role === "student" || role === "ecmember") && !yearRaw) {
       throw new HttpsError(
         "invalid-argument",
         "yearLevel is required for student and ec roles."
+      );
+    }
+
+    if (role === "ecmember" && !ecPosition) {
+      throw new HttpsError(
+        "invalid-argument",
+        "ecPosition is required for EC member accounts."
+      );
+    }
+
+    if (isBod && !bodAssignedCourse) {
+      throw new HttpsError(
+        "invalid-argument",
+        "assignedCourse is required for B.O.D. accounts."
       );
     }
 
@@ -1625,6 +2048,11 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
         schoolIdKey,
         email,
         role,
+        ecPosition: role === "ecmember" ? ecPosition : "",
+        ecScope: role === "ecmember" ? ecScope : null,
+        assignedCourse: role === "ecmember" ? (bodAssignedCourse || null) : null,
+        courseScope: role === "ecmember" ? (courseScope || null) : null,
+        isBod: role === "ecmember" ? isBod : false,
         course: course || "",
         year: year || "",
         yearLevel: year || "",
@@ -2377,7 +2805,9 @@ function isValidFingerprintCleanupOwner(
   return mapping.templateId > 0 &&
     mapping.mappingStatus !== "deleted" &&
     mapping.mappingStatus !== "missing_profile" &&
+    mapping.mappingStatus !== "needs_reenrollment" &&
     profileStatus !== "inactive" &&
+    profileStatus !== "disabled" &&
     fingerprintStatus !== "needs_reenrollment" &&
     fingerprintStatus !== "stale";
 }
@@ -2542,24 +2972,249 @@ async function activateFingerprintMappingForUid(
   }
 }
 
+function sortFingerprintCleanupOwnerCandidates(
+  left: FingerprintCleanupReportMapping,
+  right: FingerprintCleanupReportMapping,
+): number {
+  const leftValid = isValidFingerprintCleanupOwner(left);
+  const rightValid = isValidFingerprintCleanupOwner(right);
+  if (leftValid !== rightValid) {
+    return leftValid ? -1 : 1;
+  }
+
+  const leftNeeds = left.needsReenrollment;
+  const rightNeeds = right.needsReenrollment;
+  if (leftNeeds !== rightNeeds) {
+    return leftNeeds ? 1 : -1;
+  }
+
+  const leftProfile = normalizeLower(left.profileStatus);
+  const rightProfile = normalizeLower(right.profileStatus);
+  const leftActiveProfile = leftProfile === "active" || !leftProfile;
+  const rightActiveProfile = rightProfile === "active" || !rightProfile;
+  if (leftActiveProfile !== rightActiveProfile) {
+    return leftActiveProfile ? -1 : 1;
+  }
+
+  if (left.lastEnrolledAtMs !== right.lastEnrolledAtMs) {
+    return right.lastEnrolledAtMs - left.lastEnrolledAtMs;
+  }
+
+  return left.studentName.localeCompare(right.studentName);
+}
+
+function buildFingerprintTemplateMigrationPayload(
+  mapping: FingerprintCleanupReportMapping,
+): Record<string, unknown> {
+  const normalizedStatus = normalizeLower(mapping.fingerprintStatus);
+  const isActiveOwner = isValidFingerprintCleanupOwner(mapping);
+  const status =
+    mapping.mappingStatus === "deleted" ||
+    mapping.mappingStatus === "missing_profile" ||
+    mapping.mappingStatus === "stale" ?
+      "stale" :
+    mapping.mappingStatus === "needs_reenrollment" ||
+    normalizedStatus === "needs_reenrollment" ?
+      "needs_reenrollment" :
+      "active";
+
+  return {
+    templateId: mapping.templateId,
+    uid: mapping.uid,
+    schoolId: mapping.schoolId,
+    name: mapping.studentName,
+    course: mapping.course,
+    yearLevel: mapping.yearLevel,
+    active: isActiveOwner,
+    status,
+    fingerprintStatus: mapping.fingerprintStatus || (isActiveOwner ? "enrolled" : status),
+    updatedAt: serverTimestamp(),
+    migratedAt: serverTimestamp(),
+  };
+}
+
 export const adminListFingerprintCleanupMappings = onCall({region: REGION}, async (request) => {
     await requireAdmin(request);
 
-    const report = await buildFingerprintCleanupReport();
-    await db.collection("logs").add({
-      action: "ADMIN_LIST_FINGERPRINT_CLEANUP_MAPPINGS",
-      actorUid: normalizeText(request.auth?.uid),
-      totalMappings: report.totalMappings,
-      duplicateMappings: report.duplicateMappings,
-      staleMappings: report.staleMappings,
-      createdAt: serverTimestamp(),
-    }).catch((logError) => {
-      authLogger.warn("adminListFingerprintCleanupMappings log write failed", {
-        error: logError,
-      });
-    });
+    const actorUid = normalizeText(request.auth?.uid);
 
-    return report;
+    try {
+      const actorProfileSnap = actorUid ? await db.doc(`profiles/${actorUid}`).get() : null;
+      authLogger.info("adminListFingerprintCleanupMappings started", {
+        actorUid,
+        actorRole: normalizeText(actorProfileSnap?.data()?.role),
+        collection: "fingerprintTemplates",
+      });
+
+      const report = await buildFingerprintCleanupReport();
+      authLogger.info("adminListFingerprintCleanupMappings completed", {
+        actorUid,
+        loadedMappings: report.totalMappings,
+        fallbackUsed: report.fallbackUsed,
+        source: report.source,
+      });
+
+      await db.collection("logs").add({
+        action: "ADMIN_LIST_FINGERPRINT_CLEANUP_MAPPINGS",
+        actorUid,
+        totalMappings: report.totalMappings,
+        duplicateMappings: report.duplicateMappings,
+        staleMappings: report.staleMappings,
+        source: report.source,
+        fallbackUsed: report.fallbackUsed,
+        createdAt: serverTimestamp(),
+      }).catch((logError) => {
+        authLogger.warn("adminListFingerprintCleanupMappings log write failed", {
+          error: logError,
+        });
+      });
+
+      return report;
+    } catch (error: unknown) {
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      const unexpectedError = error as {code?: string; message?: string};
+      authLogger.error("adminListFingerprintCleanupMappings failed", {
+        actorUid,
+        code: unexpectedError.code ?? "unknown",
+        message: unexpectedError.message ?? "Unknown fingerprint cleanup error",
+        error,
+      });
+
+      throw new HttpsError(
+        "internal",
+        "Unable to load fingerprint mappings. Check Cloud Function logs for the exact error.",
+      );
+    }
+  });
+
+export const adminBuildFingerprintMappingsFromProfiles = onCall({region: REGION}, async (request) => {
+    await requireAdmin(request);
+
+    const actorUid = normalizeText(request.auth?.uid);
+
+    try {
+      const report = await buildFingerprintCleanupReport();
+      const groupedByTemplate = new Map<number, FingerprintCleanupReportMapping[]>();
+
+      report.mappings
+        .filter((mapping) =>
+          mapping.templateId > 0 &&
+          (mapping.sources.includes("profile") || mapping.sources.includes("student_projection")),
+        )
+        .forEach((mapping) => {
+          const current = groupedByTemplate.get(mapping.templateId) ?? [];
+          current.push(mapping);
+          groupedByTemplate.set(mapping.templateId, current);
+        });
+
+      if (groupedByTemplate.size === 0) {
+        return {
+          ok: true,
+          createdCount: 0,
+          updatedCount: 0,
+          skippedCount: 0,
+          totalProfileMappings: 0,
+          message: "No profile fingerprint mappings were found to migrate.",
+        } satisfies FingerprintCleanupBuildMappingsResponse;
+      }
+
+      let createdCount = 0;
+      let updatedCount = 0;
+      let skippedCount = 0;
+      let operationsInBatch = 0;
+      let batch = db.batch();
+
+      for (const [templateId, mappings] of groupedByTemplate.entries()) {
+        const preferred = [...mappings].sort(sortFingerprintCleanupOwnerCandidates)[0];
+        const payload = buildFingerprintTemplateMigrationPayload(preferred);
+        const templateRef = fingerprintTemplateRef(templateId);
+        const templateSnap = await templateRef.get();
+        const existingData = templateSnap.data() ?? {};
+        const existingUid = normalizeText(existingData.uid);
+        const existingSchoolId = normalizeText(existingData.schoolId);
+        const existingStatus = normalizeLower(existingData.status);
+        const existingActive = existingData.active !== false;
+        const nextStatus = normalizeLower(payload.status);
+        const nextUid = normalizeText(payload.uid);
+        const nextSchoolId = normalizeText(payload.schoolId);
+        const nextActive = payload.active === true;
+
+        if (
+          templateSnap.exists &&
+          existingUid === nextUid &&
+          existingSchoolId === nextSchoolId &&
+          existingStatus === nextStatus &&
+          existingActive === nextActive
+        ) {
+          skippedCount += 1;
+          continue;
+        }
+
+        batch.set(templateRef, payload, {merge: true});
+        operationsInBatch += 1;
+        if (templateSnap.exists) {
+          updatedCount += 1;
+        } else {
+          createdCount += 1;
+        }
+
+        if (operationsInBatch >= 400) {
+          await batch.commit();
+          batch = db.batch();
+          operationsInBatch = 0;
+        }
+      }
+
+      if (operationsInBatch > 0) {
+        await batch.commit();
+      }
+
+      await db.collection("logs").add({
+        action: "ADMIN_BUILD_FINGERPRINT_MAPPINGS_FROM_PROFILES",
+        actorUid,
+        createdCount,
+        updatedCount,
+        skippedCount,
+        totalProfileMappings: groupedByTemplate.size,
+        createdAt: serverTimestamp(),
+      }).catch((logError) => {
+        authLogger.warn("adminBuildFingerprintMappingsFromProfiles log write failed", {
+          error: logError,
+        });
+      });
+
+      return {
+        ok: true,
+        createdCount,
+        updatedCount,
+        skippedCount,
+        totalProfileMappings: groupedByTemplate.size,
+        message:
+          createdCount > 0 || updatedCount > 0 ?
+            `Fingerprint mappings built from profiles. Created ${createdCount}, updated ${updatedCount}, skipped ${skippedCount}.` :
+            "Fingerprint mappings are already up to date.",
+      } satisfies FingerprintCleanupBuildMappingsResponse;
+    } catch (error: unknown) {
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      const unexpectedError = error as {code?: string; message?: string};
+      authLogger.error("adminBuildFingerprintMappingsFromProfiles failed", {
+        actorUid,
+        code: unexpectedError.code ?? "unknown",
+        message: unexpectedError.message ?? "Unknown fingerprint migration error",
+        error,
+      });
+
+      throw new HttpsError(
+        "internal",
+        "Unable to build fingerprint mappings from profiles. Check Cloud Function logs for the exact error.",
+      );
+    }
   });
 
 export const adminManageFingerprintCleanup = onCall({region: REGION}, async (request) => {
@@ -2751,6 +3406,9 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
 
 export const ecListStudents = onCall({region: REGION}, async (request) => {
     await requireAdminOrEC(request);
+    const actorProfile = await callerProfileData(request);
+    const actorCourseScope = resolveProfileCourseScope(actorProfile);
+    const actorIsBod = isBodProfileData(actorProfile);
 
     const body = asRecord(request.data);
     const rawLimit = Number.parseInt(normalizeText(body.limit), 10);
@@ -2842,7 +3500,19 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
           "Active",
         email: normalizeText(profileData.email),
         createdAtMs: toMillis(profileData.createdAt ?? studentData.createdAt),
+        ecPosition: normalizeECPosition(profileData.ecPosition),
+        courseScope: resolveProfileCourseScope(profileData) || null,
+        isBod: isBodProfileData(profileData),
       };
+    }).filter((student) => {
+      if (!actorIsBod) {
+        return true;
+      }
+
+      return Boolean(
+        actorCourseScope &&
+        normalizeCourseLabel(student.course) === actorCourseScope,
+      );
     });
 
     return {students};
@@ -2850,6 +3520,7 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
 
 export const ecCreateStudent = onCall({region: REGION}, async (request) => {
     await requireAdminOrEC(request);
+    const actorProfile = await callerProfileData(request);
 
     const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
@@ -2889,6 +3560,12 @@ export const ecCreateStudent = onCall({region: REGION}, async (request) => {
         "Course is required."
       );
     }
+
+    ensureBodCourseScopeAccess(
+      actorProfile,
+      course,
+      "B.O.D. members can only create students inside their own course scope.",
+    );
 
     if (!yearRaw) {
       throw new HttpsError(
@@ -3297,6 +3974,31 @@ export const adminUpsertPortableDevice = onCall({region: REGION}, async (request
     );
 
     return {deviceId, enabled};
+  });
+
+export const logPermissionDeniedAttempt = onCall({region: REGION}, async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Login required.");
+    }
+
+    const body = asRecord(request.data);
+    const targetType = normalizeText(body.targetType) || "unknown";
+    const targetId = normalizeText(body.targetId) || "unknown";
+    const attemptedAction = normalizeText(body.action) || "unknown";
+    const reason = normalizeText(body.reason) || "permission-denied";
+
+    await writeStructuredAuditLog({
+      actorUid: request.auth.uid,
+      action: "permission_denied_attempt",
+      targetType,
+      targetId,
+      metadata: {
+        attemptedAction,
+        reason,
+      },
+    });
+
+    return {ok: true};
   });
 
 export const studentManagePreRegistration = onCall({region: REGION}, async (request) => {
@@ -3729,6 +4431,114 @@ export const studentManagePreRegistration = onCall({region: REGION}, async (requ
 
     return result;
   });
+
+export const auditStudentWrites = onDocumentUpdatedWithAuthContext(
+  {region: REGION, document: "students/{studentId}"},
+  async (event) => {
+    if (shouldSkipAuthContextAudit(event)) {
+      return;
+    }
+
+    const beforeData = event.data?.before.data() ?? {};
+    const afterData = event.data?.after.data() ?? {};
+    const studentId = normalizeText(event.params.studentId);
+    const actorUid = normalizeText(event.authId);
+
+    const readyBefore = beforeData.readyForClearance === true;
+    const readyAfter = afterData.readyForClearance === true;
+    if (!readyBefore && readyAfter) {
+      await writeStructuredAuditLog({
+        actorUid,
+        action: "student_marked_ready_for_clearance",
+        targetType: "student",
+        targetId: studentId,
+      });
+    }
+
+    const editedKeys = [
+      "schoolId",
+      "studentName",
+      "name",
+      "fullName",
+      "course",
+      "year",
+      "yearLevel",
+      "status",
+    ].filter((key) => JSON.stringify(beforeData[key]) !== JSON.stringify(afterData[key]));
+
+    if (editedKeys.length > 0) {
+      await writeStructuredAuditLog({
+        actorUid,
+        action: "student_edited",
+        targetType: "student",
+        targetId: studentId,
+        metadata: {
+          editedKeys,
+        },
+      });
+    }
+  },
+);
+
+export const auditEventCreates = onDocumentCreatedWithAuthContext(
+  {region: REGION, document: "events/{eventId}"},
+  async (event) => {
+    if (shouldSkipAuthContextAudit(event)) {
+      return;
+    }
+
+    await writeStructuredAuditLog({
+      actorUid: event.authId,
+      action: "event_created",
+      targetType: "event",
+      targetId: normalizeText(event.params.eventId),
+      metadata: {
+        ownerType: normalizeText(event.data?.data()?.ownerType),
+        courseScope: normalizeCourseLabel(event.data?.data()?.courseScope) || null,
+      },
+    });
+  },
+);
+
+export const auditEventUpdates = onDocumentUpdatedWithAuthContext(
+  {region: REGION, document: "events/{eventId}"},
+  async (event) => {
+    if (shouldSkipAuthContextAudit(event)) {
+      return;
+    }
+
+    await writeStructuredAuditLog({
+      actorUid: event.authId,
+      action: "event_edited",
+      targetType: "event",
+      targetId: normalizeText(event.params.eventId),
+      metadata: {
+        ownerType: normalizeText(event.data?.after.data()?.ownerType),
+        courseScope: normalizeCourseLabel(event.data?.after.data()?.courseScope) || null,
+      },
+    });
+  },
+);
+
+export const auditEventDeletes = onDocumentDeletedWithAuthContext(
+  {region: REGION, document: "events/{eventId}"},
+  async (event) => {
+    if (shouldSkipAuthContextAudit(event)) {
+      return;
+    }
+
+    await writeStructuredAuditLog({
+      actorUid: event.authId,
+      action: "event_deleted",
+      targetType: "event",
+      targetId: normalizeText(event.params.eventId),
+      metadata: {
+        ownerType: normalizeText(event.data?.data()?.ownerType),
+        courseScope: normalizeCourseLabel(event.data?.data()?.courseScope) || null,
+      },
+    });
+  },
+);
 
 // Portable device HTTP endpoints now live exclusively in the
 // `portable-device-functions` codebase. Keeping them out of the default

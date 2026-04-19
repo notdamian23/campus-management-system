@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { onAuthStateChanged } from "firebase/auth";
 import { FiChevronDown, FiPlus } from "react-icons/fi";
 import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
@@ -60,7 +61,8 @@ import {
   useECPageErrorToast,
   useIsBelowBreakpoint,
 } from "@/components/ecmember";
-import { app, db } from "@/lib/firebase";
+import { app, auth, db } from "@/lib/firebase";
+import type { CampusProfileDoc } from "@/lib/campus-auth";
 import {
   buildCampusProfileUpdatePayload,
   type CampusNormalizedRole,
@@ -68,6 +70,12 @@ import {
   type CampusUserProfileSource,
   type CampusUserProjectionSource,
 } from "@/lib/campus-user-rows";
+import {
+  canManageStudent,
+  getCourseScope,
+  isBOD,
+} from "@/lib/ec-permissions";
+import { logPermissionDeniedAttemptForCurrentUser } from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
 import { formatStudentFullName } from "@/lib/student-name";
 
@@ -88,6 +96,10 @@ type Student = {
   readyForClearance: boolean;
   email?: string;
   createdAt?: unknown;
+};
+
+type ViewerProfile = CampusProfileDoc & {
+  uid: string;
 };
 
 type AttendanceStatus = "Attended" | "Missed";
@@ -531,6 +543,28 @@ function toErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+async function logStudentPermissionDeniedAttempt(
+  action: string,
+  targetId: string,
+  error: unknown,
+) {
+  const message = toErrorMessage(error, "");
+  if (!message.toLowerCase().includes("permission-denied")) {
+    return;
+  }
+
+  try {
+    await logPermissionDeniedAttemptForCurrentUser({
+      action,
+      targetType: "student",
+      targetId,
+      reason: message,
+    });
+  } catch {
+    // Audit logging should not block the user-facing failure state.
+  }
+}
+
 function toEditableFieldValue(value: unknown) {
   const normalized = String(value ?? "").trim();
   if (!normalized || normalized === "-" || normalized === "Unassigned") {
@@ -553,6 +587,8 @@ function formatEventDate(date: Date | null, fallback: string) {
 export default function ECStudentLookup() {
   const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
   const isCompactViewport = useIsBelowBreakpoint(1024);
+  const [viewerProfile, setViewerProfile] = useState<ViewerProfile | null>(null);
+  const [viewerProfileReady, setViewerProfileReady] = useState(false);
 
   const [queryText, setQueryText] = useState<string>("");
   const [courseFilter, setCourseFilter] = useState<string>("");
@@ -605,7 +641,49 @@ export default function ECStudentLookup() {
     [],
   );
 
+  const viewerIsBod = useMemo(
+    () => isBOD(viewerProfile),
+    [viewerProfile],
+  );
+  const viewerCourseScope = useMemo(
+    () => getCourseScope(viewerProfile),
+    [viewerProfile],
+  );
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        setViewerProfile(null);
+        setViewerProfileReady(true);
+        return;
+      }
+
+      try {
+        const snap = await getDoc(doc(db, "profiles", user.uid));
+        if (!snap.exists()) {
+          setViewerProfile({ uid: user.uid });
+          return;
+        }
+
+        setViewerProfile({
+          uid: user.uid,
+          ...(snap.data() as CampusProfileDoc),
+        });
+      } catch {
+        setViewerProfile({ uid: user.uid });
+      } finally {
+        setViewerProfileReady(true);
+      }
+    });
+
+    return () => unsub();
+  }, []);
+
   const loadStudents = useCallback(async () => {
+    if (!viewerProfileReady) {
+      return;
+    }
+
     setLoading(true);
     setLoadError(null);
 
@@ -618,7 +696,14 @@ export default function ECStudentLookup() {
 
       const projectionByUid = new Map<string, StudentDirectoryProjection>();
       try {
-        const projectionSnap = await getDocs(collection(db, "students"));
+        const projectionRef =
+          viewerIsBod && viewerCourseScope
+            ? query(
+                collection(db, "students"),
+                where("course", "==", viewerCourseScope),
+              )
+            : collection(db, "students");
+        const projectionSnap = await getDocs(projectionRef);
         projectionSnap.docs.forEach((snapshot) => {
           projectionByUid.set(
             snapshot.id,
@@ -634,7 +719,7 @@ export default function ECStudentLookup() {
           remoteStudent,
           projectionByUid.get(String(remoteStudent.uid ?? "").trim()),
         ),
-      );
+      ).filter((student) => canManageStudent(viewerProfile, student));
 
       rows.sort(
         (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
@@ -646,11 +731,20 @@ export default function ECStudentLookup() {
     } finally {
       setLoading(false);
     }
-  }, [functions]);
+  }, [functions, viewerCourseScope, viewerIsBod, viewerProfile, viewerProfileReady]);
 
   useEffect(() => {
     void loadStudents();
   }, [loadStudents]);
+
+  useEffect(() => {
+    if (!viewerIsBod || !viewerCourseScope) {
+      return;
+    }
+
+    setCourseFilter(viewerCourseScope);
+    setNewCourse(viewerCourseScope);
+  }, [viewerCourseScope, viewerIsBod]);
 
   useEffect(() => {
     const syncStudentsPerPage = () => {
@@ -1296,7 +1390,7 @@ export default function ECStudentLookup() {
 
   const clearFilters = () => {
     setQueryText("");
-    setCourseFilter("");
+    setCourseFilter(viewerIsBod && viewerCourseScope ? viewerCourseScope : "");
     setYearFilter("");
   };
 
@@ -1404,6 +1498,11 @@ export default function ECStudentLookup() {
         dedupeKey: `ec-students:status:${student.uid}:${nextStatus}`,
       });
     } catch (error: unknown) {
+      await logStudentPermissionDeniedAttempt(
+        "toggle_account_status",
+        student.uid,
+        error,
+      );
       const message = toErrorMessage(error, "Failed to update student status.");
       setStatusNotice({
         type: "err",
@@ -1542,6 +1641,11 @@ export default function ECStudentLookup() {
         });
       }
     } catch (error: unknown) {
+      await logStudentPermissionDeniedAttempt(
+        nextReady ? "mark_ready_for_clearance" : "remove_ready_for_clearance",
+        student.uid,
+        error,
+      );
       const message = toErrorMessage(
         error,
         "Failed to mark this student ready for clearance.",
@@ -1718,6 +1822,11 @@ export default function ECStudentLookup() {
         dedupeKey: `ec-students:edit-profile:${selectedStudent.uid}`,
       });
     } catch (error: unknown) {
+      await logStudentPermissionDeniedAttempt(
+        "edit_student_profile",
+        selectedStudent.uid,
+        error,
+      );
       const message = toErrorMessage(
         error,
         "Failed to save profile changes.",
@@ -1778,7 +1887,7 @@ export default function ECStudentLookup() {
       });
       setNewSchoolId("");
       setNewStudentName("");
-      setNewCourse("");
+      setNewCourse(viewerIsBod && viewerCourseScope ? viewerCourseScope : "");
       setNewYear("");
       setNewEmail("");
       setShowAddForm(false);
@@ -1789,6 +1898,11 @@ export default function ECStudentLookup() {
       });
       await loadStudents();
     } catch (error: unknown) {
+      await logStudentPermissionDeniedAttempt(
+        "create_student",
+        schoolId,
+        error,
+      );
       const message = toErrorMessage(
         error,
         "Failed to create student account.",
@@ -1820,6 +1934,11 @@ export default function ECStudentLookup() {
             <Chip variant="flat" className="bg-white/15 text-white">
               {filtered.length} matching filters
             </Chip>
+            {viewerIsBod && viewerCourseScope && (
+              <Chip variant="flat" className="bg-white/15 text-white">
+                Course scope: {viewerCourseScope}
+              </Chip>
+            )}
           </>
         }
       />
@@ -1855,7 +1974,13 @@ export default function ECStudentLookup() {
           <Select
             aria-label="Filter by course"
             label="Course"
-            selectedKeys={new Set([courseFilter || "__all_courses__"])}
+            selectedKeys={
+              new Set([
+                viewerIsBod && viewerCourseScope
+                  ? viewerCourseScope
+                  : courseFilter || "__all_courses__",
+              ])
+            }
             onSelectionChange={(keys) => {
               if (keys === "all") return;
               const selected = Array.from(keys)[0];
@@ -1864,6 +1989,7 @@ export default function ECStudentLookup() {
               }
             }}
             disallowEmptySelection
+            isDisabled={viewerIsBod}
             className="w-full"
             items={courseFilterItems}
           >
@@ -1904,6 +2030,7 @@ export default function ECStudentLookup() {
 
             <Button
               onPress={() => setShowAddForm((prev) => !prev)}
+              isDisabled={viewerProfileReady && viewerIsBod && !viewerCourseScope}
               className={[
                 "min-h-12 w-full justify-center gap-2 text-sm font-medium text-white",
                 showAddForm
@@ -1979,7 +2106,13 @@ export default function ECStudentLookup() {
               </label>
               <Select
                 aria-label="New student course"
-                selectedKeys={new Set([newCourse || "__select_course__"])}
+                selectedKeys={
+                  new Set([
+                    viewerIsBod && viewerCourseScope
+                      ? viewerCourseScope
+                      : newCourse || "__select_course__",
+                  ])
+                }
                 onSelectionChange={(keys) => {
                   if (keys === "all") return;
                   const selected = Array.from(keys)[0];
@@ -1990,6 +2123,7 @@ export default function ECStudentLookup() {
                   }
                 }}
                 disallowEmptySelection
+                isDisabled={viewerIsBod}
                 className="mt-1 w-full"
                 items={addCourseItems}
               >
@@ -2687,7 +2821,13 @@ export default function ECStudentLookup() {
                 />
                 <Select
                   label="Course"
-                  selectedKeys={editProfileCourse ? [editProfileCourse] : []}
+                  selectedKeys={
+                    viewerIsBod && viewerCourseScope
+                      ? [viewerCourseScope]
+                      : editProfileCourse
+                        ? [editProfileCourse]
+                        : []
+                  }
                   onSelectionChange={(keys) => {
                     const selected = Array.from(keys)[0];
                     if (typeof selected === "string") {
@@ -2696,6 +2836,7 @@ export default function ECStudentLookup() {
                   }}
                   placeholder="Select course"
                   isRequired={selectedStudentRole !== "teacher"}
+                  isDisabled={viewerIsBod}
                 >
                   {courseOptions.map((course) => (
                     <SelectItem key={course}>{course}</SelectItem>

@@ -22,7 +22,7 @@ const DEFAULT_ENROLLMENT_SESSION_LIMIT = 15;
 const MAX_ENROLLMENT_SESSION_LIMIT = 25;
 const DEFAULT_SYNC_BATCH_LIMIT = 25;
 const MAX_SYNC_BATCH_LIMIT = 50;
-const DEFAULT_CLEANUP_LIMIT = 25;
+const DEFAULT_CLEANUP_LIMIT = 10;
 const MAX_CLEANUP_LIMIT = 50;
 const TOKEN_VERSION = 1;
 
@@ -884,6 +884,41 @@ async function authenticateDevice(req: Request, authMode: AuthMode): Promise<Dev
   }
 
   return authenticateDeviceWithSecret(req);
+}
+
+function getCleanupQueueSharedSecret(): string {
+  const envSecret = normalizeText(process.env.CAMPUS_DEVICE_SECRET);
+  if (envSecret) {
+    return envSecret;
+  }
+
+  return "";
+}
+
+async function authenticateCleanupQueueRequest(
+  req: Request
+): Promise<{deviceId: string}> {
+  const providedSecret = requestHeader(
+    req,
+    "X-Campus-Device-Secret",
+    "X-Device-Secret"
+  );
+  if (!providedSecret) {
+    throw new ApiError(401, "unauthorized");
+  }
+
+  const configuredSecret = getCleanupQueueSharedSecret();
+  if (configuredSecret) {
+    if (!safeEqual(providedSecret, configuredSecret)) {
+      throw new ApiError(401, "unauthorized");
+    }
+  } else {
+    await authenticateDeviceWithSecret(req);
+  }
+
+  return {
+    deviceId: requestHeader(req, "X-Campus-Device-Id", "X-Device-Id"),
+  };
 }
 
 function deviceEndpoint(
@@ -2805,7 +2840,7 @@ export const ecCloseFingerprintEnrollmentSession = functions
   });
 
 async function listPendingCleanupQueueItems(
-  device: DeviceContext,
+  deviceId: string,
   limit: number
 ): Promise<CleanupQueueItem[]> {
   const snapshot = await db
@@ -2817,7 +2852,7 @@ async function listPendingCleanupQueueItems(
     .map((cleanupDoc) => {
       const data = cleanupDoc.data() ?? {};
       const targetDeviceId = normalizeText(data.targetDeviceId);
-      if (targetDeviceId && targetDeviceId !== device.deviceId) {
+      if (targetDeviceId && deviceId && targetDeviceId !== deviceId) {
         return null;
       }
 
@@ -2838,7 +2873,7 @@ async function listPendingCleanupQueueItems(
 }
 
 async function acknowledgeCleanupQueueResults(
-  device: DeviceContext,
+  deviceId: string,
   results: CleanupQueueResult[]
 ): Promise<number> {
   if (results.length === 0) {
@@ -2858,7 +2893,7 @@ async function acknowledgeCleanupQueueResults(
       {
         processed: true,
         processedAt: serverTimestamp(),
-        processedByDeviceId: device.deviceId,
+        processedByDeviceId: deviceId,
         processedMessage: result.message,
         updatedAt: serverTimestamp(),
       },
@@ -3311,57 +3346,153 @@ export const campusDeviceSubmitEnrollment = deviceEndpoint(
   }
 );
 
-export const campusDeviceCleanupQueue = deviceEndpoint(
-  "GET",
-  "session-or-secret",
-  async (req, res, device) => {
+async function handleCleanupQueueRequest(req: Request, res: Response): Promise<void> {
+  const cleanupDevice = await authenticateCleanupQueueRequest(req);
+
+  if (req.method === "GET") {
     const limit = parseQueryInt(
       req.query.limit,
       DEFAULT_CLEANUP_LIMIT,
       1,
       MAX_CLEANUP_LIMIT
     );
-    const items = await listPendingCleanupQueueItems(device, limit);
+    const items = await listPendingCleanupQueueItems(cleanupDevice.deviceId, limit);
 
     sendJson(res, 200, {
       ok: true,
-      count: items.length,
-      items,
+      items: items.map((item) => ({
+        id: item.cleanupId,
+        cleanupId: item.cleanupId,
+        type: item.type,
+        templateId: item.templateId,
+        uid: item.uid,
+        schoolId: item.schoolId,
+        reason: item.reason,
+      })),
     });
+    return;
   }
-);
 
-export const campusDeviceAcknowledgeCleanupQueue = deviceEndpoint(
-  "POST",
-  "session-or-secret",
-  async (req, res, device) => {
+  if (req.method === "POST") {
     const body = asRecord(req.body);
-    const rawResults = Array.isArray(body.results) ? body.results : [];
-    if (rawResults.length > MAX_SYNC_BATCH_LIMIT) {
-      throw new ApiError(
-        400,
-        `results must contain at most ${MAX_SYNC_BATCH_LIMIT} items.`
-      );
+    const processedIds = asStringArray(body.processedIds);
+    const legacyResults = Array.isArray(body.results) ? body.results : [];
+
+    let results: CleanupQueueResult[] = processedIds.map((cleanupId) => ({
+      cleanupId,
+      processed: true,
+      message: "processed",
+    }));
+
+    if (results.length === 0 && legacyResults.length > 0) {
+      if (legacyResults.length > MAX_SYNC_BATCH_LIMIT) {
+        throw new ApiError(
+          400,
+          `results must contain at most ${MAX_SYNC_BATCH_LIMIT} items.`
+        );
+      }
+
+      results = legacyResults
+        .map((rawResult) => {
+          const result = asRecord(rawResult);
+          return {
+            cleanupId: normalizeText(result.cleanupId),
+            processed: result.processed === true,
+            message: normalizeText(result.message),
+          } satisfies CleanupQueueResult;
+        })
+        .filter((result) => result.cleanupId);
     }
 
-    const results = rawResults
-      .map((rawResult) => {
-        const result = asRecord(rawResult);
-        return {
-          cleanupId: normalizeText(result.cleanupId),
-          processed: result.processed === true,
-          message: normalizeText(result.message),
-        } satisfies CleanupQueueResult;
-      })
-      .filter((result) => result.cleanupId);
+    if (results.length === 0) {
+      throw new ApiError(400, "processedIds must contain at least one cleanup item ID.");
+    }
 
-    const processed = await acknowledgeCleanupQueueResults(device, results);
+    const processed = await acknowledgeCleanupQueueResults(
+      cleanupDevice.deviceId,
+      results
+    );
     sendJson(res, 200, {
       ok: true,
       processed,
+      processedIds: results
+        .filter((result) => result.processed)
+        .map((result) => result.cleanupId),
+    });
+    return;
+  }
+
+  res.set("Allow", "GET, POST, OPTIONS");
+  sendJson(res, 405, {ok: false, error: "method_not_allowed"});
+}
+
+export const campusDeviceCleanupQueue = functions.region(REGION).https.onRequest(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  if (req.method === "OPTIONS") {
+    res.set("Allow", "GET, POST, OPTIONS");
+    res.status(204).send("");
+    return;
+  }
+
+  try {
+    await handleCleanupQueueRequest(req, res);
+  } catch (error: unknown) {
+    const status = error instanceof ApiError ? error.status : 500;
+    const message = errorMessage(error, "Server error");
+    const shortError =
+      status === 401 ? "unauthorized" :
+      status === 400 ? "bad_request" :
+        "internal";
+    deviceLogger.error("Cleanup queue endpoint failed", {
+      status,
+      message,
+      error,
+    });
+    sendJson(res, status, {
+      ok: false,
+      error: shortError,
+      ...(shortError === "internal" ? {message} : {}),
     });
   }
-);
+});
+
+export const campusDeviceAcknowledgeCleanupQueue = functions.region(REGION).https.onRequest(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  if (req.method === "OPTIONS") {
+    res.set("Allow", "POST, OPTIONS");
+    res.status(204).send("");
+    return;
+  }
+
+  if (req.method !== "POST") {
+    res.set("Allow", "POST, OPTIONS");
+    sendJson(res, 405, {ok: false, error: "method_not_allowed"});
+    return;
+  }
+
+  try {
+    await handleCleanupQueueRequest(req, res);
+  } catch (error: unknown) {
+    const status = error instanceof ApiError ? error.status : 500;
+    const message = errorMessage(error, "Server error");
+    const shortError =
+      status === 401 ? "unauthorized" :
+      status === 400 ? "bad_request" :
+        "internal";
+    deviceLogger.error("Cleanup queue acknowledge alias failed", {
+      status,
+      message,
+      error,
+    });
+    sendJson(res, status, {
+      ok: false,
+      error: shortError,
+      ...(shortError === "internal" ? {message} : {}),
+    });
+  }
+});
 
 export const campusDeviceSyncAttendance = deviceEndpoint(
   "POST",

@@ -53,12 +53,18 @@ function StudentLayoutShell({ children }: { children: ReactNode }) {
           return;
         }
 
-        if (profile.role !== "student" && profile.role !== "ec") {
+        if (
+          profile.role !== "student" &&
+          profile.role !== "ec" &&
+          profile.role !== "ecmember"
+        ) {
           router.replace("/login");
           return;
         }
 
-        setCanSwitchToEc(profile.role === "ec");
+        setCanSwitchToEc(
+          profile.role === "ec" || profile.role === "ecmember",
+        );
         setAuthorized(true);
       } catch {
         router.replace("/login");

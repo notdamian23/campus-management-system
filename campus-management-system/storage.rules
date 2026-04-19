@@ -9,18 +9,62 @@ service firebase.storage {
       return /databases/(default)/documents/profiles/$(request.auth.uid);
     }
 
+    function eventPath(eventId) {
+      return /databases/(default)/documents/events/$(eventId);
+    }
+
+    function hasProfile() {
+      return signedIn() && firestore.exists(profilePath());
+    }
+
+    function profile() {
+      return hasProfile() ? firestore.get(profilePath()).data : null;
+    }
+
     function role() {
-      return signedIn() && firestore.exists(profilePath())
-        ? firestore.get(profilePath()).data.role
-        : "";
+      return hasProfile() ? profile().role : "";
     }
 
     function isAdmin() {
       return signedIn() && role() == "admin";
     }
 
+    function isECMemberRole(value) {
+      return value == "ec" || value == "ecmember";
+    }
+
     function isEC() {
-      return signedIn() && role() == "ec";
+      return signedIn() && isECMemberRole(role());
+    }
+
+    function inferCourseScopeFromPosition(position) {
+      return position == "B.O.D. (ME)" ? "Mechanical Engineering" :
+        position == "B.O.D. (EE)" ? "Electrical Engineering" :
+        position == "B.O.D. (IE)" ? "Industrial Engineering" :
+        position == "B.O.D. (CPE)" ? "Computer Engineering" :
+        position == "B.O.D. (ECE)" ? "Electronics Engineering" :
+        null;
+    }
+
+    function currentCourseScope() {
+      return !hasProfile() ? null :
+        (
+          profile().courseScope != null &&
+          profile().courseScope != ""
+        ) ? profile().courseScope :
+        inferCourseScopeFromPosition(profile().ecPosition);
+    }
+
+    function isBOD() {
+      return isEC() &&
+        (
+          profile().isBod == true ||
+          inferCourseScopeFromPosition(profile().ecPosition) != null
+        );
+    }
+
+    function isRegularEC() {
+      return isEC() && !isBOD();
     }
 
     function isTeacher() {
@@ -31,27 +75,69 @@ service firebase.storage {
       return isAdmin() || isEC();
     }
 
-    // Shared EC document storage:
-    // ec-documents/shared/{docId}/{fileName}
+    function eventExists(eventId) {
+      return firestore.exists(eventPath(eventId));
+    }
+
+    function eventData(eventId) {
+      return eventExists(eventId) ? firestore.get(eventPath(eventId)).data : null;
+    }
+
+    function eventOwnerType(data) {
+      return data.ownerType == "bod" ? "bod" : "ec";
+    }
+
+    function eventCourseScope(data) {
+      return data.courseScope != null && data.courseScope != "" ?
+        data.courseScope :
+        null;
+    }
+
+    function canViewEventData(data) {
+      return !isEC() ? signedIn() :
+        isAdmin() || isRegularEC() ||
+        (
+          isBOD() &&
+          (
+            eventOwnerType(data) == "ec" ||
+            (
+              currentCourseScope() != null &&
+              eventCourseScope(data) == currentCourseScope()
+            )
+          )
+        );
+    }
+
+    function canEditEventFiles(eventId) {
+      return eventExists(eventId) &&
+        (
+          isAdmin() ||
+          isRegularEC() ||
+          (
+            isBOD() &&
+            currentCourseScope() != null &&
+            eventOwnerType(eventData(eventId)) == "bod" &&
+            eventCourseScope(eventData(eventId)) == currentCourseScope() &&
+            eventData(eventId).createdBy == request.auth.uid
+          )
+        );
+    }
+
     match /ec-documents/shared/{docId}/{fileName} {
       allow read, write: if isAdminOrEC();
     }
 
-    // Event image storage:
-    // events/{eventId}/images/{fileId}
     match /events/{eventId}/images/{fileId} {
-      allow read: if signedIn();
-      allow write: if isAdminOrEC();
+      allow read: if eventExists(eventId) && canViewEventData(eventData(eventId));
+      allow write: if canEditEventFiles(eventId);
     }
 
-    // Event document storage:
-    // events/{eventId}/docs/{fileId}
     match /events/{eventId}/docs/{fileId} {
-      allow read: if isAdminOrEC() || isTeacher();
-      allow write: if isAdminOrEC();
+      allow read: if isTeacher() ||
+        (eventExists(eventId) && canViewEventData(eventData(eventId)));
+      allow write: if canEditEventFiles(eventId);
     }
 
-    // Deny everything else by default.
     match /{allPaths=**} {
       allow read, write: if false;
     }

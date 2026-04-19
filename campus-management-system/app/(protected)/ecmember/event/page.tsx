@@ -101,15 +101,28 @@ import {
   today,
 } from "@internationalized/date";
 import { createCampusLogger } from "@/lib/campus-logger";
+import type { CampusProfileDoc } from "@/lib/campus-auth";
+import {
+  canEditEvent,
+  canViewEvent,
+  getCourseScope,
+  isBOD,
+  isRegularEC,
+} from "@/lib/ec-permissions";
+import { logPermissionDeniedAttemptForCurrentUser } from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
 import {
   formatStudentFullName,
   formatStudentReferenceList,
 } from "@/lib/student-name";
 
-type Role = "teacher" | "student" | "ec";
+type Role = "teacher" | "student" | "ec" | "ecmember" | "admin";
 type EventStatus = "upcoming" | "ongoing" | "completed";
 const ecEventsLogger = createCampusLogger("EC Events");
+
+type ViewerProfile = CampusProfileDoc & {
+  uid: string;
+};
 
 type EventDoc = {
   id: string;
@@ -142,6 +155,10 @@ type EventDoc = {
 
   status?: EventStatus;
   createdBy?: string | null;
+  createdByPosition?: string | null;
+  createdByCourseScope?: string | null;
+  courseScope?: string | null;
+  ownerType?: "ec" | "bod";
   createdAt?: any;
 };
 
@@ -179,6 +196,48 @@ const addToast = ({
     dedupeKey: `ec-events:${color}:${title}:${description}`,
   });
 };
+
+function describeError(error: unknown, fallback: string) {
+  if (typeof error === "object" && error !== null) {
+    const maybe = error as {code?: unknown; message?: unknown};
+    const message =
+      typeof maybe.message === "string" && maybe.message.trim() ?
+        maybe.message.trim() :
+        fallback;
+    if (typeof maybe.code === "string" && maybe.code.trim()) {
+      return `${maybe.code}: ${message}`;
+    }
+    return message;
+  }
+
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+
+  return fallback;
+}
+
+async function logEventPermissionDeniedAttempt(
+  action: string,
+  targetId: string,
+  error: unknown,
+) {
+  const message = describeError(error, "");
+  if (!message.toLowerCase().includes("permission-denied")) {
+    return;
+  }
+
+  try {
+    await logPermissionDeniedAttemptForCurrentUser({
+      action,
+      targetType: "event",
+      targetId,
+      reason: message,
+    });
+  } catch {
+    // Best-effort audit only.
+  }
+}
 
 type EventFile = {
   id: string;
@@ -1495,6 +1554,7 @@ export default function EventDashboard() {
   const [saveMsg, setSaveMsg] = useState("");
 
   const [isECUser, setIsECUser] = useState(false);
+  const [viewerProfile, setViewerProfile] = useState<ViewerProfile | null>(null);
   const [roleLoading, setRoleLoading] = useState(true);
 
   const [events, setEvents] = useState<EventDoc[]>([]);
@@ -1554,6 +1614,28 @@ export default function EventDashboard() {
   const [exportMsg, setExportMsg] = useState<string>("");
   const [exportError, setExportError] = useState<string>("");
 
+  const viewerProfileWithUid = useMemo(
+    () =>
+      currentUser?.uid ?
+        ({ uid: currentUser.uid, ...(viewerProfile ?? {}) } as ViewerProfile) :
+        viewerProfile,
+    [currentUser?.uid, viewerProfile],
+  );
+  const viewerIsRegularEc = useMemo(
+    () => isRegularEC(viewerProfileWithUid),
+    [viewerProfileWithUid],
+  );
+  const viewerIsBod = useMemo(
+    () => isBOD(viewerProfileWithUid),
+    [viewerProfileWithUid],
+  );
+  const viewerCourseScope = useMemo(
+    () => getCourseScope(viewerProfileWithUid),
+    [viewerProfileWithUid],
+  );
+  const canManageNotifications = viewerIsRegularEc;
+  const canCreateEvents = isECUser;
+
   // Role check
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -1563,18 +1645,29 @@ export default function EventDashboard() {
       if (!user) {
         setIsECUser(false);
         setCurrentUser(null);
+        setViewerProfile(null);
         setRoleLoading(false);
         return;
       }
 
       try {
         const snap = await getDoc(doc(db, "profiles", user.uid));
-        const role = snap.exists()
-          ? (snap.data()?.role as Role | undefined)
-          : undefined;
-        setIsECUser(role === "ec");
+        const data = snap.exists()
+          ? (snap.data() as CampusProfileDoc)
+          : null;
+        const role = data?.role as Role | undefined;
+        setViewerProfile(
+          data ?
+            {
+              uid: user.uid,
+              ...data,
+            } :
+            { uid: user.uid },
+        );
+        setIsECUser(role === "ec" || role === "ecmember");
       } catch {
         setIsECUser(false);
+        setViewerProfile({ uid: user.uid });
       } finally {
         setRoleLoading(false);
       }
@@ -1583,22 +1676,51 @@ export default function EventDashboard() {
     return () => unsub();
   }, []);
 
-  useEffect(() => {
-    const unsub = onSnapshot(
-      query(collection(db, "payments"), orderBy("createdAt", "desc")),
-      (snap) => {
-        const rows = snap.docs.map((paymentDoc) => {
-          const data = paymentDoc.data() as {
-            title?: unknown;
-            ref?: unknown;
-          };
+  const canViewEventRecord = useCallback(
+    (event: EventDoc) => canViewEvent(viewerProfileWithUid, event),
+    [viewerProfileWithUid],
+  );
 
-          return {
-            id: paymentDoc.id,
-            title: String(data.title ?? "Untitled Payment").trim() || "Untitled Payment",
-            ref: String(data.ref ?? paymentDoc.id).trim() || paymentDoc.id,
-          } as PaymentLinkOption;
-        });
+  const canEditEventRecord = useCallback(
+    (event: EventDoc) => canEditEvent(viewerProfileWithUid, event),
+    [viewerProfileWithUid],
+  );
+
+  useEffect(() => {
+    if (roleLoading) {
+      return;
+    }
+
+    if (viewerIsBod && !viewerCourseScope) {
+      setPaymentLinkOptions([]);
+      return;
+    }
+
+    const paymentsQuery =
+      viewerIsBod && viewerCourseScope ?
+        query(collection(db, "payments"), where("course", "==", viewerCourseScope)) :
+        query(collection(db, "payments"), orderBy("createdAt", "desc"));
+
+    const unsub = onSnapshot(
+      paymentsQuery,
+      (snap) => {
+        const rows = snap.docs
+          .map((paymentDoc) => {
+            const data = paymentDoc.data() as {
+              title?: unknown;
+              ref?: unknown;
+              createdAt?: unknown;
+            };
+
+            return {
+              id: paymentDoc.id,
+              title: String(data.title ?? "Untitled Payment").trim() || "Untitled Payment",
+              ref: String(data.ref ?? paymentDoc.id).trim() || paymentDoc.id,
+              createdAt: data.createdAt,
+            };
+          })
+          .sort((left, right) => toMillis(right.createdAt) - toMillis(left.createdAt))
+          .map(({ createdAt, ...payment }) => payment satisfies PaymentLinkOption);
 
         setPaymentLinkOptions(rows);
       },
@@ -1608,7 +1730,7 @@ export default function EventDashboard() {
     );
 
     return () => unsub();
-  }, []);
+  }, [roleLoading, viewerCourseScope, viewerIsBod]);
 
   const loadStudentsForNotifications = useCallback(async (): Promise<
     StudentLookup[]
@@ -1807,7 +1929,7 @@ export default function EventDashboard() {
   );
 
   const refreshSentNotificationsOnce = useCallback(async () => {
-    if (!currentUser || !isECUser) {
+    if (!currentUser || !canManageNotifications) {
       setNotifications([]);
       setNotificationsLoading(false);
       return;
@@ -1842,11 +1964,11 @@ export default function EventDashboard() {
     } finally {
       setNotificationsLoading(false);
     }
-  }, [currentUser, isECUser, mapNotificationSummaryRows]);
+  }, [canManageNotifications, currentUser, mapNotificationSummaryRows]);
 
   // Live sent notifications (grouped by dispatchId)
   useEffect(() => {
-    if (!currentUser || !isECUser) {
+    if (!currentUser || !canManageNotifications) {
       setNotifications([]);
       setNotificationsLoading(false);
       return;
@@ -1873,23 +1995,88 @@ export default function EventDashboard() {
 
     return () => unsub();
   }, [
+    canManageNotifications,
     currentUser,
-    isECUser,
     mapNotificationSummaryRows,
     refreshSentNotificationsOnce,
   ]);
 
   // Live events
   useEffect(() => {
-    const qy = query(collection(db, "events"), orderBy("createdAt", "desc"));
-    const unsub = onSnapshot(
-      qy,
-      (snap) => {
-        const list: EventDoc[] = snap.docs.map((d) => {
-          const data = d.data() as Omit<EventDoc, "id">;
-          return { id: d.id, ...data };
+    if (roleLoading) {
+      return;
+    }
+
+    if (!isECUser) {
+      setEvents([]);
+      setEventsLoading(false);
+      return;
+    }
+
+    if (viewerIsBod && !viewerCourseScope) {
+      setEvents([]);
+      setEventsLoading(false);
+      return;
+    }
+
+    const mapEventRows = (docs: QueryDocumentSnapshot<DocumentData>[]) =>
+      docs
+        .map((snapshot) => {
+          const data = snapshot.data() as Omit<EventDoc, "id">;
+          return { id: snapshot.id, ...data };
+        })
+        .filter((event) => canViewEventRecord(event));
+
+    const sortRows = (rows: EventDoc[]) =>
+      [...rows].sort((left, right) => toMillis(right.createdAt) - toMillis(left.createdAt));
+
+    if (viewerIsBod && viewerCourseScope) {
+      let ecRows: EventDoc[] = [];
+      let bodRows: EventDoc[] = [];
+
+      const syncRows = () => {
+        const merged = new Map<string, EventDoc>();
+        [...ecRows, ...bodRows].forEach((event) => {
+          merged.set(event.id, event);
         });
-        setEvents(list);
+        setEvents(sortRows(Array.from(merged.values())));
+        setEventsLoading(false);
+      };
+
+      const unsubEc = onSnapshot(
+        query(collection(db, "events"), where("ownerType", "==", "ec")),
+        (snap) => {
+          ecRows = mapEventRows(snap.docs);
+          syncRows();
+        },
+        () => {
+          ecRows = [];
+          syncRows();
+        },
+      );
+
+      const unsubBod = onSnapshot(
+        query(collection(db, "events"), where("courseScope", "==", viewerCourseScope)),
+        (snap) => {
+          bodRows = mapEventRows(snap.docs);
+          syncRows();
+        },
+        () => {
+          bodRows = [];
+          syncRows();
+        },
+      );
+
+      return () => {
+        unsubEc();
+        unsubBod();
+      };
+    }
+
+    const unsub = onSnapshot(
+      query(collection(db, "events"), orderBy("createdAt", "desc")),
+      (snap) => {
+        setEvents(mapEventRows(snap.docs));
         setEventsLoading(false);
       },
       () => {
@@ -1897,8 +2084,15 @@ export default function EventDashboard() {
         setEventsLoading(false);
       },
     );
+
     return () => unsub();
-  }, []);
+  }, [
+    canViewEventRecord,
+    isECUser,
+    roleLoading,
+    viewerCourseScope,
+    viewerIsBod,
+  ]);
 
   // Live files for expanded event
   useEffect(() => {
@@ -1912,7 +2106,13 @@ export default function EventDashboard() {
       collection(db, "events", expandedEventId, "docs"),
       orderBy("createdAt", "desc"),
     );
-    const attendanceQ = collection(db, "events", expandedEventId, "attendance");
+    const attendanceQ =
+      viewerIsBod && viewerCourseScope ?
+        query(
+          collection(db, "events", expandedEventId, "attendance"),
+          where("course", "==", viewerCourseScope),
+        ) :
+        collection(db, "events", expandedEventId, "attendance");
 
     const unsubImgs = onSnapshot(imgQ, (snap) => {
       setEventImages((prev) => ({
@@ -1949,7 +2149,7 @@ export default function EventDashboard() {
       unsubDocs();
       unsubAttendance();
     };
-  }, [expandedEventId]);
+  }, [expandedEventId, viewerCourseScope, viewerIsBod]);
 
   // Live registrations for pre-registration events
   useEffect(() => {
@@ -1964,7 +2164,12 @@ export default function EventDashboard() {
 
     const unsubs = preRegEventIds.map((eventId) =>
       onSnapshot(
-        collection(db, "events", eventId, "registrations"),
+        viewerIsBod && viewerCourseScope ?
+          query(
+            collection(db, "events", eventId, "registrations"),
+            where("course", "==", viewerCourseScope),
+          ) :
+          collection(db, "events", eventId, "registrations"),
         async (snap) => {
           try {
             const rows: RegistrationDoc[] = snap.docs
@@ -1989,21 +2194,11 @@ export default function EventDashboard() {
 
             const activeRows = await Promise.all(
               rows.map(async (row) => {
-                const [profileSnap, studentSnap] = await Promise.all([
-                  getDoc(doc(db, "profiles", row.uid)),
-                  getDoc(doc(db, "students", row.uid)),
-                ]);
-
-                const profileStatus = String(profileSnap.data()?.status ?? "")
-                  .trim()
-                  .toLowerCase();
+                const studentSnap = await getDoc(doc(db, "students", row.uid));
                 const studentStatus = String(studentSnap.data()?.status ?? "")
                   .trim()
                   .toLowerCase();
-                if (
-                  profileStatus === "inactive" ||
-                  studentStatus === "inactive"
-                ) {
+                if (studentStatus === "inactive") {
                   return null;
                 }
 
@@ -2030,7 +2225,7 @@ export default function EventDashboard() {
     return () => {
       unsubs.forEach((unsub) => unsub());
     };
-  }, [events]);
+  }, [events, viewerCourseScope, viewerIsBod]);
 
   const filteredEvents = useMemo(() => {
     const s = searchText.trim().toLowerCase();
@@ -2320,6 +2515,10 @@ export default function EventDashboard() {
     () => (selectedEvent ? computeStatus(selectedEvent) : null),
     [selectedEvent],
   );
+  const selectedEventEditable = useMemo(
+    () => (selectedEvent ? canEditEventRecord(selectedEvent) : false),
+    [canEditEventRecord, selectedEvent],
+  );
 
   const notificationTotalPages = useMemo(
     () =>
@@ -2373,6 +2572,25 @@ export default function EventDashboard() {
     setParticipantSearch("");
     setEventFilesTab("images");
   }, [expandedEventId]);
+
+  useEffect(() => {
+    if (!viewerIsBod || !viewerCourseScope) {
+      return;
+    }
+
+    setSelectedEventCourses([viewerCourseScope]);
+    setIsAllCoursesExplicit(false);
+    setSelectedEventStudents([]);
+    setEventCourseSearch("");
+    setShowEventCourseDropdown(false);
+    setShowEventStudentDropdown(false);
+  }, [viewerCourseScope, viewerIsBod, showAddEventForm, editingEventId]);
+
+  useEffect(() => {
+    if (!canManageNotifications && showNotificationForm) {
+      setShowNotificationForm(false);
+    }
+  }, [canManageNotifications, showNotificationForm]);
 
   const eventSortLabel = useMemo(() => {
     if (eventSortMode === "oldest_to_latest") return "Date, old to new";
@@ -2545,7 +2763,14 @@ export default function EventDashboard() {
     file: File,
   ) {
     if (!currentUser) throw new Error("Not logged in");
-    if (!isECUser) throw new Error("Only EC can upload");
+    const event = events.find((item) => item.id === eventId) ?? null;
+    if (!event || !canEditEventRecord(event)) {
+      throw new Error(
+        viewerIsBod ?
+          "B.O.D. members can only upload files to their own course activities." :
+          "Only editable events can accept uploads.",
+      );
+    }
 
     const safeName = file.name.replace(/[^\w.\-()+ ]/g, "_");
     const fileId = `${Date.now()}_${safeName}`;
@@ -2762,7 +2987,8 @@ export default function EventDashboard() {
     fileDocId: string,
     path: string,
   ) {
-    if (!isECUser) return;
+    const event = events.find((item) => item.id === eventId) ?? null;
+    if (!event || !canEditEventRecord(event)) return;
     await deleteObject(ref(storage, path));
     await deleteDoc(doc(db, "events", eventId, kind, fileDocId));
   }
@@ -2774,7 +3000,8 @@ export default function EventDashboard() {
     path: string,
     fileName: string,
   ) {
-    if (!isECUser) return;
+    const event = events.find((item) => item.id === eventId) ?? null;
+    if (!event || !canEditEventRecord(event)) return;
     setPendingDeleteFile({
       eventId,
       kind,
@@ -2807,6 +3034,11 @@ export default function EventDashboard() {
 
       setPendingDeleteFile(null);
     } catch (error: any) {
+      await logEventPermissionDeniedAttempt(
+        "delete_event_file",
+        pendingDeleteFile.eventId,
+        error,
+      );
       const message = error?.message || "Failed to delete file.";
       setUploadErr(message);
       addToast({
@@ -2891,10 +3123,12 @@ export default function EventDashboard() {
       return;
     }
 
-    if (!isECUser) {
+    if (!isECUser || !canEditEventRecord(eventToDelete)) {
       addToast({
         title: "Access denied",
-        description: "Only EC members can delete events.",
+        description: viewerIsBod ?
+          "B.O.D. members can only delete their own completed course activities." :
+          "Only editable events can be deleted.",
         color: "danger",
         timeout: 5000,
       });
@@ -2932,6 +3166,14 @@ export default function EventDashboard() {
 
       if (computeStatus(eventToDelete) !== "completed") {
         throw new Error("Only completed events can be deleted.");
+      }
+
+      if (!canEditEventRecord(eventToDelete)) {
+        throw new Error(
+          viewerIsBod ?
+            "B.O.D. members can only delete their own completed course activities." :
+            "You do not have permission to delete this event.",
+        );
       }
 
       await deleteCompletedEventById(eventToDelete.id);
@@ -2983,6 +3225,11 @@ export default function EventDashboard() {
         timeout: 3500,
       });
     } catch (error: any) {
+      await logEventPermissionDeniedAttempt(
+        "delete_event",
+        pendingDeleteEvent.id,
+        error,
+      );
       const message = error?.message || "Failed to delete event.";
       addToast({
         title: "Delete failed",
@@ -3106,8 +3353,9 @@ export default function EventDashboard() {
     setNotifMsg("");
 
     if (roleLoading) return setNotifError("Checking your role, please wait...");
-    if (!isECUser)
-      return setNotifError("Only EC members can send notifications.");
+    if (!canManageNotifications) {
+      return setNotifError("Only regular EC members can send notifications.");
+    }
     if (!notifTitle.trim())
       return setNotifError("Notification title is required.");
     if (!notifDate) return setNotifError("Notification date is required.");
@@ -3295,6 +3543,11 @@ export default function EventDashboard() {
         void refreshSentNotificationsOnce();
         return;
       } catch (error: unknown) {
+        await logEventPermissionDeniedAttempt(
+          "edit_notification",
+          editingNotificationDispatchId,
+          error,
+        );
         const message =
           error instanceof Error
             ? error.message
@@ -3439,6 +3692,11 @@ export default function EventDashboard() {
       setNotifMsg(`Notification sent to ${recipients.length} student(s).`);
       resetNotificationComposer();
     } catch (error: unknown) {
+      await logEventPermissionDeniedAttempt(
+        "send_notification",
+        dispatchId,
+        error,
+      );
       const message =
         error instanceof Error ? error.message : "Failed to send notification.";
       setNotifError(message);
@@ -3503,10 +3761,12 @@ export default function EventDashboard() {
       return;
     }
 
-    if (!isECUser) {
+    if (!isECUser || !canEditEventRecord(eventToEdit)) {
       addToast({
         title: "Access denied",
-        description: "Only EC members can edit events.",
+        description: viewerIsBod ?
+          "B.O.D. members can only edit their own upcoming course activities." :
+          "You do not have permission to edit this event.",
         color: "danger",
         timeout: 5000,
       });
@@ -3651,10 +3911,12 @@ export default function EventDashboard() {
     );
 
     setSelectedEventYearLevels(selectedYears);
-    setSelectedEventCourses(selectedCourses);
+    setSelectedEventCourses(
+      viewerIsBod && viewerCourseScope ? [viewerCourseScope] : selectedCourses,
+    );
     setIsAllYearsExplicit(allYearsExplicit);
-    setIsAllCoursesExplicit(allCoursesExplicit);
-    setSelectedEventStudents(parsedTargets);
+    setIsAllCoursesExplicit(viewerIsBod ? false : allCoursesExplicit);
+    setSelectedEventStudents(viewerIsBod ? [] : parsedTargets);
 
     setEventYearSearch("");
     setEventCourseSearch("");
@@ -3673,7 +3935,12 @@ export default function EventDashboard() {
     setSaveMsg("");
 
     if (roleLoading) return setSaveError("Checking your role, please wait...");
-    if (!isECUser) return setSaveError("Only EC members can save events.");
+    if (!canCreateEvents) {
+      return setSaveError("Only EC members can save events.");
+    }
+    if (viewerIsBod && !viewerCourseScope) {
+      return setSaveError("Your B.O.D. profile is missing a course scope.");
+    }
     if (!title.trim()) return setSaveError("Title is required.");
     if (!date) return setSaveError("Date is required.");
     if (toMinutesFrom24h(eventEnd24) <= toMinutesFrom24h(eventScheduled24)) {
@@ -3696,6 +3963,13 @@ export default function EventDashboard() {
       : null;
     if (editingEventId && !eventBeingEdited) {
       return setSaveError("The event you are editing no longer exists.");
+    }
+    if (eventBeingEdited && !canEditEventRecord(eventBeingEdited)) {
+      return setSaveError(
+        viewerIsBod ?
+          "B.O.D. members can only edit their own upcoming course activities." :
+          "You do not have permission to edit this event.",
+      );
     }
     if (eventBeingEdited && computeStatus(eventBeingEdited) !== "upcoming") {
       return setSaveError("Only upcoming events can be edited.");
@@ -3762,15 +4036,17 @@ export default function EventDashboard() {
         );
       }
 
-      const studentTarget = selectedEventStudents
+      const effectiveSelectedEventStudents =
+        viewerIsBod ? [] : selectedEventStudents;
+      const studentTarget = effectiveSelectedEventStudents
         .map((student) => `${student.studentName} (${student.schoolId})`)
         .join("; ");
-      const selectedStudentIds = selectedEventStudents
+      const selectedStudentIds = effectiveSelectedEventStudents
         .map((student) => student.uid.trim())
         .filter((value) => value.length > 0 && !value.startsWith("manual-"));
       const selectedSchoolIds = Array.from(
         new Set(
-          selectedEventStudents
+          effectiveSelectedEventStudents
             .map((student) => student.schoolId.trim())
             .filter((value) => value.length > 0 && value !== "Unknown ID"),
         ),
@@ -3780,9 +4056,12 @@ export default function EventDashboard() {
       const yearLevelValue = isAllYearsExplicit
         ? "All Years"
         : selectedEventYearLevels.join(", ");
-      const courseValue = isAllCoursesExplicit
-        ? "All Courses"
-        : selectedEventCourses.join(", ");
+      const courseValue =
+        viewerIsBod && viewerCourseScope ?
+          viewerCourseScope :
+          isAllCoursesExplicit ?
+            "All Courses" :
+            selectedEventCourses.join(", ");
       const liveRegistrationCount = editingEventId
         ? eventRegistrations[editingEventId]?.filter(
             (row) => row.status === "PRE_REGISTERED",
@@ -3821,7 +4100,10 @@ export default function EventDashboard() {
         yearLevel: yearLevelValue || "All Years",
         course: courseValue || "All Courses",
         yearLevels: selectedEventYearLevels,
-        courses: selectedEventCourses,
+        courses:
+          viewerIsBod && viewerCourseScope ?
+            [viewerCourseScope] :
+            selectedEventCourses,
         targetStudent: studentTarget,
         selectedStudentIds,
         selectedSchoolIds,
@@ -3837,6 +4119,22 @@ export default function EventDashboard() {
         preRegCount,
         preRegRemaining,
         waitlistCount,
+        ownerType:
+          viewerIsBod ? "bod" : (eventBeingEdited?.ownerType ?? "ec"),
+        courseScope:
+          viewerIsBod ? viewerCourseScope : (eventBeingEdited?.courseScope ?? null),
+        createdBy:
+          viewerIsBod ?
+            (currentUser ? currentUser.uid : null) :
+            (eventBeingEdited?.createdBy ?? (currentUser ? currentUser.uid : null)),
+        createdByPosition:
+          viewerIsBod ?
+            String(viewerProfileWithUid?.ecPosition ?? "").trim() || null :
+            (eventBeingEdited?.createdByPosition ?? null),
+        createdByCourseScope:
+          viewerIsBod ?
+            viewerCourseScope :
+            (eventBeingEdited?.createdByCourseScope ?? null),
       };
 
       if (editingEventId) {
@@ -3863,6 +4161,11 @@ export default function EventDashboard() {
       resetEventComposer();
       setShowAddEventForm(false);
     } catch (err: any) {
+      await logEventPermissionDeniedAttempt(
+        editingEventId ? "edit_event" : "create_event",
+        editingEventId || title.trim() || "new-event",
+        err,
+      );
       setSaveError(
         err?.message ||
           (editingEventId
@@ -4074,33 +4377,35 @@ export default function EventDashboard() {
             }
           />
 
-          <ECQuickActionCard
-            title="Create Notification"
-            description="Open the notification composer to schedule or update an EC notice without losing your event list context."
-            icon={BellRing}
-            action={
-              <Button
-                color="primary"
-                variant="flat"
-                className="w-full sm:w-auto"
-                onPress={() =>
-                  setShowNotificationForm((v) => {
-                    const next = !v;
-                    if (next) {
-                      setNotifError("");
-                      setNotifMsg("");
-                      resetNotificationComposer();
-                      setShowAddEventForm(false);
-                      setEditingEventId(null);
-                    }
-                    return next;
-                  })
-                }
-              >
-                Create Notification
-              </Button>
-            }
-          />
+          {canManageNotifications && (
+            <ECQuickActionCard
+              title="Create Notification"
+              description="Open the notification composer to schedule or update an EC notice without losing your event list context."
+              icon={BellRing}
+              action={
+                <Button
+                  color="primary"
+                  variant="flat"
+                  className="w-full sm:w-auto"
+                  onPress={() =>
+                    setShowNotificationForm((v) => {
+                      const next = !v;
+                      if (next) {
+                        setNotifError("");
+                        setNotifMsg("");
+                        resetNotificationComposer();
+                        setShowAddEventForm(false);
+                        setEditingEventId(null);
+                      }
+                      return next;
+                    })
+                  }
+                >
+                  Create Notification
+                </Button>
+              }
+            />
+          )}
         </div>
       </section>
 
@@ -5579,6 +5884,7 @@ export default function EventDashboard() {
                 <div className="space-y-3">
                   {paginatedEvents.map((ev) => {
                     const liveStatus = computeStatus(ev);
+                    const canEditThisEvent = canEditEventRecord(ev);
                     const hasSlots =
                       ev.isPreReg && typeof ev.preRegSlots === "number";
                     const registrations = eventRegistrations[ev.id] ?? [];
@@ -5632,6 +5938,11 @@ export default function EventDashboard() {
                             >
                               {liveStatus}
                             </span>
+                            {!canEditThisEvent && (
+                              <span className="px-3 py-1 text-xs rounded-full bg-slate-100 text-slate-700">
+                                Read-only
+                              </span>
+                            )}
 
                             {hasSlots && (
                               <span className="px-3 py-1 text-xs rounded-full bg-purple-100 text-purple-700">
@@ -5666,6 +5977,7 @@ export default function EventDashboard() {
                                   e.stopPropagation();
                                   requestDeleteCompletedEvent(ev);
                                 }}
+                                isDisabled={!canEditThisEvent}
                               >
                                 Delete
                               </Button>
@@ -5693,7 +6005,7 @@ export default function EventDashboard() {
                                   if (liveStatus !== "upcoming") return;
                                   void handleStartEditUpcomingEvent(ev);
                                 }}
-                                isDisabled={liveStatus !== "upcoming"}
+                                isDisabled={liveStatus !== "upcoming" || !canEditThisEvent}
                               >
                                 {liveStatus === "upcoming"
                                   ? "Edit"
@@ -6037,8 +6349,8 @@ export default function EventDashboard() {
                                 </p>
                               )}
 
-                              {/* Upload controls (EC only) */}
-                              {isECUser && (
+                              {/* Upload controls */}
+                              {canEditThisEvent && (
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                   <label
                                     className="border rounded-lg p-3 bg-white cursor-pointer hover:bg-gray-50"
@@ -6593,6 +6905,7 @@ export default function EventDashboard() {
                           color="danger"
                           variant="flat"
                           onPress={() => requestDeleteCompletedEvent(selectedEvent)}
+                          isDisabled={!selectedEventEditable}
                         >
                           Delete
                         </Button>
@@ -6612,7 +6925,7 @@ export default function EventDashboard() {
                             if (selectedEventStatus !== "upcoming") return;
                             void handleStartEditUpcomingEvent(selectedEvent);
                           }}
-                          isDisabled={selectedEventStatus !== "upcoming"}
+                          isDisabled={selectedEventStatus !== "upcoming" || !selectedEventEditable}
                         >
                           {selectedEventStatus === "upcoming" ? "Edit event" : "Edit later"}
                         </Button>
@@ -6824,7 +7137,7 @@ export default function EventDashboard() {
                           <p className="text-sm text-green-600">{uploadMsg}</p>
                         ) : null}
 
-                        {isECUser ? (
+                        {selectedEventEditable ? (
                           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                             <Card shadow="none" className="border border-border/70 bg-slate-50/70">
                               <CardBody className="gap-2 p-4">
@@ -6901,7 +7214,7 @@ export default function EventDashboard() {
                             const original = (eventImages[selectedEvent.id] ?? []).find(
                               (item) => item.id === file.id,
                             );
-                            if (!isECUser || !original?.path) return null;
+                            if (!selectedEventEditable || !original?.path) return null;
 
                             return (
                               <Button
@@ -6928,7 +7241,7 @@ export default function EventDashboard() {
                             const original = (eventDocs[selectedEvent.id] ?? []).find(
                               (item) => item.id === file.id,
                             );
-                            if (!isECUser || !original?.path) return null;
+                            if (!selectedEventEditable || !original?.path) return null;
 
                             return (
                               <Button
@@ -6991,7 +7304,8 @@ export default function EventDashboard() {
         renderImageActions={(file) => {
           const original = viewAllModalImages.find((item) => item.id === file.id);
           const modalEventId = viewAllFilesModal.eventId;
-          if (!isECUser || !modalEventId || !original?.path) return null;
+          const modalEvent = events.find((item) => item.id === modalEventId) ?? null;
+          if (!modalEventId || !modalEvent || !canEditEventRecord(modalEvent) || !original?.path) return null;
 
           return (
             <Button
@@ -7042,7 +7356,8 @@ export default function EventDashboard() {
         renderDocumentActions={(file) => {
           const original = viewAllModalDocs.find((item) => item.id === file.id);
           const modalEventId = viewAllFilesModal.eventId;
-          if (!isECUser || !modalEventId || !original?.path) return null;
+          const modalEvent = events.find((item) => item.id === modalEventId) ?? null;
+          if (!modalEventId || !modalEvent || !canEditEventRecord(modalEvent) || !original?.path) return null;
 
           return (
             <Button

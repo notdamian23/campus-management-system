@@ -2,7 +2,7 @@ import type { User } from "firebase/auth";
 import { finalizeVerifiedCampusProfileForCurrentUser } from "@/lib/firebase-functions";
 import { formatStudentFullName } from "@/lib/student-name";
 
-export type CampusRole = "teacher" | "student" | "ec" | "admin";
+export type CampusRole = "teacher" | "student" | "ec" | "ecmember" | "admin";
 
 export type CampusProfileDoc = {
   role?: string;
@@ -22,9 +22,14 @@ export type CampusProfileDoc = {
   firstName?: string;
   lastName?: string;
   course?: string;
+  ecScope?: "all" | "course" | null;
+  assignedCourse?: string | null;
+  courseScope?: string | null;
   year?: string;
   yearLevel?: string;
   readyForClearance?: boolean;
+  ecPosition?: string | null;
+  isBod?: boolean;
 };
 
 type CampusCookieState = {
@@ -122,7 +127,7 @@ export function resolveCampusVerificationEmailTarget(
 export function resolveRoleHome(role?: string) {
   if (role === "teacher") return "/teacher";
   if (role === "student") return "/student";
-  if (role === "ec") return "/ecmember";
+  if (role === "ec" || role === "ecmember") return "/ecmember";
   if (role === "admin") return "/admin";
   return "/";
 }

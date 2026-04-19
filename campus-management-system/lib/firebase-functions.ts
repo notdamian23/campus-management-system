@@ -252,9 +252,22 @@ export type AdminDeleteDuplicateStudentSchoolIdsResult = {
 export type FingerprintCleanupMappingStatus =
   | "active"
   | "stale"
+  | "needs_reenrollment"
   | "duplicate"
   | "deleted"
   | "missing_profile";
+export type FingerprintCleanupReportSummary = {
+  total: number;
+  active: number;
+  stale: number;
+  duplicate: number;
+  needsReenrollment: number;
+};
+export type FingerprintCleanupReportSource =
+  | "fingerprintTemplates"
+  | "profiles_fallback"
+  | "mixed"
+  | "empty";
 export type FingerprintCleanupReportMapping = {
   rowId: string;
   templateId: number;
@@ -278,11 +291,15 @@ export type FingerprintCleanupReportMapping = {
 };
 export type FingerprintCleanupReport = {
   generatedAtMs: number;
+  summary: FingerprintCleanupReportSummary;
   totalMappings: number;
   activeMappings: number;
   staleMappings: number;
   duplicateMappings: number;
   needsReenrollment: number;
+  source: FingerprintCleanupReportSource;
+  fallbackUsed: boolean;
+  emptyMessage: string;
   mappings: FingerprintCleanupReportMapping[];
 };
 export type FingerprintCleanupAction =
@@ -295,6 +312,14 @@ export type FingerprintCleanupActionResult = {
   action: FingerprintCleanupAction;
   updatedCount: number;
   queueCount: number;
+  message: string;
+};
+export type FingerprintCleanupBuildMappingsResult = {
+  ok: boolean;
+  createdCount: number;
+  updatedCount: number;
+  skippedCount: number;
+  totalProfileMappings: number;
   message: string;
 };
 
@@ -314,6 +339,27 @@ export async function finalizeVerifiedCampusProfileForCurrentUser(): Promise<{
     finalized: result.data?.finalized === true,
     profile: result.data?.profile ?? null,
   };
+}
+
+export async function logPermissionDeniedAttemptForCurrentUser(
+  payload: {
+    action: string;
+    targetType: string;
+    targetId: string;
+    reason?: string;
+  },
+): Promise<void> {
+  const callable = httpsCallable<
+    {
+      action: string;
+      targetType: string;
+      targetId: string;
+      reason?: string;
+    },
+    {ok?: boolean}
+  >(getCampusFunctions(), "logPermissionDeniedAttempt");
+
+  await callable(payload);
 }
 
 export async function adminBulkImportStudents(
@@ -389,6 +435,157 @@ export async function adminDeleteDuplicateStudentSchoolIds(
   return result.data;
 }
 
+function toFunctionsErrorCode(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    const code = (error as {code?: unknown}).code;
+    if (typeof code === "string") {
+      return code.replace(/^functions\//, "");
+    }
+  }
+
+  return "";
+}
+
+function toFunctionsErrorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    const message = (error as {message?: unknown}).message;
+    if (typeof message === "string" && message.trim()) {
+      return message.trim();
+    }
+  }
+
+  return "";
+}
+
+function fingerprintCleanupErrorMessage(
+  error: unknown,
+  action: "load" | "manage" | "build",
+): string {
+  const code = toFunctionsErrorCode(error);
+  const rawMessage = toFunctionsErrorMessage(error);
+  const loweredMessage = rawMessage.toLowerCase();
+
+  if (code === "permission-denied") {
+    return "permission-denied: Admin access is required for fingerprint cleanup.";
+  }
+
+  if (code === "unauthenticated") {
+    return "unauthenticated: Sign in again as an admin to load fingerprint cleanup.";
+  }
+
+  if (code === "unimplemented" || code === "not-found") {
+    return "function not deployed: Deploy the Firebase admin cleanup functions in asia-southeast1.";
+  }
+
+  if (code === "unavailable") {
+    return "functions unavailable: The fingerprint cleanup service is temporarily unavailable.";
+  }
+
+  if (code === "invalid-response") {
+    return "invalid response shape: The fingerprint cleanup function returned unexpected data.";
+  }
+
+  if (loweredMessage.includes("index")) {
+    return `missing index: ${rawMessage}`;
+  }
+
+  if (loweredMessage.includes("permission-denied")) {
+    return `permission-denied: ${rawMessage}`;
+  }
+
+  if (loweredMessage.includes("internal") || code === "internal") {
+    return action === "load" ?
+      "internal: The cleanup report failed on the server. Check Cloud Function logs." :
+      action === "build" ?
+        "internal: Building fingerprint mappings failed on the server. Check Cloud Function logs." :
+        "internal: Fingerprint cleanup failed on the server. Check Cloud Function logs.";
+  }
+
+  if (rawMessage) {
+    return code ? `${code}: ${rawMessage}` : rawMessage;
+  }
+
+  return action === "load" ?
+    "Failed to load the fingerprint cleanup report." :
+    action === "build" ?
+      "Failed to build fingerprint mappings from profiles." :
+      "Fingerprint cleanup failed.";
+}
+
+function normalizeFingerprintCleanupReport(
+  payload: unknown,
+): FingerprintCleanupReport {
+  if (typeof payload !== "object" || payload === null) {
+    const error = new Error(
+      "invalid response shape: missing fingerprint cleanup payload.",
+    ) as Error & {code?: string};
+    error.code = "invalid-response";
+    throw error;
+  }
+
+  const data = payload as Record<string, unknown>;
+  if (!Array.isArray(data.mappings)) {
+    const error = new Error(
+      "invalid response shape: mappings must be an array.",
+    ) as Error & {code?: string};
+    error.code = "invalid-response";
+    throw error;
+  }
+
+  const mappings = data.mappings;
+  const summary =
+    typeof data.summary === "object" && data.summary !== null ?
+      (data.summary as Record<string, unknown>) :
+      {};
+
+  return {
+    generatedAtMs: Number(data.generatedAtMs ?? Date.now()) || Date.now(),
+    summary: {
+      total: Number(summary.total ?? data.totalMappings ?? mappings.length) || 0,
+      active: Number(summary.active ?? data.activeMappings ?? 0) || 0,
+      stale: Number(summary.stale ?? data.staleMappings ?? 0) || 0,
+      duplicate: Number(summary.duplicate ?? data.duplicateMappings ?? 0) || 0,
+      needsReenrollment:
+        Number(summary.needsReenrollment ?? data.needsReenrollment ?? 0) || 0,
+    },
+    totalMappings: Number(data.totalMappings ?? summary.total ?? mappings.length) || 0,
+    activeMappings: Number(data.activeMappings ?? summary.active ?? 0) || 0,
+    staleMappings: Number(data.staleMappings ?? summary.stale ?? 0) || 0,
+    duplicateMappings: Number(data.duplicateMappings ?? summary.duplicate ?? 0) || 0,
+    needsReenrollment:
+      Number(data.needsReenrollment ?? summary.needsReenrollment ?? 0) || 0,
+    source:
+      (typeof data.source === "string" ? data.source : "empty") as FingerprintCleanupReportSource,
+    fallbackUsed: data.fallbackUsed === true,
+    emptyMessage: typeof data.emptyMessage === "string" ? data.emptyMessage : "",
+    mappings: mappings as FingerprintCleanupReportMapping[],
+  };
+}
+
+function throwNormalizedFingerprintCleanupError(
+  error: unknown,
+  action: "load" | "manage" | "build",
+): never {
+  const code = toFunctionsErrorCode(error);
+  const message = fingerprintCleanupErrorMessage(error, action);
+
+  logAuthEvent("error", "Fingerprint cleanup callable failed", {
+    action,
+    region: CAMPUS_FUNCTIONS_REGION,
+    code: code || "unknown",
+    message,
+    rawMessage: toFunctionsErrorMessage(error),
+    details:
+      typeof error === "object" && error !== null ?
+        (error as {details?: unknown}).details :
+        null,
+  });
+
+  const normalizedError = new Error(message) as Error & {code?: string};
+  normalizedError.code = code || undefined;
+  throw normalizedError;
+}
+
 export async function adminListFingerprintCleanupMappings(
   functions: ReturnType<typeof getCampusFunctions>,
 ): Promise<FingerprintCleanupReport> {
@@ -399,8 +596,12 @@ export async function adminListFingerprintCleanupMappings(
     "adminListFingerprintCleanupMappings",
   );
 
-  const result = await callable({});
-  return result.data;
+  try {
+    const result = await callable({});
+    return normalizeFingerprintCleanupReport(result.data);
+  } catch (error: unknown) {
+    throwNormalizedFingerprintCleanupError(error, "load");
+  }
 }
 
 export async function adminManageFingerprintCleanup(
@@ -431,8 +632,32 @@ export async function adminManageFingerprintCleanup(
     FingerprintCleanupActionResult
   >(functions, "adminManageFingerprintCleanup");
 
-  const result = await callable(payload);
-  return result.data;
+  try {
+    const result = await callable(payload);
+    return result.data;
+  } catch (error: unknown) {
+    throwNormalizedFingerprintCleanupError(error, "manage");
+  }
+}
+
+export async function adminBuildFingerprintMappingsFromProfiles(
+  functions: ReturnType<typeof getCampusFunctions>,
+): Promise<FingerprintCleanupBuildMappingsResult> {
+  logAuthEvent("info", "Building fingerprint mappings from profiles", {
+    region: CAMPUS_FUNCTIONS_REGION,
+  });
+
+  const callable = httpsCallable<
+    Record<string, never>,
+    FingerprintCleanupBuildMappingsResult
+  >(functions, "adminBuildFingerprintMappingsFromProfiles");
+
+  try {
+    const result = await callable({});
+    return result.data;
+  } catch (error: unknown) {
+    throwNormalizedFingerprintCleanupError(error, "build");
+  }
 }
 
 export function logCampusAuthEvent(

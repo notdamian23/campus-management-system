@@ -86,7 +86,11 @@ export default function ECLayout({ children }: Props) {
       const canOpenStudentLookupAsAdmin =
         data.role === "admin" && pathname === "/ecmember/students";
 
-      if (data.role !== "ec" && !canOpenStudentLookupAsAdmin) {
+      if (
+        data.role !== "ec" &&
+        data.role !== "ecmember" &&
+        !canOpenStudentLookupAsAdmin
+      ) {
         router.replace("/login");
         return;
       }

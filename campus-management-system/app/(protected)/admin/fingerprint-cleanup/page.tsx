@@ -35,6 +35,7 @@ import {
 } from "lucide-react";
 import {auth} from "@/lib/firebase";
 import {
+  adminBuildFingerprintMappingsFromProfiles,
   adminListFingerprintCleanupMappings,
   adminManageFingerprintCleanup,
   getCampusFunctions,
@@ -59,6 +60,7 @@ const statusOptions: Array<{key: StatusFilter; label: string}> = [
   {key: "all", label: "All statuses"},
   {key: "active", label: "Active"},
   {key: "stale", label: "Stale"},
+  {key: "needs_reenrollment", label: "Needs re-enrollment"},
   {key: "duplicate", label: "Duplicate"},
   {key: "deleted", label: "Deleted"},
   {key: "missing_profile", label: "Missing profile"},
@@ -76,6 +78,7 @@ function statusChipColor(status: FingerprintCleanupReportMapping["mappingStatus"
   if (status === "active") return "success";
   if (status === "duplicate") return "warning";
   if (status === "stale") return "secondary";
+  if (status === "needs_reenrollment") return "secondary";
   if (status === "deleted") return "danger";
   return "default";
 }
@@ -119,6 +122,8 @@ export default function AdminFingerprintCleanupPage() {
   const [actionReason, setActionReason] = useState("");
   const [keepUid, setKeepUid] = useState("");
   const [actionLoadingKey, setActionLoadingKey] = useState("");
+  const [buildModalOpen, setBuildModalOpen] = useState(false);
+  const [buildMappingsLoading, setBuildMappingsLoading] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
@@ -141,6 +146,15 @@ export default function AdminFingerprintCleanupPage() {
       );
       setReport(nextReport);
       hasLoadedReportRef.current = true;
+      if (process.env.NODE_ENV !== "production") {
+        console.info("[FingerprintCleanup] report loaded", {
+          uid: auth.currentUser?.uid ?? "",
+          source: nextReport.source,
+          fallbackUsed: nextReport.fallbackUsed,
+          mappings: nextReport.totalMappings,
+          needsReenrollment: nextReport.needsReenrollment,
+        });
+      }
       if (showToast) {
         campusToast.success({
           title: "Fingerprint report refreshed",
@@ -149,6 +163,15 @@ export default function AdminFingerprintCleanupPage() {
         });
       }
     } catch (error: unknown) {
+      if (process.env.NODE_ENV !== "production") {
+        const maybe = error as {code?: string; message?: string};
+        console.error("[FingerprintCleanup] load failed", {
+          uid: auth.currentUser?.uid ?? "",
+          code: maybe.code ?? "",
+          message: maybe.message ?? "",
+          error,
+        });
+      }
       campusToast.error({
         title: "Fingerprint cleanup unavailable",
         description:
@@ -208,7 +231,12 @@ export default function AdminFingerprintCleanupPage() {
       if (duplicatesOnly && mapping.duplicateReasons.length === 0) {
         return false;
       }
-      if (staleOnly && mapping.mappingStatus !== "stale") {
+      if (
+        staleOnly &&
+        mapping.mappingStatus !== "stale" &&
+        mapping.mappingStatus !== "deleted" &&
+        mapping.mappingStatus !== "missing_profile"
+      ) {
         return false;
       }
       if (!needle) {
@@ -236,6 +264,19 @@ export default function AdminFingerprintCleanupPage() {
 
   const pendingActionLabel =
     pendingAction ? actionLabel(pendingAction.action) : "";
+  const hasActiveFilters =
+    Boolean(search.trim()) ||
+    statusFilter !== "all" ||
+    courseFilter !== "all" ||
+    yearFilter !== "all" ||
+    duplicatesOnly ||
+    staleOnly;
+  const emptyStateMessage =
+    hasActiveFilters ?
+      "No fingerprint mappings matched the current filters." :
+    report?.emptyMessage ?
+      report.emptyMessage :
+      "No fingerprint mappings found yet. Sync or enroll fingerprints first.";
 
   async function runAction() {
     if (!pendingAction) {
@@ -298,6 +339,33 @@ export default function AdminFingerprintCleanupPage() {
     }
   }
 
+  async function buildMappingsFromProfiles() {
+    setBuildMappingsLoading(true);
+    try {
+      const result = await adminBuildFingerprintMappingsFromProfiles(
+        getCampusFunctions(),
+      );
+      campusToast.success({
+        title: "Build mappings from profiles",
+        description: result.message,
+        dedupeKey: `admin:fingerprint-cleanup:build:${result.createdCount}:${result.updatedCount}:${result.skippedCount}`,
+      });
+      setBuildModalOpen(false);
+      await loadReport();
+    } catch (error: unknown) {
+      campusToast.error({
+        title: "Build mappings failed",
+        description:
+          error instanceof Error ?
+            error.message :
+            "Failed to build fingerprint mappings from profiles.",
+        dedupeKey: "admin:fingerprint-cleanup:build-error",
+      });
+    } finally {
+      setBuildMappingsLoading(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <Card shadow="sm" className="border border-[#e8ddd5] bg-white">
@@ -325,6 +393,15 @@ export default function AdminFingerprintCleanupPage() {
             </div>
 
             <div className="flex flex-wrap gap-2">
+              <Button
+                variant="bordered"
+                onPress={() => {
+                  setBuildModalOpen(true);
+                }}
+                isDisabled={refreshing || loading || buildMappingsLoading}
+              >
+                Build mappings from profiles
+              </Button>
               <Button
                 color="danger"
                 variant="flat"
@@ -397,6 +474,16 @@ export default function AdminFingerprintCleanupPage() {
               </Card>
             </div>
           )}
+
+          {!loading && report?.fallbackUsed ? (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              Showing fallback profile-based fingerprint mappings because the
+              canonical `fingerprintTemplates` records are empty or incomplete.
+              Use <span className="font-semibold">Build mappings from profiles</span>{" "}
+              to create the admin cleanup records without touching the AS608
+              sensor.
+            </div>
+          ) : null}
         </CardBody>
       </Card>
 
@@ -525,7 +612,7 @@ export default function AdminFingerprintCleanupPage() {
                 <TableBody
                   emptyContent={
                     <div className="py-10 text-center text-sm text-campus-text-secondary">
-                      No fingerprint mappings matched the current filters.
+                      {emptyStateMessage}
                     </div>
                   }
                   items={filteredMappings}
@@ -738,7 +825,7 @@ export default function AdminFingerprintCleanupPage() {
                       {pendingAction?.mapping.studentName}
                     </p>
                     <p className="mt-1 text-sm text-campus-text-secondary">
-                      Template #{pendingAction?.mapping.templateId} •{" "}
+                      Template #{pendingAction?.mapping.templateId} -{" "}
                       {pendingAction?.mapping.schoolId}
                     </p>
                   </div>
@@ -778,6 +865,56 @@ export default function AdminFingerprintCleanupPage() {
                   isLoading={Boolean(actionLoadingKey)}
                 >
                   {pendingActionLabel}
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      <Modal
+        isOpen={buildModalOpen}
+        onOpenChange={(open) => {
+          if (!buildMappingsLoading) {
+            setBuildModalOpen(open);
+          }
+        }}
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>Build mappings from profiles</ModalHeader>
+              <ModalBody className="space-y-4">
+                <p className="text-sm text-campus-text-secondary">
+                  This reads existing student profile fingerprint fields and
+                  creates or updates `fingerprintTemplates` records for admin
+                  cleanup. It does not touch the AS608 sensor, does not clear
+                  templates, and does not delete student accounts.
+                </p>
+                <div className="rounded-2xl border bg-[#faf7f3] px-4 py-3 text-sm text-campus-text-secondary">
+                  Use this when older profile data exists but the canonical
+                  fingerprint mapping collection is still empty or incomplete.
+                </div>
+              </ModalBody>
+              <ModalFooter className="justify-between">
+                <Button
+                  variant="bordered"
+                  onPress={() => {
+                    setBuildModalOpen(false);
+                    onClose();
+                  }}
+                  isDisabled={buildMappingsLoading}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  color="primary"
+                  onPress={() => {
+                    void buildMappingsFromProfiles();
+                  }}
+                  isLoading={buildMappingsLoading}
+                >
+                  Build mappings
                 </Button>
               </ModalFooter>
             </>
