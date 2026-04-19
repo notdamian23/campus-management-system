@@ -50,7 +50,12 @@ function setCorsHeaders(res, origin) {
     }
 }
 const authLogger = (0, campusLogger_1.createCampusLogger)("CAMPUS auth");
-const STUDENT_LOOKUP_PROFILE_ROLES = ["student"];
+const STUDENT_ONLY_LOOKUP_PROFILE_ROLES = ["student"];
+const STUDENT_AUDIENCE_LOOKUP_PROFILE_ROLES = [
+    "student",
+    "ec",
+    "ecmember",
+];
 const VALID_COURSES = [
     "Computer Engineering",
     "Industrial Engineering",
@@ -99,6 +104,12 @@ function normalizeText(value) {
 }
 function normalizeLower(value) {
     return normalizeText(value).toLowerCase();
+}
+function isStudentAudienceRole(value) {
+    const normalized = normalizeLower(value);
+    return normalized === "student" ||
+        normalized === "ec" ||
+        normalized === "ecmember";
 }
 function normalizeSchoolIdKey(value) {
     return normalizeLower(value);
@@ -1167,6 +1178,27 @@ function matchesSpecificStudentTarget(targetValue, schoolId, studentName) {
         }
     }
     return false;
+}
+function normalizeIdentifierList(value) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    return value.map((item) => normalizeText(item)).filter(Boolean);
+}
+function hasExplicitSelectedAudience(event) {
+    return normalizeIdentifierList(event.selectedStudentIds).length > 0 ||
+        normalizeIdentifierList(event.selectedSchoolIds).length > 0;
+}
+function matchesSelectedAudience(event, studentId, schoolId) {
+    if (!hasExplicitSelectedAudience(event)) {
+        return true;
+    }
+    const selectedStudentIds = normalizeIdentifierList(event.selectedStudentIds);
+    const selectedSchoolIds = normalizeIdentifierList(event.selectedSchoolIds);
+    const normalizedStudentId = normalizeLower(studentId);
+    const normalizedSchoolId = normalizeLower(schoolId);
+    return selectedStudentIds.some((value) => normalizeLower(value) === normalizedStudentId) ||
+        selectedSchoolIds.some((value) => normalizeLower(value) === normalizedSchoolId);
 }
 function parseRegistrationStatus(raw) {
     const normalized = normalizeLower(raw);
@@ -2495,15 +2527,17 @@ exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request)
     const actorCourseScope = resolveProfileCourseScope(actorProfile);
     const actorIsBod = isBodProfileData(actorProfile);
     const body = asRecord(request.data);
+    const includeEcMembers = body.includeEcMembers === true;
     const rawLimit = Number.parseInt(normalizeText(body.limit), 10);
     const limit = Number.isFinite(rawLimit) ?
         Math.min(Math.max(rawLimit, 1), 5000) :
         2000;
-    // EC members are still part of the student roster, so the lookup includes
-    // both student and ecmember roles.
+    const lookupRoles = includeEcMembers ?
+        [...STUDENT_AUDIENCE_LOOKUP_PROFILE_ROLES] :
+        [...STUDENT_ONLY_LOOKUP_PROFILE_ROLES];
     const profileSnapshot = await db
         .collection("profiles")
-        .where("role", "in", [...STUDENT_LOOKUP_PROFILE_ROLES])
+        .where("role", "in", lookupRoles)
         .limit(limit)
         .get();
     const studentRefs = profileSnapshot.docs.map((profileDoc) => db.doc(`students/${profileDoc.id}`));
@@ -2943,7 +2977,7 @@ exports.studentManagePreRegistration = (0, https_1.onCall)({ region: REGION }, a
         const profileData = (_a = profileSnap.data()) !== null && _a !== void 0 ? _a : {};
         const studentData = (_b = studentSnap.data()) !== null && _b !== void 0 ? _b : {};
         const role = normalizeLower(profileData.role);
-        if (role !== "student") {
+        if (!isStudentAudienceRole(role)) {
             throw new https_1.HttpsError("permission-denied", "Student access only.");
         }
         const accountStatus = normalizeLower(studentData.status) ||
@@ -2978,6 +3012,9 @@ exports.studentManagePreRegistration = (0, https_1.onCall)({ region: REGION }, a
         const studentName = normalizeText(profileData.studentName) ||
             normalizeText(profileData.name) ||
             schoolId;
+        if (!matchesSelectedAudience(eventData, uid, schoolId)) {
+            throw new https_1.HttpsError("permission-denied", "You are not part of the allowed audience for this event.");
+        }
         const course = normalizeText(profileData.course) || "Unassigned";
         const year = normalizeYear(profileData.year);
         const courseTargets = toTargetList(eventData.courses);
@@ -2988,14 +3025,16 @@ exports.studentManagePreRegistration = (0, https_1.onCall)({ region: REGION }, a
         const yearValue = yearTargets.length > 0 ?
             yearTargets :
             normalizeText(eventData.yearLevel);
-        if (!matchesTargetList(courseValue, course, "All Courses")) {
-            throw new https_1.HttpsError("permission-denied", "Your course is not allowed for this event.");
-        }
-        if (!matchesTargetList(yearValue, year, "All Years")) {
-            throw new https_1.HttpsError("permission-denied", "Your year level is not allowed for this event.");
-        }
-        if (!matchesSpecificStudentTarget(eventData.targetStudent, schoolId, studentName)) {
-            throw new https_1.HttpsError("permission-denied", "You are not part of the allowed audience for this event.");
+        if (!hasExplicitSelectedAudience(eventData)) {
+            if (!matchesTargetList(courseValue, course, "All Courses")) {
+                throw new https_1.HttpsError("permission-denied", "Your course is not allowed for this event.");
+            }
+            if (!matchesTargetList(yearValue, year, "All Years")) {
+                throw new https_1.HttpsError("permission-denied", "Your year level is not allowed for this event.");
+            }
+            if (!matchesSpecificStudentTarget(eventData.targetStudent, schoolId, studentName)) {
+                throw new https_1.HttpsError("permission-denied", "You are not part of the allowed audience for this event.");
+            }
         }
         const requiredPaymentId = normalizeText(eventData.linkedPaymentId) ||
             normalizeText(eventData.requiredPaymentId);

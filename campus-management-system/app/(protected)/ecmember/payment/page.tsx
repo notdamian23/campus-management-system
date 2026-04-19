@@ -72,6 +72,7 @@ import {
   getCourseScope,
   isBOD,
 } from "@/lib/ec-permissions";
+import { normalizeCourse } from "@/lib/courseOptions";
 import {
   formatStudentFullName,
   formatStudentReferenceList,
@@ -618,21 +619,40 @@ export default function PaymentDashboard() {
     let mounted = true;
 
     async function loadStudents() {
+      if (viewerProfileLoading) {
+        return;
+      }
+
+      if (viewerIsBod && !viewerCourseScope) {
+        if (mounted) {
+          setStudents([]);
+          setStudentsLoading(false);
+        }
+        return;
+      }
+
       setStudentsLoading(true);
 
       try {
         const fn = httpsCallable<
-          { limit: number },
+          { limit: number; includeEcMembers?: boolean },
           { students?: RemoteStudent[] }
         >(functions, "ecListStudents");
-        const res = await fn({ limit: 2000 });
+        const res = await fn({ limit: 2000, includeEcMembers: true });
         if (!mounted) return;
 
         const list = (res.data?.students ?? [])
           .map(mapRemoteStudent)
           .filter((item) => item.uid)
           .sort(sortStudentsByNameAndId);
-        setStudents(list);
+        const scopedList =
+          viewerIsBod && viewerCourseScope ?
+            list.filter(
+              (student) =>
+                normalizeCourse(student.course) === viewerCourseScope,
+            ) :
+            list;
+        setStudents(scopedList);
       } catch (error: unknown) {
         if (!mounted) return;
         setStudents([]);
@@ -649,7 +669,7 @@ export default function PaymentDashboard() {
     return () => {
       mounted = false;
     };
-  }, [functions]);
+  }, [functions, viewerCourseScope, viewerIsBod, viewerProfileLoading]);
 
   useEffect(() => {
     if (viewerProfileLoading) {

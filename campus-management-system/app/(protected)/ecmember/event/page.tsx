@@ -110,6 +110,7 @@ import {
   isBOD,
   isRegularEC,
 } from "@/lib/ec-permissions";
+import { normalizeCourse } from "@/lib/courseOptions";
 import { logPermissionDeniedAttemptForCurrentUser } from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
 import { formatStudentFullName } from "@/lib/student-name";
@@ -409,6 +410,13 @@ const EVENT_COURSE_CHOICES = [
   "Electronics Engineering",
   "Industrial Engineering",
 ];
+const BOD_SELECTED_STUDENT_SCOPE_ERROR =
+  "B.O.D. members can only target students from their assigned course.";
+const BOD_SELECTED_STUDENT_LIMIT = 9;
+const BOD_SELECTED_STUDENT_LIMIT_ERROR =
+  "B.O.D. selected-student events can include up to 9 students.";
+const BOD_COURSE_SCOPE_ERROR =
+  "B.O.D. members can only create events for their assigned course.";
 const ITEMS_PER_PAGE = 5;
 const PARTICIPANT_ROWS_PER_PAGE_OPTIONS = ["10", "25", "50"] as const;
 
@@ -734,6 +742,31 @@ function sortStudentLookups(rows: StudentLookup[]) {
       left.studentName.localeCompare(right.studentName) ||
       left.schoolId.localeCompare(right.schoolId),
   );
+}
+
+function isStudentInCourseScope(
+  student: Pick<StudentLookup, "course">,
+  courseScope: string | null,
+) {
+  if (!courseScope) {
+    return false;
+  }
+
+  const normalizedStudentCourse = normalizeCourse(String(student.course ?? ""));
+  return Boolean(
+    normalizedStudentCourse && normalizedStudentCourse === courseScope,
+  );
+}
+
+function filterStudentsForCourseScope(
+  students: StudentLookup[],
+  courseScope: string | null,
+) {
+  if (!courseScope) {
+    return [];
+  }
+
+  return students.filter((student) => isStudentInCourseScope(student, courseScope));
 }
 
 function resolveRequiredEventAudience(
@@ -1918,6 +1951,7 @@ export default function EventDashboard() {
     StudentLookup[]
   > => {
     if (!isECUser) return [];
+    if (viewerIsBod && !viewerCourseScope) return [];
     if (studentsLoading) return studentOptions;
 
     setStudentsLoading(true);
@@ -1925,10 +1959,10 @@ export default function EventDashboard() {
 
     try {
       const fn = httpsCallable<
-        { limit: number },
+        { limit: number; includeEcMembers?: boolean },
         { students?: RemoteStudent[] }
       >(functions, "ecListStudents");
-      const res = await fn({ limit: 2000 });
+      const res = await fn({ limit: 2000, includeEcMembers: true });
       const rows = (res.data?.students ?? [])
         .map((s) => {
           const uid = String(s.uid ?? "").trim();
@@ -1970,9 +2004,13 @@ export default function EventDashboard() {
             a.studentName.localeCompare(b.studentName) ||
             a.schoolId.localeCompare(b.schoolId),
         );
+      const scopedRows =
+        viewerIsBod && viewerCourseScope ?
+          filterStudentsForCourseScope(rows, viewerCourseScope) :
+          rows;
 
-      setStudentOptions(rows);
-      return rows;
+      setStudentOptions(scopedRows);
+      return scopedRows;
     } catch (error: unknown) {
       const message =
         error instanceof Error ? error.message : "Failed to load students.";
@@ -1982,7 +2020,14 @@ export default function EventDashboard() {
     } finally {
       setStudentsLoading(false);
     }
-  }, [functions, isECUser, studentsLoading, studentOptions]);
+  }, [
+    functions,
+    isECUser,
+    studentOptions,
+    studentsLoading,
+    viewerCourseScope,
+    viewerIsBod,
+  ]);
 
   useEffect(() => {
     if (!showNotificationForm && !showAddEventForm) return;
@@ -2498,14 +2543,25 @@ export default function EventDashboard() {
 
   const filteredEventStudentOptions = useMemo(() => {
     const query = eventSearchName.trim().toLowerCase();
-    return studentOptions
+    const sourceRows =
+      viewerIsBod && viewerCourseScope ?
+        filterStudentsForCourseScope(studentOptions, viewerCourseScope) :
+        studentOptions;
+
+    return sourceRows
       .filter((student) => {
         if (selectedEventStudentIds.has(student.uid)) return false;
         if (!query) return true;
         return student.searchText.includes(query);
       })
       .slice(0, 20);
-  }, [eventSearchName, studentOptions, selectedEventStudentIds]);
+  }, [
+    eventSearchName,
+    selectedEventStudentIds,
+    studentOptions,
+    viewerCourseScope,
+    viewerIsBod,
+  ]);
 
   const filteredEventYearOptions = useMemo(() => {
     const query = eventYearSearch.trim().toLowerCase();
@@ -2518,20 +2574,33 @@ export default function EventDashboard() {
 
   const filteredEventCourseOptions = useMemo(() => {
     const query = eventCourseSearch.trim().toLowerCase();
-    return EVENT_COURSE_CHOICES.filter((item) => {
+    const sourceCourses =
+      viewerIsBod && viewerCourseScope ?
+        EVENT_COURSE_CHOICES.filter((item) => item === viewerCourseScope) :
+        EVENT_COURSE_CHOICES;
+
+    return sourceCourses.filter((item) => {
       if (selectedEventCoursesSet.has(item)) return false;
       if (!query) return true;
       return item.toLowerCase().includes(query);
     }).slice(0, 20);
-  }, [eventCourseSearch, selectedEventCoursesSet]);
+  }, [
+    eventCourseSearch,
+    selectedEventCoursesSet,
+    viewerCourseScope,
+    viewerIsBod,
+  ]);
   const showAllYearsOption = useMemo(() => {
     const query = eventYearSearch.trim().toLowerCase();
     return !query || "all years".includes(query);
   }, [eventYearSearch]);
   const showAllCoursesOption = useMemo(() => {
+    if (viewerIsBod) {
+      return false;
+    }
     const query = eventCourseSearch.trim().toLowerCase();
     return !query || "all courses".includes(query);
-  }, [eventCourseSearch]);
+  }, [eventCourseSearch, viewerIsBod]);
 
   const filteredNotifications = useMemo(() => {
     const s = notificationSearchText.trim().toLowerCase();
@@ -2881,7 +2950,6 @@ export default function EventDashboard() {
 
     setSelectedEventCourses([viewerCourseScope]);
     setIsAllCoursesExplicit(false);
-    setSelectedEventStudents([]);
     setEventCourseSearch("");
     setShowEventCourseDropdown(false);
     setShowEventStudentDropdown(false);
@@ -2962,10 +3030,21 @@ export default function EventDashboard() {
   const isEditingEvent = Boolean(editingEventId);
   const isEditingNotification = Boolean(editingNotificationDispatchId);
   const hasSpecificTarget = selectedEventStudents.length > 0;
+  const bodSelectedEventStudentsOutOfScope = useMemo(
+    () =>
+      viewerIsBod && viewerCourseScope ?
+        selectedEventStudents.filter(
+          (student) => !isStudentInCourseScope(student, viewerCourseScope),
+        ) :
+        [],
+    [selectedEventStudents, viewerCourseScope, viewerIsBod],
+  );
   const hasEventYearFilter =
     isAllYearsExplicit || selectedEventYearLevels.length > 0;
   const hasEventCourseFilter =
-    isAllCoursesExplicit || selectedEventCourses.length > 0;
+    (viewerIsBod && Boolean(viewerCourseScope)) ||
+    isAllCoursesExplicit ||
+    selectedEventCourses.length > 0;
   const hasEventRegistrantSelection =
     hasSpecificTarget || hasEventYearFilter || hasEventCourseFilter;
   const hasNotifYearFilter =
@@ -2979,6 +3058,8 @@ export default function EventDashboard() {
       : "";
   const eventCourseLabel = isAllCoursesExplicit
     ? "All Courses"
+    : viewerIsBod && viewerCourseScope
+      ? viewerCourseScope
     : selectedEventCourses.length > 0
       ? selectedEventCourses.join(", ")
       : "";
@@ -4428,7 +4509,7 @@ export default function EventDashboard() {
     );
     setIsAllYearsExplicit(allYearsExplicit);
     setIsAllCoursesExplicit(viewerIsBod ? false : allCoursesExplicit);
-    setSelectedEventStudents(viewerIsBod ? [] : parsedTargets);
+    setSelectedEventStudents(parsedTargets);
 
     setEventYearSearch("");
     setEventCourseSearch("");
@@ -4450,7 +4531,14 @@ export default function EventDashboard() {
     if (!canCreateEvents) {
       return setSaveError("Only EC members can save events.");
     }
-    if (viewerIsBod && !viewerCourseScope) {
+    if (!currentUser?.uid) {
+      return setSaveError("You must be signed in to save events.");
+    }
+
+    const viewerCourseScopeValue =
+      viewerIsBod ? normalizeCourse(viewerCourseScope ?? "") : "";
+
+    if (viewerIsBod && !viewerCourseScopeValue) {
       return setSaveError("Your B.O.D. profile is missing a course scope.");
     }
     if (!title.trim()) return setSaveError("Title is required.");
@@ -4496,6 +4584,31 @@ export default function EventDashboard() {
     }
     if (eventBeingEdited && computeStatus(eventBeingEdited) !== "upcoming") {
       return setSaveError("Only upcoming events can be edited.");
+    }
+    if (viewerIsBod && isAllCoursesExplicit) {
+      return setSaveError(BOD_COURSE_SCOPE_ERROR);
+    }
+    if (
+      viewerIsBod &&
+      viewerCourseScopeValue &&
+      selectedEventCourses.some(
+        (courseName) => normalizeCourse(courseName) !== viewerCourseScopeValue,
+      )
+    ) {
+      return setSaveError(BOD_COURSE_SCOPE_ERROR);
+    }
+    if (bodSelectedEventStudentsOutOfScope.length > 0) {
+      setSaveError(BOD_SELECTED_STUDENT_SCOPE_ERROR);
+      addToast({
+        title: "Course restriction",
+        description: BOD_SELECTED_STUDENT_SCOPE_ERROR,
+        color: "danger",
+        timeout: 5000,
+      });
+      return;
+    }
+    if (viewerIsBod && selectedEventStudents.length > BOD_SELECTED_STUDENT_LIMIT) {
+      return setSaveError(BOD_SELECTED_STUDENT_LIMIT_ERROR);
     }
 
     try {
@@ -4559,9 +4672,8 @@ export default function EventDashboard() {
         );
       }
 
-      const effectiveSelectedEventStudents =
-        viewerIsBod ? [] : selectedEventStudents;
-      const studentTarget = effectiveSelectedEventStudents
+      const effectiveSelectedEventStudents = selectedEventStudents;
+      const detailedStudentTarget = effectiveSelectedEventStudents
         .map((student) => `${student.studentName} (${student.schoolId})`)
         .join("; ");
       const selectedStudentIds = effectiveSelectedEventStudents
@@ -4574,16 +4686,45 @@ export default function EventDashboard() {
             .filter((value) => value.length > 0 && value !== "Unknown ID"),
         ),
       );
+      const bodSelectedSchoolIds =
+        viewerIsBod && selectedStudentIds.length > 0 ?
+          (() => {
+            const scopedSchoolIds = effectiveSelectedEventStudents
+              .filter((student) => {
+                const uid = student.uid.trim();
+                return uid.length > 0 && !uid.startsWith("manual-");
+              })
+              .map((student) => student.schoolId.trim())
+              .filter(
+                (value) => value.length > 0 && value !== "Unknown ID",
+              );
+            return scopedSchoolIds.length === selectedStudentIds.length
+              ? scopedSchoolIds
+              : [];
+          })() :
+          [];
+      const bodHasSpecificStudentAudience =
+        viewerIsBod && selectedStudentIds.length > 0;
+      const eventTargetStudent =
+        viewerIsBod ?
+          bodHasSpecificStudentAudience ?
+            getSpecificEventAudienceSummary({
+              targetStudent: "",
+              selectedStudentIds,
+              selectedSchoolIds: bodSelectedSchoolIds,
+            }) :
+            "" :
+          detailedStudentTarget;
       const startTime = format12h(eventScheduled24);
       const endTime = format12h(eventEnd24);
       const yearLevelValue = isAllYearsExplicit
         ? "All Years"
         : selectedEventYearLevels.join(", ");
       const targetCourses =
-        viewerIsBod && viewerCourseScope ? [viewerCourseScope] : selectedEventCourses;
+        viewerIsBod && viewerCourseScopeValue ? [viewerCourseScopeValue] : selectedEventCourses;
       const courseValue =
-        viewerIsBod && viewerCourseScope ?
-          viewerCourseScope :
+        viewerIsBod && viewerCourseScopeValue ?
+          viewerCourseScopeValue :
           isAllCoursesExplicit ?
             "All Courses" :
             targetCourses.join(", ");
@@ -4634,7 +4775,7 @@ export default function EventDashboard() {
             courses: targetCourses,
             yearLevel: yearLevelValue || "All Years",
             yearLevels: selectedEventYearLevels,
-            targetStudent: studentTarget,
+            targetStudent: detailedStudentTarget,
             selectedStudentIds,
             selectedSchoolIds,
           },
@@ -4656,7 +4797,7 @@ export default function EventDashboard() {
           targetStudents: paymentTargets,
           yearLevelValue: yearLevelValue || "All Years",
           courseValue: courseValue || "All Courses",
-          targetStudentSummary: studentTarget,
+          targetStudentSummary: detailedStudentTarget,
           targetYearLevels: selectedEventYearLevels,
           targetCourses,
         });
@@ -4696,7 +4837,7 @@ export default function EventDashboard() {
         course: courseValue || "All Courses",
         yearLevels: selectedEventYearLevels,
         courses: targetCourses,
-        targetStudent: studentTarget,
+        targetStudent: eventTargetStudent,
         selectedStudentIds,
         selectedSchoolIds,
         details: details.trim(),
@@ -4716,31 +4857,51 @@ export default function EventDashboard() {
         ownerType:
           viewerIsBod ? "bod" : (eventBeingEdited?.ownerType ?? "ec"),
         courseScope:
-          viewerIsBod ? viewerCourseScope : (eventBeingEdited?.courseScope ?? null),
+          viewerIsBod ? viewerCourseScopeValue : (eventBeingEdited?.courseScope ?? null),
         createdBy:
           viewerIsBod ?
-            (currentUser ? currentUser.uid : null) :
-            (eventBeingEdited?.createdBy ?? (currentUser ? currentUser.uid : null)),
+            currentUser.uid :
+            (eventBeingEdited?.createdBy ?? currentUser.uid),
         createdByPosition:
           viewerIsBod ?
             String(viewerProfileWithUid?.ecPosition ?? "").trim() || null :
             (eventBeingEdited?.createdByPosition ?? null),
         createdByCourseScope:
           viewerIsBod ?
-            viewerCourseScope :
+            viewerCourseScopeValue :
             (eventBeingEdited?.createdByCourseScope ?? null),
       };
 
+      const eventPayload =
+        viewerIsBod ?
+          {
+            ...savePayload,
+            ownerType: "bod" as const,
+            createdBy: currentUser.uid,
+            course: viewerCourseScopeValue,
+            courseScope: viewerCourseScopeValue,
+            createdByCourseScope: viewerCourseScopeValue,
+            courses: [viewerCourseScopeValue],
+            selectedStudentIds,
+            selectedSchoolIds: bodSelectedSchoolIds,
+            targetStudent: bodHasSpecificStudentAudience ? eventTargetStudent : "",
+          } :
+          savePayload;
+
+      if (process.env.NODE_ENV !== "production" && viewerIsBod) {
+        console.log("[BOD EVENT CREATE PAYLOAD]", eventPayload);
+      }
+
       if (editingEventId) {
         await setDoc(eventDocRef, {
-          ...savePayload,
+          ...eventPayload,
           updatedAt: serverTimestamp(),
         }, {merge: true});
         setSaveMsg(withPayment ? "Event and payment updated!" : "Event updated!");
       } else {
         await setDoc(eventDocRef, {
-          ...savePayload,
-          createdBy: currentUser ? currentUser.uid : null,
+          ...eventPayload,
+          createdBy: currentUser.uid,
           createdAt: serverTimestamp(),
           status: "upcoming",
         });
@@ -5358,21 +5519,23 @@ export default function EventDashboard() {
                                       <span className="font-medium">
                                         {item}
                                       </span>
-                                      <Button
-                                        isIconOnly
-                                        size="sm"
-                                        variant="light"
-                                        className="h-5 min-w-5 text-campus-text-secondary"
-                                        onPress={() => {
-                                          setIsAllCoursesExplicit(false);
-                                          setSelectedEventCourses((prev) =>
-                                            prev.filter((x) => x !== item),
-                                          );
-                                        }}
-                                        aria-label={`Remove ${item}`}
-                                      >
-                                        x
-                                      </Button>
+                                      {!viewerIsBod && (
+                                        <Button
+                                          isIconOnly
+                                          size="sm"
+                                          variant="light"
+                                          className="h-5 min-w-5 text-campus-text-secondary"
+                                          onPress={() => {
+                                            setIsAllCoursesExplicit(false);
+                                            setSelectedEventCourses((prev) =>
+                                              prev.filter((x) => x !== item),
+                                            );
+                                          }}
+                                          aria-label={`Remove ${item}`}
+                                        >
+                                          x
+                                        </Button>
+                                      )}
                                     </span>
                                   ))
                                 )}
@@ -5384,73 +5547,90 @@ export default function EventDashboard() {
                             ref={eventCoursePickerRef}
                             className="mt-2 space-y-2"
                           >
-                            <Input
-                              value={eventCourseSearch}
-                              onValueChange={(value) => {
-                                setEventCourseSearch(value);
-                                setShowEventCourseDropdown(true);
-                              }}
-                              onFocus={() => setShowEventCourseDropdown(true)}
-                              placeholder="Search course"
-                              size="sm"
-                              className="w-full"
-                            />
+                            {viewerIsBod && viewerCourseScope ? (
+                              <>
+                                <Input
+                                  value={viewerCourseScope}
+                                  isDisabled
+                                  placeholder="Assigned course"
+                                  size="sm"
+                                  className="w-full"
+                                />
+                                <p className="text-xs text-campus-text-secondary">
+                                  Course stays locked to {viewerCourseScope} for B.O.D. events.
+                                </p>
+                              </>
+                            ) : (
+                              <>
+                                <Input
+                                  value={eventCourseSearch}
+                                  onValueChange={(value) => {
+                                    setEventCourseSearch(value);
+                                    setShowEventCourseDropdown(true);
+                                  }}
+                                  onFocus={() => setShowEventCourseDropdown(true)}
+                                  placeholder="Search course"
+                                  size="sm"
+                                  className="w-full"
+                                />
 
-                            {showEventCourseDropdown && (
-                              <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
-                                {!showAllCoursesOption &&
-                                filteredEventCourseOptions.length === 0 ? (
-                                  <p className="px-4 py-2 text-sm text-campus-text-secondary">
-                                    {selectedEventCourses.length ===
-                                    EVENT_COURSE_CHOICES.length
-                                      ? "All courses selected."
-                                      : "No matching courses."}
-                                  </p>
-                                ) : (
-                                  <>
-                                    {showAllCoursesOption && (
-                                      <Button
-                                        size="sm"
-                                        variant="light"
-                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
-                                        onPress={() => {
-                                          setSelectedEventCourses([]);
-                                          setIsAllCoursesExplicit(true);
-                                          setEventCourseSearch("");
-                                          setShowEventCourseDropdown(true);
-                                        }}
-                                      >
-                                        <div className="text-sm font-medium text-campus-text-primary">
-                                          All Courses
-                                        </div>
-                                      </Button>
+                                {showEventCourseDropdown && (
+                                  <div className="rounded-lg border bg-white shadow-lg max-h-56 overflow-y-auto">
+                                    {!showAllCoursesOption &&
+                                    filteredEventCourseOptions.length === 0 ? (
+                                      <p className="px-4 py-2 text-sm text-campus-text-secondary">
+                                        {selectedEventCourses.length ===
+                                        EVENT_COURSE_CHOICES.length
+                                          ? "All courses selected."
+                                          : "No matching courses."}
+                                      </p>
+                                    ) : (
+                                      <>
+                                        {showAllCoursesOption && (
+                                          <Button
+                                            size="sm"
+                                            variant="light"
+                                            className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                            onPress={() => {
+                                              setSelectedEventCourses([]);
+                                              setIsAllCoursesExplicit(true);
+                                              setEventCourseSearch("");
+                                              setShowEventCourseDropdown(true);
+                                            }}
+                                          >
+                                            <div className="text-sm font-medium text-campus-text-primary">
+                                              All Courses
+                                            </div>
+                                          </Button>
+                                        )}
+
+                                        {filteredEventCourseOptions.map((item) => (
+                                          <Button
+                                            key={item}
+                                            size="sm"
+                                            variant="light"
+                                            className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
+                                            onPress={() => {
+                                              setIsAllCoursesExplicit(false);
+                                              setSelectedEventCourses((prev) =>
+                                                prev.includes(item)
+                                                  ? prev
+                                                  : [...prev, item],
+                                              );
+                                              setEventCourseSearch("");
+                                              setShowEventCourseDropdown(true);
+                                            }}
+                                          >
+                                            <div className="text-sm font-medium text-campus-text-primary">
+                                              {item}
+                                            </div>
+                                          </Button>
+                                        ))}
+                                      </>
                                     )}
-
-                                    {filteredEventCourseOptions.map((item) => (
-                                      <Button
-                                        key={item}
-                                        size="sm"
-                                        variant="light"
-                                        className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
-                                        onPress={() => {
-                                          setIsAllCoursesExplicit(false);
-                                          setSelectedEventCourses((prev) =>
-                                            prev.includes(item)
-                                              ? prev
-                                              : [...prev, item],
-                                          );
-                                          setEventCourseSearch("");
-                                          setShowEventCourseDropdown(true);
-                                        }}
-                                      >
-                                        <div className="text-sm font-medium text-campus-text-primary">
-                                          {item}
-                                        </div>
-                                      </Button>
-                                    ))}
-                                  </>
+                                  </div>
                                 )}
-                              </div>
+                              </>
                             )}
                           </div>
                         </div>
@@ -5497,6 +5677,12 @@ export default function EventDashboard() {
                               </div>
                             </div>
                           )}
+                          {viewerIsBod &&
+                          bodSelectedEventStudentsOutOfScope.length > 0 && (
+                            <p className="mt-2 text-xs text-red-600">
+                              {BOD_SELECTED_STUDENT_SCOPE_ERROR}
+                            </p>
+                          )}
 
                           <div
                             ref={eventStudentPickerRef}
@@ -5532,6 +5718,29 @@ export default function EventDashboard() {
                                       variant="light"
                                       className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
                                       onPress={() => {
+                                        if (
+                                          viewerIsBod &&
+                                          viewerCourseScope &&
+                                          !isStudentInCourseScope(
+                                            student,
+                                            viewerCourseScope,
+                                          )
+                                        ) {
+                                          setSaveError(
+                                            BOD_SELECTED_STUDENT_SCOPE_ERROR,
+                                          );
+                                          return;
+                                        }
+                                        if (
+                                          viewerIsBod &&
+                                          selectedEventStudents.length >=
+                                            BOD_SELECTED_STUDENT_LIMIT
+                                        ) {
+                                          setSaveError(
+                                            BOD_SELECTED_STUDENT_LIMIT_ERROR,
+                                          );
+                                          return;
+                                        }
                                         setSelectedEventStudents((prev) =>
                                           prev.some(
                                             (x) => x.uid === student.uid,

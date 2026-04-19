@@ -1,4 +1,4 @@
-rules_version = "2";
+rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() {
@@ -47,6 +47,10 @@ service cloud.firestore {
 
     function isECMemberRole(value) {
       return value == "ec" || value == "ecmember";
+    }
+
+    function isStudentAudienceRole(value) {
+      return value == "student" || value == "ec" || value == "ecmember";
     }
 
     function isEC() {
@@ -181,7 +185,7 @@ service cloud.firestore {
 
     function canManageStudentNotification(targetUid) {
       return exists(userProfilePath(targetUid)) &&
-        get(userProfilePath(targetUid)).data.role == "student" &&
+        isStudentAudienceRole(get(userProfilePath(targetUid)).data.role) &&
         (
           isAdminOrRegularEC() ||
           (
@@ -211,7 +215,59 @@ service cloud.firestore {
         null;
     }
 
+    function eventSelectedStudentIds(data) {
+      return data.selectedStudentIds is list ? data.selectedStudentIds : [];
+    }
+
+    function eventSelectedSchoolIds(data) {
+      return data.selectedSchoolIds is list ? data.selectedSchoolIds : [];
+    }
+
+    function bodSelectedStudentAtMatchesScope(studentIds, schoolIds, index) {
+      let targetProfile = studentIds.size() <= index ?
+        null :
+        get(userProfilePath(studentIds[index])).data;
+
+      return studentIds.size() <= index ||
+        (
+          targetProfile != null &&
+          isStudentAudienceRole(targetProfile.role) &&
+          targetProfile.course == currentCourseScope() &&
+          (
+            schoolIds.size() == 0 ||
+            targetProfile.schoolId == schoolIds[index]
+          )
+        );
+    }
+
+    function bodSelectedAudienceIsScoped(data) {
+      let studentIds = eventSelectedStudentIds(data);
+      let schoolIds = eventSelectedSchoolIds(data);
+
+      return studentIds.size() <= 9 &&
+        (schoolIds.size() == 0 || schoolIds.size() == studentIds.size()) &&
+        (studentIds.size() > 0 || schoolIds.size() == 0) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 0) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 1) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 2) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 3) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 4) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 5) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 6) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 7) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 8);
+    }
+
+    function bodTargetStudentIsPrivate(data) {
+      return !(data.targetStudent is string) ||
+        data.targetStudent == "" ||
+        data.targetStudent.matches("^Specific students selected \\([1-9][0-9]*\\)$");
+    }
+
     function bodEventAudienceIsScoped(data) {
+      let studentIds = eventSelectedStudentIds(data);
+      let schoolIds = eventSelectedSchoolIds(data);
+
       return data.ownerType == "bod" &&
         data.courseScope == currentCourseScope() &&
         data.createdBy == request.auth.uid &&
@@ -222,17 +278,10 @@ service cloud.firestore {
           (data.courses.size() == 1 && data.courses[0] == currentCourseScope())
         ) &&
         (
-          !(data.selectedStudentIds is list) ||
-          data.selectedStudentIds.size() == 0
+          (studentIds.size() == 0 && schoolIds.size() == 0) ||
+          bodSelectedAudienceIsScoped(data)
         ) &&
-        (
-          !(data.selectedSchoolIds is list) ||
-          data.selectedSchoolIds.size() == 0
-        ) &&
-        (
-          !(data.targetStudent is string) ||
-          data.targetStudent == ""
-        );
+        bodTargetStudentIsPrivate(data);
     }
 
     function canViewEventData(data) {
