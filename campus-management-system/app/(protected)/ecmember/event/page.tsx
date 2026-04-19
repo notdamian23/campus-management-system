@@ -143,8 +143,10 @@ type EventDoc = {
   details?: string;
   isPreReg?: boolean;
   withPayment?: boolean;
+  paymentRequired?: boolean;
   waitlistEnabled?: boolean;
   requiredPaymentId?: string;
+  linkedPaymentId?: string;
   registrationStartAt?: any;
   registrationEndAt?: any;
   cancellationDeadlineAt?: any;
@@ -265,10 +267,17 @@ type RegistrationDoc = {
   cancelledAt?: any;
 };
 
-type PaymentLinkOption = {
+type EventPaymentStudentDoc = {
   id: string;
-  title: string;
-  ref: string;
+  uid?: string;
+  schoolId?: string;
+  name?: string;
+  studentName?: string;
+  course?: string;
+  year?: string;
+  status?: string;
+  createdAt?: any;
+  updatedAt?: any;
 };
 
 type RemoteStudent = {
@@ -362,6 +371,7 @@ type EventParticipantRow = {
   attendanceStatus: string;
   attendanceTimeIn: string;
   attendanceTimeOut: string;
+  paymentStatus: "Paid" | "Not Paid" | "Not Required";
   sortMs: number;
 };
 
@@ -884,9 +894,59 @@ function formatDateTime(value: any): string {
   return new Date(ms).toLocaleString();
 }
 
+function makePaymentRef(paymentId: string) {
+  const year = new Date().getFullYear();
+  return `PMT-${year}-${paymentId.slice(0, 6).toUpperCase()}`;
+}
+
 function isPresentAttendanceStatus(status: string) {
   const normalized = normalizeLowerLookupText(status);
   return normalized === "present" || normalized === "timed in";
+}
+
+function getEventLinkedPaymentId(
+  event: Pick<EventDoc, "linkedPaymentId" | "requiredPaymentId"> | null | undefined,
+) {
+  return String(event?.linkedPaymentId ?? event?.requiredPaymentId ?? "").trim();
+}
+
+function normalizePaymentAssignmentStatus(value: unknown): "Paid" | "Unpaid" {
+  return normalizeLowerLookupText(value) === "paid" ? "Paid" : "Unpaid";
+}
+
+function getPaymentStatusByStudent(
+  event: Pick<EventDoc, "withPayment" | "paymentRequired"> | null | undefined,
+  paymentAssignmentsByUid: Map<string, "Paid" | "Unpaid">,
+  paymentAssignmentsBySchoolId: Map<string, "Paid" | "Unpaid">,
+  uid: string,
+  schoolId: string,
+): EventParticipantRow["paymentStatus"] {
+  const paymentRequired =
+    event?.withPayment === true || event?.paymentRequired === true;
+  if (!paymentRequired) {
+    return "Not Required";
+  }
+
+  const normalizedUid = String(uid ?? "").trim();
+  const normalizedSchoolId = String(schoolId ?? "").trim();
+  const status =
+    (normalizedUid ? paymentAssignmentsByUid.get(normalizedUid) : undefined) ??
+    (normalizedSchoolId ?
+      paymentAssignmentsBySchoolId.get(normalizedSchoolId) :
+      undefined);
+
+  return status === "Paid" ? "Paid" : "Not Paid";
+}
+
+function participantStatusSortRank(status: string) {
+  const normalized = normalizeLowerLookupText(status);
+  if (normalized === "present" || normalized === "timed in") return 0;
+  if (normalized === "absent" || normalized === "missed") return 1;
+  if (normalized === "not paid") return 2;
+  if (normalized === "pre-registered") return 3;
+  if (normalized === "waitlisted") return 4;
+  if (normalized === "cancelled") return 5;
+  return 6;
 }
 
 function buildAttendanceMetadataRows(
@@ -1001,6 +1061,7 @@ function toEventDetailFileItem(
 
 function getEventParticipantToneClasses(status: string) {
   if (status === "Present") return "bg-emerald-100 text-emerald-700";
+  if (status === "Not Paid") return "bg-amber-100 text-amber-800";
   if (status === "Missed" || status === "Absent") return "bg-rose-100 text-rose-700";
   if (status === "Waitlisted") return "bg-amber-100 text-amber-700";
   if (status === "Cancelled") return "bg-slate-100 text-slate-700";
@@ -1011,12 +1072,56 @@ function buildEventParticipantRows(
   event: EventDoc | null,
   registrations: RegistrationDoc[],
   attendanceRows: EventAttendanceDoc[],
+  paymentAssignments: EventPaymentStudentDoc[] = [],
+  audienceStudents: StudentLookup[] = [],
 ) {
   if (!event) return [] as EventParticipantRow[];
 
   const rowsByUid = new Map<string, EventParticipantRow>();
   const preRegisteredByUid = new Set<string>();
   const preRegisteredBySchoolId = new Set<string>();
+  const paymentAssignmentsByUid = new Map<string, "Paid" | "Unpaid">();
+  const paymentAssignmentsBySchoolId = new Map<string, "Paid" | "Unpaid">();
+
+  paymentAssignments.forEach((assignment) => {
+    const uid = String(assignment.uid ?? assignment.id).trim();
+    const schoolId = String(assignment.schoolId ?? "").trim();
+    const status = normalizePaymentAssignmentStatus(assignment.status);
+
+    if (uid) {
+      paymentAssignmentsByUid.set(uid, status);
+    }
+    if (schoolId) {
+      paymentAssignmentsBySchoolId.set(schoolId, status);
+    }
+  });
+
+  audienceStudents.forEach((student) => {
+    const uid = String(student.uid ?? "").trim();
+    if (!uid) return;
+
+    const schoolId = String(student.schoolId ?? "").trim() || uid;
+    const paymentStatus = getPaymentStatusByStudent(
+      event,
+      paymentAssignmentsByUid,
+      paymentAssignmentsBySchoolId,
+      uid,
+      schoolId,
+    );
+
+    rowsByUid.set(uid, {
+      uid,
+      schoolId,
+      studentName: student.studentName || schoolId,
+      course: String(student.course ?? "").trim() || "-",
+      year: String(student.year ?? "").trim() || "-",
+      attendanceStatus: paymentStatus === "Not Paid" ? "Not Paid" : "Eligible",
+      attendanceTimeIn: "-",
+      attendanceTimeOut: "-",
+      paymentStatus,
+      sortMs: 0,
+    });
+  });
 
   registrations.forEach((registration) => {
     const uid = String(registration.uid ?? registration.id).trim();
@@ -1064,17 +1169,27 @@ function buildEventParticipantRows(
       }
     }
 
+    const paymentStatus = getPaymentStatusByStudent(
+      event,
+      paymentAssignmentsByUid,
+      paymentAssignmentsBySchoolId,
+      uid,
+      schoolId || uid,
+    );
+
     rowsByUid.set(uid, {
       uid,
       schoolId: schoolId || uid,
       studentName,
       course,
       year,
-      attendanceStatus: formatRegistrationStatus(
-        parseRegistrationStatus(registration.status),
-      ),
+      attendanceStatus:
+        paymentStatus === "Not Paid" ?
+          "Not Paid" :
+          formatRegistrationStatus(parseRegistrationStatus(registration.status)),
       attendanceTimeIn: "-",
       attendanceTimeOut: "-",
+      paymentStatus,
       sortMs: registrationSortMillis(registration),
     });
   });
@@ -1160,17 +1275,26 @@ function buildEventParticipantRows(
       existing?.attendanceStatus ||
       "Recorded";
 
+    const paymentStatus = getPaymentStatusByStudent(
+      event,
+      paymentAssignmentsByUid,
+      paymentAssignmentsBySchoolId,
+      uid,
+      schoolId,
+    );
+
     rowsByUid.set(uid, {
       uid,
       schoolId,
       studentName,
       course,
       year,
-      attendanceStatus: status,
+      attendanceStatus: paymentStatus === "Not Paid" ? "Not Paid" : status,
       attendanceTimeIn:
         timeInValue !== "-" ? timeInValue : (existing?.attendanceTimeIn ?? "-"),
       attendanceTimeOut:
         timeOutValue !== "-" ? timeOutValue : (existing?.attendanceTimeOut ?? "-"),
+      paymentStatus,
       sortMs: Math.max(
         toMillis(rowDoc.updatedAt || rowDoc.createdAt || rowDoc.timestamp),
         existing?.sortMs ?? 0,
@@ -1178,15 +1302,42 @@ function buildEventParticipantRows(
     });
   });
 
-  if (computeStatus(event) === "completed") {
-    rowsByUid.forEach((row) => {
-      if (row.attendanceStatus === "Pre-registered" && row.attendanceTimeIn === "-") {
-        row.attendanceStatus = "Missed";
-      }
-    });
-  }
+  const eventCompleted = computeStatus(event) === "completed";
+  rowsByUid.forEach((row) => {
+    const paymentStatus = getPaymentStatusByStudent(
+      event,
+      paymentAssignmentsByUid,
+      paymentAssignmentsBySchoolId,
+      row.uid,
+      row.schoolId,
+    );
+    row.paymentStatus = paymentStatus;
+
+    if (paymentStatus === "Not Paid") {
+      row.attendanceStatus = "Not Paid";
+      return;
+    }
+
+    if (row.attendanceStatus === "Missed") {
+      row.attendanceStatus = "Absent";
+    }
+
+    if (
+      eventCompleted &&
+      !isPresentAttendanceStatus(row.attendanceStatus) &&
+      row.attendanceStatus !== "Waitlisted" &&
+      row.attendanceStatus !== "Cancelled" &&
+      row.attendanceStatus !== "Not Paid"
+    ) {
+      row.attendanceStatus = "Absent";
+    }
+  });
 
   return Array.from(rowsByUid.values()).sort((left, right) => {
+    const byStatus =
+      participantStatusSortRank(left.attendanceStatus) -
+      participantStatusSortRank(right.attendanceStatus);
+    if (byStatus !== 0) return byStatus;
     const byName = left.studentName.localeCompare(right.studentName);
     if (byName !== 0) return byName;
     return left.schoolId.localeCompare(right.schoolId);
@@ -1228,10 +1379,26 @@ function toAbsentAttendanceExportRow(student: StudentLookup): AttendanceExportRo
   };
 }
 
+function toNotPaidAttendanceExportRow(
+  student: StudentLookup,
+  participantRow?: EventParticipantRow | null,
+): AttendanceExportRow {
+  return {
+    schoolId: participantRow?.schoolId || student.schoolId,
+    studentName: participantRow?.studentName || student.studentName,
+    course: participantRow?.course || student.course || "-",
+    year: participantRow?.year || student.year || "-",
+    attendanceStatus: "Not Paid",
+    attendanceTimeIn: "",
+    attendanceTimeOut: "",
+  };
+}
+
 async function downloadAttendanceWorkbook(
   event: EventDoc,
   presentRows: AttendanceExportRow[],
   absentRows: AttendanceExportRow[],
+  notPaidRows: AttendanceExportRow[],
 ) {
   const generatedAt = new Date().toLocaleString();
   const presentSheetData = buildAttendanceSheetRows(
@@ -1246,10 +1413,17 @@ async function downloadAttendanceWorkbook(
     generatedAt,
     false,
   );
+  const notPaidSheetData = buildAttendanceSheetRows(
+    event,
+    notPaidRows,
+    generatedAt,
+    false,
+  );
   const XLSX = await import("xlsx");
   const workbook = XLSX.utils.book_new();
   const presentSheet = XLSX.utils.aoa_to_sheet(presentSheetData);
   const absentsSheet = XLSX.utils.aoa_to_sheet(absentSheetData);
+  const notPaidSheet = XLSX.utils.aoa_to_sheet(notPaidSheetData);
 
   presentSheet["!cols"] = [
     { wch: 16 },
@@ -1267,9 +1441,17 @@ async function downloadAttendanceWorkbook(
     { wch: 10 },
     { wch: 18 },
   ];
+  notPaidSheet["!cols"] = [
+    { wch: 16 },
+    { wch: 30 },
+    { wch: 24 },
+    { wch: 10 },
+    { wch: 18 },
+  ];
 
   XLSX.utils.book_append_sheet(workbook, presentSheet, "Present");
   XLSX.utils.book_append_sheet(workbook, absentsSheet, "Absents");
+  XLSX.utils.book_append_sheet(workbook, notPaidSheet, "Not Paid");
 
   const slug = (event.title || event.id)
     .toLowerCase()
@@ -1512,6 +1694,10 @@ export default function EventDashboard() {
   const [withPayment, setWithPayment] = useState(false);
   const [waitlistEnabled, setWaitlistEnabled] = useState(false);
   const [requiredPaymentId, setRequiredPaymentId] = useState("");
+  const [paymentTitle, setPaymentTitle] = useState("");
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentDueDate, setPaymentDueDate] = useState("");
+  const [paymentDescription, setPaymentDescription] = useState("");
 
   const [eventScheduled24, setEventScheduled24] = useState("07:00");
   const [eventStartTimeValue, setEventStartTimeValue] = useState<Time | null>(
@@ -1559,9 +1745,6 @@ export default function EventDashboard() {
 
   const [events, setEvents] = useState<EventDoc[]>([]);
   const [eventsLoading, setEventsLoading] = useState(true);
-  const [paymentLinkOptions, setPaymentLinkOptions] = useState<
-    PaymentLinkOption[]
-  >([]);
   const [notifications, setNotifications] = useState<NotificationSummary[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
   const [expandedNotificationId, setExpandedNotificationId] = useState<
@@ -1589,6 +1772,10 @@ export default function EventDashboard() {
   const [eventAttendance, setEventAttendance] = useState<
     Record<string, EventAttendanceDoc[]>
   >({});
+  const [selectedEventAudienceStudents, setSelectedEventAudienceStudents] =
+    useState<StudentLookup[]>([]);
+  const [selectedEventPaymentAssignments, setSelectedEventPaymentAssignments] =
+    useState<EventPaymentStudentDoc[]>([]);
   const [eventFilesTab, setEventFilesTab] = useState<EventFilesTab>("images");
   const [viewAllFilesModal, setViewAllFilesModal] = useState<{
     open: boolean;
@@ -1685,52 +1872,6 @@ export default function EventDashboard() {
     (event: EventDoc) => canEditEvent(viewerProfileWithUid, event),
     [viewerProfileWithUid],
   );
-
-  useEffect(() => {
-    if (roleLoading) {
-      return;
-    }
-
-    if (viewerIsBod && !viewerCourseScope) {
-      setPaymentLinkOptions([]);
-      return;
-    }
-
-    const paymentsQuery =
-      viewerIsBod && viewerCourseScope ?
-        query(collection(db, "payments"), where("course", "==", viewerCourseScope)) :
-        query(collection(db, "payments"), orderBy("createdAt", "desc"));
-
-    const unsub = onSnapshot(
-      paymentsQuery,
-      (snap) => {
-        const rows = snap.docs
-          .map((paymentDoc) => {
-            const data = paymentDoc.data() as {
-              title?: unknown;
-              ref?: unknown;
-              createdAt?: unknown;
-            };
-
-            return {
-              id: paymentDoc.id,
-              title: String(data.title ?? "Untitled Payment").trim() || "Untitled Payment",
-              ref: String(data.ref ?? paymentDoc.id).trim() || paymentDoc.id,
-              createdAt: data.createdAt,
-            };
-          })
-          .sort((left, right) => toMillis(right.createdAt) - toMillis(left.createdAt))
-          .map(({ createdAt, ...payment }) => payment satisfies PaymentLinkOption);
-
-        setPaymentLinkOptions(rows);
-      },
-      () => {
-        setPaymentLinkOptions([]);
-      },
-    );
-
-    return () => unsub();
-  }, [roleLoading, viewerCourseScope, viewerIsBod]);
 
   const loadStudentsForNotifications = useCallback(async (): Promise<
     StudentLookup[]
@@ -2462,14 +2603,88 @@ export default function EventDashboard() {
     () => (selectedEvent ? eventAttendance[selectedEvent.id] ?? [] : []),
     [eventAttendance, selectedEvent],
   );
+
+  useEffect(() => {
+    if (!selectedEvent) {
+      setSelectedEventAudienceStudents([]);
+      return;
+    }
+
+    const currentSelectedEvent = selectedEvent;
+    let active = true;
+
+    async function loadSelectedEventAudience() {
+      let allStudents = studentOptions;
+      if (allStudents.length === 0) {
+        allStudents = await loadStudentsForNotifications();
+      }
+      if (!active) return;
+
+      const audience = resolveRequiredEventAudience(
+        currentSelectedEvent,
+        allStudents,
+      );
+      setSelectedEventAudienceStudents(
+        audience.resolved ? audience.students : [],
+      );
+    }
+
+    void loadSelectedEventAudience();
+
+    return () => {
+      active = false;
+    };
+  }, [loadStudentsForNotifications, selectedEvent, studentOptions]);
+
+  useEffect(() => {
+    const paymentId = getEventLinkedPaymentId(selectedEvent);
+    if (!selectedEvent || !(selectedEvent.withPayment || selectedEvent.paymentRequired) || !paymentId) {
+      setSelectedEventPaymentAssignments([]);
+      return;
+    }
+
+    const paymentStudentsQuery =
+      viewerIsBod && viewerCourseScope ?
+        query(
+          collection(db, "payments", paymentId, "students"),
+          where("course", "==", viewerCourseScope),
+        ) :
+        collection(db, "payments", paymentId, "students");
+
+    const unsub = onSnapshot(
+      paymentStudentsQuery,
+      (snap) => {
+        setSelectedEventPaymentAssignments(
+          snap.docs.map((paymentStudentDoc) => ({
+            id: paymentStudentDoc.id,
+            ...(paymentStudentDoc.data() as Omit<EventPaymentStudentDoc, "id">),
+          })),
+        );
+      },
+      () => {
+        setSelectedEventPaymentAssignments([]);
+      },
+    );
+
+    return () => unsub();
+  }, [selectedEvent, viewerCourseScope, viewerIsBod]);
+
   const selectedEventParticipantRows = useMemo(
     () =>
       buildEventParticipantRows(
         selectedEvent,
         selectedEventRegistrations,
         selectedEventAttendanceRows,
+        selectedEventPaymentAssignments,
+        selectedEventAudienceStudents,
       ),
-    [selectedEvent, selectedEventAttendanceRows, selectedEventRegistrations],
+    [
+      selectedEvent,
+      selectedEventAttendanceRows,
+      selectedEventAudienceStudents,
+      selectedEventPaymentAssignments,
+      selectedEventRegistrations,
+    ],
   );
   const filteredSelectedParticipantRows = useMemo(() => {
     const search = participantSearch.trim().toLowerCase();
@@ -2503,11 +2718,17 @@ export default function EventDashboard() {
       ).length,
     [selectedEventParticipantRows],
   );
-  const selectedEventMissedCount = useMemo(
+  const selectedEventAbsentCount = useMemo(
     () =>
       selectedEventParticipantRows.filter(
-        (row) =>
-          row.attendanceStatus === "Missed" || row.attendanceStatus === "Absent",
+        (row) => row.attendanceStatus === "Absent",
+      ).length,
+    [selectedEventParticipantRows],
+  );
+  const selectedEventNotPaidCount = useMemo(
+    () =>
+      selectedEventParticipantRows.filter(
+        (row) => row.attendanceStatus === "Not Paid",
       ).length,
     [selectedEventParticipantRows],
   );
@@ -3720,6 +3941,10 @@ export default function EventDashboard() {
     setWithPayment(false);
     setWaitlistEnabled(false);
     setRequiredPaymentId("");
+    setPaymentTitle("");
+    setPaymentAmount("");
+    setPaymentDueDate("");
+    setPaymentDescription("");
     setSelectedEventStudents([]);
     setEventYearSearch("");
     setEventCourseSearch("");
@@ -3746,6 +3971,188 @@ export default function EventDashboard() {
     setCancellationDeadline24("23:59");
     setCancellationDeadlineTimeValue(toTimeValue("23:59"));
   }, []);
+
+  const syncEventPaymentRecord = useCallback(async ({
+    eventId,
+    eventTitle,
+    linkedPaymentId,
+    targetStudents,
+    yearLevelValue,
+    courseValue,
+    targetStudentSummary,
+    targetYearLevels,
+    targetCourses,
+  }: {
+    eventId: string;
+    eventTitle: string;
+    linkedPaymentId: string;
+    targetStudents: StudentLookup[];
+    yearLevelValue: string;
+    courseValue: string;
+    targetStudentSummary: string;
+    targetYearLevels: string[];
+    targetCourses: string[];
+  }) => {
+    if (!currentUser?.uid) {
+      throw new Error("You must be signed in to save an event payment.");
+    }
+
+    const amountValue = Number(paymentAmount);
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
+      throw new Error("Amount is required for paid events.");
+    }
+
+    const activeTargets = sortStudentLookups(
+      targetStudents.filter(
+        (student) => normalizeLowerLookupText(student.status) !== "inactive",
+      ),
+    );
+    if (activeTargets.length === 0) {
+      throw new Error(
+        "No active students match the selected audience for this paid event.",
+      );
+    }
+
+    const paymentDocRef = linkedPaymentId ?
+      doc(db, "payments", linkedPaymentId) :
+      doc(collection(db, "payments"));
+    const [paymentDocSnap, existingAssignmentsSnap] = await Promise.all([
+      getDoc(paymentDocRef),
+      linkedPaymentId ?
+        getDocs(collection(db, "payments", paymentDocRef.id, "students")) :
+        Promise.resolve(null),
+    ]);
+
+    const existingPaymentData = paymentDocSnap.data() as {
+      ref?: unknown;
+      createdAt?: unknown;
+    } | undefined;
+
+    const existingAssignments = new Map<
+      string,
+      {
+        status: "Paid" | "Unpaid";
+      }
+    >();
+    existingAssignmentsSnap?.docs.forEach((assignmentDoc) => {
+      existingAssignments.set(assignmentDoc.id, {
+        status: normalizePaymentAssignmentStatus(assignmentDoc.data()?.status),
+      });
+    });
+
+    const nextTargetIds = new Set(activeTargets.map((student) => student.uid));
+    let paidCount = 0;
+
+    await setDoc(
+      paymentDocRef,
+      {
+        title: paymentTitle.trim() || eventTitle,
+        ref:
+          String(existingPaymentData?.ref ?? "").trim() ||
+          makePaymentRef(paymentDocRef.id),
+        amount: amountValue,
+        date: paymentDueDate.trim(),
+        yearLevel: yearLevelValue || "All Years",
+        course: courseValue || "All Courses",
+        targetStudent: targetStudentSummary,
+        targetYearLevels,
+        targetCourses,
+        details: paymentDescription.trim(),
+        linkedEventId: eventId,
+        eventId,
+        linkedEventTitle: eventTitle,
+        createdByUid: currentUser.uid,
+        createdByRole: "ecmember",
+        createdByCourseScope: viewerCourseScope ?? null,
+        courseScope:
+          targetCourses.length === 1 ? targetCourses[0] : null,
+        source: "event",
+        status: "active",
+        updatedAt: serverTimestamp(),
+        ...(paymentDocSnap.exists() ? {} : {createdAt: serverTimestamp()}),
+      },
+      {merge: true},
+    );
+
+    const upsertRows = activeTargets.map((student) => {
+      const existingStatus = existingAssignments.get(student.uid)?.status ?? "Unpaid";
+      if (existingStatus === "Paid") {
+        paidCount += 1;
+      }
+
+      return {
+        student,
+        status: existingStatus,
+      };
+    });
+
+    const writesPerBatch = 350;
+    for (let index = 0; index < upsertRows.length; index += writesPerBatch) {
+      const batch = writeBatch(db);
+      const chunk = upsertRows.slice(index, index + writesPerBatch);
+
+      chunk.forEach(({student, status}) => {
+        batch.set(
+          doc(db, "payments", paymentDocRef.id, "students", student.uid),
+          {
+            uid: student.uid,
+            schoolId: student.schoolId,
+            name: student.studentName,
+            studentName: student.studentName,
+            year: student.year || "-",
+            section: "-",
+            course: student.course || "-",
+            status,
+            updatedAt: serverTimestamp(),
+            ...(
+              existingAssignments.has(student.uid) ?
+                {} :
+                {createdAt: serverTimestamp()}
+            ),
+          },
+          {merge: true},
+        );
+      });
+
+      await batch.commit();
+    }
+
+    const removedAssignmentIds = Array.from(existingAssignments.keys()).filter(
+      (uid) => !nextTargetIds.has(uid),
+    );
+    for (let index = 0; index < removedAssignmentIds.length; index += writesPerBatch) {
+      const batch = writeBatch(db);
+      removedAssignmentIds
+        .slice(index, index + writesPerBatch)
+        .forEach((uid) => {
+          batch.delete(doc(db, "payments", paymentDocRef.id, "students", uid));
+        });
+      await batch.commit();
+    }
+
+    await setDoc(
+      paymentDocRef,
+      {
+        totalStudents: activeTargets.length,
+        paidCount,
+        unpaidCount: Math.max(0, activeTargets.length - paidCount),
+        updatedAt: serverTimestamp(),
+      },
+      {merge: true},
+    );
+
+    return {
+      paymentId: paymentDocRef.id,
+      created: !paymentDocSnap.exists(),
+    };
+  }, [
+    currentUser?.uid,
+    paymentAmount,
+    paymentDescription,
+    paymentDueDate,
+    paymentTitle,
+    viewerCourseScope,
+  ]);
 
   const handleStartEditUpcomingEvent = async (eventToEdit: EventDoc) => {
     setSaveError("");
@@ -3853,16 +4260,41 @@ export default function EventDashboard() {
     setDetails(String(eventToEdit.details ?? ""));
 
     const preRegEnabled = Boolean(eventToEdit.isPreReg);
+    const paymentEnabled =
+      Boolean(eventToEdit.withPayment) || Boolean(eventToEdit.paymentRequired);
+    const linkedPaymentId = getEventLinkedPaymentId(eventToEdit);
     setIsPreReg(preRegEnabled);
-    setWithPayment(Boolean(eventToEdit.withPayment));
+    setWithPayment(paymentEnabled);
     setWaitlistEnabled(Boolean(eventToEdit.waitlistEnabled));
-    setRequiredPaymentId(String(eventToEdit.requiredPaymentId ?? "").trim());
+    setRequiredPaymentId(linkedPaymentId);
     setPreRegSlots(
       typeof eventToEdit.preRegSlots === "number" &&
         eventToEdit.preRegSlots >= 0
         ? Math.trunc(eventToEdit.preRegSlots)
         : 50,
     );
+
+    if (paymentEnabled && linkedPaymentId) {
+      const paymentSnap = await getDoc(doc(db, "payments", linkedPaymentId));
+      const paymentData = paymentSnap.data() as {
+        title?: unknown;
+        amount?: unknown;
+        date?: unknown;
+        details?: unknown;
+      } | undefined;
+
+      setPaymentTitle(String(paymentData?.title ?? eventToEdit.title ?? "").trim());
+      setPaymentAmount(
+        paymentData?.amount != null ? String(paymentData.amount) : "",
+      );
+      setPaymentDueDate(String(paymentData?.date ?? "").trim());
+      setPaymentDescription(String(paymentData?.details ?? "").trim());
+    } else {
+      setPaymentTitle(String(eventToEdit.title ?? "").trim());
+      setPaymentAmount("");
+      setPaymentDueDate("");
+      setPaymentDescription("");
+    }
 
     setEventScheduled24(start24);
     setEventStartTimeValue(toTimeValue(start24));
@@ -3949,8 +4381,19 @@ export default function EventDashboard() {
     if (isPreReg && (Number.isNaN(preRegSlots) || preRegSlots < 0)) {
       return setSaveError("Pre-reg slots must be at least 0.");
     }
-    if (withPayment && !requiredPaymentId.trim()) {
-      return setSaveError("Select the linked payment before saving this event.");
+    if (
+      withPayment &&
+      (!Number.isFinite(Number(paymentAmount)) || Number(paymentAmount) <= 0)
+    ) {
+      const message = "Amount is required for paid events.";
+      setSaveError(message);
+      addToast({
+        title: "Missing payment amount",
+        description: message,
+        color: "danger",
+        timeout: 5000,
+      });
+      return;
     }
     if (!isPreReg && !hasEventRegistrantSelection && !editingEventId) {
       return setSaveError(
@@ -4056,12 +4499,14 @@ export default function EventDashboard() {
       const yearLevelValue = isAllYearsExplicit
         ? "All Years"
         : selectedEventYearLevels.join(", ");
+      const targetCourses =
+        viewerIsBod && viewerCourseScope ? [viewerCourseScope] : selectedEventCourses;
       const courseValue =
         viewerIsBod && viewerCourseScope ?
           viewerCourseScope :
           isAllCoursesExplicit ?
             "All Courses" :
-            selectedEventCourses.join(", ");
+            targetCourses.join(", ");
       const liveRegistrationCount = editingEventId
         ? eventRegistrations[editingEventId]?.filter(
             (row) => row.status === "PRE_REGISTERED",
@@ -4090,6 +4535,76 @@ export default function EventDashboard() {
         isPreReg && typeof slots === "number"
           ? Math.max(0, slots - preRegCount)
           : 0;
+      const eventDocRef = editingEventId ?
+        doc(db, "events", editingEventId) :
+        doc(collection(db, "events"));
+      const eventDocId = eventDocRef.id;
+      let linkedPaymentId = withPayment ? requiredPaymentId.trim() : "";
+      const previousLinkedPaymentId = getEventLinkedPaymentId(eventBeingEdited);
+
+      if (withPayment) {
+        let allStudents = studentOptions;
+        if (allStudents.length === 0) {
+          allStudents = await loadStudentsForNotifications();
+        }
+
+        const paymentAudience = resolveRequiredEventAudience(
+          {
+            course: courseValue || "All Courses",
+            courses: targetCourses,
+            yearLevel: yearLevelValue || "All Years",
+            yearLevels: selectedEventYearLevels,
+            targetStudent: studentTarget,
+            selectedStudentIds,
+            selectedSchoolIds,
+          },
+          allStudents,
+        );
+        const paymentTargets = paymentAudience.resolved ?
+          paymentAudience.students :
+          sortStudentLookups(
+            allStudents.filter(
+              (student) =>
+                normalizeLowerLookupText(student.status) !== "inactive",
+            ),
+          );
+
+        const paymentSync = await syncEventPaymentRecord({
+          eventId: eventDocId,
+          eventTitle: title.trim(),
+          linkedPaymentId,
+          targetStudents: paymentTargets,
+          yearLevelValue: yearLevelValue || "All Years",
+          courseValue: courseValue || "All Courses",
+          targetStudentSummary: studentTarget,
+          targetYearLevels: selectedEventYearLevels,
+          targetCourses,
+        });
+        linkedPaymentId = paymentSync.paymentId;
+        setRequiredPaymentId(paymentSync.paymentId);
+
+        addToast({
+          title: paymentSync.created ? "Payment created with event." : "Payment synced with event.",
+          description: paymentSync.created ?
+            "The linked payment record was created automatically." :
+            "The linked payment record was updated automatically.",
+          color: "success",
+          timeout: 4500,
+        });
+      } else if (previousLinkedPaymentId) {
+        await setDoc(
+          doc(db, "payments", previousLinkedPaymentId),
+          {
+            status: "archived",
+            linkedEventId: null,
+            eventId: null,
+            linkedEventTitle: "",
+            updatedAt: serverTimestamp(),
+          },
+          {merge: true},
+        );
+      }
+
       const savePayload = {
         title: title.trim(),
         location: location.trim(),
@@ -4100,18 +4615,17 @@ export default function EventDashboard() {
         yearLevel: yearLevelValue || "All Years",
         course: courseValue || "All Courses",
         yearLevels: selectedEventYearLevels,
-        courses:
-          viewerIsBod && viewerCourseScope ?
-            [viewerCourseScope] :
-            selectedEventCourses,
+        courses: targetCourses,
         targetStudent: studentTarget,
         selectedStudentIds,
         selectedSchoolIds,
         details: details.trim(),
         isPreReg,
         withPayment,
+        paymentRequired: withPayment,
         waitlistEnabled: isPreReg ? waitlistEnabled : false,
-        requiredPaymentId: withPayment ? requiredPaymentId.trim() : "",
+        requiredPaymentId: withPayment ? linkedPaymentId : "",
+        linkedPaymentId: withPayment ? linkedPaymentId : null,
         registrationStartAt,
         registrationEndAt,
         cancellationDeadlineAt,
@@ -4138,23 +4652,19 @@ export default function EventDashboard() {
       };
 
       if (editingEventId) {
-        await setDoc(
-          doc(db, "events", editingEventId),
-          {
-            ...savePayload,
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true },
-        );
-        setSaveMsg("Event updated!");
+        await setDoc(eventDocRef, {
+          ...savePayload,
+          updatedAt: serverTimestamp(),
+        }, {merge: true});
+        setSaveMsg(withPayment ? "Event and payment updated!" : "Event updated!");
       } else {
-        await addDoc(collection(db, "events"), {
+        await setDoc(eventDocRef, {
           ...savePayload,
           createdBy: currentUser ? currentUser.uid : null,
           createdAt: serverTimestamp(),
           status: "upcoming",
         });
-        setSaveMsg("Event saved!");
+        setSaveMsg(withPayment ? "Event and payment saved!" : "Event saved!");
       }
 
       setEditingEventId(null);
@@ -4183,9 +4693,13 @@ export default function EventDashboard() {
     setExportingEventId(ev.id);
 
     try {
-      const [attendanceSnap, registrationsSnap] = await Promise.all([
+      const paymentId = getEventLinkedPaymentId(ev);
+      const [attendanceSnap, registrationsSnap, paymentAssignmentsSnap] = await Promise.all([
         getDocs(collection(db, "events", ev.id, "attendance")),
         getDocs(collection(db, "events", ev.id, "registrations")),
+        ev.withPayment && paymentId ?
+          getDocs(collection(db, "payments", paymentId, "students")) :
+          Promise.resolve(null),
       ]);
 
       const registrations = registrationsSnap.docs.map((registrationDoc) => {
@@ -4209,10 +4723,17 @@ export default function EventDashboard() {
         id: attendanceDoc.id,
         ...(attendanceDoc.data() as Omit<EventAttendanceDoc, "id">),
       }));
+      const paymentAssignments = paymentAssignmentsSnap?.docs.map(
+        (paymentStudentDoc) => ({
+          id: paymentStudentDoc.id,
+          ...(paymentStudentDoc.data() as Omit<EventPaymentStudentDoc, "id">),
+        }),
+      ) ?? [];
       const participantRows = buildEventParticipantRows(
         ev,
         registrations,
         attendanceRows,
+        paymentAssignments,
       );
       const participantRowsByUid = new Map<string, EventParticipantRow>();
       const participantRowsBySchoolId = new Map<string, EventParticipantRow>();
@@ -4233,12 +4754,18 @@ export default function EventDashboard() {
       const audience = resolveRequiredEventAudience(ev, allStudents);
       let presentRows: AttendanceExportRow[] = [];
       let absentRows: AttendanceExportRow[] = [];
+      let notPaidRows: AttendanceExportRow[] = [];
 
       if (audience.resolved) {
         audience.students.forEach((student) => {
           const participantRow =
             participantRowsByUid.get(student.uid) ??
             participantRowsBySchoolId.get(student.schoolId);
+
+          if (participantRow?.attendanceStatus === "Not Paid") {
+            notPaidRows.push(toNotPaidAttendanceExportRow(student, participantRow));
+            return;
+          }
 
           if (participantRow && isPresentAttendanceStatus(participantRow.attendanceStatus)) {
             presentRows.push(toPresentAttendanceExportRow(student, participantRow));
@@ -4250,24 +4777,58 @@ export default function EventDashboard() {
 
         presentRows = sortAttendanceExportRows(presentRows);
         absentRows = sortAttendanceExportRows(absentRows);
+        notPaidRows = sortAttendanceExportRows(notPaidRows);
       } else {
         // Older events do not always store explicit audience filters. In that
         // case we preserve the previous export data and leave the absents sheet
-        // empty instead of inferring absences from the whole roster.
+        // and Not Paid sheets empty instead of inferring rows from the whole roster.
         presentRows = sortAttendanceExportRows(
-          participantRows.map((row) => ({
-            schoolId: row.schoolId,
-            studentName: row.studentName,
-            course: row.course,
-            year: row.year,
-            attendanceStatus: row.attendanceStatus,
-            attendanceTimeIn: row.attendanceTimeIn,
-            attendanceTimeOut: row.attendanceTimeOut,
-          })),
+          participantRows
+            .filter((row) => isPresentAttendanceStatus(row.attendanceStatus))
+            .map((row) => ({
+              schoolId: row.schoolId,
+              studentName: row.studentName,
+              course: row.course,
+              year: row.year,
+              attendanceStatus: row.attendanceStatus,
+              attendanceTimeIn: row.attendanceTimeIn,
+              attendanceTimeOut: row.attendanceTimeOut,
+            })),
+        );
+        absentRows = sortAttendanceExportRows(
+          participantRows
+            .filter((row) => row.attendanceStatus === "Absent")
+            .map((row) => ({
+              schoolId: row.schoolId,
+              studentName: row.studentName,
+              course: row.course,
+              year: row.year,
+              attendanceStatus: row.attendanceStatus,
+              attendanceTimeIn: "",
+              attendanceTimeOut: "",
+            })),
+        );
+        notPaidRows = sortAttendanceExportRows(
+          participantRows
+            .filter((row) => row.attendanceStatus === "Not Paid")
+            .map((row) => ({
+              schoolId: row.schoolId,
+              studentName: row.studentName,
+              course: row.course,
+              year: row.year,
+              attendanceStatus: row.attendanceStatus,
+              attendanceTimeIn: "",
+              attendanceTimeOut: "",
+            })),
         );
       }
 
-      if (!audience.resolved && presentRows.length === 0) {
+      if (
+        !audience.resolved &&
+        presentRows.length === 0 &&
+        absentRows.length === 0 &&
+        notPaidRows.length === 0
+      ) {
         setExportError(
           "No registration or attendance records found for this event.",
         );
@@ -4280,15 +4841,15 @@ export default function EventDashboard() {
         return;
       }
 
-      await downloadAttendanceWorkbook(ev, presentRows, absentRows);
+      await downloadAttendanceWorkbook(ev, presentRows, absentRows, notPaidRows);
 
       const description = audience.resolved
-        ? `Downloaded ${presentRows.length} present and ${absentRows.length} absent row(s).`
-        : "Downloaded the attendance workbook. Audience rules were unavailable, so the Absents sheet was left empty.";
+        ? `Downloaded ${presentRows.length} present, ${absentRows.length} absent, and ${notPaidRows.length} not-paid row(s).`
+        : "Downloaded the attendance workbook. Audience rules were unavailable, so only captured Present, Absents, and Not Paid rows were exported.";
       setExportMsg(
         audience.resolved
-          ? `Exported ${presentRows.length} present and ${absentRows.length} absent row(s) for "${ev.title}".`
-          : `Exported attendance rows for "${ev.title}" with an empty Absents sheet.`,
+          ? `Exported ${presentRows.length} present, ${absentRows.length} absent, and ${notPaidRows.length} not-paid row(s) for "${ev.title}".`
+          : `Exported attendance rows for "${ev.title}" using the available attendance and payment records.`,
       );
       addToast({
         title: "Attendance export ready",
@@ -4431,6 +4992,12 @@ export default function EventDashboard() {
                   setWithPayment(checked);
                   if (!checked) {
                     setRequiredPaymentId("");
+                    setPaymentTitle("");
+                    setPaymentAmount("");
+                    setPaymentDueDate("");
+                    setPaymentDescription("");
+                  } else if (!paymentTitle.trim()) {
+                    setPaymentTitle(title.trim());
                   }
                 }}
               >
@@ -4966,36 +5533,73 @@ export default function EventDashboard() {
           </div>
 
           {withPayment && (
-            <div>
-              <label className="text-sm font-medium">Linked Payment</label>
-              <Select
-                aria-label="Linked payment"
-                className="mt-1 w-full"
-                placeholder={
-                  paymentLinkOptions.length === 0
-                    ? "No EC payments available yet"
-                    : "Select a payment"
-                }
-                selectedKeys={
-                  requiredPaymentId ? new Set([requiredPaymentId]) : new Set()
-                }
-                onSelectionChange={(keys) => {
-                  const selected = Array.from(keys)[0];
-                  setRequiredPaymentId(
-                    typeof selected === "string" ? selected : "",
-                  );
-                }}
-                isDisabled={paymentLinkOptions.length === 0}
-              >
-                {paymentLinkOptions.map((option) => (
-                  <SelectItem key={option.id}>
-                    {option.title} ({option.ref})
-                  </SelectItem>
-                ))}
-              </Select>
-              <p className="mt-1 text-xs text-campus-text-secondary">
-                Students must have this payment marked paid before the backend
-                will accept pre-registration.
+            <div className="space-y-4 rounded-xl border border-amber-200 bg-amber-50/60 p-4">
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-campus-text-primary">
+                  Event Payment Details
+                </p>
+                <p className="text-xs text-campus-text-secondary">
+                  Saving this event will automatically create or update the linked payment record.
+                </p>
+                {requiredPaymentId ? (
+                  <Chip size="sm" className="bg-white text-amber-800">
+                    Linked payment: {requiredPaymentId}
+                  </Chip>
+                ) : null}
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <div>
+                  <label className="text-sm font-medium">Payment Title/Name</label>
+                  <Input
+                    aria-label="Payment title"
+                    value={paymentTitle}
+                    onValueChange={setPaymentTitle}
+                    className="mt-1 w-full"
+                    placeholder="Defaults to the event title"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium">Amount</label>
+                  <Input
+                    aria-label="Payment amount"
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={paymentAmount}
+                    onValueChange={setPaymentAmount}
+                    className="mt-1 w-full"
+                    placeholder="Enter amount"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium">Due Date</label>
+                  <Input
+                    aria-label="Payment due date"
+                    type="date"
+                    value={paymentDueDate}
+                    onValueChange={setPaymentDueDate}
+                    className="mt-1 w-full"
+                  />
+                </div>
+
+                <div className="lg:col-span-2">
+                  <label className="text-sm font-medium">Description</label>
+                  <Textarea
+                    aria-label="Payment description"
+                    value={paymentDescription}
+                    onValueChange={setPaymentDescription}
+                    minRows={3}
+                    className="mt-1 w-full"
+                    placeholder="Optional payment notes for students"
+                  />
+                </div>
+              </div>
+
+              <p className="text-xs text-campus-text-secondary">
+                Students will only be treated as eligible attendees after this linked payment is marked paid on their account.
               </p>
             </div>
           )}
@@ -6868,9 +7472,6 @@ export default function EventDashboard() {
                         <Chip size="sm" className={statusChip(selectedEventStatus || "upcoming")}>
                           {selectedEventStatus || "upcoming"}
                         </Chip>
-                        <Chip size="sm" className="bg-slate-100 text-slate-700">
-                          {getEventTargetLabel(selectedEvent)}
-                        </Chip>
                       </div>
                       <div className="space-y-1">
                         <h3 className="text-xl font-semibold text-campus-text-primary">
@@ -6935,7 +7536,7 @@ export default function EventDashboard() {
                 </ModalHeader>
 
                 <ModalBody className="space-y-5 pb-6">
-                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
                     <EventDetailStat
                       label="Pre-Reg"
                       value={
@@ -6951,9 +7552,14 @@ export default function EventDashboard() {
                       tone="green"
                     />
                     <EventDetailStat
-                      label="Missed"
-                      value={selectedEventMissedCount}
+                      label="Absent"
+                      value={selectedEventAbsentCount}
                       tone="red"
+                    />
+                    <EventDetailStat
+                      label="Not Paid"
+                      value={selectedEventNotPaidCount}
+                      tone="purple"
                     />
                     <EventDetailStat
                       label="Files"
@@ -6989,7 +7595,11 @@ export default function EventDashboard() {
                             />
                             <EventDetailInfoRow
                               label="Payment linked"
-                              value={selectedEvent.withPayment ? "Yes" : "No"}
+                              value={
+                                selectedEvent.withPayment ?
+                                  getEventLinkedPaymentId(selectedEvent) || "Yes" :
+                                  "No"
+                              }
                             />
                             <EventDetailInfoRow
                               label="Pre-registration"
@@ -7082,6 +7692,15 @@ export default function EventDashboard() {
                             {filteredSelectedParticipantRows.length} participant
                             {filteredSelectedParticipantRows.length === 1 ? "" : "s"}
                           </Chip>
+                          <Chip size="sm" className="bg-emerald-100 text-emerald-700">
+                            Present: {selectedEventPresentCount}
+                          </Chip>
+                          <Chip size="sm" className="bg-rose-100 text-rose-700">
+                            Absent: {selectedEventAbsentCount}
+                          </Chip>
+                          <Chip size="sm" className="bg-amber-100 text-amber-800">
+                            Not Paid: {selectedEventNotPaidCount}
+                          </Chip>
                         </div>
 
                         {filteredSelectedParticipantRows.length === 0 ? (
@@ -7114,12 +7733,28 @@ export default function EventDashboard() {
                                       Time in: {row.attendanceTimeIn} | Time out: {row.attendanceTimeOut}
                                     </p>
                                   </div>
-                                  <Chip
-                                    size="sm"
-                                    className={getEventParticipantToneClasses(row.attendanceStatus)}
-                                  >
-                                    {row.attendanceStatus}
-                                  </Chip>
+                                  <div className="flex flex-wrap items-center justify-end gap-2">
+                                    <Chip
+                                      size="sm"
+                                      className={getEventParticipantToneClasses(row.attendanceStatus)}
+                                    >
+                                      {row.attendanceStatus}
+                                    </Chip>
+                                    {selectedEvent.withPayment ? (
+                                      <Chip
+                                        size="sm"
+                                        className={
+                                          row.paymentStatus === "Paid" ?
+                                            "bg-emerald-100 text-emerald-700" :
+                                            row.paymentStatus === "Not Paid" ?
+                                              "bg-amber-100 text-amber-800" :
+                                              "bg-slate-100 text-slate-700"
+                                        }
+                                      >
+                                        Payment: {row.paymentStatus}
+                                      </Chip>
+                                    ) : null}
+                                  </div>
                                 </CardBody>
                               </Card>
                             ))}

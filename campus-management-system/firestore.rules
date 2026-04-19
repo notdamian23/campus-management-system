@@ -17,6 +17,10 @@ service cloud.firestore {
       return /databases/$(database)/documents/events/$(eventId);
     }
 
+    function paymentPath(paymentId) {
+      return /databases/$(database)/documents/payments/$(paymentId);
+    }
+
     function hasProfile() {
       return signedIn() && exists(profilePath());
     }
@@ -324,12 +328,38 @@ service cloud.firestore {
         );
     }
 
+    function canDeletePaymentData() {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          currentCourseScope() != null &&
+          paymentCourseScope(resource.data) == currentCourseScope() &&
+          resource.data.createdByUid == request.auth.uid &&
+          resource.data.createdByCourseScope == currentCourseScope() &&
+          resource.data.course == currentCourseScope()
+        );
+    }
+
     function canManagePaymentStudentData(data) {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
           currentCourseScope() != null &&
           data.course == currentCourseScope()
+        );
+    }
+
+    function canDeletePaymentStudentData(paymentId, data) {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          currentCourseScope() != null &&
+          data.course == currentCourseScope() &&
+          exists(paymentPath(paymentId)) &&
+          paymentCourseScope(get(paymentPath(paymentId)).data) == currentCourseScope() &&
+          get(paymentPath(paymentId)).data.createdByUid == request.auth.uid &&
+          get(paymentPath(paymentId)).data.createdByCourseScope == currentCourseScope() &&
+          get(paymentPath(paymentId)).data.course == currentCourseScope()
         );
     }
 
@@ -456,7 +486,8 @@ service cloud.firestore {
     match /payments/{paymentId} {
       allow read: if signedIn() && canViewPaymentData(resource.data);
       allow create: if signedIn() && canCreatePaymentData(request.resource.data);
-      allow update, delete: if signedIn() && canUpdatePaymentData();
+      allow update: if signedIn() && canUpdatePaymentData();
+      allow delete: if signedIn() && canDeletePaymentData();
 
       match /students/{studentUid} {
         allow read: if isAdminOrRegularEC() ||
@@ -468,8 +499,9 @@ service cloud.firestore {
             resource.data.course == currentCourseScope()
           );
         allow create: if canManagePaymentStudentData(request.resource.data);
-        allow update, delete: if canManagePaymentStudentData(resource.data) &&
+        allow update: if canManagePaymentStudentData(resource.data) &&
           canManagePaymentStudentData(request.resource.data);
+        allow delete: if canDeletePaymentStudentData(paymentId, resource.data);
       }
     }
 

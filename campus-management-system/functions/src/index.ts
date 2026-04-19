@@ -4150,8 +4150,10 @@ export const studentManagePreRegistration = onCall({region: REGION}, async (requ
         );
       }
 
-      const requiredPaymentId = normalizeText(eventData.requiredPaymentId);
-      if (eventData.withPayment === true) {
+      const requiredPaymentId =
+        normalizeText(eventData.linkedPaymentId) ||
+        normalizeText(eventData.requiredPaymentId);
+      if (eventData.withPayment === true || eventData.paymentRequired === true) {
         if (!requiredPaymentId) {
           throw new HttpsError(
             "failed-precondition",

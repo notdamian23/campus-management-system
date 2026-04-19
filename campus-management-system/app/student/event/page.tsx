@@ -502,7 +502,7 @@ export default function StudentEventsPage() {
                           ) : null}
                           {item.withPayment ? (
                             <Chip size="sm" className="bg-amber-100 text-amber-700">
-                              Payment linked
+                              Payment required
                             </Chip>
                           ) : null}
                           {item.registrationStatus === "PRE_REGISTERED" ? (
@@ -651,7 +651,7 @@ function StudentEventDetails({
       ? Math.max(0, event.preRegSlots - event.preRegCount)
       : 0);
   const requirementText = event.withPayment
-    ? "Bring your payment receipt if the EC requires verification during attendance or check-in."
+    ? "Payment is required for this event. You will not be treated as an eligible attendee until the EC marks the linked payment as paid on your account."
     : "Follow the EC instructions shared for this event before arrival.";
 
   return (
@@ -901,7 +901,7 @@ function StudentEventDetails({
                 {event.status === "Payment Due" ? (
                   <Card shadow="none" className="border border-amber-100 bg-amber-50/80">
                     <CardBody className="p-4 text-sm text-amber-700">
-                      Complete the linked EC payment first. The backend will reject pre-registration until that payment is marked paid on your account.
+                      Payment Required: complete the linked EC payment first. The backend will reject registration and attendance validation until that payment is marked paid on your account.
                     </CardBody>
                   </Card>
                 ) : null}

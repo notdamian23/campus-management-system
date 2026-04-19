@@ -215,6 +215,40 @@ export function canManagePayment(
   return Boolean(courseScope && paymentScope && courseScope === paymentScope);
 }
 
+export function canEditPayment(
+  profile: ECProfileLike,
+  payment?: {
+    course?: unknown;
+    courseScope?: unknown;
+    createdByUid?: unknown;
+    createdByCourseScope?: unknown;
+  } | null,
+) {
+  if (normalizeLower(profile?.role) === "admin") return true;
+  if (isRegularEC(profile)) return true;
+  if (!isBOD(profile)) return false;
+
+  const courseScope = getCourseScope(profile);
+  const paymentCourse = normalizeMaybeCourse(payment?.course);
+  const paymentScope =
+    normalizeMaybeCourse(payment?.courseScope) || paymentCourse;
+  const createdByCourseScope = normalizeMaybeCourse(
+    payment?.createdByCourseScope,
+  );
+  const actorUid = trimValue(profile?.uid);
+  const createdByUid = trimValue(payment?.createdByUid);
+
+  return Boolean(
+    courseScope &&
+      actorUid &&
+      createdByUid &&
+      actorUid === createdByUid &&
+      paymentCourse === courseScope &&
+      paymentScope === courseScope &&
+      createdByCourseScope === courseScope,
+  );
+}
+
 export function canViewEvent(profile: ECProfileLike, event: EventLike) {
   if (normalizeLower(profile?.role) === "admin") return true;
   if (isRegularEC(profile)) return true;

@@ -2726,8 +2726,8 @@ exports.studentManagePreRegistration = (0, https_1.onCall)({ region: REGION }, a
         if (!matchesSpecificStudentTarget(eventData.targetStudent, schoolId, studentName)) {
             throw new https_1.HttpsError("permission-denied", "You are not part of the allowed audience for this event.");
         }
-        const requiredPaymentId = normalizeText(eventData.requiredPaymentId);
-        if (eventData.withPayment === true) {
+        const requiredPaymentId = normalizeText(eventData.linkedPaymentId) || normalizeText(eventData.requiredPaymentId);
+        if (eventData.withPayment === true || eventData.paymentRequired === true) {
             if (!requiredPaymentId) {
                 throw new https_1.HttpsError("failed-precondition", "This event requires a linked payment before registration.");
             }

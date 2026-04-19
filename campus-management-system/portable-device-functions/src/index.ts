@@ -51,6 +51,8 @@ type PortableEventSummary = {
   selectedSchoolIds: string[];
   isPreReg: boolean;
   requiresRegistration: boolean;
+  requiresPayment: boolean;
+  linkedPaymentId: string;
   createdAtMs: number;
   sortMs: number;
 };
@@ -542,6 +544,10 @@ function normalizeIdentifierList(value: unknown): string[] {
   return dedupeStrings(asStringArray(value));
 }
 
+function getEventLinkedPaymentId(data: FirebaseFirestore.DocumentData): string {
+  return normalizeText(data.linkedPaymentId) || normalizeText(data.requiredPaymentId);
+}
+
 function matchesTargetList(targets: string[], value: string): boolean {
   if (targets.length === 0) {
     return true;
@@ -597,6 +603,7 @@ function evaluateEventEligibility(
     course: string;
     yearLevel: string;
     registrationStatus?: unknown;
+    paymentStatus?: unknown;
   }
 ): {allowed: boolean; reason: string} {
   if (!matchesSelectedAudience(event, candidate.studentId, candidate.schoolId)) {
@@ -627,7 +634,49 @@ function evaluateEventEligibility(
     return {allowed: false, reason: "registration_required"};
   }
 
+  if (event.requiresPayment && normalizeLower(candidate.paymentStatus) !== "paid") {
+    return {allowed: false, reason: "payment_required"};
+  }
+
   return {allowed: true, reason: "allowed"};
+}
+
+async function loadPaymentStatusesByStudentId(paymentId: string): Promise<Map<string, string>> {
+  const normalizedPaymentId = normalizeText(paymentId);
+  if (!normalizedPaymentId) {
+    return new Map<string, string>();
+  }
+
+  const snapshot = await db.collection(`payments/${normalizedPaymentId}/students`).get();
+  const paymentStatuses = new Map<string, string>();
+  snapshot.docs.forEach((paymentStudentDoc) => {
+    const data = paymentStudentDoc.data() ?? {};
+    const uid = normalizeText(data.uid) || paymentStudentDoc.id;
+    if (!uid) {
+      return;
+    }
+
+    paymentStatuses.set(uid, normalizeLower(data.status));
+  });
+
+  return paymentStatuses;
+}
+
+async function loadPaymentStatusForStudent(paymentId: string, studentId: string): Promise<string> {
+  const normalizedPaymentId = normalizeText(paymentId);
+  const normalizedStudentId = normalizeText(studentId);
+  if (!normalizedPaymentId || !normalizedStudentId) {
+    return "";
+  }
+
+  const paymentStudentSnap = await db.doc(
+    `payments/${normalizedPaymentId}/students/${normalizedStudentId}`
+  ).get();
+  if (!paymentStudentSnap.exists) {
+    return "";
+  }
+
+  return normalizeLower(paymentStudentSnap.data()?.status);
 }
 
 function registrationLookupFromSnapshot(
@@ -972,6 +1021,11 @@ function eventSummaryFromSnapshot(
   const courses = normalizeTargetList(data.courses);
   const selectedStudentIds = normalizeIdentifierList(data.selectedStudentIds);
   const selectedSchoolIds = normalizeIdentifierList(data.selectedSchoolIds);
+  const linkedPaymentId = getEventLinkedPaymentId(data);
+  const requiresPayment =
+    data.paymentRequired === true ||
+    data.withPayment === true ||
+    linkedPaymentId.length > 0;
 
   return {
     eventId: snap.id,
@@ -988,6 +1042,8 @@ function eventSummaryFromSnapshot(
     selectedSchoolIds,
     isPreReg: data.isPreReg === true,
     requiresRegistration: data.isPreReg === true,
+    requiresPayment,
+    linkedPaymentId,
     createdAtMs: toMillis(data.createdAt),
     sortMs: parseEventStartMs(date, schedule.scheduledTime),
   };
@@ -1061,6 +1117,10 @@ async function resolveAuthorizedStudentIds(
   event: PortableEventSummary
 ): Promise<Map<string, {registrationId: string}>> {
   const registrationsSnap = await db.collection(`events/${eventId}/registrations`).get();
+  const paymentStatusesByStudentId =
+    event.requiresPayment && event.linkedPaymentId ?
+      await loadPaymentStatusesByStudentId(event.linkedPaymentId) :
+      new Map<string, string>();
   const registrations = registrationsSnap.docs
     .map((doc) => registrationLookupFromSnapshot(doc))
     .filter((registration) => registration.studentId.length > 0);
@@ -1084,6 +1144,7 @@ async function resolveAuthorizedStudentIds(
         course: registration.course,
         yearLevel: registration.yearLevel,
         registrationStatus: registration.status,
+        paymentStatus: paymentStatusesByStudentId.get(registration.studentId),
       });
       if (eligibility.allowed) {
         authorized.set(registration.studentId, {
@@ -1124,6 +1185,7 @@ async function resolveAuthorizedStudentIds(
         course: normalizeCourse(data.course),
         yearLevel: normalizeYearLevel(data.year ?? data.yearLevel),
         registrationStatus: registration?.status,
+        paymentStatus: paymentStatusesByStudentId.get(doc.id),
       });
       if (!eligibility.allowed) {
         return;
@@ -1157,6 +1219,7 @@ async function resolveAuthorizedStudentIds(
       course: normalizeCourse(data.course),
       yearLevel: normalizeYearLevel(data.year ?? data.yearLevel),
       registrationStatus: registration?.status,
+      paymentStatus: paymentStatusesByStudentId.get(doc.id),
     });
     if (!eligibility.allowed) {
       return;
@@ -1185,6 +1248,8 @@ function portableEventPayload(event: PortableEventSummary) {
     selectedStudentIds: event.selectedStudentIds,
     selectedSchoolIds: event.selectedSchoolIds,
     requiresRegistration: event.requiresRegistration,
+    requiresPayment: event.requiresPayment,
+    linkedPaymentId: event.linkedPaymentId,
   };
 }
 
@@ -1196,6 +1261,8 @@ function portableEventEligibilityPayload(event: PortableEventSummary) {
     selectedStudentIds: event.selectedStudentIds,
     selectedSchoolIds: event.selectedSchoolIds,
     requiresRegistration: event.requiresRegistration,
+    requiresPayment: event.requiresPayment,
+    linkedPaymentId: event.linkedPaymentId,
   };
 }
 
@@ -2415,6 +2482,10 @@ async function syncAttendanceRecord(
     normalizeYearLevel(record.yearLevel ?? record.year) ||
     normalizeYearLevel(mergedStudent.yearLevel ?? mergedStudent.year) ||
     "Unassigned";
+  const paymentStatus =
+    event.requiresPayment && event.linkedPaymentId ?
+      await loadPaymentStatusForStudent(event.linkedPaymentId, studentId) :
+      "";
   deviceLogger.info(`[SYNC][ATTEND] validating eventId=${eventId} schoolId=${resolvedSchoolId}`, {
     eventId,
     schoolId: resolvedSchoolId,
@@ -2428,8 +2499,12 @@ async function syncAttendanceRecord(
     course: resolvedCourse,
     yearLevel: resolvedYearLevel,
     registrationStatus,
+    paymentStatus,
   });
   if (!eligibility.allowed) {
+    const rejectionMessage = eligibility.reason === "payment_required" ?
+      "Student has not paid." :
+      "Student is not allowed for this event";
     deviceLogger.warn(
       `[SYNC][ATTEND] rejected reason=not_allowed_for_event eventId=${eventId} schoolId=${resolvedSchoolId}`,
       {
@@ -2448,7 +2523,7 @@ async function syncAttendanceRecord(
         studentName: resolvedStudentName,
         deviceId: device.deviceId,
         syncStatus: "rejected",
-        message: "Student is not allowed for this event",
+        message: rejectionMessage,
         attemptedAt: serverTimestamp(),
         processedAt: serverTimestamp(),
         source: "portable-device",
@@ -2458,7 +2533,7 @@ async function syncAttendanceRecord(
     return {
       recordId,
       status: "rejected",
-      message: "Student is not allowed for this event",
+      message: rejectionMessage,
     };
   }
 

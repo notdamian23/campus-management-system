@@ -642,6 +642,11 @@ export function studentPaymentFooter(payment: StudentPayment) {
       <Chip size="sm" className={toneClasses.chip}>
         {payment.status}
       </Chip>
+      {payment.source === "event" ? (
+        <Chip size="sm" className="bg-blue-100 text-blue-700">
+          Event payment
+        </Chip>
+      ) : null}
       {overdue ? (
         <Chip size="sm" className="bg-rose-100 text-rose-700">
           Overdue

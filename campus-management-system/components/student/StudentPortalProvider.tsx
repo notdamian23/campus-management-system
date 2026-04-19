@@ -76,6 +76,8 @@ export type StudentPayment = {
   date: string;
   details: string;
   status: "PAID" | "UNPAID";
+  linkedEventId: string;
+  source: "event" | "manual";
   createdAtMs: number;
   updatedAtMs: number;
 };
@@ -102,12 +104,14 @@ export type StudentEvent = {
   yearLevel: string;
   isPreReg: boolean;
   withPayment: boolean;
+  paymentRequired: boolean;
   lifecycle: LifecycleStatus;
   status: StudentEventStatus;
   eventDate: Date | null;
   attendanceStatus: string | null;
   registrationStatus: StudentRegistrationStatus | null;
   requiredPaymentId: string;
+  linkedPaymentId: string;
   registrationStartAtMs: number;
   registrationEndAtMs: number;
   cancellationDeadlineAtMs: number;
@@ -167,8 +171,10 @@ type RawEventDoc = {
   details: string;
   isPreReg: boolean;
   withPayment: boolean;
+  paymentRequired: boolean;
   waitlistEnabled: boolean;
   requiredPaymentId: string;
+  linkedPaymentId: string;
   registrationStartAtMs: number;
   registrationEndAtMs: number;
   cancellationDeadlineAtMs: number;
@@ -184,6 +190,9 @@ type PaymentDocData = {
   amount?: number | string;
   date?: string;
   details?: string;
+  linkedEventId?: string;
+  source?: string;
+  status?: string;
 };
 
 type PaymentAssignmentData = {
@@ -294,6 +303,13 @@ function normalizeText(value: unknown) {
   return String(value ?? "")
     .trim()
     .toLowerCase();
+}
+
+function getLinkedPaymentId(raw: {
+  linkedPaymentId?: string;
+  requiredPaymentId?: string;
+} | null | undefined) {
+  return String(raw?.linkedPaymentId ?? raw?.requiredPaymentId ?? "").trim();
 }
 
 function normalizeYear(raw: unknown) {
@@ -683,9 +699,19 @@ export function StudentPortalProvider({
             const data = d.data() as Partial<RawEventDoc> & {
               yearLevels?: unknown;
               courses?: unknown;
+              paymentRequired?: unknown;
+              linkedPaymentId?: unknown;
             };
             const yearLevels = toTargetList(data.yearLevels);
             const courses = toTargetList(data.courses);
+            const linkedPaymentId = getLinkedPaymentId({
+              linkedPaymentId: String((data as { linkedPaymentId?: unknown }).linkedPaymentId ?? "").trim(),
+              requiredPaymentId: String(data.requiredPaymentId ?? "").trim(),
+            });
+            const paymentRequired =
+              data.paymentRequired === true ||
+              data.withPayment === true ||
+              linkedPaymentId.length > 0;
             return {
               id: d.id,
               title: String(data.title ?? "Untitled Event"),
@@ -705,9 +731,11 @@ export function StudentPortalProvider({
               targetStudent: String(data.targetStudent ?? ""),
               details: String(data.details ?? ""),
               isPreReg: data.isPreReg === true,
-              withPayment: data.withPayment === true,
+              withPayment: paymentRequired,
+              paymentRequired,
               waitlistEnabled: data.waitlistEnabled === true,
-              requiredPaymentId: String(data.requiredPaymentId ?? "").trim(),
+              requiredPaymentId: linkedPaymentId,
+              linkedPaymentId,
               registrationStartAtMs: toMillis(
                 (data as { registrationStartAt?: unknown }).registrationStartAt,
               ),
@@ -856,6 +884,9 @@ export function StudentPortalProvider({
           const rows = await Promise.all(
             snap.docs.map(async (paymentDoc) => {
               const paymentData = paymentDoc.data() as PaymentDocData;
+              if (normalizeText(paymentData.status) === "archived") {
+                return null;
+              }
               const assignmentSnap = await getDoc(
                 doc(db, "payments", paymentDoc.id, "students", uid),
               );
@@ -880,6 +911,9 @@ export function StudentPortalProvider({
                 date: String(paymentData.date ?? ""),
                 details: String(paymentData.details ?? ""),
                 status,
+                linkedEventId: String(paymentData.linkedEventId ?? "").trim(),
+                source:
+                  normalizeText(paymentData.source) === "event" ? "event" : "manual",
                 createdAtMs,
                 updatedAtMs,
               } as StudentPayment;
@@ -1117,9 +1151,16 @@ export function StudentPortalProvider({
         );
         const attendanceRaw = normalizeText(attendanceByEvent[raw.id] ?? "");
         const registration = registrationsByEvent[raw.id] ?? null;
-        const paymentMatch = raw.requiredPaymentId
-          ? paymentById.get(normalizeText(raw.requiredPaymentId))
+        const linkedPaymentId = getLinkedPaymentId(raw)
+          ? getLinkedPaymentId(raw)
+          : "";
+        const paymentMatch = linkedPaymentId
+          ? paymentById.get(normalizeText(linkedPaymentId))
           : null;
+        const paymentRequired = raw.paymentRequired || raw.withPayment;
+        const paymentOutstanding =
+          paymentRequired &&
+          (!paymentMatch || paymentMatch.status === "UNPAID");
 
         let status: StudentEventStatus = "Upcoming";
 
@@ -1127,6 +1168,8 @@ export function StudentPortalProvider({
           status = "Attended";
         } else if (registration?.status === "CANCELLED") {
           status = "Cancelled";
+        } else if (paymentOutstanding) {
+          status = "Payment Due";
         } else if (lifecycle === "completed") {
           if (registration?.status === "WAITLISTED") {
             status = "Waitlisted";
@@ -1141,11 +1184,6 @@ export function StudentPortalProvider({
           status = "Pre-registered";
         } else if (registration?.status === "WAITLISTED") {
           status = "Waitlisted";
-        } else if (
-          raw.withPayment &&
-          (!paymentMatch || paymentMatch.status === "UNPAID")
-        ) {
-          status = "Payment Due";
         } else if (raw.isPreReg) {
           status = "Pre-registration";
         } else {
@@ -1164,12 +1202,14 @@ export function StudentPortalProvider({
           yearLevel: raw.yearLevel || "All Years",
           isPreReg: raw.isPreReg,
           withPayment: raw.withPayment,
+          paymentRequired,
           lifecycle,
           status,
           eventDate,
           attendanceStatus: attendanceRaw || null,
           registrationStatus: registration?.status ?? null,
-          requiredPaymentId: raw.requiredPaymentId,
+          requiredPaymentId: linkedPaymentId,
+          linkedPaymentId,
           registrationStartAtMs: raw.registrationStartAtMs,
           registrationEndAtMs: raw.registrationEndAtMs,
           cancellationDeadlineAtMs: raw.cancellationDeadlineAtMs,
@@ -1247,7 +1287,7 @@ export function StudentPortalProvider({
         });
       } else if (ev.status === "Payment Due") {
         pushItem(
-          `payment:${normalizeText(ev.requiredPaymentId || ev.title)}`,
+          `payment:${normalizeText(ev.linkedPaymentId || ev.requiredPaymentId || ev.title)}`,
           {
           id: `event-payment:${ev.id}`,
           title: `Payment Due: ${ev.title}`,

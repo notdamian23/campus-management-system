@@ -469,9 +469,14 @@ function LoginForm() {
       footer={
         <>
           Don&apos;t have an account?{" "}
-          <span className="font-bold text-primary-600">
+          <a
+            href="https://www.facebook.com/engineeringcouncil.uclm"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-bold text-primary-600 transition-colors hover:text-primary-700"
+          >
             Contact Administration
-          </span>
+          </a>
         </>
       }
     >
