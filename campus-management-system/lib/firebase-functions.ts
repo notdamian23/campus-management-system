@@ -249,6 +249,54 @@ export type AdminDeleteDuplicateStudentSchoolIdsResult = {
   failedCount: number;
   failureDetails: string[];
 };
+export type FingerprintCleanupMappingStatus =
+  | "active"
+  | "stale"
+  | "duplicate"
+  | "deleted"
+  | "missing_profile";
+export type FingerprintCleanupReportMapping = {
+  rowId: string;
+  templateId: number;
+  uid: string;
+  schoolId: string;
+  studentName: string;
+  course: string;
+  yearLevel: string;
+  profileStatus: string;
+  mappingStatus: FingerprintCleanupMappingStatus;
+  fingerprintStatus: string;
+  lastEnrolledAtMs: number;
+  duplicateTemplateCount: number;
+  duplicateSchoolIdCount: number;
+  duplicateReasons: string[];
+  sources: string[];
+  canRemoveStale: boolean;
+  canRemoveMapping: boolean;
+  canKeepTemplateOwner: boolean;
+  needsReenrollment: boolean;
+};
+export type FingerprintCleanupReport = {
+  generatedAtMs: number;
+  totalMappings: number;
+  activeMappings: number;
+  staleMappings: number;
+  duplicateMappings: number;
+  needsReenrollment: number;
+  mappings: FingerprintCleanupReportMapping[];
+};
+export type FingerprintCleanupAction =
+  | "removeStaleMapping"
+  | "removeMapping"
+  | "markNeedsReenrollment"
+  | "keepStudent";
+export type FingerprintCleanupActionResult = {
+  ok: boolean;
+  action: FingerprintCleanupAction;
+  updatedCount: number;
+  queueCount: number;
+  message: string;
+};
 
 export async function finalizeVerifiedCampusProfileForCurrentUser(): Promise<{
   finalized: boolean;
@@ -338,6 +386,52 @@ export async function adminDeleteDuplicateStudentSchoolIds(
   >(functions, "adminDeleteDuplicateStudentSchoolIds");
 
   const result = await callable({});
+  return result.data;
+}
+
+export async function adminListFingerprintCleanupMappings(
+  functions: ReturnType<typeof getCampusFunctions>,
+): Promise<FingerprintCleanupReport> {
+  logAuthEvent("info", "Loading fingerprint cleanup mappings");
+
+  const callable = httpsCallable<Record<string, never>, FingerprintCleanupReport>(
+    functions,
+    "adminListFingerprintCleanupMappings",
+  );
+
+  const result = await callable({});
+  return result.data;
+}
+
+export async function adminManageFingerprintCleanup(
+  functions: ReturnType<typeof getCampusFunctions>,
+  payload: {
+    action: FingerprintCleanupAction;
+    templateId: number;
+    uid?: string;
+    keepUid?: string;
+    reason?: string;
+  },
+): Promise<FingerprintCleanupActionResult> {
+  logAuthEvent("info", "Submitting fingerprint cleanup action", {
+    action: payload.action,
+    templateId: payload.templateId,
+    hasUid: Boolean(payload.uid),
+    hasKeepUid: Boolean(payload.keepUid),
+  });
+
+  const callable = httpsCallable<
+    {
+      action: FingerprintCleanupAction;
+      templateId: number;
+      uid?: string;
+      keepUid?: string;
+      reason?: string;
+    },
+    FingerprintCleanupActionResult
+  >(functions, "adminManageFingerprintCleanup");
+
+  const result = await callable(payload);
   return result.data;
 }
 

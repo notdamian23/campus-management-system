@@ -160,6 +160,15 @@ service cloud.firestore {
       allow create, update, delete: if isAdminOrEC();
     }
 
+    // Canonical fingerprint template ownership and cleanup queue are admin-only.
+    match /fingerprintTemplates/{templateId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /moduleCleanupQueue/{cleanupId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
     // Sync logs are written by Admin SDK functions for auditability.
     match /syncLogs/{logId} {
       allow read: if isAdminOrEC();

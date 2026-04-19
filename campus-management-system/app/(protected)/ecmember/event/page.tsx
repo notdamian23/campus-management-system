@@ -125,6 +125,8 @@ type EventDoc = {
   yearLevels?: string[];
   courses?: string[];
   targetStudent?: string;
+  selectedStudentIds?: string[];
+  selectedSchoolIds?: string[];
   details?: string;
   isPreReg?: boolean;
   withPayment?: boolean;
@@ -510,6 +512,43 @@ function toEventTargetList(value: unknown): string[] {
   );
 }
 
+function normalizeEventIdentifierList(value: unknown) {
+  return toEventTargetList(value).map((item) => normalizeLookupText(item)).filter(Boolean);
+}
+
+function hasExplicitSelectedEventAudience(
+  event: Pick<EventDoc, "selectedStudentIds" | "selectedSchoolIds">,
+) {
+  return (
+    normalizeEventIdentifierList(event.selectedStudentIds).length > 0 ||
+    normalizeEventIdentifierList(event.selectedSchoolIds).length > 0
+  );
+}
+
+function matchesSelectedEventAudience(
+  event: Pick<EventDoc, "selectedStudentIds" | "selectedSchoolIds">,
+  uid: string,
+  schoolId: string,
+) {
+  if (!hasExplicitSelectedEventAudience(event)) {
+    return true;
+  }
+
+  const selectedStudentIds = normalizeEventIdentifierList(event.selectedStudentIds);
+  const selectedSchoolIds = normalizeEventIdentifierList(event.selectedSchoolIds);
+  const normalizedUid = normalizeLowerLookupText(uid);
+  const normalizedSchoolId = normalizeLowerLookupText(schoolId);
+
+  return (
+    selectedStudentIds.some(
+      (item) => normalizeLowerLookupText(item) === normalizedUid,
+    ) ||
+    selectedSchoolIds.some(
+      (item) => normalizeLowerLookupText(item) === normalizedSchoolId,
+    )
+  );
+}
+
 function matchesEventTargetList(
   targetValue: unknown,
   studentValue: string,
@@ -600,7 +639,13 @@ function sortStudentLookups(rows: StudentLookup[]) {
 function resolveRequiredEventAudience(
   event: Pick<
     EventDoc,
-    "course" | "courses" | "yearLevel" | "yearLevels" | "targetStudent"
+    | "course"
+    | "courses"
+    | "yearLevel"
+    | "yearLevels"
+    | "targetStudent"
+    | "selectedStudentIds"
+    | "selectedSchoolIds"
   >,
   students: StudentLookup[],
 ) {
@@ -613,8 +658,12 @@ function resolveRequiredEventAudience(
       ? event.yearLevels.map((item) => normalizeLookupText(item)).filter(Boolean)
       : toEventTargetList(event.yearLevel);
   const hasSpecificTarget = Boolean(normalizeLookupText(event.targetStudent));
+  const hasSelectedAudience = hasExplicitSelectedEventAudience(event);
   const hasExplicitAudience =
-    courseTargets.length > 0 || yearTargets.length > 0 || hasSpecificTarget;
+    courseTargets.length > 0 ||
+    yearTargets.length > 0 ||
+    hasSpecificTarget ||
+    hasSelectedAudience;
 
   if (!hasExplicitAudience) {
     return {
@@ -628,6 +677,19 @@ function resolveRequiredEventAudience(
   );
 
   const matchedStudents = activeStudents.filter((student) => {
+    const selectedMatch = matchesSelectedEventAudience(
+      event,
+      student.uid,
+      student.schoolId,
+    );
+    if (!selectedMatch) {
+      return false;
+    }
+
+    if (hasSelectedAudience) {
+      return true;
+    }
+
     const courseMatch = matchesEventTargetList(
       courseTargets,
       student.course,
@@ -894,23 +956,61 @@ function buildEventParticipantRows(
   if (!event) return [] as EventParticipantRow[];
 
   const rowsByUid = new Map<string, EventParticipantRow>();
+  const preRegisteredByUid = new Set<string>();
+  const preRegisteredBySchoolId = new Set<string>();
 
   registrations.forEach((registration) => {
     const uid = String(registration.uid ?? registration.id).trim();
     if (!uid) return;
+    const schoolId = String(registration.schoolId ?? "").trim();
+    const studentName = formatStudentFullName(
+      {
+        studentName: registration.studentName,
+        schoolId: registration.schoolId,
+      },
+      schoolId || uid,
+    );
+    const course = String(registration.course ?? "").trim() || "-";
+    const year = String(registration.year ?? "").trim() || "-";
+    if (
+      !matchesSelectedEventAudience(event, uid, schoolId) ||
+      (!hasExplicitSelectedEventAudience(event) &&
+        (!matchesEventTargetList(
+          Array.isArray(event.courses) && event.courses.length > 0
+            ? event.courses
+            : event.course,
+          course,
+          "All Courses",
+        ) ||
+          !matchesEventTargetList(
+            Array.isArray(event.yearLevels) && event.yearLevels.length > 0
+              ? event.yearLevels
+              : event.yearLevel,
+            year,
+            "All Years",
+          ) ||
+          !matchesSpecificEventStudentTarget(
+            event.targetStudent,
+            schoolId,
+            studentName,
+          )))
+    ) {
+      return;
+    }
+
+    if (parseRegistrationStatus(registration.status) === "PRE_REGISTERED") {
+      preRegisteredByUid.add(uid);
+      if (schoolId) {
+        preRegisteredBySchoolId.add(schoolId);
+      }
+    }
 
     rowsByUid.set(uid, {
       uid,
-      schoolId: String(registration.schoolId ?? "").trim() || uid,
-      studentName: formatStudentFullName(
-        {
-          studentName: registration.studentName,
-          schoolId: registration.schoolId,
-        },
-        String(registration.schoolId ?? "").trim() || uid,
-      ),
-      course: String(registration.course ?? "").trim() || "-",
-      year: String(registration.year ?? "").trim() || "-",
+      schoolId: schoolId || uid,
+      studentName,
+      course,
+      year,
       attendanceStatus: formatRegistrationStatus(
         parseRegistrationStatus(registration.status),
       ),
@@ -925,6 +1025,54 @@ function buildEventParticipantRows(
     if (!uid) return;
 
     const existing = rowsByUid.get(uid);
+    const schoolId =
+      String(rowDoc.schoolId ?? existing?.schoolId ?? "").trim() || uid;
+    const studentName = formatStudentFullName(
+      {
+        studentName: rowDoc.studentName ?? existing?.studentName,
+        name: rowDoc.name,
+        schoolId: rowDoc.schoolId ?? existing?.schoolId,
+      },
+      schoolId,
+    );
+    const course = String(rowDoc.course ?? existing?.course ?? "").trim() || "-";
+    const year =
+      String(rowDoc.yearLevel ?? rowDoc.year ?? existing?.year ?? "").trim() ||
+      "-";
+    if (
+      !matchesSelectedEventAudience(event, uid, schoolId) ||
+      (!hasExplicitSelectedEventAudience(event) &&
+        (!matchesEventTargetList(
+          Array.isArray(event.courses) && event.courses.length > 0
+            ? event.courses
+            : event.course,
+          course,
+          "All Courses",
+        ) ||
+          !matchesEventTargetList(
+            Array.isArray(event.yearLevels) && event.yearLevels.length > 0
+              ? event.yearLevels
+              : event.yearLevel,
+            year,
+            "All Years",
+          ) ||
+          !matchesSpecificEventStudentTarget(
+            event.targetStudent,
+            schoolId,
+            studentName,
+          )))
+    ) {
+      return;
+    }
+
+    if (
+      event.isPreReg &&
+      !preRegisteredByUid.has(uid) &&
+      !preRegisteredBySchoolId.has(schoolId)
+    ) {
+      return;
+    }
+
     const fallbackStatus =
       typeof rowDoc.present === "boolean"
         ? rowDoc.present
@@ -955,19 +1103,10 @@ function buildEventParticipantRows(
 
     rowsByUid.set(uid, {
       uid,
-      schoolId: String(rowDoc.schoolId ?? existing?.schoolId ?? "").trim() || uid,
-      studentName: formatStudentFullName(
-        {
-          studentName: rowDoc.studentName ?? existing?.studentName,
-          name: rowDoc.name,
-          schoolId: rowDoc.schoolId ?? existing?.schoolId,
-        },
-        String(rowDoc.schoolId ?? existing?.schoolId ?? "").trim() || uid,
-      ),
-      course: String(rowDoc.course ?? existing?.course ?? "").trim() || "-",
-      year:
-        String(rowDoc.yearLevel ?? rowDoc.year ?? existing?.year ?? "").trim() ||
-        "-",
+      schoolId,
+      studentName,
+      course,
+      year,
       attendanceStatus: status,
       attendanceTimeIn:
         timeInValue !== "-" ? timeInValue : (existing?.attendanceTimeIn ?? "-"),
@@ -3426,10 +3565,22 @@ export default function EventDashboard() {
       selectedCourses.length === 0 &&
       legacyCourses.some((item) => item.toLowerCase() === "all courses");
 
-    const parsedTargets = parseTargetStudents(
-      eventToEdit.targetStudent,
-      allStudents,
+    const explicitSelectedStudentIds = normalizeEventIdentifierList(
+      eventToEdit.selectedStudentIds,
     );
+    const explicitSelectedSchoolIds = normalizeEventIdentifierList(
+      eventToEdit.selectedSchoolIds,
+    );
+    const parsedTargets =
+      explicitSelectedStudentIds.length > 0 || explicitSelectedSchoolIds.length > 0
+        ? sortStudentLookups(
+            allStudents.filter(
+              (student) =>
+                explicitSelectedStudentIds.includes(student.uid) ||
+                explicitSelectedSchoolIds.includes(student.schoolId),
+            ),
+          )
+        : parseTargetStudents(eventToEdit.targetStudent, allStudents);
     const nextDate = /^\d{4}-\d{2}-\d{2}$/.test(String(eventToEdit.date ?? ""))
       ? String(eventToEdit.date)
       : isoDateToday();
@@ -3614,6 +3765,16 @@ export default function EventDashboard() {
       const studentTarget = selectedEventStudents
         .map((student) => `${student.studentName} (${student.schoolId})`)
         .join("; ");
+      const selectedStudentIds = selectedEventStudents
+        .map((student) => student.uid.trim())
+        .filter((value) => value.length > 0 && !value.startsWith("manual-"));
+      const selectedSchoolIds = Array.from(
+        new Set(
+          selectedEventStudents
+            .map((student) => student.schoolId.trim())
+            .filter((value) => value.length > 0 && value !== "Unknown ID"),
+        ),
+      );
       const startTime = format12h(eventScheduled24);
       const endTime = format12h(eventEnd24);
       const yearLevelValue = isAllYearsExplicit
@@ -3662,6 +3823,8 @@ export default function EventDashboard() {
         yearLevels: selectedEventYearLevels,
         courses: selectedEventCourses,
         targetStudent: studentTarget,
+        selectedStudentIds,
+        selectedSchoolIds,
         details: details.trim(),
         isPreReg,
         withPayment,

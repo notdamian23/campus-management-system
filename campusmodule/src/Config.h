@@ -16,6 +16,9 @@ inline constexpr char kWifiSsid[] = "REPLACE_WITH_WIFI_SSID";
 inline constexpr char kWifiPassword[] = "REPLACE_WITH_WIFI_PASSWORD";
 inline constexpr char kSetupApPrefix[] = "CAMPUS-Setup";
 
+// Portable ESP32 devices must call deployed HTTPS onRequest Cloud Functions.
+// Final attendance sync URL:
+// https://asia-southeast1-campus-27dd9.cloudfunctions.net/campusDeviceSyncAttendance
 inline constexpr char kApiBaseUrl[] =
     "https://asia-southeast1-campus-27dd9.cloudfunctions.net";
 inline constexpr char kDeviceId[] = "campus-portable-01";
@@ -32,9 +35,11 @@ inline constexpr uint32_t kAttendancePollMs = 180;
 inline constexpr uint32_t kAutoSyncIntervalMs = 60000;
 inline constexpr uint32_t kMessageHoldMs = 1200;
 inline constexpr uint32_t kSetupPortalTimeoutMs = 5UL * 60UL * 1000UL;
+inline constexpr uint8_t kHttpRetryAttempts = 3;
 inline constexpr uint16_t kEventListLimit = 20;
 inline constexpr uint16_t kPendingEnrollmentLimit = 20;
-inline constexpr uint16_t kSyncBatchSize = 20;
+// Keep attendance sync requests to one record during TLS-memory testing.
+inline constexpr uint16_t kSyncBatchSize = 1;
 inline constexpr uint16_t kFingerprintFirstTemplateId = 1;
 inline constexpr uint16_t kFingerprintLastTemplateId = 127;
 inline constexpr long kUtcOffsetSeconds = 8L * 60L * 60L;

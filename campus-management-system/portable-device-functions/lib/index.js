@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.campusDeviceConfirmPairing = exports.campusDeviceLatestEvent = exports.campusDeviceSyncAttendance = exports.campusDeviceSubmitEnrollment = exports.campusDevicePendingEnrollments = exports.campusDeviceSyncEnrollmentResults = exports.campusDeviceDownloadEnrollmentSession = exports.campusDevicePairEnrollmentSession = exports.campusDeviceListEnrollmentSessions = exports.campusDevicePairedEventContext = exports.campusDevicePairEvent = exports.campusDeviceListEvents = exports.campusDeviceCreateSession = exports.ecCloseFingerprintEnrollmentSession = exports.ecCreateFingerprintEnrollmentSession = exports.ecGetFingerprintEnrollmentSessionDetail = exports.ecListFingerprintEnrollmentSessions = void 0;
+exports.campusDeviceConfirmPairing = exports.campusDeviceLatestEvent = exports.campusDeviceSyncAttendance = exports.campusDeviceAcknowledgeCleanupQueue = exports.campusDeviceCleanupQueue = exports.campusDeviceSubmitEnrollment = exports.campusDevicePendingEnrollments = exports.campusDeviceSyncEnrollmentResults = exports.campusDeviceDownloadEnrollmentSession = exports.campusDevicePairEnrollmentSession = exports.campusDeviceListEnrollmentSessions = exports.campusDevicePairedEventContext = exports.campusDevicePairEvent = exports.campusDeviceListEvents = exports.campusDeviceCreateSession = exports.ecCloseFingerprintEnrollmentSession = exports.ecCreateFingerprintEnrollmentSession = exports.ecGetFingerprintEnrollmentSessionDetail = exports.ecListFingerprintEnrollmentSessions = void 0;
 const crypto_1 = require("crypto");
 const admin = __importStar(require("firebase-admin"));
 const functions = __importStar(require("firebase-functions/v1"));
@@ -54,6 +54,8 @@ const DEFAULT_ENROLLMENT_SESSION_LIMIT = 15;
 const MAX_ENROLLMENT_SESSION_LIMIT = 25;
 const DEFAULT_SYNC_BATCH_LIMIT = 25;
 const MAX_SYNC_BATCH_LIMIT = 50;
+const DEFAULT_CLEANUP_LIMIT = 25;
+const MAX_CLEANUP_LIMIT = 50;
 const TOKEN_VERSION = 1;
 class ApiError extends Error {
     constructor(status, message) {
@@ -69,6 +71,20 @@ function normalizeText(value) {
 }
 function normalizeLower(value) {
     return normalizeText(value).toLowerCase();
+}
+function requestHeader(req, ...names) {
+    for (const name of names) {
+        const value = normalizeText(req.get(name));
+        if (value) {
+            return value;
+        }
+    }
+    return "";
+}
+function sanitizeIdComponent(value) {
+    return normalizeLower(value)
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
 }
 function asRecord(value) {
     return typeof value === "object" && value !== null ?
@@ -99,6 +115,52 @@ function toMillis(value) {
 function toPositiveInt(value, fallback = 0) {
     const parsed = Number.parseInt(normalizeText(value), 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+function fingerprintTemplateRef(templateId) {
+    return db.doc(`fingerprintTemplates/${templateId}`);
+}
+async function upsertFingerprintTemplateOwner(templateId, payload) {
+    if (templateId <= 0 || !payload.uid) {
+        return;
+    }
+    await fingerprintTemplateRef(templateId).set({
+        templateId,
+        uid: payload.uid,
+        schoolId: payload.schoolId,
+        name: payload.studentName,
+        course: payload.course,
+        yearLevel: payload.yearLevel,
+        active: true,
+        status: "active",
+        sensorId: payload.deviceId,
+        enrolledAt: payload.enrolledAt,
+        updatedAt: serverTimestamp(),
+    }, { merge: true });
+}
+async function findActiveFingerprintTemplateConflict(templateId, studentId) {
+    var _a;
+    if (templateId <= 0) {
+        return null;
+    }
+    const templateSnap = await fingerprintTemplateRef(templateId).get();
+    if (!templateSnap.exists) {
+        return null;
+    }
+    const templateData = (_a = templateSnap.data()) !== null && _a !== void 0 ? _a : {};
+    const ownerUid = normalizeText(templateData.uid) ||
+        normalizeText(templateData.studentUid) ||
+        normalizeText(templateData.studentId);
+    if (!ownerUid || ownerUid === studentId) {
+        return null;
+    }
+    if (templateData.active === false) {
+        return null;
+    }
+    const status = normalizeLower(templateData.status);
+    if (status === "stale" || status === "needs_reenrollment" || status === "deleted") {
+        return null;
+    }
+    return templateData;
 }
 function parseQueryInt(value, fallback, min, max) {
     const raw = Array.isArray(value) ? value[0] : value;
@@ -298,6 +360,9 @@ function normalizeTargetList(value) {
     const raw = dedupeStrings(asStringArray(value));
     return raw.filter((item) => normalizeLower(item) !== "all years" && normalizeLower(item) !== "all courses");
 }
+function normalizeIdentifierList(value) {
+    return dedupeStrings(asStringArray(value));
+}
 function matchesTargetList(targets, value) {
     if (targets.length === 0) {
         return true;
@@ -317,6 +382,86 @@ function matchesSpecificStudentTarget(targetStudent, candidate) {
         normalizeLower(candidate.name),
     ].filter(Boolean);
     return identifiers.includes(target);
+}
+function hasExplicitSelectedAudience(event) {
+    return event.selectedStudentIds.length > 0 || event.selectedSchoolIds.length > 0;
+}
+function matchesSelectedAudience(event, studentId, schoolId) {
+    if (!hasExplicitSelectedAudience(event)) {
+        return true;
+    }
+    const normalizedStudentId = normalizeLower(studentId);
+    const normalizedSchoolId = normalizeLower(schoolId);
+    return event.selectedStudentIds.some((value) => normalizeLower(value) === normalizedStudentId) ||
+        event.selectedSchoolIds.some((value) => normalizeLower(value) === normalizedSchoolId);
+}
+function evaluateEventEligibility(event, candidate) {
+    if (!matchesSelectedAudience(event, candidate.studentId, candidate.schoolId)) {
+        return { allowed: false, reason: "not_selected_student" };
+    }
+    if (!hasExplicitSelectedAudience(event)) {
+        if (!matchesSpecificStudentTarget(event.targetStudent, {
+            uid: candidate.studentId,
+            schoolId: candidate.schoolId,
+            studentName: candidate.studentName,
+            name: candidate.studentName,
+        })) {
+            return { allowed: false, reason: "not_target_student" };
+        }
+        if (!matchesTargetList(event.courses, normalizeCourse(candidate.course))) {
+            return { allowed: false, reason: "not_target_course" };
+        }
+        if (!matchesTargetList(event.yearLevels, normalizeYearLevel(candidate.yearLevel))) {
+            return { allowed: false, reason: "not_target_year" };
+        }
+    }
+    if (event.requiresRegistration &&
+        parseRegistrationStatus(candidate.registrationStatus) !== "PRE_REGISTERED") {
+        return { allowed: false, reason: "registration_required" };
+    }
+    return { allowed: true, reason: "allowed" };
+}
+function registrationLookupFromSnapshot(snap) {
+    var _a, _b;
+    const data = (_a = snap.data()) !== null && _a !== void 0 ? _a : {};
+    const studentId = normalizeText(data.uid) ||
+        normalizeText(data.studentUid) ||
+        normalizeText(data.studentId) ||
+        snap.id;
+    return {
+        studentId,
+        registrationId: snap.id,
+        schoolId: normalizeText(data.schoolId),
+        studentName: normalizeText(data.studentName) ||
+            normalizeText(data.name) ||
+            studentId,
+        course: normalizeCourse(data.course),
+        yearLevel: normalizeYearLevel((_b = data.year) !== null && _b !== void 0 ? _b : data.yearLevel),
+        status: parseRegistrationStatus(data.status),
+    };
+}
+async function loadStudentProfilesBySchoolIds(schoolIds) {
+    const probes = normalizeIdentifierList(schoolIds);
+    if (probes.length === 0) {
+        return [];
+    }
+    const chunks = [];
+    for (let index = 0; index < probes.length; index += 10) {
+        chunks.push(probes.slice(index, index + 10));
+    }
+    const snapshots = await Promise.all(chunks.map((chunk) => db.collection("profiles").where("schoolId", "in", chunk).get()));
+    const seen = new Set();
+    const rows = [];
+    snapshots.forEach((snapshot) => {
+        snapshot.docs.forEach((doc) => {
+            if (seen.has(doc.id)) {
+                return;
+            }
+            seen.add(doc.id);
+            rows.push(doc);
+        });
+    });
+    return rows;
 }
 function isStudentProfile(data) {
     return normalizeLower(data === null || data === void 0 ? void 0 : data.role) === "student";
@@ -404,7 +549,7 @@ async function loadDeviceContext(deviceId, authMode, deviceData) {
     const snap = deviceData ? null : await ref.get();
     const data = deviceData !== null && deviceData !== void 0 ? deviceData : snap === null || snap === void 0 ? void 0 : snap.data();
     if (!data) {
-        throw new ApiError(403, "Device is not registered.");
+        throw new ApiError(401, "Unauthorized device");
     }
     if (data.enabled === false) {
         throw new ApiError(403, "Device is disabled.");
@@ -427,19 +572,19 @@ async function loadDeviceContext(deviceId, authMode, deviceData) {
 }
 async function authenticateDeviceWithSecret(req) {
     var _a;
-    const deviceId = normalizeText(req.get("X-Device-Id"));
-    const secret = normalizeText(req.get("X-Device-Secret"));
+    const deviceId = requestHeader(req, "X-Campus-Device-Id", "X-Device-Id");
+    const secret = requestHeader(req, "X-Campus-Device-Secret", "X-Device-Secret");
     if (!deviceId || !secret) {
-        throw new ApiError(401, "Missing device authentication headers.");
+        throw new ApiError(401, "Unauthorized device");
     }
     const ref = db.doc(`devices/${deviceId}`);
     const snap = await ref.get();
     if (!snap.exists) {
-        throw new ApiError(403, "Device is not registered.");
+        throw new ApiError(401, "Unauthorized device");
     }
     const data = (_a = snap.data()) !== null && _a !== void 0 ? _a : {};
     if (!deviceSecretMatches(data, secret)) {
-        throw new ApiError(403, "Device secret is invalid.");
+        throw new ApiError(401, "Unauthorized device");
     }
     return loadDeviceContext(deviceId, "secret", data);
 }
@@ -479,7 +624,7 @@ function deviceEndpoint(method, authMode, handler) {
         }
         if (req.method !== method) {
             res.set("Allow", `${method}, OPTIONS`);
-            sendJson(res, 405, { error: "Method not allowed." });
+            sendJson(res, 405, { ok: false, error: "Method not allowed." });
             return;
         }
         try {
@@ -488,9 +633,11 @@ function deviceEndpoint(method, authMode, handler) {
         }
         catch (error) {
             const status = error instanceof ApiError ? error.status : 500;
-            const message = errorMessage(error, "Internal server error.");
+            const message = status >= 500 ?
+                "Server error" :
+                errorMessage(error, "Server error");
             deviceLogger.error("Portable device endpoint failed", { error, status });
-            sendJson(res, status, { error: message });
+            sendJson(res, status, { ok: false, error: message });
         }
     });
 }
@@ -505,6 +652,8 @@ function eventSummaryFromSnapshot(snap) {
         normalizeText(data.timeEnd));
     const yearLevels = normalizeTargetList(data.yearLevels);
     const courses = normalizeTargetList(data.courses);
+    const selectedStudentIds = normalizeIdentifierList(data.selectedStudentIds);
+    const selectedSchoolIds = normalizeIdentifierList(data.selectedSchoolIds);
     return {
         eventId: snap.id,
         title: normalizeText(data.title) || "Untitled Event",
@@ -516,6 +665,8 @@ function eventSummaryFromSnapshot(snap) {
         yearLevels,
         courses,
         targetStudent: normalizeText(data.targetStudent),
+        selectedStudentIds,
+        selectedSchoolIds,
         isPreReg: data.isPreReg === true,
         requiresRegistration: data.isPreReg === true,
         createdAtMs: toMillis(data.createdAt),
@@ -576,41 +727,128 @@ async function loadDocsById(collectionName, ids) {
 }
 async function resolveAuthorizedStudentIds(eventId, event) {
     const registrationsSnap = await db.collection(`events/${eventId}/registrations`).get();
+    const registrations = registrationsSnap.docs
+        .map((doc) => registrationLookupFromSnapshot(doc))
+        .filter((registration) => registration.studentId.length > 0);
+    const registrationsByStudentId = new Map();
     const authorized = new Map();
-    registrationsSnap.docs.forEach((doc) => {
-        const data = doc.data();
-        if (event.isPreReg && parseRegistrationStatus(data.status) !== "PRE_REGISTERED") {
-            return;
-        }
-        const studentId = normalizeText(data.uid) || normalizeText(data.studentUid) || doc.id;
-        if (studentId) {
-            authorized.set(studentId, { registrationId: doc.id });
+    registrations.forEach((registration) => {
+        const existing = registrationsByStudentId.get(registration.studentId);
+        if (!existing || (existing.status !== "PRE_REGISTERED" &&
+            registration.status === "PRE_REGISTERED")) {
+            registrationsByStudentId.set(registration.studentId, registration);
         }
     });
-    if (event.isPreReg || authorized.size > 0) {
+    if (event.requiresRegistration) {
+        registrationsByStudentId.forEach((registration) => {
+            const eligibility = evaluateEventEligibility(event, {
+                studentId: registration.studentId,
+                schoolId: registration.schoolId,
+                studentName: registration.studentName,
+                course: registration.course,
+                yearLevel: registration.yearLevel,
+                registrationStatus: registration.status,
+            });
+            if (eligibility.allowed) {
+                authorized.set(registration.studentId, {
+                    registrationId: registration.registrationId,
+                });
+            }
+        });
+        return authorized;
+    }
+    if (event.selectedStudentIds.length > 0) {
+        event.selectedStudentIds.forEach((studentId) => {
+            var _a;
+            const registration = registrationsByStudentId.get(studentId);
+            authorized.set(studentId, {
+                registrationId: (_a = registration === null || registration === void 0 ? void 0 : registration.registrationId) !== null && _a !== void 0 ? _a : "",
+            });
+        });
+    }
+    if (event.selectedSchoolIds.length > 0) {
+        const selectedProfiles = await loadStudentProfilesBySchoolIds(event.selectedSchoolIds);
+        selectedProfiles.forEach((doc) => {
+            var _a, _b, _c;
+            const data = (_a = doc.data()) !== null && _a !== void 0 ? _a : {};
+            if (!isStudentProfile(data)) {
+                return;
+            }
+            const registration = registrationsByStudentId.get(doc.id);
+            const eligibility = evaluateEventEligibility(event, {
+                studentId: doc.id,
+                schoolId: normalizeText(data.schoolId),
+                studentName: normalizeText(data.studentName) ||
+                    normalizeText(data.name) ||
+                    doc.id,
+                course: normalizeCourse(data.course),
+                yearLevel: normalizeYearLevel((_b = data.year) !== null && _b !== void 0 ? _b : data.yearLevel),
+                registrationStatus: registration === null || registration === void 0 ? void 0 : registration.status,
+            });
+            if (!eligibility.allowed) {
+                return;
+            }
+            authorized.set(doc.id, {
+                registrationId: (_c = registration === null || registration === void 0 ? void 0 : registration.registrationId) !== null && _c !== void 0 ? _c : "",
+            });
+        });
+    }
+    if (hasExplicitSelectedAudience(event)) {
         return authorized;
     }
     const profilesSnap = await db.collection("profiles").where("role", "==", "student").get();
     profilesSnap.docs.forEach((doc) => {
-        var _a;
+        var _a, _b;
         const data = doc.data();
         if (!isStudentProfile(data)) {
             return;
         }
-        if (!matchesSpecificStudentTarget(event.targetStudent, Object.assign(Object.assign({}, data), { uid: doc.id }))) {
+        const registration = registrationsByStudentId.get(doc.id);
+        const eligibility = evaluateEventEligibility(event, {
+            studentId: doc.id,
+            schoolId: normalizeText(data.schoolId),
+            studentName: normalizeText(data.studentName) ||
+                normalizeText(data.name) ||
+                doc.id,
+            course: normalizeCourse(data.course),
+            yearLevel: normalizeYearLevel((_a = data.year) !== null && _a !== void 0 ? _a : data.yearLevel),
+            registrationStatus: registration === null || registration === void 0 ? void 0 : registration.status,
+        });
+        if (!eligibility.allowed) {
             return;
         }
-        const course = normalizeCourse(data.course);
-        const yearLevel = normalizeYearLevel((_a = data.year) !== null && _a !== void 0 ? _a : data.yearLevel);
-        if (!matchesTargetList(event.courses, course)) {
-            return;
-        }
-        if (!matchesTargetList(event.yearLevels, yearLevel)) {
-            return;
-        }
-        authorized.set(doc.id, { registrationId: "" });
+        authorized.set(doc.id, {
+            registrationId: (_b = registration === null || registration === void 0 ? void 0 : registration.registrationId) !== null && _b !== void 0 ? _b : "",
+        });
     });
     return authorized;
+}
+function portableEventPayload(event) {
+    return {
+        eventId: event.eventId,
+        title: event.title,
+        date: event.date,
+        scheduledTime: event.scheduledTime,
+        scheduledTimeEnd: event.scheduledTimeEnd,
+        location: event.location,
+        status: event.status,
+        yearLevels: event.yearLevels,
+        courses: event.courses,
+        targetStudent: event.targetStudent,
+        selectedStudentIds: event.selectedStudentIds,
+        selectedSchoolIds: event.selectedSchoolIds,
+        requiresRegistration: event.requiresRegistration,
+    };
+}
+function portableEventEligibilityPayload(event) {
+    return {
+        yearLevels: event.yearLevels,
+        courses: event.courses,
+        targetStudent: event.targetStudent,
+        selectedStudentIds: event.selectedStudentIds,
+        selectedSchoolIds: event.selectedSchoolIds,
+        requiresRegistration: event.requiresRegistration,
+    };
 }
 function mapStudentContext(studentId, profileData, studentData, registrationId) {
     var _a, _b;
@@ -1111,6 +1349,28 @@ function resolveAttendanceMoment(epochValue, isoValue, timestampValue) {
         iso,
     };
 }
+function normalizeAttendanceType(value) {
+    const raw = normalizeLower(value);
+    if (raw === "time-in" || raw === "timein" || raw === "in") {
+        return "time-in";
+    }
+    if (raw === "time-out" || raw === "timeout" || raw === "out") {
+        return "time-out";
+    }
+    if (raw === "present") {
+        return "present";
+    }
+    return "";
+}
+function buildAttendanceRecordId(eventId, studentId, schoolId, attendanceType) {
+    return [
+        sanitizeIdComponent(eventId),
+        sanitizeIdComponent(studentId || schoolId),
+        sanitizeIdComponent(attendanceType || "attendance"),
+    ]
+        .filter(Boolean)
+        .join("-");
+}
 function deriveAttendanceStatus(hasTimeIn, hasTimeOut) {
     if (hasTimeIn && hasTimeOut) {
         return "Present";
@@ -1149,6 +1409,17 @@ async function syncEnrollmentResult(device, record) {
             message: "fingerprintTemplateId must be a positive integer.",
         };
     }
+    if (!failedUpload) {
+        const templateConflict = await findActiveFingerprintTemplateConflict(templateId, studentId);
+        if (templateConflict) {
+            return {
+                recordId,
+                studentId,
+                status: "failed",
+                message: `Template ${templateId} is already assigned to another active student.`,
+            };
+        }
+    }
     const session = await resolveDeviceEnrollmentSession(device, sessionId);
     if (session.status === "closed") {
         return {
@@ -1168,6 +1439,7 @@ async function syncEnrollmentResult(device, record) {
     let resultMessage = failedUpload ?
         "Enrollment marked as failed." :
         "Fingerprint enrollment synced.";
+    let templateOwnerPayload = null;
     await db.runTransaction(async (transaction) => {
         var _a, _b, _c, _d, _e, _f;
         const [freshSessionSnap, sessionStudentSnap, portableStudentSnap, profileSnap, syncLogSnap,] = await transaction.getAll(sessionRef, sessionStudentRef, portableStudentRef, profileRef, syncLogRef);
@@ -1239,6 +1511,15 @@ async function syncEnrollmentResult(device, record) {
                 latestEnrollmentSessionId: sessionId,
                 updatedAt: serverTimestamp(),
             }, { merge: true });
+            templateOwnerPayload = {
+                uid: studentId,
+                schoolId: portableStudentPatch.schoolId,
+                studentName: portableStudentPatch.studentName,
+                course: portableStudentPatch.course,
+                yearLevel: portableStudentPatch.yearLevel,
+                deviceId: device.deviceId,
+                enrolledAt: recordedTimestamp.timestamp,
+            };
         }
         transaction.set(syncLogRef, {
             recordId,
@@ -1262,6 +1543,9 @@ async function syncEnrollmentResult(device, record) {
             updatedAt: serverTimestamp(),
         }, { merge: true });
     });
+    if (!failedUpload && resultStatus === "uploaded" && templateOwnerPayload) {
+        await upsertFingerprintTemplateOwner(templateId, templateOwnerPayload);
+    }
     await refreshEnrollmentSessionSummary(sessionId);
     return {
         recordId,
@@ -1335,56 +1619,114 @@ async function pairDeviceToEvent(device, eventId) {
     }, { merge: true });
     return context;
 }
-async function isStudentRegisteredForEvent(eventId, studentId) {
+async function findStudentRegistrationStatusForEvent(eventId, studentId) {
     var _a, _b;
     const eventSnap = await db.doc(`events/${eventId}`).get();
     const eventData = (_a = eventSnap.data()) !== null && _a !== void 0 ? _a : {};
     if (eventData.isPreReg !== true) {
-        return true;
+        return "";
     }
     const directSnap = await db.doc(`events/${eventId}/registrations/${studentId}`).get();
     if (directSnap.exists) {
-        return parseRegistrationStatus((_b = directSnap.data()) === null || _b === void 0 ? void 0 : _b.status) === "PRE_REGISTERED";
+        return parseRegistrationStatus((_b = directSnap.data()) === null || _b === void 0 ? void 0 : _b.status);
     }
     const registrationsSnap = await db.collection(`events/${eventId}/registrations`).get();
-    return registrationsSnap.docs.some((doc) => {
+    for (const doc of registrationsSnap.docs) {
         const data = doc.data();
-        return (parseRegistrationStatus(data.status) === "PRE_REGISTERED" &&
-            (normalizeText(data.uid) === studentId ||
-                normalizeText(data.studentUid) === studentId));
-    });
+        if ((normalizeText(data.uid) === studentId ||
+            normalizeText(data.studentUid) === studentId)) {
+            return parseRegistrationStatus(data.status);
+        }
+    }
+    return "";
 }
 async function syncAttendanceRecord(device, record) {
-    var _a, _b, _c, _d, _e, _f;
-    const recordId = normalizeText(record.recordId);
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     const eventId = normalizeText(record.eventId);
     const studentId = normalizeText(record.studentId) ||
         normalizeText(record.studentUid) ||
         normalizeText(record.uid);
+    const schoolId = normalizeText(record.schoolId);
+    const rawDeviceId = normalizeText(record.deviceId);
+    const recordedTimestamp = resolveRecordedTimestamp(record);
+    const incomingTimeIn = resolveAttendanceMoment((_b = (_a = record.timeInEpoch) !== null && _a !== void 0 ? _a : record.timestampEpoch) !== null && _b !== void 0 ? _b : record.capturedAtEpoch, (_d = (_c = record.timeInIso) !== null && _c !== void 0 ? _c : record.timestampIso) !== null && _d !== void 0 ? _d : record.capturedAtIso);
+    const incomingTimeOut = resolveAttendanceMoment(record.timeOutEpoch, record.timeOutIso);
+    const attendanceType = normalizeAttendanceType(record.attendanceType) ||
+        (incomingTimeOut.hasValue ? "time-out" : incomingTimeIn.hasValue ? "time-in" : "");
+    const recordId = normalizeText(record.recordId) ||
+        buildAttendanceRecordId(eventId, studentId, schoolId, attendanceType);
+    const requestDeviceId = rawDeviceId || device.deviceId;
     if (!recordId) {
         return { recordId: "", status: "failed", message: "recordId is required." };
     }
-    if (!eventId || !studentId) {
+    if (!eventId) {
         return {
             recordId,
             status: "failed",
-            message: "eventId and studentId are required.",
+            message: "eventId is required.",
         };
     }
-    const pairedEventId = normalizeText((_a = device.pairingData) === null || _a === void 0 ? void 0 : _a.eventId);
+    if (!studentId || !schoolId) {
+        return {
+            recordId,
+            status: "failed",
+            message: "studentId and schoolId are required.",
+        };
+    }
+    if (!attendanceType) {
+        return {
+            recordId,
+            status: "failed",
+            message: "attendanceType or attendance time data is required.",
+        };
+    }
+    if (!rawDeviceId) {
+        return {
+            recordId,
+            status: "failed",
+            message: "deviceId is required.",
+        };
+    }
+    if (requestDeviceId !== device.deviceId) {
+        return {
+            recordId,
+            status: "failed",
+            message: "deviceId does not match the authenticated device.",
+        };
+    }
+    const hasRecordedTimestamp = recordedTimestamp.epochSeconds > 0 ||
+        recordedTimestamp.iso.length > 0 ||
+        incomingTimeIn.hasValue ||
+        incomingTimeOut.hasValue;
+    if (!hasRecordedTimestamp) {
+        return {
+            recordId,
+            status: "failed",
+            message: "timestamp, timeIn, or timeOut is required.",
+        };
+    }
+    if ((attendanceType === "time-in" || attendanceType === "present") &&
+        !incomingTimeIn.hasValue) {
+        return {
+            recordId,
+            status: "failed",
+            message: "timeIn data is required for this attendanceType.",
+        };
+    }
+    if ((attendanceType === "time-out" || attendanceType === "present") &&
+        !incomingTimeOut.hasValue) {
+        return {
+            recordId,
+            status: "failed",
+            message: "timeOut data is required for this attendanceType.",
+        };
+    }
+    const pairedEventId = normalizeText((_e = device.pairingData) === null || _e === void 0 ? void 0 : _e.eventId);
     if (!pairedEventId || pairedEventId !== eventId) {
         return {
             recordId,
             status: "failed",
             message: "Device can only sync attendance to its paired event.",
-        };
-    }
-    const isRegistered = await isStudentRegisteredForEvent(eventId, studentId);
-    if (!isRegistered) {
-        return {
-            recordId,
-            status: "failed",
-            message: "Student is not registered for the paired event.",
         };
     }
     const attendanceRef = db.doc(`events/${eventId}/attendance/${studentId}`);
@@ -1393,15 +1735,70 @@ async function syncAttendanceRecord(device, record) {
     const studentRef = db.doc(`students/${studentId}`);
     const profileRef = db.doc(`profiles/${studentId}`);
     const event = await getEventSummary(eventId);
-    const recordedTimestamp = resolveRecordedTimestamp(record);
-    const incomingTimeIn = resolveAttendanceMoment((_c = (_b = record.timeInEpoch) !== null && _b !== void 0 ? _b : record.timestampEpoch) !== null && _c !== void 0 ? _c : record.capturedAtEpoch, (_e = (_d = record.timeInIso) !== null && _d !== void 0 ? _d : record.timestampIso) !== null && _e !== void 0 ? _e : record.capturedAtIso);
-    const incomingTimeOut = resolveAttendanceMoment(record.timeOutEpoch, record.timeOutIso);
-    const incomingTimeInSource = normalizeText((_f = record.timeInSource) !== null && _f !== void 0 ? _f : record.timeSource) || "unknown";
+    const registrationStatus = await findStudentRegistrationStatusForEvent(eventId, studentId);
+    const [profileSnap, studentSnap] = await Promise.all([
+        profileRef.get(),
+        studentRef.get(),
+    ]);
+    const mergedStudent = Object.assign(Object.assign({}, (profileSnap.exists ? profileSnap.data() : {})), (studentSnap.exists ? studentSnap.data() : {}));
+    const resolvedSchoolId = schoolId || normalizeText(mergedStudent.schoolId) || studentId;
+    const resolvedStudentName = normalizeText(record.studentName) ||
+        normalizeText(mergedStudent.studentName) ||
+        normalizeText(mergedStudent.name) ||
+        resolvedSchoolId ||
+        studentId;
+    const resolvedCourse = normalizeText(record.course) ||
+        normalizeText(mergedStudent.course) ||
+        "Unassigned";
+    const resolvedYearLevel = normalizeYearLevel((_f = record.yearLevel) !== null && _f !== void 0 ? _f : record.year) ||
+        normalizeYearLevel((_g = mergedStudent.yearLevel) !== null && _g !== void 0 ? _g : mergedStudent.year) ||
+        "Unassigned";
+    deviceLogger.info(`[SYNC][ATTEND] validating eventId=${eventId} schoolId=${resolvedSchoolId}`, {
+        eventId,
+        schoolId: resolvedSchoolId,
+        studentId,
+        deviceId: device.deviceId,
+    });
+    const eligibility = evaluateEventEligibility(event, {
+        studentId,
+        schoolId: resolvedSchoolId,
+        studentName: resolvedStudentName,
+        course: resolvedCourse,
+        yearLevel: resolvedYearLevel,
+        registrationStatus,
+    });
+    if (!eligibility.allowed) {
+        deviceLogger.warn(`[SYNC][ATTEND] rejected reason=not_allowed_for_event eventId=${eventId} schoolId=${resolvedSchoolId}`, {
+            eventId,
+            schoolId: resolvedSchoolId,
+            studentId,
+            reason: eligibility.reason,
+        });
+        await syncLogRef.set({
+            recordId,
+            eventId,
+            studentId,
+            schoolId: resolvedSchoolId,
+            studentName: resolvedStudentName,
+            deviceId: device.deviceId,
+            syncStatus: "rejected",
+            message: "Student is not allowed for this event",
+            attemptedAt: serverTimestamp(),
+            processedAt: serverTimestamp(),
+            source: "portable-device",
+        }, { merge: true });
+        return {
+            recordId,
+            status: "rejected",
+            message: "Student is not allowed for this event",
+        };
+    }
+    const incomingTimeInSource = normalizeText((_h = record.timeInSource) !== null && _h !== void 0 ? _h : record.timeSource) || "unknown";
     const incomingTimeOutSource = normalizeText(record.timeOutSource) || "unknown";
     let resultStatus = "failed";
     let resultMessage = "Failed to sync attendance.";
     await db.runTransaction(async (transaction) => {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
         const eventSnap = await transaction.get(eventRef);
         if (!eventSnap.exists) {
             throw new ApiError(404, "Event not found.");
@@ -1464,9 +1861,9 @@ async function syncAttendanceRecord(device, record) {
             }, { merge: true });
             return;
         }
-        const profileSnap = await transaction.get(profileRef);
-        const studentSnap = await transaction.get(studentRef);
-        const mergedStudent = Object.assign(Object.assign({}, (profileSnap.exists ? profileSnap.data() : {})), (studentSnap.exists ? studentSnap.data() : {}));
+        const transactionProfileSnap = await transaction.get(profileRef);
+        const transactionStudentSnap = await transaction.get(studentRef);
+        const transactionStudentData = Object.assign(Object.assign({}, (transactionProfileSnap.exists ? transactionProfileSnap.data() : {})), (transactionStudentSnap.exists ? transactionStudentSnap.data() : {}));
         const attendanceStatus = deriveAttendanceStatus(mergedTimeIn.hasValue, mergedTimeOut.hasValue);
         const attendanceDoc = {
             eventId,
@@ -1475,52 +1872,52 @@ async function syncAttendanceRecord(device, record) {
             studentId,
             uid: studentId,
             studentUid: studentId,
-            schoolId: normalizeText(record.schoolId) || normalizeText(mergedStudent.schoolId) || studentId,
-            studentName: normalizeText(record.studentName) ||
-                normalizeText(mergedStudent.studentName) ||
-                normalizeText(mergedStudent.name) ||
-                normalizeText(record.schoolId) ||
+            schoolId: resolvedSchoolId || normalizeText(transactionStudentData.schoolId) || studentId,
+            studentName: resolvedStudentName ||
+                normalizeText(transactionStudentData.studentName) ||
+                normalizeText(transactionStudentData.name) ||
                 studentId,
-            course: normalizeText(record.course) ||
-                normalizeText(mergedStudent.course) ||
+            course: resolvedCourse ||
+                normalizeText(transactionStudentData.course) ||
                 "Unassigned",
-            yearLevel: normalizeYearLevel((_e = record.yearLevel) !== null && _e !== void 0 ? _e : record.year) ||
-                normalizeYearLevel((_f = mergedStudent.yearLevel) !== null && _f !== void 0 ? _f : mergedStudent.year) ||
+            yearLevel: resolvedYearLevel ||
+                normalizeYearLevel((_e = transactionStudentData.yearLevel) !== null && _e !== void 0 ? _e : transactionStudentData.year) ||
                 "Unassigned",
-            year: normalizeYearLevel((_g = record.yearLevel) !== null && _g !== void 0 ? _g : record.year) ||
-                normalizeYearLevel((_h = mergedStudent.yearLevel) !== null && _h !== void 0 ? _h : mergedStudent.year) ||
+            year: resolvedYearLevel ||
+                normalizeYearLevel((_f = transactionStudentData.yearLevel) !== null && _f !== void 0 ? _f : transactionStudentData.year) ||
                 "Unassigned",
-            timestamp: (_j = mergedTimeIn.timestamp) !== null && _j !== void 0 ? _j : recordedTimestamp.timestamp,
-            recordedAt: (_k = existingAttendance.recordedAt) !== null && _k !== void 0 ? _k : serverTimestamp(),
+            timestamp: (_g = mergedTimeIn.timestamp) !== null && _g !== void 0 ? _g : recordedTimestamp.timestamp,
+            recordedAt: (_h = existingAttendance.recordedAt) !== null && _h !== void 0 ? _h : serverTimestamp(),
             recordedByDevice: true,
             recordedByDeviceId: device.deviceId,
-            deviceId: normalizeText(record.deviceId) || device.deviceId,
+            deviceId: requestDeviceId,
             syncedAt: serverTimestamp(),
             syncStatus: "synced",
-            fingerprintTemplateId: toPositiveInt((_l = record.fingerprintTemplateId) !== null && _l !== void 0 ? _l : record.templateId, -1),
-            templateId: toPositiveInt((_m = record.fingerprintTemplateId) !== null && _m !== void 0 ? _m : record.templateId, -1),
+            fingerprintTemplateId: toPositiveInt((_j = record.fingerprintTemplateId) !== null && _j !== void 0 ? _j : record.templateId, -1),
+            templateId: toPositiveInt((_k = record.fingerprintTemplateId) !== null && _k !== void 0 ? _k : record.templateId, -1),
             source: normalizeText(record.source) || "portable-device",
             deviceRecordId: recordId,
+            attendanceType,
             deviceTimestampEpoch: recordedTimestamp.epochSeconds,
             deviceTimestampIso: recordedTimestamp.iso,
             timeSource: normalizeText(record.timeSource) || "unknown",
             scheduledTime: normalizeText(record.scheduledTimeStart) || event.scheduledTime,
             scheduledTimeStart: normalizeText(record.scheduledTimeStart) || event.scheduledTime,
             scheduledTimeEnd: normalizeText(record.scheduledTimeEnd) || event.scheduledTimeEnd,
-            location: normalizeText((_o = record.location) !== null && _o !== void 0 ? _o : record.eventLocation) || event.location,
+            location: normalizeText((_l = record.location) !== null && _l !== void 0 ? _l : record.eventLocation) || event.location,
             attendanceStatus,
             status: attendanceStatus,
             timeInEpoch: mergedTimeIn.epochSeconds,
             timeInIso: mergedTimeIn.iso,
             timeInSource: existingTimeIn.hasValue && !incomingTimeIn.hasValue ?
-                normalizeText((_p = existingAttendance.timeInSource) !== null && _p !== void 0 ? _p : existingAttendance.timeSource) || "unknown" :
+                normalizeText((_m = existingAttendance.timeInSource) !== null && _m !== void 0 ? _m : existingAttendance.timeSource) || "unknown" :
                 incomingTimeInSource,
             timeOutEpoch: mergedTimeOut.epochSeconds,
             timeOutIso: mergedTimeOut.iso,
             timeOutSource: existingTimeOut.hasValue && !incomingTimeOut.hasValue ?
                 normalizeText(existingAttendance.timeOutSource) || "unknown" :
                 incomingTimeOutSource,
-            createdAt: (_q = existingAttendance.createdAt) !== null && _q !== void 0 ? _q : serverTimestamp(),
+            createdAt: (_o = existingAttendance.createdAt) !== null && _o !== void 0 ? _o : serverTimestamp(),
             updatedAt: serverTimestamp(),
         };
         if (mergedTimeIn.timestamp) {
@@ -1670,6 +2067,59 @@ exports.ecCloseFingerprintEnrollmentSession = functions
         session: enrollmentSessionPayload(session),
     };
 });
+async function listPendingCleanupQueueItems(device, limit) {
+    const snapshot = await db
+        .collection("moduleCleanupQueue")
+        .where("processed", "==", false)
+        .get();
+    return snapshot.docs
+        .map((cleanupDoc) => {
+        var _a;
+        const data = (_a = cleanupDoc.data()) !== null && _a !== void 0 ? _a : {};
+        const targetDeviceId = normalizeText(data.targetDeviceId);
+        if (targetDeviceId && targetDeviceId !== device.deviceId) {
+            return null;
+        }
+        return {
+            cleanupId: cleanupDoc.id,
+            type: normalizeText(data.type),
+            templateId: toPositiveInt(data.templateId, -1),
+            uid: normalizeText(data.uid),
+            schoolId: normalizeText(data.schoolId),
+            reason: normalizeText(data.reason),
+        };
+    })
+        .filter((item) => {
+        return item !== null && item.templateId > 0 && Boolean(item.type);
+    })
+        .sort((left, right) => left.cleanupId.localeCompare(right.cleanupId))
+        .slice(0, limit);
+}
+async function acknowledgeCleanupQueueResults(device, results) {
+    if (results.length === 0) {
+        return 0;
+    }
+    const batch = db.batch();
+    let processedCount = 0;
+    for (const result of results) {
+        if (!result.processed || !result.cleanupId) {
+            continue;
+        }
+        const cleanupRef = db.doc(`moduleCleanupQueue/${result.cleanupId}`);
+        batch.set(cleanupRef, {
+            processed: true,
+            processedAt: serverTimestamp(),
+            processedByDeviceId: device.deviceId,
+            processedMessage: result.message,
+            updatedAt: serverTimestamp(),
+        }, { merge: true });
+        processedCount += 1;
+    }
+    if (processedCount > 0) {
+        await batch.commit();
+    }
+    return processedCount;
+}
 exports.campusDeviceCreateSession = deviceEndpoint("POST", "secret", async (_req, res, device) => {
     const payload = await createDeviceSessionResponse(device);
     sendJson(res, 200, payload);
@@ -1698,15 +2148,8 @@ exports.campusDevicePairEvent = deviceEndpoint("POST", "session-or-secret", asyn
     const context = await pairDeviceToEvent(device, eventId);
     sendJson(res, 200, {
         status: "paired",
-        event: {
-            eventId: context.event.eventId,
-            title: context.event.title,
-            date: context.event.date,
-            scheduledTime: context.event.scheduledTime,
-            scheduledTimeEnd: context.event.scheduledTimeEnd,
-            location: context.event.location,
-            status: context.event.status,
-        },
+        event: portableEventPayload(context.event),
+        eligibility: portableEventEligibilityPayload(context.event),
         roster: {
             count: context.students.length,
             recordedStudentIds: context.recordedStudentIds,
@@ -1738,15 +2181,8 @@ exports.campusDevicePairedEventContext = deviceEndpoint("GET", "session-or-secre
             eventId: context.event.eventId,
             status: normalizeText(context.pairing.status) || "paired",
         },
-        event: {
-            eventId: context.event.eventId,
-            title: context.event.title,
-            date: context.event.date,
-            scheduledTime: context.event.scheduledTime,
-            scheduledTimeEnd: context.event.scheduledTimeEnd,
-            location: context.event.location,
-            status: context.event.status,
-        },
+        event: portableEventPayload(context.event),
+        eligibility: portableEventEligibilityPayload(context.event),
         roster: {
             count: context.students.length,
             recordedStudentIds: context.recordedStudentIds,
@@ -1894,7 +2330,7 @@ exports.campusDevicePendingEnrollments = deviceEndpoint("GET", "session-or-secre
     });
 });
 exports.campusDeviceSubmitEnrollment = deviceEndpoint("POST", "session-or-secret", async (req, res, device) => {
-    var _a, _b, _c, _d, _e, _f, _g;
+    var _a, _b, _c, _d, _e;
     const body = asRecord(req.body);
     const sessionId = normalizeText(body.sessionId) ||
         normalizeText(device.data.activeEnrollmentSessionId);
@@ -1923,21 +2359,29 @@ exports.campusDeviceSubmitEnrollment = deviceEndpoint("POST", "session-or-secret
     if (templateId <= 0) {
         throw new ApiError(400, "fingerprintTemplateId must be a positive integer.");
     }
+    const templateConflict = await findActiveFingerprintTemplateConflict(templateId, studentId);
+    if (templateConflict) {
+        throw new ApiError(409, `Template ${templateId} is already assigned to another active student.`);
+    }
     const profileRef = db.doc(`profiles/${studentId}`);
     const profileSnap = await profileRef.get();
     const profileData = profileSnap.exists ? (_c = profileSnap.data()) !== null && _c !== void 0 ? _c : {} : {};
+    const resolvedSchoolId = normalizeText(body.schoolId) || normalizeText(profileData.schoolId) || studentId;
+    const resolvedStudentName = normalizeText(body.studentName) ||
+        normalizeText(profileData.studentName) ||
+        normalizeText(profileData.name) ||
+        studentId;
+    const resolvedCourse = normalizeText(body.course) || normalizeText(profileData.course) || "Unassigned";
+    const resolvedYearLevel = normalizeYearLevel((_d = body.yearLevel) !== null && _d !== void 0 ? _d : body.year) ||
+        normalizeYearLevel((_e = profileData.yearLevel) !== null && _e !== void 0 ? _e : profileData.year) ||
+        "Unassigned";
     await db.doc(`students/${studentId}`).set({
         uid: studentId,
         studentId,
-        schoolId: normalizeText(body.schoolId) || normalizeText(profileData.schoolId) || studentId,
-        studentName: normalizeText(body.studentName) ||
-            normalizeText(profileData.studentName) ||
-            normalizeText(profileData.name) ||
-            studentId,
-        course: normalizeText(body.course) || normalizeText(profileData.course) || "Unassigned",
-        yearLevel: normalizeYearLevel((_d = body.yearLevel) !== null && _d !== void 0 ? _d : body.year) ||
-            normalizeYearLevel((_e = profileData.yearLevel) !== null && _e !== void 0 ? _e : profileData.year) ||
-            "Unassigned",
+        schoolId: resolvedSchoolId,
+        studentName: resolvedStudentName,
+        course: resolvedCourse,
+        yearLevel: resolvedYearLevel,
         fingerprintTemplateId: templateId,
         fingerprintStatus: "enrolled",
         fingerprintDeviceId: device.deviceId,
@@ -1957,15 +2401,10 @@ exports.campusDeviceSubmitEnrollment = deviceEndpoint("POST", "session-or-secret
         queueId: enrollmentDocId,
         studentId,
         eventId,
-        schoolId: normalizeText(body.schoolId) || normalizeText(profileData.schoolId) || studentId,
-        studentName: normalizeText(body.studentName) ||
-            normalizeText(profileData.studentName) ||
-            normalizeText(profileData.name) ||
-            studentId,
-        course: normalizeText(body.course) || normalizeText(profileData.course) || "Unassigned",
-        yearLevel: normalizeYearLevel((_f = body.yearLevel) !== null && _f !== void 0 ? _f : body.year) ||
-            normalizeYearLevel((_g = profileData.yearLevel) !== null && _g !== void 0 ? _g : profileData.year) ||
-            "Unassigned",
+        schoolId: resolvedSchoolId,
+        studentName: resolvedStudentName,
+        course: resolvedCourse,
+        yearLevel: resolvedYearLevel,
         status: "enrolled",
         fingerprintTemplateId: templateId,
         fingerprintDeviceId: device.deviceId,
@@ -1976,6 +2415,15 @@ exports.campusDeviceSubmitEnrollment = deviceEndpoint("POST", "session-or-secret
         lastEnrollmentSyncAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
     }, { merge: true });
+    await upsertFingerprintTemplateOwner(templateId, {
+        uid: studentId,
+        schoolId: resolvedSchoolId,
+        studentName: resolvedStudentName,
+        course: resolvedCourse,
+        yearLevel: resolvedYearLevel,
+        deviceId: device.deviceId,
+        enrolledAt: serverTimestamp(),
+    });
     sendJson(res, 200, {
         status: "enrolled",
         studentId,
@@ -1983,7 +2431,39 @@ exports.campusDeviceSubmitEnrollment = deviceEndpoint("POST", "session-or-secret
         deviceId: device.deviceId,
     });
 });
+exports.campusDeviceCleanupQueue = deviceEndpoint("GET", "session-or-secret", async (req, res, device) => {
+    const limit = parseQueryInt(req.query.limit, DEFAULT_CLEANUP_LIMIT, 1, MAX_CLEANUP_LIMIT);
+    const items = await listPendingCleanupQueueItems(device, limit);
+    sendJson(res, 200, {
+        ok: true,
+        count: items.length,
+        items,
+    });
+});
+exports.campusDeviceAcknowledgeCleanupQueue = deviceEndpoint("POST", "session-or-secret", async (req, res, device) => {
+    const body = asRecord(req.body);
+    const rawResults = Array.isArray(body.results) ? body.results : [];
+    if (rawResults.length > MAX_SYNC_BATCH_LIMIT) {
+        throw new ApiError(400, `results must contain at most ${MAX_SYNC_BATCH_LIMIT} items.`);
+    }
+    const results = rawResults
+        .map((rawResult) => {
+        const result = asRecord(rawResult);
+        return {
+            cleanupId: normalizeText(result.cleanupId),
+            processed: result.processed === true,
+            message: normalizeText(result.message),
+        };
+    })
+        .filter((result) => result.cleanupId);
+    const processed = await acknowledgeCleanupQueueResults(device, results);
+    sendJson(res, 200, {
+        ok: true,
+        processed,
+    });
+});
 exports.campusDeviceSyncAttendance = deviceEndpoint("POST", "session-or-secret", async (req, res, device) => {
+    var _a, _b;
     const body = asRecord(req.body);
     const rawRecords = Array.isArray(body.records) ? body.records : null;
     if (!rawRecords) {
@@ -2025,7 +2505,16 @@ exports.campusDeviceSyncAttendance = deviceEndpoint("POST", "session-or-secret",
             });
         }
     }
-    sendJson(res, 200, { results });
+    const synced = results.filter((result) => result.status === "uploaded" || result.status === "duplicate").length;
+    const rejected = results.filter((result) => result.status === "rejected");
+    const failed = results.filter((result) => result.status === "failed");
+    const ok = rejected.length === 0 && failed.length === 0;
+    const error = rejected.length > 0 ?
+        "Student is not allowed for this event" :
+        (_b = (_a = failed[0]) === null || _a === void 0 ? void 0 : _a.message) !== null && _b !== void 0 ? _b : "";
+    sendJson(res, 200, Object.assign(Object.assign({ ok,
+        synced }, (error ? { error } : {})), { rejected,
+        results }));
 });
 exports.campusDeviceLatestEvent = deviceEndpoint("GET", "session-or-secret", async (_req, res) => {
     const [event] = await listAvailableEvents(1);

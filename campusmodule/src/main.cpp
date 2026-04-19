@@ -41,6 +41,7 @@ std::vector<StudentInfo> g_cachedPendingStudents;
 std::vector<StudentInfo> g_cachedPairedStudents;
 std::vector<EnrollmentSessionInfo> g_cachedEnrollmentSessions;
 std::vector<String> g_remoteRecordedStudentIds;
+bool g_pairedEventRecoveredFromAttendance = false;
 
 constexpr const char *kMenuItems[] = {
     "Pair Event",
@@ -97,6 +98,7 @@ enum class SyncPhase : uint8_t {
   WaitForTime,
   UploadEnrollment,
   UploadAttendance,
+  CleanupMappings,
   RefreshContext,
   Complete,
 };
@@ -119,6 +121,9 @@ struct SyncController {
   size_t enrollmentUploads = 0;
   size_t attendanceUploads = 0;
   size_t duplicates = 0;
+  size_t rejections = 0;
+  bool cleanupQueueLoaded = false;
+  std::vector<CleanupQueueItem> cleanupQueue;
   String lastError;
 };
 
@@ -140,6 +145,9 @@ AttendanceCaptureMode g_attendanceCaptureMode = AttendanceCaptureMode::None;
 void showTimedMessage(const String &line1, const String &line2, uint32_t holdMs,
                       const String &line3 = "", const String &line4 = "");
 void loadStoredPairedEventContext();
+bool recoverPairedEventFromAttendance(EventInfo &event);
+void addBackupEventCandidate(const AttendanceRecord &record,
+                             std::vector<EventInfo> &events);
 
 String trim16(const String &value) {
   String output = value;
@@ -316,6 +324,7 @@ void resetPairedEventState() {
   g_pairedEvent = EventInfo{};
   g_cachedPairedStudents.clear();
   g_remoteRecordedStudentIds.clear();
+  g_pairedEventRecoveredFromAttendance = false;
   g_attendanceCaptureMode = AttendanceCaptureMode::None;
 }
 
@@ -408,6 +417,23 @@ void setFingerprintState(const char *state) {
   Serial.printf("[FP] state=%s\n", state);
 }
 
+FingerprintMatch waitForFingerprintLookup(uint32_t timeoutMs) {
+  const uint32_t startedAt = millis();
+  while ((millis() - startedAt) < timeoutMs) {
+    const FingerprintMatch match = g_fingerprint.scanOnce();
+    if (match.status == FingerprintScanStatus::NoFinger) {
+      delay(90);
+      continue;
+    }
+    return match;
+  }
+
+  FingerprintMatch timeout;
+  timeout.status = FingerprintScanStatus::Error;
+  timeout.message = "Finger check timeout";
+  return timeout;
+}
+
 const char *screenName(AppScreen screen) {
   switch (screen) {
     case AppScreen::Menu:
@@ -455,6 +481,8 @@ const char *syncPhaseName(SyncPhase phase) {
       return "Enrollments";
     case SyncPhase::UploadAttendance:
       return "Attendance";
+    case SyncPhase::CleanupMappings:
+      return "Cleanup";
     case SyncPhase::RefreshContext:
       return "Refresh evt";
     case SyncPhase::Complete:
@@ -544,10 +572,48 @@ void cachePairedEventContext(const EventInfo &event,
   g_pairedEvent = eventToCache;
   g_cachedPairedStudents = students;
   g_remoteRecordedStudentIds = recordedStudentIds;
+  g_pairedEventRecoveredFromAttendance = false;
   g_storage.savePairedEventContext(eventToCache, students, recordedStudentIds);
 }
 
+bool recoverPairedEventFromAttendance(EventInfo &event) {
+  const std::vector<AttendanceRecord> records = g_storage.loadAttendanceRecords();
+  std::vector<EventInfo> candidates;
+  candidates.reserve(records.size());
+
+  String latestEventId;
+  uint64_t latestEpoch = 0;
+  for (const auto &record : records) {
+    if (record.synced || record.syncRejected || record.eventId.isEmpty()) {
+      continue;
+    }
+
+    addBackupEventCandidate(record, candidates);
+    if (latestEventId.isEmpty() || record.capturedAtEpoch >= latestEpoch) {
+      latestEventId = record.eventId;
+      latestEpoch = record.capturedAtEpoch;
+    }
+  }
+
+  if (candidates.empty()) {
+    return false;
+  }
+
+  if (!latestEventId.isEmpty()) {
+    for (const auto &candidate : candidates) {
+      if (candidate.eventId == latestEventId) {
+        event = candidate;
+        return true;
+      }
+    }
+  }
+
+  event = candidates.front();
+  return true;
+}
+
 void loadStoredPairedEventContext() {
+  g_pairedEventRecoveredFromAttendance = false;
   EventInfo event;
   std::vector<StudentInfo> students;
   std::vector<String> recordedStudentIds;
@@ -561,6 +627,20 @@ void loadStoredPairedEventContext() {
   g_pairedEvent = g_storage.loadPairedEvent();
   g_cachedPairedStudents.clear();
   g_remoteRecordedStudentIds.clear();
+  if (g_pairedEvent.isValid()) {
+    return;
+  }
+
+  EventInfo recoveredEvent;
+  if (recoverPairedEventFromAttendance(recoveredEvent)) {
+    g_pairedEvent = recoveredEvent;
+    g_pairedEventRecoveredFromAttendance = true;
+    Serial.printf(
+        "[PAIR] recovered event from pending attendance eventId=%s title=%s "
+        "pendingA=%u\n",
+        g_pairedEvent.eventId.c_str(), g_pairedEvent.title.c_str(),
+        static_cast<unsigned>(g_storage.unsyncedAttendanceCount()));
+  }
 }
 
 void loadStoredEnrollmentSession() {
@@ -747,6 +827,10 @@ void renderSyncProgress() {
   String line2 = String(syncModeName(g_sync.mode)) + " " + syncPhaseName(g_sync.phase);
   String line3 = "E:" + String(g_sync.enrollmentUploads) + " A:" +
                  String(g_sync.attendanceUploads);
+  if (g_sync.rejections > 0) {
+    line3 += " R:";
+    line3 += String(g_sync.rejections);
+  }
   String line4 = "Dup:" + String(g_sync.duplicates) + " Q:" +
                  String(g_storage.unsyncedAttendanceCount());
   g_display.showLines("Sync Records", line2, line3, line4);
@@ -826,15 +910,57 @@ String syncSummaryLine() {
   if (g_sync.enrollmentUploads > 0) {
     line = "E:" + String(g_sync.enrollmentUploads) + " " + line;
   }
+  if (g_sync.rejections > 0) {
+    line += " R:";
+    line += String(g_sync.rejections);
+  }
   return line;
 }
 
+String syncFailureTitle(const String &error) {
+  if (!g_wifi.isConnected() || error == "Wi-Fi not connected") {
+    return "NO WIFI";
+  }
+
+  const int httpCode = g_backend.lastHttpStatusCode();
+  if (httpCode == -1) {
+    return "HTTPS CONNECT FAIL";
+  }
+  if (httpCode == 401 || httpCode == 403) {
+    return "AUTH ERROR";
+  }
+  if (httpCode >= 500 && httpCode <= 599) {
+    return "SERVER ERROR";
+  }
+  return "SYNC FAILED";
+}
+
+String syncFailureDetail(const String &error) {
+  if (!g_wifi.isConnected() || error == "Wi-Fi not connected") {
+    return "Check Wi-Fi setup";
+  }
+
+  const int httpCode = g_backend.lastHttpStatusCode();
+  if (httpCode == -1) {
+    const String detail = g_backend.lastHttpErrorString();
+    return trim16(detail.isEmpty() ? error : detail);
+  }
+  if (httpCode == 401 || httpCode == 403) {
+    return "Check device auth";
+  }
+  if (httpCode >= 500 && httpCode <= 599) {
+    return "Retry later";
+  }
+  return trim16(error);
+}
+
 void finishSyncSuccess() {
-  Serial.printf("[SYNC] completed mode=%s E=%u A=%u D=%u\n",
+  Serial.printf("[SYNC] completed mode=%s E=%u A=%u D=%u R=%u\n",
                 syncModeName(g_sync.mode),
                 static_cast<unsigned>(g_sync.enrollmentUploads),
                 static_cast<unsigned>(g_sync.attendanceUploads),
-                static_cast<unsigned>(g_sync.duplicates));
+                static_cast<unsigned>(g_sync.duplicates),
+                static_cast<unsigned>(g_sync.rejections));
 
   if (!g_sync.keepWifiConnected) {
     disconnectAfterOnlineTask();
@@ -844,8 +970,14 @@ void finishSyncSuccess() {
     g_autoSyncBackoffMs = CampusConfig::kAutoSyncIntervalMs;
   } else {
     setScreen(AppScreen::Menu);
-    showTimedMessage("Sync Complete", syncSummaryLine(), kLongMessageMs);
+    showTimedMessage("SYNC OK", syncSummaryLine(), kLongMessageMs);
     g_feedback.success();
+  }
+
+  if (g_pairedEventRecoveredFromAttendance &&
+      g_storage.unsyncedAttendanceCount() == 0) {
+    Serial.println("[PAIR] cleared recovered event after sync completion");
+    resetPairedEventState();
   }
 
   g_sync = SyncController{};
@@ -867,7 +999,8 @@ void failSync(const String &error) {
         nextBackoff > kMaxAutoSyncBackoffMs ? kMaxAutoSyncBackoffMs : nextBackoff;
   } else {
     setScreen(AppScreen::Menu);
-    showTimedMessage("Sync Partial", trim16(message), kLongMessageMs);
+    showTimedMessage(syncFailureTitle(message), syncFailureDetail(message),
+                     kLongMessageMs, trim16(message));
     g_feedback.warning();
   }
 
@@ -880,7 +1013,7 @@ void startSync(SyncMode mode, bool keepWifiConnected) {
     return;
   }
 
-  if (!hasPendingSyncWork()) {
+  if (!hasPendingSyncWork() && mode != SyncMode::Manual) {
     if (mode == SyncMode::Manual) {
       showTimedMessage("Sync Records", "Nothing pending", kShortMessageMs);
     }
@@ -987,9 +1120,7 @@ void tickSync() {
       const std::vector<AttendanceRecord> batch =
           g_storage.loadUnsyncedAttendanceBatch(CampusConfig::kSyncBatchSize);
       if (batch.empty()) {
-        g_sync.phase = g_sync.contextRefreshNeeded && g_pairedEvent.isValid()
-                           ? SyncPhase::RefreshContext
-                           : SyncPhase::Complete;
+        g_sync.phase = SyncPhase::CleanupMappings;
         markDisplayDirty();
         return;
       }
@@ -997,22 +1128,96 @@ void tickSync() {
       std::vector<SyncItemResult> results;
       String error;
       if (!g_backend.syncAttendance(batch, results, error)) {
+        if (!results.empty()) {
+          g_storage.applySyncResults(results);
+        }
         failSync(error);
         return;
       }
 
       g_storage.applySyncResults(results);
+      bool batchHasFailure = false;
+      String batchError;
       for (const auto &result : results) {
+        Serial.printf("[SYNC][ATTEND] result record=%s status=%s message=%s\n",
+                      result.recordId.c_str(), result.status.c_str(),
+                      result.message.c_str());
         if (result.status == "uploaded") {
           ++g_sync.attendanceUploads;
           g_sync.contextRefreshNeeded = true;
         } else if (result.status == "duplicate") {
           ++g_sync.duplicates;
           g_sync.contextRefreshNeeded = true;
+        } else if (result.status == "rejected") {
+          ++g_sync.rejections;
+        } else if (!batchHasFailure) {
+          batchHasFailure = true;
+          batchError = result.message;
         }
       }
 
+      if (batchHasFailure) {
+        failSync(batchError);
+        return;
+      }
+
       g_lastAttendancePromptUnsyncedCount = static_cast<size_t>(-1);
+      markDisplayDirty();
+      return;
+    }
+
+    case SyncPhase::CleanupMappings: {
+      if (!g_sync.cleanupQueueLoaded) {
+        String error;
+        if (!g_backend.fetchCleanupQueue(g_sync.cleanupQueue, error)) {
+          failSync(error);
+          return;
+        }
+        g_sync.cleanupQueueLoaded = true;
+      }
+
+      if (g_sync.cleanupQueue.empty()) {
+        g_sync.phase = g_sync.contextRefreshNeeded && g_pairedEvent.isValid()
+                           ? SyncPhase::RefreshContext
+                           : SyncPhase::Complete;
+        markDisplayDirty();
+        return;
+      }
+
+      const CleanupQueueItem item = g_sync.cleanupQueue.front();
+      g_sync.cleanupQueue.erase(g_sync.cleanupQueue.begin());
+
+      String cleanupError;
+      if (!g_storage.applyCleanupQueueItem(item, cleanupError)) {
+        failSync(cleanupError);
+        return;
+      }
+
+      if (item.type == "deleteTemplateIfUnused") {
+        String deleteError;
+        if (!g_fingerprint.deleteTemplate(item.templateId, deleteError)) {
+          failSync(deleteError);
+          return;
+        }
+      }
+
+      CleanupQueueResult result;
+      result.cleanupId = item.cleanupId;
+      result.processed = true;
+      result.message = "Applied on device";
+      std::vector<CleanupQueueResult> ackResults = {result};
+      String ackError;
+      if (!g_backend.acknowledgeCleanupQueue(ackResults, ackError)) {
+        failSync(ackError);
+        return;
+      }
+
+      loadStoredPairedEventContext();
+      loadStoredEnrollmentSession();
+      g_sync.contextRefreshNeeded = true;
+      Serial.printf("[SYNC][CLEANUP] cleanupId=%s type=%s template=%d schoolId=%s\n",
+                    item.cleanupId.c_str(), item.type.c_str(), item.templateId,
+                    item.schoolId.c_str());
       markDisplayDirty();
       return;
     }
@@ -1264,6 +1469,38 @@ void enrollSelectedStudent() {
     return;
   }
 
+  clearTimedMessage();
+  g_display.show("Check Finger", "Place finger...");
+  const FingerprintMatch existingMatch =
+      waitForFingerprintLookup(8000);
+  if (existingMatch.status == FingerprintScanStatus::Error) {
+    showTimedMessage("Check Failed", trim16(existingMatch.message),
+                     kLongMessageMs);
+    g_feedback.error();
+    return;
+  }
+  if (existingMatch.status == FingerprintScanStatus::Matched) {
+    const FingerprintTemplateOwnership ownership =
+        g_storage.resolveTemplateOwnership(existingMatch.templateId);
+    if (ownership.state == FingerprintOwnershipState::Unique) {
+      if (ownership.student.studentUid == student.studentUid) {
+        showTimedMessage("Already Enrolled", student.schoolId, kLongMessageMs,
+                         "Use cleanup", "before replace");
+      } else {
+        showTimedMessage("Finger In Use",
+                         trim16(ownership.student.schoolId.isEmpty()
+                                    ? ownership.student.studentUid
+                                    : ownership.student.schoolId),
+                         kLongMessageMs, "Cleanup first", "");
+      }
+    } else {
+      showTimedMessage("Cleanup Needed", "Admin review", kLongMessageMs,
+                       "Duplicate or", "stale template");
+    }
+    g_feedback.warning();
+    return;
+  }
+
   const int templateId = g_storage.nextFreeTemplateId(
       CampusConfig::kFingerprintFirstTemplateId,
       CampusConfig::kFingerprintLastTemplateId);
@@ -1349,6 +1586,13 @@ void enterAttendanceMode() {
     return;
   }
 
+  if (g_pairedEventRecoveredFromAttendance) {
+    showTimedMessage("Recovered Event", "Sync records first", kLongMessageMs,
+                     trim16(g_pairedEvent.title), trim16(g_pairedEvent.date));
+    g_feedback.warning();
+    return;
+  }
+
   if (!g_fingerprint.isReady()) {
     showTimedMessage("Scanner Offline", "Check AS608", kMediumMessageMs);
     g_feedback.error();
@@ -1403,18 +1647,44 @@ void handleAttendanceLoop() {
   }
 
   setFingerprintState("matched");
-  StudentInfo student;
-  if (!g_storage.findStudentByTemplate(match.templateId, student)) {
-    showTimedMessage("No Mapping", "Enroll student", kMediumMessageMs);
+  const FingerprintTemplateOwnership ownership =
+      g_storage.resolveTemplateOwnership(match.templateId);
+  if (ownership.state == FingerprintOwnershipState::None) {
+    Serial.printf("[ATTEND] template=%d ownership=none totalMatches=%u\n",
+                  match.templateId,
+                  static_cast<unsigned>(ownership.totalMatches));
+    showTimedMessage("Unknown Finger", "Re-enroll Needed", kMediumMessageMs);
     g_feedback.error();
     startFingerRemovalWait();
     return;
   }
 
-  if (!g_storage.isStudentAuthorizedForEvent(g_pairedEvent.eventId,
-                                             student.studentUid)) {
-    showTimedMessage("Not In Roster", "See operator", kMediumMessageMs);
-    g_feedback.warning();
+  if (ownership.state == FingerprintOwnershipState::Duplicate) {
+    Serial.printf("[ATTEND] template=%d ownership=duplicate active=%u total=%u\n",
+                  match.templateId,
+                  static_cast<unsigned>(ownership.activeOwners),
+                  static_cast<unsigned>(ownership.totalMatches));
+    showTimedMessage("Duplicate FP", "Fix Required", kMediumMessageMs);
+    g_feedback.error();
+    startFingerRemovalWait();
+    return;
+  }
+  StudentInfo student = ownership.student;
+
+  Serial.printf("[ATTEND] matched schoolId=%s name=%s\n", student.schoolId.c_str(),
+                student.studentName.c_str());
+  const bool isAllowed = g_storage.isStudentAuthorizedForEvent(
+      g_pairedEvent.eventId, student.studentUid);
+  Serial.printf("[ATTEND] eligibility allowed=%s reason=%s\n",
+                isAllowed ? "yes" : "no",
+                isAllowed ? "paired_roster" : "not_in_event");
+  if (!isAllowed) {
+    Serial.println("[ATTEND] rejected not in event");
+    showTimedMessage("NOT IN EVENT",
+                     trim16(student.studentName.isEmpty() ? student.schoolId
+                                                          : student.studentName),
+                     kMediumMessageMs);
+    g_feedback.error();
     startFingerRemovalWait();
     return;
   }

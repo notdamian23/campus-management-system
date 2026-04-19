@@ -3,10 +3,27 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <esp_heap_caps.h>
+
+#include <memory>
 
 #include "Config.h"
 
 namespace {
+constexpr char kCreateSessionPath[] = "/campusDeviceCreateSession";
+constexpr char kAttendanceSyncPath[] = "/campusDeviceSyncAttendance";
+constexpr char kCleanupQueuePath[] = "/campusDeviceCleanupQueue";
+constexpr char kCleanupAckPath[] = "/campusDeviceAcknowledgeCleanupQueue";
+
+struct RequestTarget {
+  String url;
+  String host;
+  String uri;
+  uint16_t port = 443;
+  bool https = true;
+  bool valid = false;
+};
+
 String buildUrl(const String &path) {
   String base = CampusConfig::kApiBaseUrl;
   if (base.endsWith("/")) {
@@ -18,7 +35,94 @@ String buildUrl(const String &path) {
   return base + "/" + path;
 }
 
+RequestTarget buildRequestTarget(const String &path) {
+  RequestTarget target;
+  target.url = buildUrl(path);
+
+  String base = CampusConfig::kApiBaseUrl;
+  base.trim();
+  if (base.isEmpty()) {
+    return target;
+  }
+
+  int schemeSplit = base.indexOf("://");
+  String remainder = base;
+  if (schemeSplit >= 0) {
+    const String scheme = base.substring(0, schemeSplit);
+    target.https = !scheme.equalsIgnoreCase("http");
+    target.port = target.https ? 443 : 80;
+    remainder = base.substring(schemeSplit + 3);
+  }
+
+  int slashIndex = remainder.indexOf('/');
+  String authority = slashIndex >= 0 ? remainder.substring(0, slashIndex) : remainder;
+  String basePath = slashIndex >= 0 ? remainder.substring(slashIndex) : "";
+  authority.trim();
+  basePath.trim();
+
+  int colonIndex = authority.indexOf(':');
+  if (colonIndex >= 0) {
+    target.host = authority.substring(0, colonIndex);
+    const int parsedPort = authority.substring(colonIndex + 1).toInt();
+    if (parsedPort > 0 && parsedPort <= 65535) {
+      target.port = static_cast<uint16_t>(parsedPort);
+    }
+  } else {
+    target.host = authority;
+  }
+
+  if (target.host.isEmpty()) {
+    return target;
+  }
+
+  if (basePath.isEmpty()) {
+    target.uri = path.startsWith("/") ? path : "/" + path;
+  } else if (path.startsWith("/")) {
+    target.uri = basePath + path;
+  } else {
+    target.uri = basePath + "/" + path;
+  }
+
+  target.valid = true;
+  return target;
+}
+
+String wifiStatusName(wl_status_t status) {
+  switch (status) {
+    case WL_CONNECTED:
+      return "WL_CONNECTED";
+    case WL_IDLE_STATUS:
+      return "WL_IDLE_STATUS";
+    case WL_NO_SSID_AVAIL:
+      return "WL_NO_SSID_AVAIL";
+    case WL_SCAN_COMPLETED:
+      return "WL_SCAN_COMPLETED";
+    case WL_CONNECT_FAILED:
+      return "WL_CONNECT_FAILED";
+    case WL_CONNECTION_LOST:
+      return "WL_CONNECTION_LOST";
+    case WL_DISCONNECTED:
+      return "WL_DISCONNECTED";
+    default:
+      return "WL_UNKNOWN(" + String(static_cast<int>(status)) + ")";
+  }
+}
+
+bool shouldRetryRequest(int httpCode, uint8_t attempt, uint8_t maxAttempts) {
+  if (attempt >= maxAttempts) {
+    return false;
+  }
+
+  if (httpCode < 0) {
+    return true;
+  }
+
+  return httpCode == 408 || httpCode == 429 || httpCode >= 500;
+}
+
 void applyDeviceSecretHeaders(HTTPClient &http) {
+  http.addHeader("X-Campus-Device-Id", CampusConfig::kDeviceId);
+  http.addHeader("X-Campus-Device-Secret", CampusConfig::kDeviceSecret);
   http.addHeader("X-Device-Id", CampusConfig::kDeviceId);
   http.addHeader("X-Device-Secret", CampusConfig::kDeviceSecret);
 }
@@ -87,6 +191,24 @@ bool parseApiErrorPayload(const String &payload, String &error) {
   }
   return false;
 }
+
+const String &emptyRequestBody() {
+  static const String kEmptyBody;
+  return kEmptyBody;
+}
+
+const String &emptyJsonObjectBody() {
+  static const String kEmptyJsonBody("{}");
+  return kEmptyJsonBody;
+}
+
+void logMemoryStage(const char *stage) {
+  Serial.printf(
+      "[MEM] stage=%s free=%u largest=%u min=%u\n", stage,
+      static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(ESP.getMinFreeHeap()));
+}
 }  // namespace
 
 bool BackendClient::fetchAvailableEvents(std::vector<EventInfo> &events,
@@ -95,7 +217,7 @@ bool BackendClient::fetchAvailableEvents(std::vector<EventInfo> &events,
   if (!requestJson("GET",
                    String("/campusDeviceListEvents?limit=") +
                        String(CampusConfig::kEventListLimit),
-                   nullptr, response, error)) {
+                   emptyRequestBody(), response, error)) {
     return false;
   }
 
@@ -135,7 +257,7 @@ bool BackendClient::fetchEnrollmentSessions(
   if (!requestJson("GET",
                    String("/campusDeviceListEnrollmentSessions?limit=") +
                        String(CampusConfig::kPendingEnrollmentLimit),
-                   nullptr, response, error)) {
+                   emptyRequestBody(), response, error)) {
     return false;
   }
 
@@ -164,7 +286,7 @@ bool BackendClient::pairEnrollmentSession(const String &sessionId,
   serializeJson(payload, body);
 
   DynamicJsonDocument response(4096);
-  if (!requestJson("POST", "/campusDevicePairEnrollmentSession", &body,
+  if (!requestJson("POST", "/campusDevicePairEnrollmentSession", body,
                    response, error)) {
     return false;
   }
@@ -189,7 +311,7 @@ bool BackendClient::downloadEnrollmentSession(const String &sessionId,
   serializeJson(payload, body);
 
   DynamicJsonDocument response(24576);
-  if (!requestJson("POST", "/campusDeviceDownloadEnrollmentSession", &body,
+  if (!requestJson("POST", "/campusDeviceDownloadEnrollmentSession", body,
                    response, error)) {
     return false;
   }
@@ -227,7 +349,7 @@ bool BackendClient::pairEvent(const String &eventId, EventInfo &event,
   serializeJson(payload, body);
 
   DynamicJsonDocument response(32768);
-  if (!requestJson("POST", "/campusDevicePairEvent", &body, response, error)) {
+  if (!requestJson("POST", "/campusDevicePairEvent", body, response, error)) {
     return false;
   }
 
@@ -247,7 +369,7 @@ bool BackendClient::fetchPairedEventContext(
     EventInfo &event, std::vector<StudentInfo> &students,
     std::vector<String> &recordedStudentIds, String &error) {
   DynamicJsonDocument response(32768);
-  if (!requestJson("GET", "/campusDevicePairedEventContext", nullptr, response,
+  if (!requestJson("GET", "/campusDevicePairedEventContext", emptyRequestBody(), response,
                    error)) {
     return false;
   }
@@ -262,7 +384,7 @@ bool BackendClient::fetchPendingEnrollments(std::vector<StudentInfo> &students,
   if (!requestJson("GET",
                    String("/campusDevicePendingEnrollments?limit=") +
                        String(CampusConfig::kPendingEnrollmentLimit),
-                   nullptr, response, error)) {
+                   emptyRequestBody(), response, error)) {
     return false;
   }
 
@@ -282,6 +404,10 @@ bool BackendClient::fetchPendingEnrollments(std::vector<StudentInfo> &students,
 }
 
 bool BackendClient::submitEnrollment(const StudentInfo &student, String &error) {
+  if (!ensureSession(error)) {
+    return false;
+  }
+
   DynamicJsonDocument payload(1024);
   if (!student.sessionId.isEmpty()) {
     payload["sessionId"] = student.sessionId;
@@ -302,70 +428,186 @@ bool BackendClient::submitEnrollment(const StudentInfo &student, String &error) 
   serializeJson(payload, body);
 
   DynamicJsonDocument response(1024);
-  return requestJson("POST", "/campusDeviceSubmitEnrollment", &body, response,
-                     error);
+  return requestJson("POST", "/campusDeviceSubmitEnrollment", body, response,
+                     error, true, CampusConfig::kHttpRetryAttempts, 1);
 }
 
 bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
                                    std::vector<SyncItemResult> &results,
                                    String &error) {
-  DynamicJsonDocument payload(24576);
-  JsonArray array = payload.createNestedArray("records");
+  results.clear();
+  if (records.empty()) {
+    return true;
+  }
+
+  if (!ensureSession(error)) {
+    return false;
+  }
+
+  const RequestTarget target = buildRequestTarget(kAttendanceSyncPath);
   for (const auto &record : records) {
+    logMemoryStage("before building payload");
+
+    String body;
+    {
+      DynamicJsonDocument payload(2048);
+      JsonArray array = payload.createNestedArray("records");
+      JsonObject object = array.createNestedObject();
+      object["recordId"] = record.recordId;
+      object["eventId"] = record.eventId;
+      object["eventTitle"] = record.eventTitle;
+      object["eventDate"] = record.eventDate;
+      object["scheduledTimeStart"] = record.scheduledTimeStart;
+      object["scheduledTimeEnd"] = record.scheduledTimeEnd;
+      object["location"] = record.eventLocation;
+      object["studentId"] = record.studentUid;
+      object["studentUid"] = record.studentUid;
+      object["schoolId"] = record.schoolId;
+      object["studentName"] = record.studentName;
+      object["course"] = record.course;
+      object["yearLevel"] = record.yearLevel;
+      object["attendanceStatus"] = record.attendanceStatus;
+      object["timeInEpoch"] = record.timeInEpoch;
+      object["timeInIso"] = record.timeInIso;
+      object["timeInSource"] = record.timeInSource;
+      object["timeOutEpoch"] = record.timeOutEpoch;
+      object["timeOutIso"] = record.timeOutIso;
+      object["timeOutSource"] = record.timeOutSource;
+      object["attendanceType"] =
+          record.hasTimeOut() ? "time-out" : "time-in";
+      object["fingerprintTemplateId"] = record.templateId;
+      object["deviceId"] = record.deviceId;
+      object["timestampEpoch"] = record.capturedAtEpoch;
+      object["timestampIso"] = record.capturedAtIso;
+      object["timeSource"] = record.timeSource;
+      object["source"] = record.source;
+
+      body.reserve(1024);
+      serializeJson(payload, body);
+    }
+
+    logMemoryStage("after building payload");
+    Serial.printf(
+        "[SYNC][ATTEND] pending=%u payloadBytes=%u wifi=%s ip=%s url=%s\n",
+        static_cast<unsigned>(records.size()),
+        static_cast<unsigned>(body.length()),
+        wifiStatusName(WiFi.status()).c_str(),
+        WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "-",
+        target.url.c_str());
+
+    DynamicJsonDocument response(4096);
+    const size_t resultsBefore = results.size();
+    if (!requestJson("POST", kAttendanceSyncPath, body, response, error, true,
+                     CampusConfig::kHttpRetryAttempts, 1)) {
+      SyncItemResult failure;
+      failure.recordId = record.recordId;
+      failure.status = "failed";
+      failure.message = error;
+      results.push_back(failure);
+      return false;
+    }
+
+    JsonArray resultArray = response["results"].as<JsonArray>();
+    if (resultArray.isNull()) {
+      error = "Attendance sync results missing.";
+      SyncItemResult failure;
+      failure.recordId = record.recordId;
+      failure.status = "failed";
+      failure.message = error;
+      results.push_back(failure);
+      return false;
+    }
+
+    for (JsonObjectConst item : resultArray) {
+      SyncItemResult result;
+      result.recordId = String(item["recordId"] | "");
+      result.status = String(item["status"] | "");
+      result.message = String(item["message"] | "");
+      if (!result.recordId.isEmpty()) {
+        results.push_back(result);
+      }
+    }
+
+    if (!(response["ok"] | false) && results.size() == resultsBefore) {
+      error = String(response["error"] | "Attendance sync rejected.");
+      SyncItemResult failure;
+      failure.recordId = record.recordId;
+      failure.status = "failed";
+      failure.message = error;
+      results.push_back(failure);
+      return false;
+    }
+
+    Serial.printf("[SYNC][ATTEND] synced=%u resultCount=%u\n",
+                  static_cast<unsigned>(response["synced"] | 0),
+                  static_cast<unsigned>(results.size()));
+  }
+  return true;
+}
+
+bool BackendClient::fetchCleanupQueue(std::vector<CleanupQueueItem> &items,
+                                      String &error) {
+  items.clear();
+  if (!ensureSession(error)) {
+    return false;
+  }
+
+  DynamicJsonDocument response(8192);
+  if (!requestJson("GET",
+                   String(kCleanupQueuePath) + "?limit=" +
+                       String(10),
+                   emptyRequestBody(), response, error)) {
+    return false;
+  }
+
+  JsonArray array = response["items"].as<JsonArray>();
+  if (array.isNull()) {
+    return true;
+  }
+
+  for (JsonObjectConst item : array) {
+    CleanupQueueItem cleanupItem;
+    cleanupItem.cleanupId = String(item["cleanupId"] | "");
+    cleanupItem.type = String(item["type"] | "");
+    cleanupItem.templateId = item["templateId"] | -1;
+    cleanupItem.studentUid =
+        String(item["uid"] | item["studentUid"] | item["studentId"] | "");
+    cleanupItem.schoolId = String(item["schoolId"] | "");
+    cleanupItem.reason = String(item["reason"] | "");
+    if (!cleanupItem.cleanupId.isEmpty() && cleanupItem.templateId > 0 &&
+        !cleanupItem.type.isEmpty()) {
+      items.push_back(cleanupItem);
+    }
+  }
+
+  return true;
+}
+
+bool BackendClient::acknowledgeCleanupQueue(
+    const std::vector<CleanupQueueResult> &results, String &error) {
+  if (results.empty()) {
+    return true;
+  }
+
+  if (!ensureSession(error)) {
+    return false;
+  }
+
+  DynamicJsonDocument payload(2048);
+  JsonArray array = payload.createNestedArray("results");
+  for (const auto &result : results) {
     JsonObject object = array.createNestedObject();
-    object["recordId"] = record.recordId;
-    object["eventId"] = record.eventId;
-    object["eventTitle"] = record.eventTitle;
-    object["eventDate"] = record.eventDate;
-    object["scheduledTimeStart"] = record.scheduledTimeStart;
-    object["scheduledTimeEnd"] = record.scheduledTimeEnd;
-    object["location"] = record.eventLocation;
-    object["studentId"] = record.studentUid;
-    object["studentUid"] = record.studentUid;
-    object["schoolId"] = record.schoolId;
-    object["studentName"] = record.studentName;
-    object["course"] = record.course;
-    object["yearLevel"] = record.yearLevel;
-    object["attendanceStatus"] = record.attendanceStatus;
-    object["timeInEpoch"] = record.timeInEpoch;
-    object["timeInIso"] = record.timeInIso;
-    object["timeInSource"] = record.timeInSource;
-    object["timeOutEpoch"] = record.timeOutEpoch;
-    object["timeOutIso"] = record.timeOutIso;
-    object["timeOutSource"] = record.timeOutSource;
-    object["fingerprintTemplateId"] = record.templateId;
-    object["deviceId"] = record.deviceId;
-    object["timestampEpoch"] = record.capturedAtEpoch;
-    object["timestampIso"] = record.capturedAtIso;
-    object["timeSource"] = record.timeSource;
-    object["source"] = record.source;
+    object["cleanupId"] = result.cleanupId;
+    object["processed"] = result.processed;
+    object["message"] = result.message;
   }
 
   String body;
   serializeJson(payload, body);
 
-  DynamicJsonDocument response(16384);
-  if (!requestJson("POST", "/campusDeviceSyncAttendance", &body, response,
-                   error)) {
-    return false;
-  }
-
-  results.clear();
-  JsonArray resultArray = response["results"].as<JsonArray>();
-  if (resultArray.isNull()) {
-    return true;
-  }
-
-  for (JsonObjectConst item : resultArray) {
-    SyncItemResult result;
-    result.recordId = String(item["recordId"] | "");
-    result.status = String(item["status"] | "");
-    result.message = String(item["message"] | "");
-    if (!result.recordId.isEmpty()) {
-      results.push_back(result);
-    }
-  }
-  return true;
+  DynamicJsonDocument response(1024);
+  return requestJson("POST", kCleanupAckPath, body, response, error, true,
+                     CampusConfig::kHttpRetryAttempts, results.size());
 }
 
 void BackendClient::clearSession() {
@@ -381,9 +623,11 @@ bool BackendClient::ensureSession(String &error) {
 
 bool BackendClient::requestSession(String &error) {
   DynamicJsonDocument response(2048);
-  String body = "{}";
-  if (!requestJson("POST", "/campusDeviceCreateSession", &body, response, error,
-                   false)) {
+  logMemoryStage("before building payload");
+  const String &body = emptyJsonObjectBody();
+  logMemoryStage("after building payload");
+  if (!requestJson("POST", kCreateSessionPath, body, response, error, false,
+                   CampusConfig::kHttpRetryAttempts)) {
     return false;
   }
 
@@ -452,11 +696,28 @@ bool BackendClient::parseEventContextResponse(
 }
 
 bool BackendClient::requestJson(const char *method, const String &path,
-                                const String *body,
+                                const String &body,
                                 DynamicJsonDocument &response, String &error,
-                                bool allowRetry) {
+                                bool allowRetry, uint8_t maxAttempts,
+                                size_t recordCount) {
+  const RequestTarget target = buildRequestTarget(path);
+  lastRequestUrl_ = target.url;
+  lastRequestPayloadSize_ = body.length();
+  lastRequestRecordCount_ = recordCount;
+  lastHttpStatusCode_ = 0;
+  lastHttpErrorString_ = "";
+  lastResponseBody_ = "";
+  lastWifiStatus_ = wifiStatusName(WiFi.status());
+  lastLocalIp_ = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+
   if (WiFi.status() != WL_CONNECTED) {
     error = "Wi-Fi not connected";
+    Serial.printf("[HTTP] wifi=%s ip=%s url=%s payloadBytes=%u records=%u\n",
+                  lastWifiStatus_.c_str(),
+                  lastLocalIp_.isEmpty() ? "-" : lastLocalIp_.c_str(),
+                  lastRequestUrl_.c_str(),
+                  static_cast<unsigned>(lastRequestPayloadSize_),
+                  static_cast<unsigned>(lastRequestRecordCount_));
     return false;
   }
 
@@ -465,73 +726,245 @@ bool BackendClient::requestJson(const char *method, const String &path,
     return false;
   }
 
-  const bool isSessionRequest = path == "/campusDeviceCreateSession";
+  if (!target.valid) {
+    error = "Invalid API base URL";
+    return false;
+  }
+
+  if (maxAttempts == 0) {
+    maxAttempts = 1;
+  }
+
+  const bool isSessionRequest = path == kCreateSessionPath;
   if (!isSessionRequest && !ensureSession(error)) {
     return false;
   }
 
-  WiFiClientSecure client;
-  client.setInsecure();
+  response.clear();
+  bool sessionRefreshAvailable = allowRetry;
+  for (uint8_t attempt = 1; attempt <= maxAttempts; ++attempt) {
+    lastWifiStatus_ = wifiStatusName(WiFi.status());
+    lastLocalIp_ = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+    const char *requestHost = target.host.c_str();
+    const char *requestUri = target.uri.c_str();
 
-  HTTPClient http;
-  const String url = buildUrl(path);
-  if (!http.begin(client, url)) {
-    error = "HTTP begin failed";
-    return false;
-  }
-
-  http.setTimeout(CampusConfig::kHttpTimeoutMs);
-  http.addHeader("Content-Type", "application/json");
-
-  if (isSessionRequest) {
-    applyDeviceSecretHeaders(http);
-  } else if (!sessionToken_.isEmpty()) {
-    http.addHeader("Authorization", "Bearer " + sessionToken_);
-  } else {
-    applyDeviceSecretHeaders(http);
-  }
-
-  int statusCode = -1;
-  if (String(method) == "GET") {
-    statusCode = http.GET();
-  } else if (String(method) == "POST") {
-    statusCode = http.POST(body != nullptr ? *body : String("{}"));
-  } else {
-    error = "HTTP method unsupported";
-    http.end();
-    return false;
-  }
-
-  const String payload = http.getString();
-  http.end();
-
-  if ((statusCode == 401 || statusCode == 403) && !isSessionRequest &&
-      allowRetry) {
-    clearSession();
-    if (!ensureSession(error)) {
+    if (WiFi.status() != WL_CONNECTED) {
+      error = "Wi-Fi not connected";
       return false;
     }
-    return requestJson(method, path, body, response, error, false);
-  }
 
-  if (statusCode < 200 || statusCode >= 300) {
+    auto client = std::make_unique<WiFiClientSecure>();
+    if (client == nullptr) {
+      error = "TLS client alloc failed";
+      return false;
+    }
+
+    // TODO: Replace setInsecure() with the production root CA certificate.
+    const bool insecureTls = true;
+    const bool caCertConfigured = false;
+    client->setInsecure();
+    client->setTimeout(CampusConfig::kHttpTimeoutMs);
+
+    IPAddress resolvedIp;
+    const int dnsResult = WiFi.hostByName(requestHost, resolvedIp);
+    Serial.printf(
+        "[HTTP] dns host=%s result=%d resolved=%s\n", requestHost,
+        dnsResult, dnsResult == 1 ? resolvedIp.toString().c_str() : "-");
+    Serial.printf("[HTTP] tlsMode=insecure setInsecure=%s caCert=%s\n",
+                  insecureTls ? "yes" : "no",
+                  caCertConfigured ? "yes" : "no");
+    if (caCertConfigured) {
+      Serial.println("[BUG] CA cert still enabled during insecure test");
+    }
+    logMemoryStage("before TLS connect");
+
+    char tlsErrorBuffer[160] = {0};
+    const bool tlsConnected = client->connect(requestHost, target.port);
+    if (!tlsConnected) {
+      const int tlsLastError =
+          client->lastError(tlsErrorBuffer, sizeof(tlsErrorBuffer));
+      lastHttpStatusCode_ = -1;
+      lastHttpErrorString_ =
+          String("TLS connect failed");
+      if (tlsLastError != 0) {
+        lastHttpErrorString_ += " (" + String(tlsLastError) + ")";
+      }
+      if (tlsErrorBuffer[0] != '\0') {
+        lastHttpErrorString_ += " ";
+        lastHttpErrorString_ += tlsErrorBuffer;
+      }
+      error = lastHttpErrorString_;
+      Serial.printf("[HTTP] tls host=%s port=%u connected=no lastError=%d detail=%s\n",
+                    requestHost, static_cast<unsigned>(target.port),
+                    tlsLastError,
+                    tlsErrorBuffer[0] != '\0' ? tlsErrorBuffer : "-");
+      logMemoryStage("after TLS connect failure");
+      client->stop();
+      if (shouldRetryRequest(lastHttpStatusCode_, attempt, maxAttempts)) {
+        delay(250UL * attempt);
+        continue;
+      }
+      return false;
+    }
+    Serial.printf("[HTTP] tls host=%s port=%u connected=yes\n",
+                  requestHost, static_cast<unsigned>(target.port));
+    logMemoryStage("after TLS connect success");
+
+    auto https = std::make_unique<HTTPClient>();
+    if (https == nullptr) {
+      client->stop();
+      error = "HTTP client alloc failed";
+      return false;
+    }
+
+    if (!https->begin(*client, requestHost, target.port, requestUri,
+                      target.https)) {
+      lastHttpStatusCode_ = -1;
+      lastHttpErrorString_ = "HTTP begin failed";
+      error = "HTTP begin failed";
+      Serial.printf(
+          "[HTTP] attempt=%u/%u method=%s wifi=%s ip=%s host=%s port=%u uri=%s "
+          "payloadBytes=%u records=%u code=%d err=%s\n",
+          static_cast<unsigned>(attempt), static_cast<unsigned>(maxAttempts),
+          method, lastWifiStatus_.c_str(),
+          lastLocalIp_.isEmpty() ? "-" : lastLocalIp_.c_str(),
+          requestHost, static_cast<unsigned>(target.port), requestUri,
+          static_cast<unsigned>(lastRequestPayloadSize_),
+          static_cast<unsigned>(lastRequestRecordCount_), lastHttpStatusCode_,
+          lastHttpErrorString_.c_str());
+      client->stop();
+      if (shouldRetryRequest(lastHttpStatusCode_, attempt, maxAttempts)) {
+        delay(250UL * attempt);
+        continue;
+      }
+      return false;
+    }
+
+    https->setTimeout(CampusConfig::kHttpTimeoutMs);
+    https->setConnectTimeout(CampusConfig::kHttpTimeoutMs);
+    https->addHeader("Content-Type", "application/json");
+
+    if (isSessionRequest) {
+      applyDeviceSecretHeaders(*https);
+    } else if (!sessionToken_.isEmpty()) {
+      https->addHeader("Authorization", "Bearer " + sessionToken_);
+    } else {
+      applyDeviceSecretHeaders(*https);
+    }
+
+    int statusCode = -1;
+    if (String(method) == "GET") {
+      statusCode = https->GET();
+    } else if (String(method) == "POST") {
+      statusCode = https->POST(body.isEmpty() ? emptyJsonObjectBody() : body);
+    } else {
+      error = "HTTP method unsupported";
+      https->end();
+      client->stop();
+      return false;
+    }
+
+    String payload = "";
+    if (statusCode > 0) {
+      payload = https->getString();
+    }
+
+    lastHttpStatusCode_ = statusCode;
+    lastHttpErrorString_ = https->errorToString(statusCode);
+    lastResponseBody_ = payload;
+
+    Serial.printf(
+        "[HTTP] attempt=%u/%u method=%s wifi=%s ip=%s host=%s port=%u uri=%s "
+        "payloadBytes=%u records=%u code=%d err=%s\n",
+        static_cast<unsigned>(attempt), static_cast<unsigned>(maxAttempts),
+        method, lastWifiStatus_.c_str(),
+        lastLocalIp_.isEmpty() ? "-" : lastLocalIp_.c_str(),
+        requestHost, static_cast<unsigned>(target.port),
+        requestUri, static_cast<unsigned>(lastRequestPayloadSize_),
+        static_cast<unsigned>(lastRequestRecordCount_), statusCode,
+        lastHttpErrorString_.c_str());
+    if (statusCode > 0) {
+      Serial.printf("[HTTP] response=%s\n", payload.c_str());
+    }
+
+    https->end();
+    client->stop();
+
+    if ((statusCode == 401 || statusCode == 403) && !isSessionRequest &&
+        sessionRefreshAvailable) {
+      sessionRefreshAvailable = false;
+      clearSession();
+      if (!ensureSession(error)) {
+        return false;
+      }
+      attempt = 0;
+      continue;
+    }
+
+    if (statusCode >= 200 && statusCode < 300) {
+      if (payload.isEmpty()) {
+        response.to<JsonObject>();
+        return true;
+      }
+
+      const DeserializationError jsonError = deserializeJson(response, payload);
+      if (jsonError) {
+        error = "JSON parse failed";
+        return false;
+      }
+      return true;
+    }
+
+    if (shouldRetryRequest(statusCode, attempt, maxAttempts)) {
+      delay(250UL * attempt);
+      continue;
+    }
+
     if (!parseApiErrorPayload(payload, error)) {
-      error = payload.isEmpty() ? ("HTTP " + String(statusCode))
-                                : ("HTTP " + String(statusCode) + " " + payload);
+      if (statusCode <= 0) {
+        error = "HTTPS " + String(statusCode) + " " + lastHttpErrorString_;
+      } else {
+        error = payload.isEmpty() ? ("HTTP " + String(statusCode))
+                                  : ("HTTP " + String(statusCode) + " " + payload);
+      }
     }
     return false;
   }
 
-  if (payload.isEmpty()) {
-    response.to<JsonObject>();
-    return true;
+  if (error.isEmpty()) {
+    error = "HTTP request failed";
   }
+  return false;
+}
 
-  const DeserializationError jsonError = deserializeJson(response, payload);
-  if (jsonError) {
-    error = "JSON parse failed";
-    return false;
-  }
+int BackendClient::lastHttpStatusCode() const {
+  return lastHttpStatusCode_;
+}
 
-  return true;
+const String &BackendClient::lastHttpErrorString() const {
+  return lastHttpErrorString_;
+}
+
+const String &BackendClient::lastResponseBody() const {
+  return lastResponseBody_;
+}
+
+const String &BackendClient::lastRequestUrl() const {
+  return lastRequestUrl_;
+}
+
+const String &BackendClient::lastWifiStatus() const {
+  return lastWifiStatus_;
+}
+
+const String &BackendClient::lastLocalIp() const {
+  return lastLocalIp_;
+}
+
+size_t BackendClient::lastRequestPayloadSize() const {
+  return lastRequestPayloadSize_;
+}
+
+size_t BackendClient::lastRequestRecordCount() const {
+  return lastRequestRecordCount_;
 }

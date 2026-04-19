@@ -1,5 +1,7 @@
 #include "DisplayManager.h"
 
+#include <algorithm>
+
 #include <LiquidCrystal_I2C.h>
 #include <Wire.h>
 
@@ -7,6 +9,72 @@
 
 namespace {
 constexpr uint8_t kCandidateAddresses[] = {0x27, 0x3F};
+
+struct Utf8Replacement {
+  const char *utf8;
+  const char *ascii;
+};
+
+String sanitizeForLcd(const String &input) {
+  String output = input;
+  bool changed = false;
+
+  static const Utf8Replacement kReplacements[] = {
+      {"\xC3\xB1", "n"}, {"\xC3\x91", "N"}, {"\xC3\xA1", "a"},
+      {"\xC3\xA0", "a"}, {"\xC3\xA2", "a"}, {"\xC3\xA4", "a"},
+      {"\xC3\xA9", "e"}, {"\xC3\xA8", "e"}, {"\xC3\xAA", "e"},
+      {"\xC3\xAB", "e"}, {"\xC3\xAD", "i"}, {"\xC3\xAC", "i"},
+      {"\xC3\xAE", "i"}, {"\xC3\xAF", "i"}, {"\xC3\xB3", "o"},
+      {"\xC3\xB2", "o"}, {"\xC3\xB4", "o"}, {"\xC3\xB6", "o"},
+      {"\xC3\xBA", "u"}, {"\xC3\xB9", "u"}, {"\xC3\xBB", "u"},
+      {"\xC3\xBC", "u"}, {"\xC3\x81", "A"}, {"\xC3\x80", "A"},
+      {"\xC3\x82", "A"}, {"\xC3\x84", "A"}, {"\xC3\x89", "E"},
+      {"\xC3\x88", "E"}, {"\xC3\x8A", "E"}, {"\xC3\x8B", "E"},
+      {"\xC3\x8D", "I"}, {"\xC3\x8C", "I"}, {"\xC3\x8E", "I"},
+      {"\xC3\x8F", "I"}, {"\xC3\x93", "O"}, {"\xC3\x92", "O"},
+      {"\xC3\x94", "O"}, {"\xC3\x96", "O"}, {"\xC3\x9A", "U"},
+      {"\xC3\x99", "U"}, {"\xC3\x9B", "U"}, {"\xC3\x9C", "U"},
+  };
+
+  for (const auto &replacement : kReplacements) {
+    if (output.indexOf(replacement.utf8) >= 0) {
+      output.replace(replacement.utf8, replacement.ascii);
+      changed = true;
+    }
+  }
+
+  String ascii;
+  ascii.reserve(output.length());
+  for (size_t index = 0; index < output.length();) {
+    const uint8_t current =
+        static_cast<uint8_t>(output.charAt(static_cast<unsigned int>(index)));
+    if (current < 0x80) {
+      ascii += static_cast<char>(current);
+      ++index;
+      continue;
+    }
+
+    changed = true;
+    size_t advance = 1;
+    if ((current & 0xE0U) == 0xC0U) {
+      advance = 2;
+    } else if ((current & 0xF0U) == 0xE0U) {
+      advance = 3;
+    } else if ((current & 0xF8U) == 0xF0U) {
+      advance = 4;
+    }
+    if (ascii.isEmpty() || ascii.charAt(ascii.length() - 1) != '?') {
+      ascii += '?';
+    }
+    index += std::min(advance, output.length() - index);
+  }
+
+  if (changed && ascii != input) {
+    Serial.printf("[LCD] sanitized original=\"%s\" display=\"%s\"\n",
+                  input.c_str(), ascii.c_str());
+  }
+  return ascii;
+}
 }  // namespace
 
 DisplayManager::~DisplayManager() {
@@ -239,7 +307,7 @@ void DisplayManager::showSyncProgress(size_t current, size_t total) {
 }
 
 String DisplayManager::fit(const String &value) const {
-  String output = value;
+  String output = sanitizeForLcd(value);
   output.trim();
   if (output.length() > CampusConfig::kLcdColumns) {
     output = output.substring(0, CampusConfig::kLcdColumns);

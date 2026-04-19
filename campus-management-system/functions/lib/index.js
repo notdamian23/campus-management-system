@@ -23,7 +23,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminDeleteDuplicateStudentSchoolIds = exports.adminFindDuplicateStudentSchoolIds = exports.adminDeactivateAllStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
+exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminManageFingerprintCleanup = exports.adminListFingerprintCleanupMappings = exports.adminDeleteDuplicateStudentSchoolIds = exports.adminFindDuplicateStudentSchoolIds = exports.adminDeactivateAllStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
 const https_1 = require("firebase-functions/v2/https");
 const campusLogger_1 = require("./campusLogger");
@@ -526,6 +526,302 @@ async function buildDuplicateStudentSchoolIdReport(limit = Number.MAX_SAFE_INTEG
         duplicateEntryCount,
         cleanupCandidateCount,
         duplicates: duplicates.slice(0, limit),
+    };
+}
+function extractFingerprintTemplateId(data) {
+    var _a, _b;
+    if (!data) {
+        return 0;
+    }
+    const parsed = Number((_b = (_a = data.fingerprintTemplateId) !== null && _a !== void 0 ? _a : data.templateId) !== null && _b !== void 0 ? _b : 0);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 0;
+}
+function resolveFingerprintRecordName(data) {
+    if (!data) {
+        return "";
+    }
+    return (resolveDuplicateStudentRecordName(data) ||
+        normalizeNamePart(data.fullName) ||
+        normalizeNamePart(data.displayName) ||
+        normalizeNamePart(data.teacherName));
+}
+function createFingerprintMappingRowId(templateId, uid) {
+    return `${templateId}:${uid || "unknown"}`;
+}
+function getOrCreateFingerprintCleanupMapping(mappings, templateId, uid, schoolId) {
+    const normalizedUid = uid || schoolId || `template-${templateId}`;
+    const rowId = createFingerprintMappingRowId(templateId, normalizedUid);
+    const existing = mappings.get(rowId);
+    if (existing) {
+        if (!existing.schoolId && schoolId) {
+            existing.schoolId = schoolId;
+        }
+        return existing;
+    }
+    const created = {
+        rowId,
+        templateId,
+        uid: normalizedUid,
+        schoolId: schoolId || normalizedUid,
+        studentName: "",
+        course: "",
+        yearLevel: "",
+        profileStatus: "",
+        profileRole: "",
+        fingerprintStatus: "",
+        lastEnrolledAtMs: 0,
+        duplicateTemplateCount: 0,
+        duplicateSchoolIdCount: 0,
+        duplicateReasons: [],
+        hasProfile: false,
+        hasStudentProjection: false,
+        hasTemplateDoc: false,
+        templateDocActive: true,
+        templateDocStatus: "",
+        sourceSet: new Set(),
+    };
+    mappings.set(rowId, created);
+    return created;
+}
+function isFingerprintMappingPotentiallyActive(mapping) {
+    const profileStatus = normalizeLower(mapping.profileStatus);
+    const profileRole = normalizeLower(mapping.profileRole);
+    const fingerprintStatus = normalizeLower(mapping.fingerprintStatus || mapping.templateDocStatus);
+    if (mapping.templateId <= 0) {
+        return false;
+    }
+    if (!mapping.hasProfile) {
+        return false;
+    }
+    if (profileRole && profileRole !== "student") {
+        return false;
+    }
+    if (profileStatus === "inactive" || profileStatus === "deleted") {
+        return false;
+    }
+    if (fingerprintStatus === "needs_reenrollment" ||
+        fingerprintStatus === "stale" ||
+        fingerprintStatus === "inactive" ||
+        fingerprintStatus === "deleted") {
+        return false;
+    }
+    if (mapping.templateDocActive === false) {
+        return false;
+    }
+    return true;
+}
+async function buildFingerprintCleanupReport() {
+    const [templateSnapshot, profileSnapshot, studentSnapshot] = await Promise.all([
+        db.collection("fingerprintTemplates").get(),
+        db.collection("profiles").get(),
+        db.collection("students").get(),
+    ]);
+    const mappings = new Map();
+    let needsReenrollment = 0;
+    profileSnapshot.docs.forEach((profileDoc) => {
+        var _a, _b, _c, _d;
+        const profileData = (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {};
+        const templateId = extractFingerprintTemplateId(profileData);
+        const fingerprintStatus = normalizeText(profileData.fingerprintStatus);
+        if (templateId <= 0 && !fingerprintStatus) {
+            return;
+        }
+        if (templateId <= 0 && normalizeLower(fingerprintStatus) === "needs_reenrollment") {
+            needsReenrollment += 1;
+            return;
+        }
+        const schoolId = normalizeText(profileData.schoolId) || profileDoc.id;
+        const mapping = getOrCreateFingerprintCleanupMapping(mappings, templateId, profileDoc.id, schoolId);
+        mapping.hasProfile = true;
+        mapping.profileStatus = normalizeText(profileData.status) || mapping.profileStatus;
+        mapping.profileRole = normalizeText(profileData.role) || mapping.profileRole;
+        mapping.studentName =
+            resolveFingerprintRecordName(profileData) || mapping.studentName || schoolId;
+        mapping.course = normalizeText(profileData.course) || mapping.course || "Unassigned";
+        mapping.yearLevel =
+            normalizeYear((_b = profileData.yearLevel) !== null && _b !== void 0 ? _b : profileData.year) ||
+                mapping.yearLevel ||
+                "Unassigned";
+        mapping.fingerprintStatus = fingerprintStatus || mapping.fingerprintStatus;
+        mapping.lastEnrolledAtMs = Math.max(mapping.lastEnrolledAtMs, toMillis((_d = (_c = profileData.fingerprintEnrolledAt) !== null && _c !== void 0 ? _c : profileData.updatedAt) !== null && _d !== void 0 ? _d : profileData.createdAt));
+        mapping.sourceSet.add("profile");
+    });
+    studentSnapshot.docs.forEach((studentDoc) => {
+        var _a, _b, _c, _d;
+        const studentData = (_a = studentDoc.data()) !== null && _a !== void 0 ? _a : {};
+        const templateId = extractFingerprintTemplateId(studentData);
+        const fingerprintStatus = normalizeText(studentData.fingerprintStatus);
+        if (templateId <= 0 && !fingerprintStatus) {
+            return;
+        }
+        if (templateId <= 0 && normalizeLower(fingerprintStatus) === "needs_reenrollment") {
+            needsReenrollment += 1;
+            return;
+        }
+        const schoolId = normalizeText(studentData.schoolId) || studentDoc.id;
+        const mapping = getOrCreateFingerprintCleanupMapping(mappings, templateId, studentDoc.id, schoolId);
+        mapping.hasStudentProjection = true;
+        if (!mapping.studentName) {
+            mapping.studentName =
+                resolveFingerprintRecordName(studentData) || mapping.studentName || schoolId;
+        }
+        if (!mapping.course) {
+            mapping.course = normalizeText(studentData.course) || "Unassigned";
+        }
+        if (!mapping.yearLevel) {
+            mapping.yearLevel =
+                normalizeYear((_b = studentData.yearLevel) !== null && _b !== void 0 ? _b : studentData.year) || "Unassigned";
+        }
+        if (!mapping.profileStatus) {
+            mapping.profileStatus = normalizeText(studentData.status);
+        }
+        mapping.fingerprintStatus = fingerprintStatus || mapping.fingerprintStatus;
+        mapping.lastEnrolledAtMs = Math.max(mapping.lastEnrolledAtMs, toMillis((_d = (_c = studentData.fingerprintEnrolledAt) !== null && _c !== void 0 ? _c : studentData.updatedAt) !== null && _d !== void 0 ? _d : studentData.createdAt));
+        mapping.sourceSet.add("student_projection");
+    });
+    templateSnapshot.docs.forEach((templateDoc) => {
+        var _a, _b, _c, _d, _e;
+        const templateData = (_a = templateDoc.data()) !== null && _a !== void 0 ? _a : {};
+        const templateId = extractFingerprintTemplateId(templateData) ||
+            toPositiveNumber(templateDoc.id);
+        const uid = normalizeText(templateData.uid) ||
+            normalizeText(templateData.studentUid) ||
+            normalizeText(templateData.studentId);
+        const schoolId = normalizeText(templateData.schoolId) || uid || templateDoc.id;
+        if (templateId <= 0) {
+            return;
+        }
+        const mapping = getOrCreateFingerprintCleanupMapping(mappings, templateId, uid, schoolId);
+        mapping.hasTemplateDoc = true;
+        mapping.templateDocActive = templateData.active !== false;
+        mapping.templateDocStatus = normalizeText(templateData.status);
+        if (!mapping.studentName) {
+            mapping.studentName =
+                resolveFingerprintRecordName(templateData) || mapping.studentName || schoolId;
+        }
+        if (!mapping.course) {
+            mapping.course = normalizeText(templateData.course) || "Unassigned";
+        }
+        if (!mapping.yearLevel) {
+            mapping.yearLevel =
+                normalizeYear((_b = templateData.yearLevel) !== null && _b !== void 0 ? _b : templateData.year) || "Unassigned";
+        }
+        if (!mapping.fingerprintStatus) {
+            mapping.fingerprintStatus =
+                normalizeText(templateData.fingerprintStatus) || mapping.templateDocStatus;
+        }
+        mapping.lastEnrolledAtMs = Math.max(mapping.lastEnrolledAtMs, toMillis((_e = (_d = (_c = templateData.enrolledAt) !== null && _c !== void 0 ? _c : templateData.fingerprintEnrolledAt) !== null && _d !== void 0 ? _d : templateData.updatedAt) !== null && _e !== void 0 ? _e : templateData.createdAt));
+        mapping.sourceSet.add("fingerprint_template");
+    });
+    const templateCounts = new Map();
+    const schoolTemplateSets = new Map();
+    mappings.forEach((mapping) => {
+        var _a;
+        if (mapping.templateId > 0) {
+            templateCounts.set(mapping.templateId, ((_a = templateCounts.get(mapping.templateId)) !== null && _a !== void 0 ? _a : 0) + 1);
+        }
+        if (mapping.schoolId && isFingerprintMappingPotentiallyActive(mapping)) {
+            const current = schoolTemplateSets.get(mapping.schoolId) || new Set();
+            current.add(mapping.templateId);
+            schoolTemplateSets.set(mapping.schoolId, current);
+        }
+    });
+    let activeMappings = 0;
+    let staleMappings = 0;
+    let duplicateMappings = 0;
+    const resolvedMappings = Array.from(mappings.values())
+        .filter((mapping) => mapping.templateId > 0)
+        .map((mapping) => {
+        var _a, _b, _c;
+        const profileStatus = normalizeLower(mapping.profileStatus);
+        const fingerprintStatus = normalizeLower(mapping.fingerprintStatus || mapping.templateDocStatus);
+        const duplicateTemplateCount = (_a = templateCounts.get(mapping.templateId)) !== null && _a !== void 0 ? _a : 0;
+        const duplicateSchoolIdCount = (_c = (_b = schoolTemplateSets.get(mapping.schoolId)) === null || _b === void 0 ? void 0 : _b.size) !== null && _c !== void 0 ? _c : 0;
+        const duplicateReasons = [];
+        if (duplicateTemplateCount > 1) {
+            duplicateReasons.push("template_shared");
+        }
+        if (duplicateSchoolIdCount > 1) {
+            duplicateReasons.push("multiple_templates_for_school");
+        }
+        const isDeleted = profileStatus === "deleted" || fingerprintStatus === "deleted";
+        const isMissingProfile = !mapping.hasProfile;
+        const isStale = !isDeleted &&
+            !isMissingProfile &&
+            (profileStatus === "inactive" ||
+                fingerprintStatus === "needs_reenrollment" ||
+                fingerprintStatus === "stale" ||
+                fingerprintStatus === "inactive" ||
+                mapping.templateDocActive === false ||
+                !mapping.hasStudentProjection);
+        const isDuplicate = duplicateReasons.length > 0;
+        let mappingStatus = "active";
+        if (isDeleted) {
+            mappingStatus = "deleted";
+        }
+        else if (isMissingProfile) {
+            mappingStatus = "missing_profile";
+        }
+        else if (isDuplicate) {
+            mappingStatus = "duplicate";
+        }
+        else if (isStale) {
+            mappingStatus = "stale";
+        }
+        if (mappingStatus === "active") {
+            activeMappings += 1;
+        }
+        if (mappingStatus === "stale") {
+            staleMappings += 1;
+        }
+        if (isDuplicate) {
+            duplicateMappings += 1;
+        }
+        const requiresReenrollment = fingerprintStatus === "needs_reenrollment" || mappingStatus === "stale";
+        if (requiresReenrollment) {
+            needsReenrollment += 1;
+        }
+        return {
+            rowId: mapping.rowId,
+            templateId: mapping.templateId,
+            uid: mapping.uid,
+            schoolId: mapping.schoolId,
+            studentName: mapping.studentName || mapping.schoolId || mapping.uid,
+            course: mapping.course || "Unassigned",
+            yearLevel: mapping.yearLevel || "Unassigned",
+            profileStatus: mapping.profileStatus || (mapping.hasProfile ? "Active" : "Missing"),
+            mappingStatus,
+            fingerprintStatus: mapping.fingerprintStatus ||
+                mapping.templateDocStatus ||
+                (mapping.templateDocActive ? "active" : "stale"),
+            lastEnrolledAtMs: mapping.lastEnrolledAtMs,
+            duplicateTemplateCount,
+            duplicateSchoolIdCount,
+            duplicateReasons,
+            sources: Array.from(mapping.sourceSet).sort(),
+            canRemoveStale: mappingStatus === "stale" ||
+                mappingStatus === "deleted" ||
+                mappingStatus === "missing_profile",
+            canRemoveMapping: true,
+            canKeepTemplateOwner: duplicateTemplateCount > 1 &&
+                isFingerprintMappingPotentiallyActive(mapping),
+            needsReenrollment: requiresReenrollment,
+        };
+    })
+        .sort((left, right) => {
+        if (left.templateId !== right.templateId) {
+            return left.templateId - right.templateId;
+        }
+        return left.studentName.localeCompare(right.studentName);
+    });
+    return {
+        generatedAtMs: Date.now(),
+        totalMappings: resolvedMappings.length,
+        activeMappings,
+        staleMappings,
+        duplicateMappings,
+        needsReenrollment,
+        mappings: resolvedMappings,
     };
 }
 function optionalBoolean(value) {
@@ -1438,6 +1734,259 @@ exports.adminDeleteDuplicateStudentSchoolIds = (0, https_1.onCall)({ region: REG
         deletedAuthCount,
         failedCount,
         failureDetails,
+    };
+});
+function isValidFingerprintCleanupOwner(mapping) {
+    const profileStatus = normalizeLower(mapping.profileStatus);
+    const fingerprintStatus = normalizeLower(mapping.fingerprintStatus);
+    return mapping.templateId > 0 &&
+        mapping.mappingStatus !== "deleted" &&
+        mapping.mappingStatus !== "missing_profile" &&
+        profileStatus !== "inactive" &&
+        fingerprintStatus !== "needs_reenrollment" &&
+        fingerprintStatus !== "stale";
+}
+function fingerprintTemplateRef(templateId) {
+    return db.collection("fingerprintTemplates").doc(String(templateId));
+}
+function buildQueuePayload(type, templateId, uid, schoolId, reason, actorUid) {
+    return {
+        type,
+        templateId,
+        uid,
+        schoolId,
+        reason,
+        createdBy: actorUid,
+        createdAt: serverTimestamp(),
+        processed: false,
+        processedAt: null,
+    };
+}
+async function queueFingerprintCleanupInstruction(batch, type, templateId, uid, schoolId, reason, actorUid) {
+    const cleanupRef = db.collection("moduleCleanupQueue").doc();
+    batch.set(cleanupRef, buildQueuePayload(type, templateId, uid, schoolId, reason, actorUid));
+}
+async function updateFingerprintTemplateDocument(batch, templateId, keepMapping, fallback) {
+    const templateRef = fingerprintTemplateRef(templateId);
+    if (keepMapping) {
+        batch.set(templateRef, {
+            templateId,
+            uid: keepMapping.uid,
+            schoolId: keepMapping.schoolId,
+            name: keepMapping.studentName,
+            course: keepMapping.course,
+            yearLevel: keepMapping.yearLevel,
+            active: true,
+            status: "active",
+            updatedAt: serverTimestamp(),
+        }, { merge: true });
+        return;
+    }
+    batch.set(templateRef, {
+        templateId,
+        uid: fallback.uid,
+        schoolId: fallback.schoolId,
+        name: fallback.studentName,
+        course: fallback.course,
+        yearLevel: fallback.yearLevel,
+        active: false,
+        status: "needs_reenrollment",
+        updatedAt: serverTimestamp(),
+    }, { merge: true });
+}
+async function clearFingerprintMappingForUid(batch, uid, nextStatus) {
+    if (!uid) {
+        return 0;
+    }
+    const [profileSnap, studentSnap] = await Promise.all([
+        db.doc(`profiles/${uid}`).get(),
+        db.doc(`students/${uid}`).get(),
+    ]);
+    let updatedCount = 0;
+    const clearPatch = {
+        hasFingerprint: false,
+        fingerprintTemplateId: admin.firestore.FieldValue.delete(),
+        templateId: admin.firestore.FieldValue.delete(),
+        fingerprintDeviceId: admin.firestore.FieldValue.delete(),
+        fingerprintEnrolledAt: admin.firestore.FieldValue.delete(),
+        latestEnrollmentSessionId: admin.firestore.FieldValue.delete(),
+        fingerprintStatus: nextStatus,
+        updatedAt: serverTimestamp(),
+    };
+    if (profileSnap.exists) {
+        batch.set(profileSnap.ref, clearPatch, { merge: true });
+        updatedCount += 1;
+    }
+    if (studentSnap.exists) {
+        batch.set(studentSnap.ref, clearPatch, { merge: true });
+        updatedCount += 1;
+    }
+    return updatedCount;
+}
+async function activateFingerprintMappingForUid(batch, uid, templateId) {
+    if (!uid || templateId <= 0) {
+        return;
+    }
+    const [profileSnap, studentSnap] = await Promise.all([
+        db.doc(`profiles/${uid}`).get(),
+        db.doc(`students/${uid}`).get(),
+    ]);
+    const activationPatch = {
+        hasFingerprint: true,
+        fingerprintTemplateId: templateId,
+        templateId,
+        fingerprintStatus: "enrolled",
+        updatedAt: serverTimestamp(),
+    };
+    if (profileSnap.exists) {
+        batch.set(profileSnap.ref, activationPatch, { merge: true });
+    }
+    if (studentSnap.exists) {
+        batch.set(studentSnap.ref, activationPatch, { merge: true });
+    }
+}
+exports.adminListFingerprintCleanupMappings = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a;
+    await requireAdmin(request);
+    const report = await buildFingerprintCleanupReport();
+    await db.collection("logs").add({
+        action: "ADMIN_LIST_FINGERPRINT_CLEANUP_MAPPINGS",
+        actorUid: normalizeText((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid),
+        totalMappings: report.totalMappings,
+        duplicateMappings: report.duplicateMappings,
+        staleMappings: report.staleMappings,
+        createdAt: serverTimestamp(),
+    }).catch((logError) => {
+        authLogger.warn("adminListFingerprintCleanupMappings log write failed", {
+            error: logError,
+        });
+    });
+    return report;
+});
+exports.adminManageFingerprintCleanup = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a, _b;
+    await requireAdmin(request);
+    const body = asRecord(request.data);
+    const action = normalizeText(body.action);
+    const actorUid = normalizeText((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid);
+    const actorProfileSnap = await db.doc(`profiles/${actorUid}`).get();
+    const actorSchoolId = actorProfileSnap.exists ?
+        normalizeText((_b = actorProfileSnap.data()) === null || _b === void 0 ? void 0 : _b.schoolId) :
+        "";
+    const templateId = toPositiveNumber(body.templateId);
+    const reason = normalizeText(body.reason) || "Admin fingerprint cleanup";
+    if (!action) {
+        throw new https_1.HttpsError("invalid-argument", "action is required.");
+    }
+    if (templateId <= 0) {
+        throw new https_1.HttpsError("invalid-argument", "templateId must be a positive integer.");
+    }
+    const report = await buildFingerprintCleanupReport();
+    const templateMappings = report.mappings.filter((mapping) => mapping.templateId === templateId);
+    if (templateMappings.length === 0) {
+        throw new https_1.HttpsError("not-found", "Fingerprint mapping not found.");
+    }
+    const batch = db.batch();
+    let updatedCount = 0;
+    let queueCount = 0;
+    let logAction = "";
+    let logTargetUid = "";
+    let logTargetSchoolId = "";
+    let message = "";
+    if (action === "keepStudent") {
+        const keepUid = normalizeText(body.keepUid);
+        const keepMapping = templateMappings.find((mapping) => mapping.uid === keepUid);
+        if (!keepUid || !keepMapping) {
+            throw new https_1.HttpsError("invalid-argument", "keepUid is required.");
+        }
+        if (!keepMapping.canKeepTemplateOwner) {
+            throw new https_1.HttpsError("failed-precondition", "Selected student cannot keep this fingerprint template.");
+        }
+        await activateFingerprintMappingForUid(batch, keepUid, templateId);
+        const removedMappings = templateMappings.filter((mapping) => mapping.uid !== keepUid);
+        for (const mapping of removedMappings) {
+            updatedCount += await clearFingerprintMappingForUid(batch, mapping.uid, "needs_reenrollment");
+            await queueFingerprintCleanupInstruction(batch, "removeMapping", templateId, mapping.uid, mapping.schoolId, reason, actorUid);
+            queueCount += 1;
+        }
+        await updateFingerprintTemplateDocument(batch, templateId, keepMapping, {
+            uid: keepMapping.uid,
+            schoolId: keepMapping.schoolId,
+            studentName: keepMapping.studentName,
+            course: keepMapping.course,
+            yearLevel: keepMapping.yearLevel,
+        });
+        logAction = "ADMIN_KEEP_FINGERPRINT_TEMPLATE_OWNER";
+        logTargetUid = keepMapping.uid;
+        logTargetSchoolId = keepMapping.schoolId;
+        message = `Template ${templateId} kept for ${keepMapping.studentName}.`;
+    }
+    else {
+        const uid = normalizeText(body.uid);
+        const targetMapping = templateMappings.find((mapping) => mapping.uid === uid);
+        if (!uid || !targetMapping) {
+            throw new https_1.HttpsError("invalid-argument", "uid is required.");
+        }
+        const nextStatus = action === "removeStaleMapping" && targetMapping.mappingStatus === "stale" ?
+            "stale" :
+            "needs_reenrollment";
+        if (action === "removeStaleMapping" && !targetMapping.canRemoveStale) {
+            throw new https_1.HttpsError("failed-precondition", "Only stale, deleted, or missing-profile mappings can use removeStaleMapping.");
+        }
+        updatedCount += await clearFingerprintMappingForUid(batch, uid, nextStatus);
+        const queueType = action === "markNeedsReenrollment" ?
+            "markNeedsReenrollment" :
+            "removeMapping";
+        await queueFingerprintCleanupInstruction(batch, queueType, templateId, targetMapping.uid, targetMapping.schoolId, reason, actorUid);
+        queueCount += 1;
+        const remainingOwner = templateMappings
+            .filter((mapping) => mapping.uid !== uid)
+            .find((mapping) => isValidFingerprintCleanupOwner(mapping)) || null;
+        await updateFingerprintTemplateDocument(batch, templateId, remainingOwner, {
+            uid: targetMapping.uid,
+            schoolId: targetMapping.schoolId,
+            studentName: targetMapping.studentName,
+            course: targetMapping.course,
+            yearLevel: targetMapping.yearLevel,
+        });
+        if (!remainingOwner) {
+            await queueFingerprintCleanupInstruction(batch, "deleteTemplateIfUnused", templateId, targetMapping.uid, targetMapping.schoolId, reason, actorUid);
+            queueCount += 1;
+        }
+        logAction =
+            action === "removeStaleMapping" ?
+                "ADMIN_REMOVE_STALE_FINGERPRINT_MAPPING" :
+                action === "markNeedsReenrollment" ?
+                    "ADMIN_MARK_FINGERPRINT_NEEDS_REENROLLMENT" :
+                    "ADMIN_REMOVE_FINGERPRINT_MAPPING";
+        logTargetUid = targetMapping.uid;
+        logTargetSchoolId = targetMapping.schoolId;
+        message =
+            action === "markNeedsReenrollment" ?
+                `${targetMapping.studentName} now needs re-enrollment.` :
+                `Fingerprint mapping removed for ${targetMapping.studentName}.`;
+    }
+    await db.collection("logs").add({
+        action: logAction,
+        actorUid,
+        actorSchoolId,
+        targetUid: logTargetUid,
+        targetSchoolId: logTargetSchoolId,
+        templateId,
+        reason,
+        createdAt: serverTimestamp(),
+        metadata: {
+            queueCount,
+            updatedCount,
+        },
+    });
+    await batch.commit();
+    return {
+        ok: true,
+        action,
+        updatedCount,
+        queueCount,
+        message,
     };
 });
 exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request) => {

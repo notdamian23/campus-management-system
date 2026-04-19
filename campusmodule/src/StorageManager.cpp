@@ -142,6 +142,7 @@ void attendanceToJson(JsonObject object, const AttendanceRecord &record) {
   object["attendanceStatus"] = record.attendanceStatus;
   object["source"] = record.source;
   object["synced"] = record.synced;
+  object["syncRejected"] = record.syncRejected;
   object["remoteDuplicate"] = record.remoteDuplicate;
   object["syncError"] = record.syncError;
   object["retryCount"] = record.retryCount;
@@ -183,6 +184,7 @@ AttendanceRecord attendanceFromJson(JsonObjectConst object) {
   record.attendanceStatus = String(object["attendanceStatus"] | "");
   record.source = String(object["source"] | "portable-device");
   record.synced = object["synced"] | false;
+  record.syncRejected = object["syncRejected"] | false;
   record.remoteDuplicate = object["remoteDuplicate"] | false;
   record.syncError = String(object["syncError"] | "");
   record.retryCount = object["retryCount"] | 0UL;
@@ -286,6 +288,54 @@ std::vector<StudentInfo> filterPendingStudents(
     }
   }
   return filtered;
+}
+
+bool isActiveFingerprintOwner(const StudentInfo &student) {
+  if (student.templateId <= 0) {
+    return false;
+  }
+
+  String fingerprintStatus = student.fingerprintStatus;
+  fingerprintStatus.toLowerCase();
+  if (fingerprintStatus == "needs_reenrollment" ||
+      fingerprintStatus == "stale" ||
+      fingerprintStatus == "inactive" ||
+      fingerprintStatus == "deleted") {
+    return false;
+  }
+
+  return true;
+}
+
+bool cleanupItemMatchesStudent(const CleanupQueueItem &item,
+                               const StudentInfo &student) {
+  if (student.templateId <= 0) {
+    return false;
+  }
+
+  if (item.templateId > 0 && student.templateId != item.templateId) {
+    return false;
+  }
+
+  if (!item.studentUid.isEmpty() && student.studentUid == item.studentUid) {
+    return true;
+  }
+
+  if (!item.schoolId.isEmpty() && student.schoolId == item.schoolId) {
+    return true;
+  }
+
+  return item.studentUid.isEmpty() && item.schoolId.isEmpty();
+}
+
+void markStudentNeedsReenrollment(StudentInfo &student) {
+  student.templateId = -1;
+  student.fingerprintStatus = "needs_reenrollment";
+  student.fingerprintDeviceId = "";
+  student.enrollmentSynced = false;
+  if (student.syncStatus == "synced") {
+    student.syncStatus = "pending";
+  }
 }
 
 void normalizeEventSchedule(EventInfo &event) {
@@ -594,7 +644,7 @@ bool StorageManager::isStudentAuthorizedForEvent(const String &eventId,
 
   if (!pairedEventCache_.isValid() || pairedEventCache_.eventId != eventId ||
       pairedStudentsCache_.empty()) {
-    return true;
+    return false;
   }
 
   for (const auto &student : pairedStudentsCache_) {
@@ -812,14 +862,127 @@ bool StorageManager::upsertFingerprintMapping(const StudentInfo &student) {
 }
 
 bool StorageManager::findStudentByTemplate(int templateId, StudentInfo &outStudent) const {
+  const FingerprintTemplateOwnership ownership = resolveTemplateOwnership(templateId);
+  if (ownership.state != FingerprintOwnershipState::Unique) {
+    return false;
+  }
+  outStudent = ownership.student;
+  return true;
+}
+
+FingerprintTemplateOwnership StorageManager::resolveTemplateOwnership(
+    int templateId) const {
   ensureFingerprintMappingsLoaded();
+  FingerprintTemplateOwnership ownership;
   for (const auto &student : fingerprintMappingsCache_) {
     if (student.templateId == templateId) {
-      outStudent = student;
-      return true;
+      ++ownership.totalMatches;
+      if (!isActiveFingerprintOwner(student)) {
+        continue;
+      }
+
+      ++ownership.activeOwners;
+      if (ownership.activeOwners == 1) {
+        ownership.student = student;
+        ownership.state = FingerprintOwnershipState::Unique;
+      } else {
+        ownership.state = FingerprintOwnershipState::Duplicate;
+      }
     }
   }
-  return false;
+  if (ownership.activeOwners == 0) {
+    ownership.state = FingerprintOwnershipState::None;
+  } else if (ownership.activeOwners > 1) {
+    ownership.state = FingerprintOwnershipState::Duplicate;
+  }
+  return ownership;
+}
+
+bool StorageManager::applyCleanupQueueItem(const CleanupQueueItem &item,
+                                           String &error) {
+  if (!littleFsReady_) {
+    error = "Storage unavailable";
+    return false;
+  }
+
+  ensureFingerprintMappingsLoaded();
+  ensurePendingStudentsLoaded();
+  ensureEnrollmentSyncQueueLoaded();
+  ensurePairedEventContextLoaded();
+
+  bool mappingsChanged = false;
+  std::vector<StudentInfo> filteredMappings;
+  filteredMappings.reserve(fingerprintMappingsCache_.size());
+  for (const auto &student : fingerprintMappingsCache_) {
+    if (cleanupItemMatchesStudent(item, student) ||
+        (item.type == "deleteTemplateIfUnused" && item.templateId > 0 &&
+         student.templateId == item.templateId)) {
+      mappingsChanged = true;
+      continue;
+    }
+    filteredMappings.push_back(student);
+  }
+  if (mappingsChanged) {
+    fingerprintMappingsCache_ = filteredMappings;
+  }
+
+  bool pendingChanged = false;
+  for (auto &student : pendingStudentsCache_) {
+    if (!cleanupItemMatchesStudent(item, student) &&
+        !(item.type == "deleteTemplateIfUnused" && item.templateId > 0 &&
+          student.templateId == item.templateId)) {
+      continue;
+    }
+    markStudentNeedsReenrollment(student);
+    pendingChanged = true;
+  }
+
+  bool syncQueueChanged = false;
+  for (auto &student : enrollmentSyncQueueCache_) {
+    if (!cleanupItemMatchesStudent(item, student) &&
+        !(item.type == "deleteTemplateIfUnused" && item.templateId > 0 &&
+          student.templateId == item.templateId)) {
+      continue;
+    }
+    markStudentNeedsReenrollment(student);
+    syncQueueChanged = true;
+  }
+
+  bool pairedChanged = false;
+  for (auto &student : pairedStudentsCache_) {
+    if (!cleanupItemMatchesStudent(item, student) &&
+        !(item.type == "deleteTemplateIfUnused" && item.templateId > 0 &&
+          student.templateId == item.templateId)) {
+      continue;
+    }
+    markStudentNeedsReenrollment(student);
+    pairedChanged = true;
+  }
+
+  if (!mappingsChanged && !pendingChanged && !syncQueueChanged && !pairedChanged) {
+    return true;
+  }
+
+  if (mappingsChanged && !writeFingerprintMappings(fingerprintMappingsCache_)) {
+    error = "Fingerprint map save failed";
+    return false;
+  }
+  if (pendingChanged && !writePendingStudents(pendingStudentsCache_)) {
+    error = "Pending queue save failed";
+    return false;
+  }
+  if (syncQueueChanged &&
+      !writeStudentList(kEnrollmentSyncQueuePath, enrollmentSyncQueueCache_)) {
+    error = "Enrollment sync queue save failed";
+    return false;
+  }
+  if (pairedChanged && pairedEventCache_.isValid() &&
+      !writePairedEventContext(pairedEventCache_, pairedStudentsCache_,
+                               remoteRecordedStudentIdsCache_)) {
+    error = "Paired event context save failed";
+    return false;
+  }
+  return true;
 }
 
 int StorageManager::nextFreeTemplateId(uint16_t startId, uint16_t endId) const {
@@ -965,7 +1128,7 @@ bool StorageManager::ensureAttendanceLoaded() const {
     const AttendanceRecord record = attendanceFromJson(item);
     if (!record.recordId.isEmpty()) {
       attendanceRecordsCache_.push_back(record);
-      if (!record.synced) {
+      if (!record.synced && !record.syncRejected) {
         ++unsyncedAttendanceCountCache_;
       }
     }
@@ -977,7 +1140,7 @@ bool StorageManager::ensureAttendanceLoaded() const {
 void StorageManager::refreshUnsyncedAttendanceCount() const {
   unsyncedAttendanceCountCache_ = 0;
   for (const auto &record : attendanceRecordsCache_) {
-    if (!record.synced) {
+    if (!record.synced && !record.syncRejected) {
       ++unsyncedAttendanceCountCache_;
     }
   }
@@ -998,7 +1161,7 @@ std::vector<AttendanceRecord> StorageManager::loadUnsyncedAttendanceBatch(
 
   batch.reserve(std::min(limit, attendanceRecordsCache_.size()));
   for (const auto &record : attendanceRecordsCache_) {
-    if (!record.synced) {
+    if (!record.synced && !record.syncRejected) {
       batch.push_back(record);
       if (batch.size() >= limit) {
         break;
@@ -1066,7 +1229,7 @@ bool StorageManager::isDuplicateAttendance(const String &eventId,
 bool StorageManager::hasUnsyncedAttendanceForEvent(const String &eventId) const {
   ensureAttendanceLoaded();
   for (const auto &record : attendanceRecordsCache_) {
-    if (record.eventId == eventId && !record.synced) {
+    if (record.eventId == eventId && !record.synced && !record.syncRejected) {
       return true;
     }
   }
@@ -1094,11 +1257,21 @@ bool StorageManager::applySyncResults(const std::vector<SyncItemResult> &results
 
       if (result.status == "uploaded" || result.status == "duplicate") {
         record.synced = true;
+        record.syncRejected = false;
         record.remoteDuplicate = result.status == "duplicate";
         record.syncError = result.message;
+        record.retryCount = 0;
         markRemoteAttendanceRecorded(record.eventId, record.studentUid);
+      } else if (result.status == "rejected") {
+        record.synced = false;
+        record.syncRejected = true;
+        record.remoteDuplicate = false;
+        record.syncError = result.message;
+        record.retryCount += 1;
       } else {
         record.synced = false;
+        record.syncRejected = false;
+        record.remoteDuplicate = false;
         record.syncError = result.message;
         record.retryCount += 1;
       }

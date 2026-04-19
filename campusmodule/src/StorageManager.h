@@ -40,6 +40,8 @@ class StorageManager {
   std::vector<StudentInfo> loadFingerprintMappings() const;
   bool upsertFingerprintMapping(const StudentInfo &student);
   bool findStudentByTemplate(int templateId, StudentInfo &outStudent) const;
+  FingerprintTemplateOwnership resolveTemplateOwnership(int templateId) const;
+  bool applyCleanupQueueItem(const CleanupQueueItem &item, String &error);
   int nextFreeTemplateId(uint16_t startId, uint16_t endId) const;
   std::vector<StudentInfo> loadUnsyncedEnrollments() const;
   size_t unsyncedEnrollmentCount() const;

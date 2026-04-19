@@ -24,7 +24,7 @@ class DisplayManager {
                              int total);
   void showStudent(const StudentInfo &student, int index, int total);
   void showAttendancePrompt(const EventInfo &event, size_t unsyncedCount);
- void showSyncProgress(size_t current, size_t total);
+  void showSyncProgress(size_t current, size_t total);
 
  private:
   String center(const String &value) const;

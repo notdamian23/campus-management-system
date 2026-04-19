@@ -93,6 +93,7 @@ struct AttendanceRecord {
   String attendanceStatus;
   String source = "portable-device";
   bool synced = false;
+  bool syncRejected = false;
   bool remoteDuplicate = false;
   String syncError;
   uint32_t retryCount = 0;
@@ -109,6 +110,34 @@ struct AttendanceRecord {
 struct SyncItemResult {
   String recordId;
   String status;
+  String message;
+};
+
+enum class FingerprintOwnershipState : uint8_t {
+  None,
+  Unique,
+  Duplicate,
+};
+
+struct FingerprintTemplateOwnership {
+  FingerprintOwnershipState state = FingerprintOwnershipState::None;
+  StudentInfo student;
+  size_t activeOwners = 0;
+  size_t totalMatches = 0;
+};
+
+struct CleanupQueueItem {
+  String cleanupId;
+  String type;
+  int templateId = -1;
+  String studentUid;
+  String schoolId;
+  String reason;
+};
+
+struct CleanupQueueResult {
+  String cleanupId;
+  bool processed = false;
   String message;
 };
 

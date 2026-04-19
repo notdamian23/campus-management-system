@@ -242,6 +242,7 @@ AttendanceOutcome AttendanceManager::saveAttendanceAction(
   record.timeSource = timestamp.source;
   record.source = "portable-device";
   record.synced = false;
+  record.syncRejected = false;
   record.remoteDuplicate = false;
   record.syncError = "";
   record.retryCount = 0;

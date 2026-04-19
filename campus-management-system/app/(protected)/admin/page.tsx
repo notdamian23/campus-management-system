@@ -43,7 +43,6 @@ import {
   Users2,
 } from "lucide-react";
 import { ScrollShadow } from "@heroui/scroll-shadow";
-import LogoutButton from "@/components/LogoutButton";
 import BulkStudentImportModal from "@/components/admin/BulkStudentImportModal";
 import {
   CampusDataTable,
@@ -1816,6 +1815,15 @@ export default function AdminDashboardPage() {
       icon: Download,
       onPress: () => setTab("exports"),
     },
+    {
+      id: "fingerprint-cleanup",
+      title: "Fingerprint cleanup",
+      description:
+        "Review stale or duplicate fingerprint mappings and queue safe module cleanup actions.",
+      helper: "Admin only",
+      icon: ShieldAlert,
+      onPress: () => router.push("/admin/fingerprint-cleanup"),
+    },
   ];
 
   const openRoleView = (role: Role) => {
@@ -2085,7 +2093,14 @@ export default function AdminDashboardPage() {
               >
                 Manage users
               </Button>
-              <LogoutButton className="bg-white text-[#7b0000] data-[hover=true]:bg-white/90" />
+              <Button
+                variant="flat"
+                className="bg-white text-[#7b0000] font-semibold data-[hover=true]:bg-white/90"
+                onPress={() => router.push("/admin/fingerprint-cleanup")}
+                startContent={<ShieldAlert size={16} />}
+              >
+                Fingerprint Cleanup
+              </Button>
             </div>
           }
         />
