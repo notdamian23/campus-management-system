@@ -1,8 +1,13 @@
 import type { User } from "firebase/auth";
 import { finalizeVerifiedCampusProfileForCurrentUser } from "@/lib/firebase-functions";
+import {
+  normalizeCampusRole,
+  resolveCampusRoleHome,
+  type CampusCanonicalRole,
+} from "@/lib/campus-role";
 import { formatStudentFullName } from "@/lib/student-name";
 
-export type CampusRole = "teacher" | "student" | "ec" | "ecmember" | "admin";
+export type CampusRole = CampusCanonicalRole;
 
 export type CampusProfileDoc = {
   role?: string;
@@ -125,11 +130,7 @@ export function resolveCampusVerificationEmailTarget(
 }
 
 export function resolveRoleHome(role?: string) {
-  if (role === "teacher") return "/teacher";
-  if (role === "student") return "/student";
-  if (role === "ec" || role === "ecmember") return "/ecmember";
-  if (role === "admin") return "/admin";
-  return "/";
+  return resolveCampusRoleHome(role);
 }
 
 export function needsPasswordChange(profile: CampusProfileDoc) {
@@ -163,9 +164,10 @@ export function setCampusCookies({
 }: CampusCookieState) {
   if (typeof document === "undefined") return;
 
+  const normalizedRole = normalizeCampusRole(role);
   const maxAge = 60 * 60 * 24 * 7;
   document.cookie = `campus_logged_in=1; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
-  document.cookie = `campus_role=${role}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  document.cookie = `campus_role=${normalizedRole}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
   document.cookie = `campus_must_change=${mustChangePassword ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
   document.cookie = `campus_email_pending=${emailVerificationPending ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
 }

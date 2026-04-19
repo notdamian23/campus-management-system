@@ -1,6 +1,7 @@
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { app } from "@/lib/firebase";
 import type { CampusProfileDoc } from "@/lib/campus-auth";
+import { normalizeCampusRole } from "@/lib/campus-role";
 import { createCampusLogger } from "@/lib/campus-logger";
 import type { BulkStudentImportInputSchema } from "@/lib/bulkStudentImport";
 
@@ -153,7 +154,13 @@ export async function getCurrentCampusProfileForCurrentUser(): Promise<CampusPro
   );
 
   const result = await callable({});
-  const profile = result.data?.profile ?? null;
+  const profile =
+    result.data?.profile ?
+      {
+        ...result.data.profile,
+        role: normalizeCampusRole(result.data.profile.role) || result.data.profile.role,
+      } :
+      null;
 
   logAuthEvent("info", "Loaded current CAMPUS profile", {
     hasProfile: Boolean(profile),

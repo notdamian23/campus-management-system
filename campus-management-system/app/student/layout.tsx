@@ -15,6 +15,7 @@ import {
   type CampusProfileDoc,
   getOnboardingRedirect,
 } from "@/lib/campus-auth";
+import { normalizeCampusRole } from "@/lib/campus-role";
 
 export default function StudentLayout({ children }: { children: ReactNode }) {
   return (
@@ -47,24 +48,19 @@ function StudentLayoutShell({ children }: { children: ReactNode }) {
         }
 
         const profile = snap.data() as CampusProfileDoc;
+        const role = normalizeCampusRole(profile.role);
         const onboardingRedirect = getOnboardingRedirect(profile);
         if (onboardingRedirect) {
           router.replace(onboardingRedirect);
           return;
         }
 
-        if (
-          profile.role !== "student" &&
-          profile.role !== "ec" &&
-          profile.role !== "ecmember"
-        ) {
+        if (role !== "student" && role !== "ecmember") {
           router.replace("/login");
           return;
         }
 
-        setCanSwitchToEc(
-          profile.role === "ec" || profile.role === "ecmember",
-        );
+        setCanSwitchToEc(role === "ecmember");
         setAuthorized(true);
       } catch {
         router.replace("/login");

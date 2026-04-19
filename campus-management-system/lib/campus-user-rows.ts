@@ -1,4 +1,8 @@
 import { resolveCampusProfileName } from "@/lib/campus-auth";
+import {
+  normalizeCampusRole,
+  type CampusCanonicalRole,
+} from "@/lib/campus-role";
 import { resolveCourseLabelFromCode } from "@/lib/courseOptions";
 import {
   getAssignedCourseCode,
@@ -13,7 +17,7 @@ import {
   resolveStudentRawFullName,
 } from "@/lib/student-name";
 
-export type CampusNormalizedRole = "admin" | "ec" | "teacher" | "student";
+export type CampusNormalizedRole = CampusCanonicalRole;
 export type CampusAccountStatus = "Active" | "Inactive";
 export type CampusFingerprintStatus = "Active" | "Inactive";
 
@@ -117,16 +121,11 @@ function normalizeLower(value: unknown) {
 }
 
 function normalizeRole(value: unknown): CampusNormalizedRole {
-  const role = normalizeLower(value);
-  if (role === "admin") return "admin";
-  if (role === "teacher") return "teacher";
-  if (role === "ec" || role === "ecmember") return "ec";
-  return "student";
+  return normalizeCampusRole(value) || "student";
 }
 
 export function toStoredCampusRole(value: unknown) {
-  const normalizedRole = normalizeRole(value);
-  return normalizedRole === "ec" ? "ecmember" : normalizedRole;
+  return normalizeRole(value);
 }
 
 function normalizeAccountStatus(value: unknown): CampusAccountStatus {
@@ -231,7 +230,7 @@ export function normalizeCampusUserRow(
     }) || missingNameLabel;
   const studentId =
     rawStudentId ||
-    ((role === "student" || role === "ec") && fallbackSchoolIdToStudentId
+    ((role === "student" || role === "ecmember") && fallbackSchoolIdToStudentId
       ? schoolId
       : missingStudentIdLabel);
   const actualCourse =
@@ -243,7 +242,7 @@ export function normalizeCampusUserRow(
     trimValue(projection?.year);
   const assignedCourse = getAssignedCourseCode(profile);
   const derivedEcScope =
-    role === "ec"
+    role === "ecmember"
       ? normalizeECScope(profile?.ecScope) || (isBOD(profile) ? "course" : "all")
       : null;
 
@@ -314,7 +313,7 @@ export function buildCampusProfileUpdatePayload({
   }
 
   const studentPatch =
-    normalizedRole === "student" || normalizedRole === "ec"
+    normalizedRole === "student" || normalizedRole === "ecmember"
       ? {
           schoolId: normalizedSchoolId,
           name: normalizedName,

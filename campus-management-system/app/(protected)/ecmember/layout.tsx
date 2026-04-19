@@ -11,6 +11,7 @@ import {
   type CampusProfileDoc,
   getOnboardingRedirect,
 } from "@/lib/campus-auth";
+import { normalizeCampusRole } from "@/lib/campus-role";
 
 type Props = {
   children: ReactNode;
@@ -77,6 +78,7 @@ export default function ECLayout({ children }: Props) {
       }
 
       const data = snap.data() as CampusProfileDoc;
+      const role = normalizeCampusRole(data.role);
       const onboardingRedirect = getOnboardingRedirect(data);
       if (onboardingRedirect) {
         router.replace(onboardingRedirect);
@@ -84,13 +86,9 @@ export default function ECLayout({ children }: Props) {
       }
 
       const canOpenStudentLookupAsAdmin =
-        data.role === "admin" && pathname === "/ecmember/students";
+        role === "admin" && pathname === "/ecmember/students";
 
-      if (
-        data.role !== "ec" &&
-        data.role !== "ecmember" &&
-        !canOpenStudentLookupAsAdmin
-      ) {
+      if (role !== "ecmember" && !canOpenStudentLookupAsAdmin) {
         router.replace("/login");
         return;
       }

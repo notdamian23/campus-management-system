@@ -76,6 +76,7 @@ import {
   type CampusProfileDoc,
   getOnboardingRedirect,
 } from "@/lib/campus-auth";
+import { normalizeCampusRole } from "@/lib/campus-role";
 import {
   buildCampusProfileUpdatePayload,
   normalizeCampusUserRow,
@@ -107,7 +108,7 @@ import {
 } from "@/lib/firebase-functions";
 import { formatStudentFullName } from "@/lib/student-name";
 
-const roleOptions = ["student", "teacher", "ec", "admin"] as const;
+const roleOptions = ["student", "teacher", "ecmember", "admin"] as const;
 const yearOptions = [
   "1st Year",
   "2nd Year",
@@ -195,7 +196,7 @@ const roleCards = [
     route: "/admin",
   },
   {
-    key: "ec" as Role,
+    key: "ecmember" as Role,
     role: "EC Member",
     summary: "Runs student operations, events, payments, and docs.",
     route: "/ecmember",
@@ -431,21 +432,21 @@ function buildDuplicateSchoolIdAuditCsv(
 }
 
 function formatRole(role: Role) {
-  return role === "ec"
+  return role === "ecmember"
     ? "EC Member"
     : `${role.charAt(0).toUpperCase()}${role.slice(1)}`;
 }
 
 function roleColor(role: Role): "danger" | "warning" | "primary" | "success" {
   if (role === "admin") return "danger";
-  if (role === "ec") return "warning";
+  if (role === "ecmember") return "warning";
   if (role === "teacher") return "primary";
   return "success";
 }
 
 function roleRank(role: Role) {
   if (role === "admin") return 0;
-  if (role === "ec") return 1;
+  if (role === "ecmember") return 1;
   if (role === "teacher") return 2;
   return 3;
 }
@@ -461,7 +462,7 @@ function buildECProfileFields(
   ecPosition: string,
   assignedCourse: string,
 ) {
-  if (role !== "ec") {
+  if (role !== "ecmember") {
     return {
       ecPosition: null,
       ecScope: null,
@@ -500,7 +501,7 @@ function hasEmail(profile: Pick<CampusUserRow, "email">) {
 
 function getRoleDescription(role: Role) {
   if (role === "admin") return "Full control over users, logs, and exports.";
-  if (role === "ec")
+  if (role === "ecmember")
     return "Manages student operations, events, payments, and documents.";
   if (role === "teacher")
     return "Reviews classroom-facing activity and attendance data.";
@@ -752,7 +753,7 @@ export default function AdminDashboardPage() {
         const onboardingRedirect = getOnboardingRedirect(profile);
         if (onboardingRedirect) return router.replace(onboardingRedirect);
 
-        if (profile.role !== "admin")
+        if (normalizeCampusRole(profile.role) !== "admin")
           return router.replace("/login");
         setAdminUid(user.uid);
       } catch {
@@ -1036,7 +1037,7 @@ export default function AdminDashboardPage() {
           accumulator[profile.role] += 1;
           return accumulator;
         },
-        { admin: 0, ec: 0, teacher: 0, student: 0 } as Record<Role, number>,
+        { admin: 0, ecmember: 0, teacher: 0, student: 0 } as Record<Role, number>,
       ),
     [profiles],
   );
@@ -1069,7 +1070,7 @@ export default function AdminDashboardPage() {
   const usersWithoutEmailCount = profiles.length - usersWithEmailCount;
   const isStudentCreateRole = newRole === "student";
   const isTeacherCreateRole = newRole === "teacher";
-  const isEcCreateRole = newRole === "ec";
+  const isEcCreateRole = newRole === "ecmember";
   const isNewBodRole = isEcCreateRole && newEcPosition === "B.O.D.";
   const createAccountHelperText = isStudentCreateRole
     ? "Student accounts need a name, course, and year level so roster, preregistration, and payment rules work correctly."
@@ -1423,7 +1424,7 @@ export default function AdminDashboardPage() {
     try {
       setSavingRoleUid(profile.uid);
       const rolePatch =
-        role === "ec"
+        role === "ecmember"
           ? { role: toStoredCampusRole(role) }
           : {
               role: toStoredCampusRole(role),
@@ -1462,7 +1463,7 @@ export default function AdminDashboardPage() {
     const year = newYear.trim();
     const isStudentRole = newRole === "student";
     const isTeacherRole = newRole === "teacher";
-    const isEcRole = newRole === "ec";
+    const isEcRole = newRole === "ecmember";
     const requiresCourse = isStudentRole || isEcRole;
     const requiresYear = isStudentRole || isEcRole;
     const name = isStudentRole
@@ -1635,8 +1636,8 @@ export default function AdminDashboardPage() {
   function requestRoleChange(profile: CampusUserRow, nextRole: Role) {
     if (nextRole === profile.role) return;
 
-    if (nextRole === "ec" && profile.role !== "ec") {
-      openEditProfileModal(profile, "ec");
+    if (nextRole === "ecmember" && profile.role !== "ecmember") {
+      openEditProfileModal(profile, "ecmember");
       campusToast.info({
         title: "Finish EC assignment",
         description:
@@ -1696,14 +1697,14 @@ export default function AdminDashboardPage() {
       profile.yearLevel === "-" ? "" : String(profile.yearLevel ?? "").trim(),
     );
     setEditProfileEcPosition(
-      resolvedRole === "ec"
-        ? ((profile.role === "ec"
+      resolvedRole === "ecmember"
+        ? ((profile.role === "ecmember"
             ? getECPositionSelectionValue(profile.ecPosition)
             : "") as ECPositionOption | "")
         : "",
     );
     setEditProfileBodCourse(
-      resolvedRole === "ec" && profile.role === "ec"
+      resolvedRole === "ecmember" && profile.role === "ecmember"
         ? String(profile.assignedCourse ?? "").trim()
         : "",
     );
@@ -1943,7 +1944,7 @@ export default function AdminDashboardPage() {
       return;
     }
 
-    if (editProfileRole === "ec" && !ecPosition) {
+    if (editProfileRole === "ecmember" && !ecPosition) {
       campusToast.error({
         title: "Missing EC position",
         description: "Choose an EC position before saving this EC member.",
@@ -1952,7 +1953,11 @@ export default function AdminDashboardPage() {
       return;
     }
 
-    if (editProfileRole === "ec" && ecPosition === "B.O.D." && !bodCourse) {
+    if (
+      editProfileRole === "ecmember" &&
+      ecPosition === "B.O.D." &&
+      !bodCourse
+    ) {
       campusToast.error({
         title: "Missing B.O.D. course",
         description: "Choose the handled course before saving this B.O.D. member.",
@@ -2954,7 +2959,7 @@ export default function AdminDashboardPage() {
                                     ? "Student profile"
                                     : profile.role === "teacher"
                                       ? "Teacher profile"
-                                      : profile.role === "ec"
+                                      : profile.role === "ecmember"
                                         ? "EC member profile"
                                         : "Admin profile"}
                                 </p>
@@ -3103,7 +3108,7 @@ export default function AdminDashboardPage() {
                         }
 
                         if (columnKey === "ecPosition")
-                          return profile.role === "ec" ? (
+                          return profile.role === "ecmember" ? (
                             <Chip
                               variant="flat"
                               color={profile.ecPosition ? "warning" : "danger"}
@@ -3118,7 +3123,7 @@ export default function AdminDashboardPage() {
                           );
 
                         if (columnKey === "ecScope")
-                          return profile.role === "ec" ? (
+                          return profile.role === "ecmember" ? (
                             <Chip
                               variant="flat"
                               color={
@@ -3135,7 +3140,7 @@ export default function AdminDashboardPage() {
                           );
 
                         if (columnKey === "assignedCourse")
-                          return profile.role === "ec" ? (
+                          return profile.role === "ecmember" ? (
                             <Chip
                               variant="flat"
                               color={profile.assignedCourse ? "secondary" : "default"}
@@ -3782,7 +3787,7 @@ export default function AdminDashboardPage() {
                       if (typeof selected === "string") {
                         const nextRole = selected as Role;
                         setEditProfileRole(nextRole);
-                        if (nextRole !== "ec") {
+                        if (nextRole !== "ecmember") {
                           setEditProfileEcPosition("");
                           setEditProfileBodCourse("");
                         }
@@ -3848,7 +3853,7 @@ export default function AdminDashboardPage() {
                       <SelectItem key={year}>{year}</SelectItem>
                     ))}
                   </Select>
-                  {editProfileRole === "ec" ? (
+                  {editProfileRole === "ecmember" ? (
                     <>
                       <Select
                         label="EC Position"

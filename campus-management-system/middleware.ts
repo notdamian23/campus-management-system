@@ -1,12 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const ROLE_HOME: Record<string, string> = {
-  teacher: "/teacher",
-  student: "/student",
-  ec: "/ecmember",
-  ecmember: "/ecmember",
-  admin: "/admin",
-};
+import { normalizeCampusRole, resolveCampusRoleHome } from "@/lib/campus-role";
 
 function redirectToLogin(req: NextRequest) {
   const url = req.nextUrl.clone();
@@ -43,7 +36,7 @@ export function middleware(req: NextRequest) {
   }
 
   const loggedIn = req.cookies.get("campus_logged_in")?.value === "1";
-  const role = req.cookies.get("campus_role")?.value;
+  const role = normalizeCampusRole(req.cookies.get("campus_role")?.value);
   const mustChangePassword = req.cookies.get("campus_must_change")?.value === "1";
   const emailVerificationPending =
     req.cookies.get("campus_email_pending")?.value === "1";
@@ -74,42 +67,36 @@ export function middleware(req: NextRequest) {
 
     if (!onboardingRequired && (isChangePasswordRoute || isVerifyPendingRoute)) {
       const url = req.nextUrl.clone();
-      url.pathname = ROLE_HOME[role ?? ""] ?? "/";
+      url.pathname = resolveCampusRoleHome(role);
       return NextResponse.redirect(url);
     }
   }
 
   if (pathname.startsWith("/teacher") && role !== "teacher") {
     const url = req.nextUrl.clone();
-    url.pathname = ROLE_HOME[role ?? ""] ?? "/";
+    url.pathname = resolveCampusRoleHome(role);
     return NextResponse.redirect(url);
   }
 
-  if (
-    pathname.startsWith("/student") &&
-    role !== "student" &&
-    role !== "ec" &&
-    role !== "ecmember"
-  ) {
+  if (pathname.startsWith("/student") && role !== "student" && role !== "ecmember") {
     const url = req.nextUrl.clone();
-    url.pathname = ROLE_HOME[role ?? ""] ?? "/";
+    url.pathname = resolveCampusRoleHome(role);
     return NextResponse.redirect(url);
   }
 
   if (
     pathname.startsWith("/ecmember") &&
-    role !== "ec" &&
     role !== "ecmember" &&
     !(role === "admin" && adminCanUseEcStudentLookup)
   ) {
     const url = req.nextUrl.clone();
-    url.pathname = ROLE_HOME[role ?? ""] ?? "/";
+    url.pathname = resolveCampusRoleHome(role);
     return NextResponse.redirect(url);
   }
 
   if (pathname.startsWith("/admin") && role !== "admin") {
     const url = req.nextUrl.clone();
-    url.pathname = ROLE_HOME[role ?? ""] ?? "/";
+    url.pathname = resolveCampusRoleHome(role);
     return NextResponse.redirect(url);
   }
 

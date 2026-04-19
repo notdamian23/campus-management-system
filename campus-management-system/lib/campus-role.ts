@@ -1,0 +1,43 @@
+export type CampusCanonicalRole = "admin" | "ecmember" | "teacher" | "student";
+
+function trimValue(value: unknown) {
+  return String(value ?? "").trim();
+}
+
+function normalizeLower(value: unknown) {
+  return trimValue(value).toLowerCase();
+}
+
+export function normalizeCampusRole(value: unknown): CampusCanonicalRole | "" {
+  const normalized = normalizeLower(value);
+  if (!normalized) {
+    return "";
+  }
+
+  const compact = normalized.replace(/[^a-z]/g, "");
+  if (compact === "admin") return "admin";
+  if (compact === "teacher") return "teacher";
+  if (compact === "student") return "student";
+  if (
+    compact === "ec" ||
+    compact === "ecmember" ||
+    compact === "ecmemberprofile"
+  ) {
+    return "ecmember";
+  }
+
+  return "";
+}
+
+export function isECMemberCampusRole(value: unknown) {
+  return normalizeCampusRole(value) === "ecmember";
+}
+
+export function resolveCampusRoleHome(value: unknown) {
+  const role = normalizeCampusRole(value);
+  if (role === "teacher") return "/teacher";
+  if (role === "student") return "/student";
+  if (role === "ecmember") return "/ecmember";
+  if (role === "admin") return "/admin";
+  return "/";
+}

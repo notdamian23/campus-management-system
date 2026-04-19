@@ -1,3 +1,5 @@
+import { normalizeCampusRole } from "@/lib/campus-role";
+
 export const PORTABLE_DEVICE_COLLECTIONS = {
   devices: "devices",
   devicePairings: "devicePairings",
@@ -209,10 +211,8 @@ export type PortableDeviceSessionResponse = {
 };
 
 export function isEngineeringCouncilRole(role: unknown): boolean {
-  const value = String(role ?? "")
-    .trim()
-    .toLowerCase();
-  return value === "admin" || value === "ec";
+  const normalizedRole = normalizeCampusRole(role);
+  return normalizedRole === "admin" || normalizedRole === "ecmember";
 }
 
 export function normalizePortableYearLevel(value: unknown): string {

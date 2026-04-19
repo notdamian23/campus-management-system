@@ -11,6 +11,7 @@ import {
   type CampusProfileDoc,
   getOnboardingRedirect,
 } from "@/lib/campus-auth";
+import {normalizeCampusRole} from "@/lib/campus-role";
 
 type Props = {
   children: ReactNode;
@@ -53,7 +54,7 @@ export default function AdminLayout({children}: Props) {
         return;
       }
 
-      if (profile.role !== "admin") {
+      if (normalizeCampusRole(profile.role) !== "admin") {
         router.replace("/login");
         return;
       }

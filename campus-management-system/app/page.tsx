@@ -30,6 +30,7 @@ import {
   resolveRoleHome,
   setCampusCookies,
 } from "@/lib/campus-auth";
+import { normalizeCampusRole } from "@/lib/campus-role";
 import {
   getCurrentCampusProfileForCurrentUser,
   logCampusAuthEvent,
@@ -369,12 +370,8 @@ function LoginForm() {
       }
 
       // Validate role
-      if (
-        data.role !== "teacher" &&
-        data.role !== "student" &&
-        data.role !== "ec" &&
-        data.role !== "admin"
-      ) {
+      const role = normalizeCampusRole(data.role);
+      if (!role) {
         await signOut(auth);
         showLoginToast(
           "Invalid account role",
@@ -382,7 +379,7 @@ function LoginForm() {
         );
         return;
       }
-      const role = data.role;
+      data = { ...data, role };
 
       logCampusAuthEvent("info", "Loaded CAMPUS profile after sign-in", {
         role,

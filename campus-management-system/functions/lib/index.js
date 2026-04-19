@@ -23,9 +23,10 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.studentManagePreRegistration = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminManageFingerprintCleanup = exports.adminBuildFingerprintMappingsFromProfiles = exports.adminListFingerprintCleanupMappings = exports.adminDeleteDuplicateStudentSchoolIds = exports.adminFindDuplicateStudentSchoolIds = exports.adminDeactivateAllStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
+exports.auditEventDeletes = exports.auditEventUpdates = exports.auditEventCreates = exports.auditStudentWrites = exports.studentManagePreRegistration = exports.logPermissionDeniedAttempt = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminManageFingerprintCleanup = exports.adminBuildFingerprintMappingsFromProfiles = exports.adminListFingerprintCleanupMappings = exports.adminDeleteDuplicateStudentSchoolIds = exports.adminFindDuplicateStudentSchoolIds = exports.adminDeactivateAllStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
 const https_1 = require("firebase-functions/v2/https");
+const firestore_1 = require("firebase-functions/v2/firestore");
 const campusLogger_1 = require("./campusLogger");
 if (admin.apps.length === 0) {
     admin.initializeApp();
@@ -49,7 +50,7 @@ function setCorsHeaders(res, origin) {
     }
 }
 const authLogger = (0, campusLogger_1.createCampusLogger)("CAMPUS auth");
-const STUDENT_LOOKUP_PROFILE_ROLES = ["student", "ec", "ecmember"];
+const STUDENT_LOOKUP_PROFILE_ROLES = ["student"];
 const VALID_COURSES = [
     "Computer Engineering",
     "Industrial Engineering",
@@ -63,6 +64,29 @@ const COURSE_ALIASES = {
     bsee: "Electrical Engineering",
     bsme: "Mechanical Engineering",
     bsece: "Electronics Engineering",
+    cpe: "Computer Engineering",
+    ie: "Industrial Engineering",
+    ee: "Electrical Engineering",
+    me: "Mechanical Engineering",
+    ece: "Electronics Engineering",
+};
+const COURSE_CODE_TO_SCOPE = {
+    CPE: "Computer Engineering",
+    IE: "Industrial Engineering",
+    EE: "Electrical Engineering",
+    ME: "Mechanical Engineering",
+    ECE: "Electronics Engineering",
+};
+const COURSE_SCOPE_TO_CODE = Object.entries(COURSE_CODE_TO_SCOPE).reduce((lookup, [code, course]) => {
+    lookup[course] = code;
+    return lookup;
+}, {});
+const BOD_POSITION_TO_COURSE_SCOPE = {
+    "B.O.D. (ME)": "Mechanical Engineering",
+    "B.O.D. (EE)": "Electrical Engineering",
+    "B.O.D. (IE)": "Industrial Engineering",
+    "B.O.D. (CPE)": "Computer Engineering",
+    "B.O.D. (ECE)": "Electronics Engineering",
 };
 function isValidCourse(value) {
     return VALID_COURSES.includes(value);
@@ -135,6 +159,100 @@ function normalizeCourseLabel(value) {
     }
     const aliasKey = normalized.toLowerCase().replace(/[\s.-]+/g, "");
     return (_a = COURSE_ALIASES[aliasKey]) !== null && _a !== void 0 ? _a : "";
+}
+function normalizeAssignedCourseCode(value) {
+    var _a;
+    const normalized = normalizeText(value).toUpperCase();
+    if (normalized && COURSE_CODE_TO_SCOPE[normalized]) {
+        return normalized;
+    }
+    const normalizedCourse = normalizeCourseLabel(value);
+    return normalizedCourse ? ((_a = COURSE_SCOPE_TO_CODE[normalizedCourse]) !== null && _a !== void 0 ? _a : "") : "";
+}
+function normalizeCampusRoleValue(value) {
+    const normalized = normalizeLower(value);
+    if (!normalized) {
+        return "";
+    }
+    const compact = normalized.replace(/[^a-z]/g, "");
+    if (compact === "admin")
+        return "admin";
+    if (compact === "teacher")
+        return "teacher";
+    if (compact === "student")
+        return "student";
+    if (compact === "ec" || compact === "ecmember" || compact === "ecmemberprofile") {
+        return "ecmember";
+    }
+    return "";
+}
+function isECMemberRole(value) {
+    return normalizeCampusRoleValue(value) === "ecmember";
+}
+function normalizeECPosition(value) {
+    const position = normalizeText(value);
+    if (!position) {
+        return "";
+    }
+    const exact = Object.keys(BOD_POSITION_TO_COURSE_SCOPE).find((item) => normalizeLower(item) === normalizeLower(position));
+    return exact !== null && exact !== void 0 ? exact : position;
+}
+function inferCourseScopeFromPosition(value) {
+    var _a;
+    const normalizedPosition = normalizeECPosition(value);
+    return (_a = BOD_POSITION_TO_COURSE_SCOPE[normalizedPosition]) !== null && _a !== void 0 ? _a : "";
+}
+function extractAssignedCourseFromPosition(value) {
+    const match = normalizeText(value).match(/^B\.O\.D\.\s*\(([A-Za-z]+)\)$/i);
+    if (!match) {
+        return "";
+    }
+    return normalizeAssignedCourseCode(match[1]);
+}
+function normalizeEcScope(value) {
+    const normalized = normalizeLower(value);
+    if (normalized === "all")
+        return "all";
+    if (normalized === "course")
+        return "course";
+    return "";
+}
+function resolveAssignedCourseCode(data) {
+    return (normalizeAssignedCourseCode(data.assignedCourse) ||
+        extractAssignedCourseFromPosition(data.ecPosition) ||
+        normalizeAssignedCourseCode(data.courseScope));
+}
+function resolveProfileEcScope(data) {
+    if (!isECMemberRole(data.role)) {
+        return "";
+    }
+    const explicitScope = normalizeEcScope(data.ecScope);
+    if (explicitScope) {
+        return explicitScope;
+    }
+    return resolveAssignedCourseCode(data) ? "course" : "all";
+}
+function resolveProfileCourseScope(data) {
+    var _a;
+    const assignedCourseCode = resolveAssignedCourseCode(data);
+    if (resolveProfileEcScope(data) === "course" && assignedCourseCode) {
+        return (_a = COURSE_CODE_TO_SCOPE[assignedCourseCode]) !== null && _a !== void 0 ? _a : "";
+    }
+    if (resolveProfileEcScope(data) === "all") {
+        return "";
+    }
+    return (normalizeCourseLabel(data.courseScope) ||
+        inferCourseScopeFromPosition(data.ecPosition));
+}
+function isBodProfileData(data) {
+    const explicitEcScope = normalizeEcScope(data.ecScope);
+    if (!isECMemberRole(data.role) || explicitEcScope === "all") {
+        return false;
+    }
+    return isECMemberRole(data.role) &&
+        (resolveProfileEcScope(data) === "course" ||
+            data.isBod === true ||
+            Boolean(inferCourseScopeFromPosition(data.ecPosition)));
 }
 function isValidEmailAddress(value) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
@@ -917,7 +1035,7 @@ function optionalBoolean(value) {
 }
 function buildCampusProfilePayload(data) {
     return {
-        role: optionalText(data.role),
+        role: normalizeCampusRoleValue(data.role) || optionalText(data.role),
         schoolId: optionalText(data.schoolId),
         email: optionalText(data.email),
         pendingEmail: data.pendingEmail === null ? null : normalizeText(data.pendingEmail) || null,
@@ -934,9 +1052,20 @@ function buildCampusProfilePayload(data) {
         firstName: optionalText(data.firstName),
         lastName: optionalText(data.lastName),
         course: optionalText(data.course),
+        ecScope: data.ecScope === null ?
+            null :
+            (resolveProfileEcScope(data) || null),
+        assignedCourse: data.assignedCourse === null ?
+            null :
+            (resolveProfileEcScope(data) === "course" ?
+                (resolveAssignedCourseCode(data) || null) :
+                null),
+        courseScope: data.courseScope === null ? null : optionalText(data.courseScope) || null,
         year: optionalText(data.year) || optionalText(data.yearLevel),
         yearLevel: optionalText(data.yearLevel) || optionalText(data.year),
         readyForClearance: optionalBoolean(data.readyForClearance),
+        ecPosition: optionalText(data.ecPosition),
+        isBod: optionalBoolean(data.isBod),
     };
 }
 function asRecord(value) {
@@ -1109,6 +1238,14 @@ async function callerRole(context) {
         String((_b = (_a = callerProfileSnap.data()) === null || _a === void 0 ? void 0 : _a.role) !== null && _b !== void 0 ? _b : "") :
         "";
 }
+async function callerProfileData(context) {
+    var _a;
+    if (!context.auth) {
+        throw new https_1.HttpsError("unauthenticated", "Login required.");
+    }
+    const callerProfileSnap = await db.doc(`profiles/${context.auth.uid}`).get();
+    return callerProfileSnap.exists ? ((_a = callerProfileSnap.data()) !== null && _a !== void 0 ? _a : {}) : {};
+}
 async function requireAdmin(context) {
     const role = await callerRole(context);
     if (role !== "admin") {
@@ -1117,23 +1254,103 @@ async function requireAdmin(context) {
 }
 async function requireAdminOrEC(context) {
     const role = await callerRole(context);
-    if (role !== "admin" && role !== "ec") {
+    if (role !== "admin" && !isECMemberRole(role)) {
         throw new https_1.HttpsError("permission-denied", "EC/Admin only.");
     }
 }
+function ensureBodCourseScopeAccess(actorProfile, targetCourse, message) {
+    if (!isBodProfileData(actorProfile)) {
+        return;
+    }
+    const actorCourseScope = resolveProfileCourseScope(actorProfile);
+    const normalizedTargetCourse = normalizeCourseLabel(targetCourse);
+    if (!actorCourseScope || actorCourseScope !== normalizedTargetCourse) {
+        throw new https_1.HttpsError("permission-denied", message);
+    }
+}
+function resolveProfileDisplayName(data) {
+    return (normalizeText(data.name) ||
+        normalizeText(data.fullName) ||
+        normalizeText(data.studentName) ||
+        normalizeText(data.teacherName) ||
+        buildStudentFullName(data.firstName, data.lastName) ||
+        normalizeText(data.schoolId) ||
+        "Unknown User");
+}
+function resolveActorPosition(data) {
+    if (isECMemberRole(data.role)) {
+        return normalizeECPosition(data.ecPosition) || "EC Member";
+    }
+    const normalizedRole = normalizeText(data.role);
+    if (!normalizedRole) {
+        return "";
+    }
+    return normalizedRole[0].toUpperCase() + normalizedRole.slice(1);
+}
+async function writeStructuredAuditLog(input) {
+    var _a, _b;
+    const actorUid = normalizeText(input.actorUid);
+    const actorProfile = actorUid ?
+        ((_a = (await db.doc(`profiles/${actorUid}`).get()).data()) !== null && _a !== void 0 ? _a : {}) :
+        {};
+    await db.collection("logs").add({
+        actorUid: actorUid || null,
+        actorName: resolveProfileDisplayName(actorProfile),
+        actorPosition: resolveActorPosition(actorProfile),
+        actorCourseScope: resolveProfileCourseScope(actorProfile) || null,
+        targetType: input.targetType,
+        targetId: input.targetId,
+        action: input.action,
+        metadata: (_b = input.metadata) !== null && _b !== void 0 ? _b : {},
+        createdAt: serverTimestamp(),
+    });
+}
+function shouldSkipAuthContextAudit(event) {
+    if (!normalizeText(event.authId)) {
+        return true;
+    }
+    const authType = normalizeLower(event.authType);
+    return authType === "service_account" ||
+        authType === "system" ||
+        authType === "unauthenticated";
+}
 exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request) => {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     await requireAdmin(request);
     const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
     const schoolIdKey = normalizeSchoolIdKey(schoolId);
-    const role = normalizeText(body.role);
+    const role = normalizeCampusRoleValue(body.role);
     const emailRaw = normalizeText(body.email);
     const name = normalizeText(body.name) ||
         normalizeText(body.teacherName) ||
         normalizeText(body.studentName);
+    const requestedEcPosition = normalizeECPosition(body.ecPosition);
+    const requestedEcScope = normalizeEcScope(body.ecScope);
+    const requestedAssignedCourse = normalizeAssignedCourseCode(body.assignedCourse);
+    const inferredCourseScope = inferCourseScopeFromPosition(requestedEcPosition);
+    const inferredAssignedCourse = extractAssignedCourseFromPosition(requestedEcPosition);
+    const bodAssignedCourse = requestedAssignedCourse || inferredAssignedCourse;
+    const isBod = role === "ecmember" &&
+        (requestedEcScope === "course" ||
+            requestedEcPosition === "B.O.D." ||
+            Boolean(inferredCourseScope) ||
+            Boolean(bodAssignedCourse));
+    const ecPosition = role !== "ecmember" ?
+        "" :
+        isBod ?
+            (bodAssignedCourse ? `B.O.D. (${bodAssignedCourse})` : "B.O.D.") :
+            requestedEcPosition;
+    const ecScope = role !== "ecmember" ?
+        "" :
+        isBod ?
+            "course" :
+            "all";
+    const courseScope = isBod && bodAssignedCourse ?
+        ((_a = COURSE_CODE_TO_SCOPE[bodAssignedCourse]) !== null && _a !== void 0 ? _a : "") :
+        "";
     const course = normalizeText(body.course);
-    const yearSource = (_a = body.yearLevel) !== null && _a !== void 0 ? _a : body.year;
+    const yearSource = (_b = body.yearLevel) !== null && _b !== void 0 ? _b : body.year;
     const yearRaw = normalizeText(yearSource);
     const year = normalizeYear(yearSource);
     if (emailRaw && !isValidEmailAddress(emailRaw)) {
@@ -1142,7 +1359,7 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
     if (!schoolId) {
         throw new https_1.HttpsError("invalid-argument", "School ID is required.");
     }
-    if (!["admin", "ec", "teacher", "student"].includes(role)) {
+    if (!["admin", "ecmember", "teacher", "student"].includes(role)) {
         throw new https_1.HttpsError("invalid-argument", "Invalid role.");
     }
     if (role === "teacher" && !name) {
@@ -1151,14 +1368,20 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
     if (role === "student" && !name) {
         throw new https_1.HttpsError("invalid-argument", "name is required for student role.");
     }
-    if (role === "ec" && !name) {
+    if (role === "ecmember" && !name) {
         throw new https_1.HttpsError("invalid-argument", "name is required for ec role.");
     }
-    if ((role === "student" || role === "ec") && !course) {
+    if ((role === "student" || role === "ecmember") && !course) {
         throw new https_1.HttpsError("invalid-argument", "course is required for student and ec roles.");
     }
-    if ((role === "student" || role === "ec") && !yearRaw) {
+    if ((role === "student" || role === "ecmember") && !yearRaw) {
         throw new https_1.HttpsError("invalid-argument", "yearLevel is required for student and ec roles.");
+    }
+    if (role === "ecmember" && !ecPosition) {
+        throw new https_1.HttpsError("invalid-argument", "ecPosition is required for EC member accounts.");
+    }
+    if (isBod && !bodAssignedCourse) {
+        throw new https_1.HttpsError("invalid-argument", "assignedCourse is required for B.O.D. accounts.");
     }
     // School ID login still resolves through Firebase Auth email, so we can
     // safely use a real contact email here when one is provided.
@@ -1197,6 +1420,11 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
             schoolIdKey,
             email,
             role,
+            ecPosition: role === "ecmember" ? ecPosition : "",
+            ecScope: role === "ecmember" ? ecScope : null,
+            assignedCourse: role === "ecmember" ? (bodAssignedCourse || null) : null,
+            courseScope: role === "ecmember" ? (courseScope || null) : null,
+            isBod: role === "ecmember" ? isBod : false,
             course: course || "",
             year: year || "",
             yearLevel: year || "",
@@ -1259,7 +1487,7 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
         }
         await db.collection("logs").add({
             action: "admin_create_user",
-            actorUid: normalizeText((_b = request.auth) === null || _b === void 0 ? void 0 : _b.uid),
+            actorUid: normalizeText((_c = request.auth) === null || _c === void 0 ? void 0 : _c.uid),
             targetUid: uid,
             targetSchoolId: schoolId,
             createdAt: timestamp,
@@ -1284,8 +1512,8 @@ exports.adminCreateUser = (0, https_1.onCall)({ region: REGION }, async (request
         authLogger.warn("adminCreateUser failed", {
             role,
             schoolId,
-            code: (_c = authError.code) !== null && _c !== void 0 ? _c : "unknown",
-            message: (_d = authError.message) !== null && _d !== void 0 ? _d : "Unknown account creation failure",
+            code: (_d = authError.code) !== null && _d !== void 0 ? _d : "unknown",
+            message: (_e = authError.message) !== null && _e !== void 0 ? _e : "Unknown account creation failure",
         });
         if (isHttpsErrorCode(error, "already-exists")) {
             throw schoolIdAlreadyExistsError(authError.message || "School ID already exists.");
@@ -2263,6 +2491,9 @@ exports.adminManageFingerprintCleanup = (0, https_1.onCall)({ region: REGION }, 
 });
 exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request) => {
     await requireAdminOrEC(request);
+    const actorProfile = await callerProfileData(request);
+    const actorCourseScope = resolveProfileCourseScope(actorProfile);
+    const actorIsBod = isBodProfileData(actorProfile);
     const body = asRecord(request.data);
     const rawLimit = Number.parseInt(normalizeText(body.limit), 10);
     const limit = Number.isFinite(rawLimit) ?
@@ -2330,13 +2561,23 @@ exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request)
                 "Active",
             email: normalizeText(profileData.email),
             createdAtMs: toMillis((_j = profileData.createdAt) !== null && _j !== void 0 ? _j : studentData.createdAt),
+            ecPosition: normalizeECPosition(profileData.ecPosition),
+            courseScope: resolveProfileCourseScope(profileData) || null,
+            isBod: isBodProfileData(profileData),
         };
+    }).filter((student) => {
+        if (!actorIsBod) {
+            return true;
+        }
+        return Boolean(actorCourseScope &&
+            normalizeCourseLabel(student.course) === actorCourseScope);
     });
     return { students };
 });
 exports.ecCreateStudent = (0, https_1.onCall)({ region: REGION }, async (request) => {
     var _a;
     await requireAdminOrEC(request);
+    const actorProfile = await callerProfileData(request);
     const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
     const schoolIdKey = normalizeSchoolIdKey(schoolId);
@@ -2358,6 +2599,7 @@ exports.ecCreateStudent = (0, https_1.onCall)({ region: REGION }, async (request
     if (!course) {
         throw new https_1.HttpsError("invalid-argument", "Course is required.");
     }
+    ensureBodCourseScopeAccess(actorProfile, course, "B.O.D. members can only create students inside their own course scope.");
     if (!yearRaw) {
         throw new https_1.HttpsError("invalid-argument", "Year is required.");
     }
@@ -2505,6 +2747,14 @@ exports.getCurrentCampusProfile = (0, https_1.onCall)({ region: REGION }, async 
         throw new https_1.HttpsError("not-found", "Your CAMPUS profile could not be found.");
     }
     const profileData = (_a = profileSnap.data()) !== null && _a !== void 0 ? _a : {};
+    const normalizedRole = normalizeCampusRoleValue(profileData.role);
+    if (normalizedRole && normalizeText(profileData.role) !== normalizedRole) {
+        await profileRef.set({
+            role: normalizedRole,
+            updatedAt: serverTimestamp(),
+        }, { merge: true });
+        profileData.role = normalizedRole;
+    }
     try {
         const authUser = await admin.auth().getUser(uid);
         const authEmail = normalizeLower(authUser.email);
@@ -2644,6 +2894,27 @@ exports.adminUpsertPortableDevice = (0, https_1.onCall)({ region: REGION }, asyn
     }, { merge: true });
     return { deviceId, enabled };
 });
+exports.logPermissionDeniedAttempt = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    if (!request.auth) {
+        throw new https_1.HttpsError("unauthenticated", "Login required.");
+    }
+    const body = asRecord(request.data);
+    const targetType = normalizeText(body.targetType) || "unknown";
+    const targetId = normalizeText(body.targetId) || "unknown";
+    const attemptedAction = normalizeText(body.action) || "unknown";
+    const reason = normalizeText(body.reason) || "permission-denied";
+    await writeStructuredAuditLog({
+        actorUid: request.auth.uid,
+        action: "permission_denied_attempt",
+        targetType,
+        targetId,
+        metadata: {
+            attemptedAction,
+            reason,
+        },
+    });
+    return { ok: true };
+});
 exports.studentManagePreRegistration = (0, https_1.onCall)({ region: REGION }, async (request) => {
     if (!request.auth) {
         throw new https_1.HttpsError("unauthenticated", "Login required.");
@@ -2726,7 +2997,8 @@ exports.studentManagePreRegistration = (0, https_1.onCall)({ region: REGION }, a
         if (!matchesSpecificStudentTarget(eventData.targetStudent, schoolId, studentName)) {
             throw new https_1.HttpsError("permission-denied", "You are not part of the allowed audience for this event.");
         }
-        const requiredPaymentId = normalizeText(eventData.linkedPaymentId) || normalizeText(eventData.requiredPaymentId);
+        const requiredPaymentId = normalizeText(eventData.linkedPaymentId) ||
+            normalizeText(eventData.requiredPaymentId);
         if (eventData.withPayment === true || eventData.paymentRequired === true) {
             if (!requiredPaymentId) {
                 throw new https_1.HttpsError("failed-precondition", "This event requires a linked payment before registration.");
@@ -2914,6 +3186,95 @@ exports.studentManagePreRegistration = (0, https_1.onCall)({ region: REGION }, a
         };
     });
     return result;
+});
+exports.auditStudentWrites = (0, firestore_1.onDocumentUpdatedWithAuthContext)({ region: REGION, document: "students/{studentId}" }, async (event) => {
+    var _a, _b, _c, _d;
+    if (shouldSkipAuthContextAudit(event)) {
+        return;
+    }
+    const beforeData = (_b = (_a = event.data) === null || _a === void 0 ? void 0 : _a.before.data()) !== null && _b !== void 0 ? _b : {};
+    const afterData = (_d = (_c = event.data) === null || _c === void 0 ? void 0 : _c.after.data()) !== null && _d !== void 0 ? _d : {};
+    const studentId = normalizeText(event.params.studentId);
+    const actorUid = normalizeText(event.authId);
+    const readyBefore = beforeData.readyForClearance === true;
+    const readyAfter = afterData.readyForClearance === true;
+    if (!readyBefore && readyAfter) {
+        await writeStructuredAuditLog({
+            actorUid,
+            action: "student_marked_ready_for_clearance",
+            targetType: "student",
+            targetId: studentId,
+        });
+    }
+    const editedKeys = [
+        "schoolId",
+        "studentName",
+        "name",
+        "fullName",
+        "course",
+        "year",
+        "yearLevel",
+        "status",
+    ].filter((key) => JSON.stringify(beforeData[key]) !== JSON.stringify(afterData[key]));
+    if (editedKeys.length > 0) {
+        await writeStructuredAuditLog({
+            actorUid,
+            action: "student_edited",
+            targetType: "student",
+            targetId: studentId,
+            metadata: {
+                editedKeys,
+            },
+        });
+    }
+});
+exports.auditEventCreates = (0, firestore_1.onDocumentCreatedWithAuthContext)({ region: REGION, document: "events/{eventId}" }, async (event) => {
+    var _a, _b, _c, _d;
+    if (shouldSkipAuthContextAudit(event)) {
+        return;
+    }
+    await writeStructuredAuditLog({
+        actorUid: event.authId,
+        action: "event_created",
+        targetType: "event",
+        targetId: normalizeText(event.params.eventId),
+        metadata: {
+            ownerType: normalizeText((_b = (_a = event.data) === null || _a === void 0 ? void 0 : _a.data()) === null || _b === void 0 ? void 0 : _b.ownerType),
+            courseScope: normalizeCourseLabel((_d = (_c = event.data) === null || _c === void 0 ? void 0 : _c.data()) === null || _d === void 0 ? void 0 : _d.courseScope) || null,
+        },
+    });
+});
+exports.auditEventUpdates = (0, firestore_1.onDocumentUpdatedWithAuthContext)({ region: REGION, document: "events/{eventId}" }, async (event) => {
+    var _a, _b, _c, _d;
+    if (shouldSkipAuthContextAudit(event)) {
+        return;
+    }
+    await writeStructuredAuditLog({
+        actorUid: event.authId,
+        action: "event_edited",
+        targetType: "event",
+        targetId: normalizeText(event.params.eventId),
+        metadata: {
+            ownerType: normalizeText((_b = (_a = event.data) === null || _a === void 0 ? void 0 : _a.after.data()) === null || _b === void 0 ? void 0 : _b.ownerType),
+            courseScope: normalizeCourseLabel((_d = (_c = event.data) === null || _c === void 0 ? void 0 : _c.after.data()) === null || _d === void 0 ? void 0 : _d.courseScope) || null,
+        },
+    });
+});
+exports.auditEventDeletes = (0, firestore_1.onDocumentDeletedWithAuthContext)({ region: REGION, document: "events/{eventId}" }, async (event) => {
+    var _a, _b, _c, _d;
+    if (shouldSkipAuthContextAudit(event)) {
+        return;
+    }
+    await writeStructuredAuditLog({
+        actorUid: event.authId,
+        action: "event_deleted",
+        targetType: "event",
+        targetId: normalizeText(event.params.eventId),
+        metadata: {
+            ownerType: normalizeText((_b = (_a = event.data) === null || _a === void 0 ? void 0 : _a.data()) === null || _b === void 0 ? void 0 : _b.ownerType),
+            courseScope: normalizeCourseLabel((_d = (_c = event.data) === null || _c === void 0 ? void 0 : _c.data()) === null || _d === void 0 ? void 0 : _d.courseScope) || null,
+        },
+    });
 });
 // Portable device HTTP endpoints now live exclusively in the
 // `portable-device-functions` codebase. Keeping them out of the default

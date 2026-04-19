@@ -172,8 +172,6 @@ function setCorsHeaders(res: any, origin: string) {
 }
 
 const authLogger = createCampusLogger("CAMPUS auth");
-
-type Role = "admin" | "ec" | "ecmember" | "teacher" | "student";
 type CallableAuthContext = {
   auth?: CallableRequest<Record<string, unknown>>["auth"];
 };
@@ -350,9 +348,27 @@ function normalizeAssignedCourseCode(value: unknown): string {
   return normalizedCourse ? (COURSE_SCOPE_TO_CODE[normalizedCourse] ?? "") : "";
 }
 
-function isECMemberRole(value: unknown): boolean {
+function normalizeCampusRoleValue(
+  value: unknown
+): "admin" | "ecmember" | "teacher" | "student" | "" {
   const normalized = normalizeLower(value);
-  return normalized === "ec" || normalized === "ecmember";
+  if (!normalized) {
+    return "";
+  }
+
+  const compact = normalized.replace(/[^a-z]/g, "");
+  if (compact === "admin") return "admin";
+  if (compact === "teacher") return "teacher";
+  if (compact === "student") return "student";
+  if (compact === "ec" || compact === "ecmember" || compact === "ecmemberprofile") {
+    return "ecmember";
+  }
+
+  return "";
+}
+
+function isECMemberRole(value: unknown): boolean {
+  return normalizeCampusRoleValue(value) === "ecmember";
 }
 
 function normalizeECPosition(value: unknown): string {
@@ -439,10 +455,6 @@ function isBodProfileData(data: FirebaseFirestore.DocumentData): boolean {
       data.isBod === true ||
       Boolean(inferCourseScopeFromPosition(data.ecPosition))
     );
-}
-
-function isRegularECProfileData(data: FirebaseFirestore.DocumentData): boolean {
-  return isECMemberRole(data.role) && !isBodProfileData(data);
 }
 
 function isValidEmailAddress(value: string): boolean {
@@ -1510,7 +1522,7 @@ function buildCampusProfilePayload(
   data: FirebaseFirestore.DocumentData
 ): CampusProfilePayload {
   return {
-    role: optionalText(data.role),
+    role: normalizeCampusRoleValue(data.role) || optionalText(data.role),
     schoolId: optionalText(data.schoolId),
     email: optionalText(data.email),
     pendingEmail:
@@ -1890,8 +1902,7 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
     const body = asRecord(request.data);
     const schoolId = normalizeText(body.schoolId);
     const schoolIdKey = normalizeSchoolIdKey(schoolId);
-    const requestedRole = normalizeText(body.role) as Role;
-    const role = requestedRole === "ec" ? "ecmember" : requestedRole;
+    const role = normalizeCampusRoleValue(body.role);
     const emailRaw = normalizeText(body.email);
     const name =
       normalizeText(body.name) ||
@@ -3766,6 +3777,18 @@ export const getCurrentCampusProfile = onCall({region: REGION}, async (request) 
     }
 
     const profileData = profileSnap.data() ?? {};
+    const normalizedRole = normalizeCampusRoleValue(profileData.role);
+
+    if (normalizedRole && normalizeText(profileData.role) !== normalizedRole) {
+      await profileRef.set(
+        {
+          role: normalizedRole,
+          updatedAt: serverTimestamp(),
+        },
+        {merge: true}
+      );
+      profileData.role = normalizedRole;
+    }
 
     try {
       const authUser = await admin.auth().getUser(uid);

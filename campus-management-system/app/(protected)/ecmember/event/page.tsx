@@ -102,6 +102,7 @@ import {
 } from "@internationalized/date";
 import { createCampusLogger } from "@/lib/campus-logger";
 import type { CampusProfileDoc } from "@/lib/campus-auth";
+import { normalizeCampusRole } from "@/lib/campus-role";
 import {
   canEditEvent,
   canViewEvent,
@@ -1882,7 +1883,7 @@ export default function EventDashboard() {
         const data = snap.exists()
           ? (snap.data() as CampusProfileDoc)
           : null;
-        const role = data?.role as Role | undefined;
+        const role = normalizeCampusRole(data?.role) as Role | "";
         setViewerProfile(
           data ?
             {
@@ -1891,7 +1892,7 @@ export default function EventDashboard() {
             } :
             { uid: user.uid },
         );
-        setIsECUser(role === "ec" || role === "ecmember");
+        setIsECUser(role === "ecmember");
       } catch {
         setIsECUser(false);
         setViewerProfile({ uid: user.uid });
