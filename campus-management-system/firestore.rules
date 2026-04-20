@@ -306,14 +306,7 @@ service cloud.firestore {
     }
 
     function canDeleteEventData() {
-      return isAdminOrRegularEC() ||
-        (
-          isBOD() &&
-          currentCourseScope() != null &&
-          eventOwnerType(resource.data) == "bod" &&
-          eventCourseScope(resource.data) == currentCourseScope() &&
-          resource.data.createdBy == request.auth.uid
-        );
+      return isAdminOrRegularEC();
     }
 
     function paymentCourseScope(data) {
@@ -364,15 +357,7 @@ service cloud.firestore {
     }
 
     function canDeletePaymentData() {
-      return isAdminOrRegularEC() ||
-        (
-          isBOD() &&
-          currentCourseScope() != null &&
-          paymentCourseScope(resource.data) == currentCourseScope() &&
-          resource.data.createdByUid == request.auth.uid &&
-          resource.data.createdByCourseScope == currentCourseScope() &&
-          resource.data.course == currentCourseScope()
-        );
+      return isAdminOrRegularEC();
     }
 
     function canManagePaymentStudentData(data) {

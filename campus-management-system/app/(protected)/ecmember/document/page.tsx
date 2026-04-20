@@ -10,6 +10,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  where,
 } from "firebase/firestore";
 import {
   deleteObject,
@@ -204,6 +205,41 @@ const normalizeDocCategory = (rawCategory: string | undefined): DocCategory => {
   }
   return "General";
 };
+
+const mapFirestoreDocumentItem = (
+  snapshot: { id: string; data: () => FirestoreDocumentRecord },
+): DocumentItem => {
+  const data = snapshot.data() as FirestoreDocumentRecord;
+  const name = String(data.name ?? "Untitled");
+  const createdAtMs = toMillis(data.createdAt);
+
+  return {
+    id: snapshot.id,
+    name,
+    type: normalizeDocType(data.type, name),
+    category: normalizeDocCategory(data.category),
+    sizeBytes: Number(data.sizeBytes ?? 0),
+    uploadedAt: createdAtMs ? toDateInputString(createdAtMs) : "",
+    createdAtMs,
+    downloadUrl: String(data.downloadURL ?? ""),
+    storagePath: String(data.storagePath ?? ""),
+    ownerType: data.ownerType === "bod" ? "bod" : "ec",
+    courseScope: typeof data.courseScope === "string" ? data.courseScope : null,
+    createdByCourseScope:
+      typeof data.createdByCourseScope === "string"
+        ? data.createdByCourseScope
+        : null,
+    createdBy: String(data.createdBy ?? ""),
+    uploadedByUid: String(data.uploadedByUid ?? ""),
+  };
+};
+
+const sortDocumentItems = (items: DocumentItem[]) =>
+  [...items].sort(
+    (left, right) =>
+      Number(right.createdAtMs ?? 0) - Number(left.createdAtMs ?? 0) ||
+      left.name.localeCompare(right.name),
+  );
 
 const addToast = ({
   title,
@@ -439,8 +475,76 @@ export default function DocumentsPage() {
       return;
     }
 
+    if (viewerIsBod && !viewerCourseScope) {
+      setDocuments([]);
+      setDocumentsLoading(false);
+      setDocumentsError("B.O.D. course scope is missing.");
+      return;
+    }
+
     setDocumentsLoading(true);
     setDocumentsError("");
+
+    const handleSubscribeError = (error: unknown, source: string) => {
+      ecDocumentsLogger.error("Firestore subscribe failed.", {
+        uid: activeUid,
+        source,
+        code: toErrorCode(error),
+        message: toErrorMessage(error),
+        raw: error,
+      });
+      setDocumentsLoading(false);
+      setDocumentsError("Failed to load documents from Firestore.");
+    };
+
+    if (viewerIsBod && viewerCourseScope) {
+      let ecRows: DocumentItem[] = [];
+      let courseRows: DocumentItem[] = [];
+
+      const syncRows = () => {
+        const merged = new Map<string, DocumentItem>();
+        [...ecRows, ...courseRows].forEach((docItem) => {
+          merged.set(docItem.id, docItem);
+        });
+
+        setDocuments(sortDocumentItems(Array.from(merged.values())));
+        setDocumentsLoading(false);
+      };
+
+      const unsubEc = onSnapshot(
+        query(collection(db, "ecDocuments"), where("ownerType", "==", "ec")),
+        (snap) => {
+          ecRows = snap.docs.map(mapFirestoreDocumentItem);
+          syncRows();
+        },
+        (error) => {
+          ecRows = [];
+          syncRows();
+          handleSubscribeError(error, "ownerType=ec");
+        },
+      );
+
+      const unsubCourseScope = onSnapshot(
+        query(
+          collection(db, "ecDocuments"),
+          where("courseScope", "==", viewerCourseScope),
+        ),
+        (snap) => {
+          courseRows = snap.docs.map(mapFirestoreDocumentItem);
+          syncRows();
+        },
+        (error) => {
+          courseRows = [];
+          syncRows();
+          handleSubscribeError(error, "courseScope");
+        },
+      );
+
+      return () => {
+        unsubEc();
+        unsubCourseScope();
+      };
+    }
 
     const qy = query(
       collection(db, "ecDocuments"),
@@ -449,48 +553,23 @@ export default function DocumentsPage() {
     const unsub = onSnapshot(
       qy,
       (snap) => {
-        const list: DocumentItem[] = snap.docs.map((d) => {
-          const data = d.data() as FirestoreDocumentRecord;
-          const name = String(data.name ?? "Untitled");
-          const createdAtMs = toMillis(data.createdAt);
-          return {
-            id: d.id,
-            name,
-            type: normalizeDocType(data.type, name),
-            category: normalizeDocCategory(data.category),
-            sizeBytes: Number(data.sizeBytes ?? 0),
-            uploadedAt: createdAtMs ? toDateInputString(createdAtMs) : "",
-            createdAtMs,
-            downloadUrl: String(data.downloadURL ?? ""),
-            storagePath: String(data.storagePath ?? ""),
-            ownerType: data.ownerType === "bod" ? "bod" : "ec",
-            courseScope: typeof data.courseScope === "string" ? data.courseScope : null,
-            createdByCourseScope:
-              typeof data.createdByCourseScope === "string"
-                ? data.createdByCourseScope
-                : null,
-            createdBy: String(data.createdBy ?? ""),
-            uploadedByUid: String(data.uploadedByUid ?? ""),
-          };
-        });
-        setDocuments(list);
+        setDocuments(sortDocumentItems(snap.docs.map(mapFirestoreDocumentItem)));
         setDocumentsLoading(false);
       },
       (error) => {
-        ecDocumentsLogger.error("Firestore subscribe failed.", {
-          uid: activeUid,
-          code: toErrorCode(error),
-          message: toErrorMessage(error),
-          raw: error,
-        });
         setDocuments([]);
-        setDocumentsLoading(false);
-        setDocumentsError("Failed to load documents from Firestore.");
+        handleSubscribeError(error, "allDocuments");
       },
     );
 
     return () => unsub();
-  }, [activeUid, authReady, viewerProfileReady]);
+  }, [
+    activeUid,
+    authReady,
+    viewerCourseScope,
+    viewerIsBod,
+    viewerProfileReady,
+  ]);
 
   const scopedDocuments = useMemo(() => {
     if (!viewerIsBod) {

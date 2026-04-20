@@ -23,7 +23,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.auditEventDeletes = exports.auditEventUpdates = exports.auditEventCreates = exports.auditStudentWrites = exports.studentManagePreRegistration = exports.logPermissionDeniedAttempt = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.updateCampusEvent = exports.createCampusEvent = exports.closeFingerprintEnrollmentSession = exports.createFingerprintEnrollmentSession = exports.getFingerprintEnrollmentSessionDetail = exports.listFingerprintEnrollmentSessions = exports.deleteCampusDocument = exports.createCampusDocumentMetadata = exports.updateStudentClearanceStatus = exports.updateStudentAccountStatus = exports.updateCampusStudentProfile = exports.createCampusStudent = exports.ecCreateStudent = exports.ecListStudents = exports.adminManageFingerprintCleanup = exports.adminBuildFingerprintMappingsFromProfiles = exports.adminListFingerprintCleanupMappings = exports.adminDeleteDuplicateStudentSchoolIds = exports.adminFindDuplicateStudentSchoolIds = exports.adminDeactivateAllStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
+exports.auditEventDeletes = exports.auditEventUpdates = exports.auditEventCreates = exports.auditStudentWrites = exports.studentManagePreRegistration = exports.logPermissionDeniedAttempt = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.updateCampusEvent = exports.createCampusEvent = exports.closeFingerprintEnrollmentSession = exports.createFingerprintEnrollmentSession = exports.getFingerprintEnrollmentSessionDetail = exports.listFingerprintEnrollmentSessions = exports.deleteCampusPayment = exports.deleteCampusEvent = exports.deleteCampusDocument = exports.createCampusDocumentMetadata = exports.updateStudentClearanceStatus = exports.updateStudentAccountStatus = exports.updateCampusStudentProfile = exports.createCampusStudent = exports.ecCreateStudent = exports.ecListStudents = exports.adminManageFingerprintCleanup = exports.adminBuildFingerprintMappingsFromProfiles = exports.adminListFingerprintCleanupMappings = exports.adminDeleteDuplicateStudentSchoolIds = exports.adminFindDuplicateStudentSchoolIds = exports.adminDeactivateAllStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
 const https_1 = require("firebase-functions/v2/https");
 const firestore_1 = require("firebase-functions/v2/firestore");
@@ -2788,6 +2788,66 @@ function ecDocumentCourseScope(data) {
     return (normalizeCourseLabel(data.courseScope) ||
         normalizeCourseLabel(data.createdByCourseScope));
 }
+function eventOwnerType(data) {
+    return normalizeLower(data.ownerType) === "bod" ? "bod" : "ec";
+}
+function eventCourseScope(data) {
+    return (normalizeCourseLabel(data.courseScope) ||
+        normalizeCourseLabel(data.createdByCourseScope) ||
+        normalizeCourseLabel(data.course));
+}
+function eventCreatedByUid(data) {
+    return normalizeText(data.createdBy || data.createdByUid);
+}
+function paymentOwnerType(data) {
+    return normalizeLower(data.ownerType) === "bod" ? "bod" : "ec";
+}
+function paymentCourseScope(data) {
+    return (normalizeCourseLabel(data.courseScope) ||
+        normalizeCourseLabel(data.createdByCourseScope) ||
+        normalizeCourseLabel(data.course));
+}
+function paymentCourseValue(data) {
+    return normalizeCourseLabel(data.course);
+}
+function paymentCreatedByCourseScope(data) {
+    return normalizeCourseLabel(data.createdByCourseScope);
+}
+function paymentCreatedByUid(data) {
+    return normalizeText(data.createdByUid || data.createdBy);
+}
+async function deleteSnapshotDocumentsInBatches(snapshot, batchSize = 350) {
+    if (snapshot.empty) {
+        return;
+    }
+    for (let index = 0; index < snapshot.docs.length; index += batchSize) {
+        const batch = db.batch();
+        snapshot.docs
+            .slice(index, index + batchSize)
+            .forEach((documentSnapshot) => batch.delete(documentSnapshot.ref));
+        await batch.commit();
+    }
+}
+async function deleteStoragePaths(paths) {
+    if (paths.length === 0) {
+        return;
+    }
+    await Promise.all(paths.map(async (rawPath) => {
+        const path = normalizeText(rawPath);
+        if (!path) {
+            return;
+        }
+        try {
+            await admin.storage().bucket().file(path).delete({ ignoreNotFound: true });
+        }
+        catch (error) {
+            const storageErrorCode = Number(error.code);
+            if (storageErrorCode !== 404) {
+                throw error;
+            }
+        }
+    }));
+}
 async function resolveEcActorContext(context) {
     var _a;
     await requireAdminOrEC(context);
@@ -3127,90 +3187,165 @@ exports.createCampusStudent = (0, https_1.onCall)({ region: REGION }, async (req
     }
 });
 exports.updateCampusStudentProfile = (0, https_1.onCall)({ region: REGION }, async (request) => {
-    const actor = await resolveEcActorContext(request);
-    const body = asRecord(request.data);
-    const uid = normalizeText(body.uid);
-    const submittedName = normalizeNamePart(body.name);
-    const schoolId = normalizeText(body.schoolId);
-    const requestedCourse = normalizeCourseLabel(body.course) || normalizeText(body.course);
-    const requestedYear = normalizeText(body.yearLevel);
-    if (!uid) {
-        throw new https_1.HttpsError("invalid-argument", "uid is required.");
+    var _a;
+    let actorUid = normalizeText((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid);
+    let actorCourseScope = "";
+    let targetUid = "";
+    try {
+        const actor = await resolveEcActorContext(request);
+        actorUid = actor.uid || actorUid;
+        actorCourseScope = actor.courseScope;
+        const body = asRecord(request.data);
+        const uid = normalizeText(body.uid);
+        targetUid = uid;
+        const submittedName = normalizeNamePart(body.name);
+        const schoolId = normalizeText(body.schoolId);
+        const requestedCourse = normalizeCourseLabel(body.course) || normalizeText(body.course);
+        const requestedYear = normalizeText(body.yearLevel);
+        if (!uid) {
+            throw new https_1.HttpsError("invalid-argument", "uid is required.");
+        }
+        if (!submittedName) {
+            throw new https_1.HttpsError("invalid-argument", "name is required.");
+        }
+        if (!schoolId) {
+            throw new https_1.HttpsError("invalid-argument", "schoolId is required.");
+        }
+        const { profileData, studentData, profileExists, studentExists } = await readStudentSources(uid);
+        if (!profileExists && !studentExists) {
+            throw new https_1.HttpsError("not-found", "Student profile not found.");
+        }
+        const targetRole = normalizeText(profileData.role || studentData.role || "student");
+        if (!isStudentAudienceRole(targetRole)) {
+            throw new https_1.HttpsError("permission-denied", "Only student and EC-member records can be updated here.");
+        }
+        const currentCourse = resolveStudentCourse(profileData, studentData);
+        if (actor.isBod) {
+            if (!currentCourse || currentCourse !== actor.courseScope) {
+                throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
+            }
+            if (requestedCourse && requestedCourse !== actor.courseScope) {
+                throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
+            }
+        }
+        const effectiveCourse = actor.isBod ?
+            actor.courseScope :
+            (requestedCourse || currentCourse);
+        if (!effectiveCourse) {
+            throw new https_1.HttpsError("invalid-argument", "Course is required.");
+        }
+        const currentYear = resolveStudentYearLevel(profileData, studentData);
+        const effectiveYear = requestedYear ? normalizeYear(requestedYear) : currentYear;
+        if (!effectiveYear || effectiveYear === "Unassigned") {
+            throw new https_1.HttpsError("invalid-argument", "Year level is required.");
+        }
+        const previousSchoolId = resolveStudentSchoolId(uid, profileData, studentData);
+        const previousSchoolIdKey = normalizeSchoolIdKey(previousSchoolId);
+        const schoolIdKey = normalizeSchoolIdKey(schoolId);
+        const timestamp = serverTimestamp();
+        if (schoolIdKey !== previousSchoolIdKey) {
+            const existingSchoolIdMatch = await findExistingStudentSchoolId(schoolId);
+            if (existingSchoolIdMatch &&
+                normalizeText(existingSchoolIdMatch.uid) !== uid) {
+                throw schoolIdAlreadyExistsError("School ID already exists.");
+            }
+        }
+        const profilePatch = {
+            schoolId,
+            schoolIdKey,
+            name: submittedName,
+            fullName: submittedName,
+            studentName: submittedName,
+            course: effectiveCourse,
+            year: effectiveYear,
+            yearLevel: effectiveYear,
+            updatedAt: timestamp,
+        };
+        const studentPatch = {
+            uid,
+            studentId: uid,
+            schoolId,
+            schoolIdKey,
+            name: submittedName,
+            fullName: submittedName,
+            studentName: submittedName,
+            course: effectiveCourse,
+            year: effectiveYear,
+            yearLevel: effectiveYear,
+            status: normalizeText(studentData.status) ||
+                normalizeText(profileData.status) ||
+                "Active",
+            readyForClearance: studentData.readyForClearance === true ||
+                profileData.readyForClearance === true,
+            updatedAt: timestamp,
+        };
+        const updateBatch = db.batch();
+        updateBatch.set(db.doc(`profiles/${uid}`), profilePatch, { merge: true });
+        updateBatch.set(db.doc(`students/${uid}`), studentPatch, { merge: true });
+        await updateBatch.commit();
+        await syncStudentSchoolIdIndex(schoolId, schoolIdKey, uid, "profile").catch((error) => {
+            authLogger.warn("updateCampusStudentProfile school ID index sync failed", {
+                actorUid,
+                targetUid: uid,
+                schoolId,
+                error,
+            });
+        });
+        if (previousSchoolIdKey &&
+            previousSchoolIdKey !== schoolIdKey) {
+            const previousIndexRef = studentSchoolIdIndexRef(previousSchoolIdKey);
+            await previousIndexRef.get().then(async (snapshot) => {
+                var _a;
+                const indexedUid = normalizeText((_a = snapshot.data()) === null || _a === void 0 ? void 0 : _a.uid);
+                if (snapshot.exists && indexedUid === uid) {
+                    await previousIndexRef.delete().catch((error) => {
+                        authLogger.warn("updateCampusStudentProfile previous school ID cleanup failed", {
+                            actorUid,
+                            targetUid: uid,
+                            previousSchoolId,
+                            error,
+                        });
+                    });
+                }
+            }).catch((error) => {
+                authLogger.warn("updateCampusStudentProfile previous school ID lookup failed", {
+                    actorUid,
+                    targetUid: uid,
+                    previousSchoolId,
+                    error,
+                });
+            });
+        }
+        return {
+            uid,
+            schoolId,
+            name: submittedName,
+            course: effectiveCourse,
+            yearLevel: effectiveYear,
+        };
     }
-    if (!submittedName) {
-        throw new https_1.HttpsError("invalid-argument", "name is required.");
-    }
-    if (!schoolId) {
-        throw new https_1.HttpsError("invalid-argument", "schoolId is required.");
-    }
-    const { profileData, studentData, profileExists, studentExists } = await readStudentSources(uid);
-    if (!profileExists && !studentExists) {
-        throw new https_1.HttpsError("not-found", "Student profile not found.");
-    }
-    const targetRole = normalizeText(profileData.role || studentData.role || "student");
-    if (!isStudentAudienceRole(targetRole)) {
-        throw new https_1.HttpsError("permission-denied", "Only student and EC-member records can be updated here.");
-    }
-    const currentCourse = resolveStudentCourse(profileData, studentData);
-    if (actor.isBod) {
-        if (!currentCourse || currentCourse !== actor.courseScope) {
+    catch (error) {
+        authLogger.error("updateCampusStudentProfile failed", {
+            actorUid,
+            actorCourseScope,
+            targetUid,
+            error,
+        });
+        const authError = error;
+        const errorCode = normalizeLower(authError.code);
+        const errorMessage = authError.message || "Failed to update student profile.";
+        if (error instanceof https_1.HttpsError) {
+            throw error;
+        }
+        if (isHttpsErrorCode(error, "already-exists")) {
+            throw schoolIdAlreadyExistsError(authError.message || "School ID already exists.");
+        }
+        if (errorCode.includes("permission-denied") ||
+            normalizeLower(errorMessage).includes("insufficient permissions")) {
             throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
         }
-        if (requestedCourse && requestedCourse !== actor.courseScope) {
-            throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
-        }
+        throw new https_1.HttpsError("internal", errorMessage);
     }
-    const effectiveCourse = actor.isBod ? actor.courseScope : (requestedCourse || currentCourse);
-    if (!effectiveCourse) {
-        throw new https_1.HttpsError("invalid-argument", "Course is required.");
-    }
-    const currentYear = resolveStudentYearLevel(profileData, studentData);
-    const effectiveYear = requestedYear ? normalizeYear(requestedYear) : currentYear;
-    if (!effectiveYear || effectiveYear === "Unassigned") {
-        throw new https_1.HttpsError("invalid-argument", "Year level is required.");
-    }
-    const schoolIdKey = normalizeSchoolIdKey(schoolId);
-    const timestamp = serverTimestamp();
-    const profilePatch = {
-        schoolId,
-        schoolIdKey,
-        name: submittedName,
-        fullName: submittedName,
-        studentName: submittedName,
-        course: effectiveCourse,
-        year: effectiveYear,
-        yearLevel: effectiveYear,
-        updatedAt: timestamp,
-    };
-    const studentPatch = {
-        uid,
-        studentId: uid,
-        schoolId,
-        schoolIdKey,
-        name: submittedName,
-        fullName: submittedName,
-        studentName: submittedName,
-        course: effectiveCourse,
-        year: effectiveYear,
-        yearLevel: effectiveYear,
-        status: normalizeText(studentData.status) ||
-            normalizeText(profileData.status) ||
-            "Active",
-        readyForClearance: studentData.readyForClearance === true ||
-            profileData.readyForClearance === true,
-        updatedAt: timestamp,
-    };
-    const updateBatch = db.batch();
-    updateBatch.set(db.doc(`profiles/${uid}`), profilePatch, { merge: true });
-    updateBatch.set(db.doc(`students/${uid}`), studentPatch, { merge: true });
-    await updateBatch.commit();
-    return {
-        uid,
-        schoolId,
-        name: submittedName,
-        course: effectiveCourse,
-        yearLevel: effectiveYear,
-    };
 });
 exports.updateStudentAccountStatus = (0, https_1.onCall)({ region: REGION }, async (request) => {
     const actor = await resolveEcActorContext(request);
@@ -3375,10 +3510,13 @@ exports.createCampusDocumentMetadata = (0, https_1.onCall)({ region: REGION }, a
     let courseScope = null;
     let createdByCourseScope = null;
     let courses = [];
+    let course = null;
+    const createdByPosition = normalizeECPosition(actor.profile.ecPosition) || null;
     if (actor.isBod) {
         ownerType = "bod";
         courseScope = actor.courseScope;
         createdByCourseScope = actor.courseScope;
+        course = actor.courseScope;
         courses = [actor.courseScope];
         const expectedPrefix = `ec-documents/course/${sanitizeCourseScopeForStoragePath(actor.courseScope)}/`;
         if (!storagePath.startsWith(expectedPrefix)) {
@@ -3394,7 +3532,9 @@ exports.createCampusDocumentMetadata = (0, https_1.onCall)({ region: REGION }, a
         storagePath,
         uploadedByUid: actor.uid,
         createdBy: actor.uid,
+        createdByPosition,
         ownerType,
+        course,
         courseScope,
         createdByCourseScope,
         courses,
@@ -3447,6 +3587,150 @@ exports.deleteCampusDocument = (0, https_1.onCall)({ region: REGION }, async (re
     return {
         docId,
         deleted: true,
+    };
+});
+exports.deleteCampusEvent = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a, _b;
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const eventId = normalizeText(body.eventId);
+    if (!eventId) {
+        throw new https_1.HttpsError("invalid-argument", "eventId is required.");
+    }
+    const eventRef = db.doc(`events/${eventId}`);
+    const eventSnapshot = await eventRef.get();
+    if (!eventSnapshot.exists) {
+        throw new https_1.HttpsError("not-found", "Event not found.");
+    }
+    const eventData = (_a = eventSnapshot.data()) !== null && _a !== void 0 ? _a : {};
+    const ownerType = eventOwnerType(eventData);
+    const scopedCourse = eventCourseScope(eventData);
+    const createdByUid = eventCreatedByUid(eventData);
+    const createdByCourseScope = normalizeCourseLabel(eventData.createdByCourseScope) || scopedCourse;
+    if (actor.isBod) {
+        if (ownerType !== "bod" ||
+            !actor.courseScope ||
+            createdByUid !== actor.uid ||
+            scopedCourse !== actor.courseScope ||
+            createdByCourseScope !== actor.courseScope) {
+            throw new https_1.HttpsError("permission-denied", "B.O.D. members can only delete their own B.O.D.-created events.");
+        }
+    }
+    const [imagesSnapshot, docsSnapshot, attendanceSnapshot, registrationsSnapshot] = await Promise.all([
+        eventRef.collection("images").get(),
+        eventRef.collection("docs").get(),
+        eventRef.collection("attendance").get(),
+        eventRef.collection("registrations").get(),
+    ]);
+    const storagePaths = [...imagesSnapshot.docs, ...docsSnapshot.docs]
+        .map((fileSnapshot) => { var _a, _b; return normalizeText(((_a = fileSnapshot.data()) === null || _a === void 0 ? void 0 : _a.path) || ((_b = fileSnapshot.data()) === null || _b === void 0 ? void 0 : _b.storagePath)); })
+        .filter(Boolean);
+    let linkedPaymentDeleted = false;
+    const linkedPaymentId = normalizeText(eventData.linkedPaymentId) ||
+        normalizeText(eventData.requiredPaymentId);
+    if (actor.isBod && actor.courseScope && linkedPaymentId) {
+        const paymentRef = db.doc(`payments/${linkedPaymentId}`);
+        const paymentSnapshot = await paymentRef.get();
+        if (paymentSnapshot.exists) {
+            const paymentData = (_b = paymentSnapshot.data()) !== null && _b !== void 0 ? _b : {};
+            const paymentOwner = paymentOwnerType(paymentData);
+            const paymentScopedCourse = paymentCourseScope(paymentData);
+            const paymentCourse = paymentCourseValue(paymentData);
+            const paymentCreatedByScope = paymentCreatedByCourseScope(paymentData) || paymentScopedCourse;
+            const paymentCreatedBy = paymentCreatedByUid(paymentData);
+            const isLegacyBodPayment = paymentCreatedBy === actor.uid &&
+                paymentScopedCourse === actor.courseScope &&
+                paymentCreatedByScope === actor.courseScope &&
+                paymentCourse === actor.courseScope;
+            if (paymentOwner === "bod" || isLegacyBodPayment) {
+                const paymentStudentsSnapshot = await paymentRef.collection("students").get();
+                await deleteSnapshotDocumentsInBatches(paymentStudentsSnapshot);
+                await paymentRef.delete();
+                linkedPaymentDeleted = true;
+            }
+        }
+    }
+    await deleteStoragePaths(storagePaths);
+    await deleteSnapshotDocumentsInBatches(imagesSnapshot);
+    await deleteSnapshotDocumentsInBatches(docsSnapshot);
+    await deleteSnapshotDocumentsInBatches(attendanceSnapshot);
+    await deleteSnapshotDocumentsInBatches(registrationsSnapshot);
+    await eventRef.delete();
+    return {
+        deleted: true,
+        eventId,
+        linkedPaymentDeleted,
+    };
+});
+exports.deleteCampusPayment = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a, _b;
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const paymentId = normalizeText(body.paymentId);
+    if (!paymentId) {
+        throw new https_1.HttpsError("invalid-argument", "paymentId is required.");
+    }
+    const paymentRef = db.doc(`payments/${paymentId}`);
+    const paymentSnapshot = await paymentRef.get();
+    if (!paymentSnapshot.exists) {
+        throw new https_1.HttpsError("not-found", "Payment not found.");
+    }
+    const paymentData = (_a = paymentSnapshot.data()) !== null && _a !== void 0 ? _a : {};
+    const ownerType = paymentOwnerType(paymentData);
+    const scopedCourse = paymentCourseScope(paymentData);
+    const paymentCourse = paymentCourseValue(paymentData);
+    const createdByScope = paymentCreatedByCourseScope(paymentData) || scopedCourse;
+    const createdByUid = paymentCreatedByUid(paymentData);
+    if (actor.isBod) {
+        const isLegacyBodPayment = createdByUid === actor.uid &&
+            scopedCourse === actor.courseScope &&
+            createdByScope === actor.courseScope &&
+            paymentCourse === actor.courseScope;
+        if (!actor.courseScope ||
+            createdByUid !== actor.uid ||
+            scopedCourse !== actor.courseScope ||
+            createdByScope !== actor.courseScope ||
+            paymentCourse !== actor.courseScope ||
+            (ownerType !== "bod" && !isLegacyBodPayment)) {
+            throw new https_1.HttpsError("permission-denied", "B.O.D. members can only delete their own course-scoped payments.");
+        }
+    }
+    const linkedEventId = normalizeText(paymentData.linkedEventId) ||
+        normalizeText(paymentData.eventId);
+    let linkedEventUpdated = false;
+    if (linkedEventId) {
+        const eventRef = db.doc(`events/${linkedEventId}`);
+        const eventSnapshot = await eventRef.get();
+        if (eventSnapshot.exists) {
+            const eventData = (_b = eventSnapshot.data()) !== null && _b !== void 0 ? _b : {};
+            const canUpdateLinkedEvent = actor.isAdmin ||
+                actor.isRegularEc ||
+                (actor.isBod &&
+                    Boolean(actor.courseScope) &&
+                    eventOwnerType(eventData) === "bod" &&
+                    eventCreatedByUid(eventData) === actor.uid &&
+                    eventCourseScope(eventData) === actor.courseScope &&
+                    (normalizeCourseLabel(eventData.createdByCourseScope) ||
+                        eventCourseScope(eventData)) === actor.courseScope);
+            if (canUpdateLinkedEvent) {
+                await eventRef.set({
+                    withPayment: false,
+                    paymentRequired: false,
+                    requiredPaymentId: "",
+                    linkedPaymentId: null,
+                    updatedAt: serverTimestamp(),
+                }, { merge: true });
+                linkedEventUpdated = true;
+            }
+        }
+    }
+    const paymentStudentsSnapshot = await paymentRef.collection("students").get();
+    await deleteSnapshotDocumentsInBatches(paymentStudentsSnapshot);
+    await paymentRef.delete();
+    return {
+        deleted: true,
+        paymentId,
+        linkedEventUpdated,
     };
 });
 exports.listFingerprintEnrollmentSessions = (0, https_1.onCall)({ region: REGION }, async (request) => {

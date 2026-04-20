@@ -66,6 +66,7 @@ import {
   exportPaymentWorkbook,
   filterRowsByCourseScope,
 } from "@/lib/ec-payment-export";
+import { deleteCampusPayment } from "@/lib/firebase-functions";
 import {
   canEditPayment,
   canManagePayment,
@@ -799,17 +800,25 @@ export default function PaymentDashboard() {
     if (!expandedPayment) return;
 
     setExpandedStudentsLoading(true);
-    const qy = query(
-      collection(db, "payments", expandedPayment, "students"),
-      orderBy("name", "asc"),
-    );
+    const qy =
+      viewerIsBod && viewerCourseScope ?
+        query(
+          collection(db, "payments", expandedPayment, "students"),
+          where("course", "==", viewerCourseScope),
+        ) :
+        query(
+          collection(db, "payments", expandedPayment, "students"),
+          orderBy("name", "asc"),
+        );
 
     const unsub = onSnapshot(
       qy,
       (snap) => {
-        const list: PaymentStudent[] = snap.docs.map((d) =>
-          mapPaymentStudentRecord(d.id, d.data() as PaymentStudentDocData),
-        );
+        const list: PaymentStudent[] = snap.docs
+          .map((d) =>
+            mapPaymentStudentRecord(d.id, d.data() as PaymentStudentDocData),
+          )
+          .sort(sortStudentsByNameAndId);
 
         setPaymentStudents((prev) => ({ ...prev, [expandedPayment]: list }));
         setExpandedStudentsLoading(false);
@@ -824,7 +833,7 @@ export default function PaymentDashboard() {
     );
 
     return () => unsub();
-  }, [expandedPayment]);
+  }, [expandedPayment, viewerCourseScope, viewerIsBod]);
 
   useEffect(() => {
     setStudentSearchText("");
@@ -1376,7 +1385,14 @@ export default function PaymentDashboard() {
       );
     }
 
-    const studentSnap = await getDocs(collection(db, "payments", paymentId, "students"));
+    const studentQuery =
+      viewerIsBod && viewerCourseScope ?
+        query(
+          collection(db, "payments", paymentId, "students"),
+          where("course", "==", viewerCourseScope),
+        ) :
+        collection(db, "payments", paymentId, "students");
+    const studentSnap = await getDocs(studentQuery);
     const rows = studentSnap.docs
       .map((studentDoc) =>
         mapPaymentStudentRecord(
@@ -1686,68 +1702,72 @@ export default function PaymentDashboard() {
     setNotice(null);
 
     try {
-      const paymentStudentSnap = await getDocs(
-        collection(db, "payments", payment.id, "students"),
-      );
-      const linkedEventRef = payment.linkedEventId
-        ? doc(db, "events", payment.linkedEventId)
-        : null;
-      const linkedEventSnap =
-        linkedEventRef ? await getDoc(linkedEventRef) : null;
-      const paymentStudentIds = paymentStudentSnap.docs.map((docSnap) => docSnap.id);
-      const writesPerBatch = 350;
-
-      if (paymentStudentIds.length === 0) {
-        const batch = writeBatch(db);
-
-        if (linkedEventRef && linkedEventSnap?.exists()) {
-          batch.set(
-            linkedEventRef,
-            {
-              withPayment: false,
-              paymentRequired: false,
-              requiredPaymentId: "",
-              linkedPaymentId: null,
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true },
-          );
-        }
-
-        batch.delete(doc(db, "payments", payment.id));
-        await batch.commit();
+      if (viewerIsBod) {
+        await deleteCampusPayment({ paymentId: payment.id });
       } else {
-        for (
-          let index = 0;
-          index < paymentStudentIds.length;
-          index += writesPerBatch
-        ) {
+        const paymentStudentSnap = await getDocs(
+          collection(db, "payments", payment.id, "students"),
+        );
+        const linkedEventRef = payment.linkedEventId
+          ? doc(db, "events", payment.linkedEventId)
+          : null;
+        const linkedEventSnap =
+          linkedEventRef ? await getDoc(linkedEventRef) : null;
+        const paymentStudentIds = paymentStudentSnap.docs.map((docSnap) => docSnap.id);
+        const writesPerBatch = 350;
+
+        if (paymentStudentIds.length === 0) {
           const batch = writeBatch(db);
-          const chunk = paymentStudentIds.slice(index, index + writesPerBatch);
 
-          chunk.forEach((studentUid) => {
-            batch.delete(doc(db, "payments", payment.id, "students", studentUid));
-          });
-
-          if (index + writesPerBatch >= paymentStudentIds.length) {
-            if (linkedEventRef && linkedEventSnap?.exists()) {
-              batch.set(
-                linkedEventRef,
-                {
-                  withPayment: false,
-                  paymentRequired: false,
-                  requiredPaymentId: "",
-                  linkedPaymentId: null,
-                  updatedAt: serverTimestamp(),
-                },
-                { merge: true },
-              );
-            }
-
-            batch.delete(doc(db, "payments", payment.id));
+          if (linkedEventRef && linkedEventSnap?.exists()) {
+            batch.set(
+              linkedEventRef,
+              {
+                withPayment: false,
+                paymentRequired: false,
+                requiredPaymentId: "",
+                linkedPaymentId: null,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true },
+            );
           }
 
+          batch.delete(doc(db, "payments", payment.id));
           await batch.commit();
+        } else {
+          for (
+            let index = 0;
+            index < paymentStudentIds.length;
+            index += writesPerBatch
+          ) {
+            const batch = writeBatch(db);
+            const chunk = paymentStudentIds.slice(index, index + writesPerBatch);
+
+            chunk.forEach((studentUid) => {
+              batch.delete(doc(db, "payments", payment.id, "students", studentUid));
+            });
+
+            if (index + writesPerBatch >= paymentStudentIds.length) {
+              if (linkedEventRef && linkedEventSnap?.exists()) {
+                batch.set(
+                  linkedEventRef,
+                  {
+                    withPayment: false,
+                    paymentRequired: false,
+                    requiredPaymentId: "",
+                    linkedPaymentId: null,
+                    updatedAt: serverTimestamp(),
+                  },
+                  { merge: true },
+                );
+              }
+
+              batch.delete(doc(db, "payments", payment.id));
+            }
+
+            await batch.commit();
+          }
         }
       }
 
@@ -1849,7 +1869,10 @@ export default function PaymentDashboard() {
   }
 
   function exportCsv(payment: Payment) {
-    const rows = paymentStudents[payment.id] ?? [];
+    const rows = filterRowsByCourseScope(
+      paymentStudents[payment.id] ?? [],
+      viewerIsBod ? viewerCourseScope : null,
+    );
     if (!rows.length) {
       setNotice({ type: "err", msg: "No student rows loaded to export." });
       campusToast.warning({

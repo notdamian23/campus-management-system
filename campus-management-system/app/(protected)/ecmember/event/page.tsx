@@ -113,6 +113,7 @@ import {
 import { normalizeCourse } from "@/lib/courseOptions";
 import {
   createCampusEvent,
+  deleteCampusEvent,
   updateCampusEvent,
   logPermissionDeniedAttemptForCurrentUser,
 } from "@/lib/firebase-functions";
@@ -3600,7 +3601,11 @@ export default function EventDashboard() {
         );
       }
 
-      await deleteCompletedEventById(eventToDelete.id);
+      if (viewerIsBod) {
+        await deleteCampusEvent({ eventId: eventToDelete.id });
+      } else {
+        await deleteCompletedEventById(eventToDelete.id);
+      }
 
       if (expandedEventId === eventToDelete.id) {
         setExpandedEventId(null);
@@ -5048,12 +5053,45 @@ export default function EventDashboard() {
     setExportingEventId(ev.id);
 
     try {
+      if (!canViewEventRecord(ev)) {
+        throw new Error(
+          viewerIsBod ?
+            "B.O.D. members can only export reports for their allowed course activities." :
+            "You do not have permission to export this event.",
+        );
+      }
+
       const paymentId = getEventLinkedPaymentId(ev);
-      const [attendanceSnap, registrationsSnap, paymentAssignmentsSnap] = await Promise.all([
-        getDocs(collection(db, "events", ev.id, "attendance")),
-        getDocs(collection(db, "events", ev.id, "registrations")),
+      const attendanceQuery =
+        viewerIsBod && viewerCourseScope ?
+          query(
+            collection(db, "events", ev.id, "attendance"),
+            where("course", "==", viewerCourseScope),
+          ) :
+          collection(db, "events", ev.id, "attendance");
+      const registrationsQuery =
+        viewerIsBod && viewerCourseScope ?
+          query(
+            collection(db, "events", ev.id, "registrations"),
+            where("course", "==", viewerCourseScope),
+          ) :
+          collection(db, "events", ev.id, "registrations");
+      const paymentAssignmentsQuery =
         ev.withPayment && paymentId ?
-          getDocs(collection(db, "payments", paymentId, "students")) :
+          (
+            viewerIsBod && viewerCourseScope ?
+              query(
+                collection(db, "payments", paymentId, "students"),
+                where("course", "==", viewerCourseScope),
+              ) :
+              collection(db, "payments", paymentId, "students")
+          ) :
+          null;
+      const [attendanceSnap, registrationsSnap, paymentAssignmentsSnap] = await Promise.all([
+        getDocs(attendanceQuery),
+        getDocs(registrationsQuery),
+        paymentAssignmentsQuery ?
+          getDocs(paymentAssignmentsQuery) :
           Promise.resolve(null),
       ]);
 

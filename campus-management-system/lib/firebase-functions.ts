@@ -176,6 +176,26 @@ export type DeleteCampusDocumentResult = {
   deleted: boolean;
 };
 
+export type DeleteCampusEventPayload = {
+  eventId: string;
+};
+
+export type DeleteCampusEventResult = {
+  eventId: string;
+  deleted: boolean;
+  linkedPaymentDeleted?: boolean;
+};
+
+export type DeleteCampusPaymentPayload = {
+  paymentId: string;
+};
+
+export type DeleteCampusPaymentResult = {
+  paymentId: string;
+  deleted: boolean;
+  linkedEventUpdated?: boolean;
+};
+
 export type SchoolIdLoginResolution =
   | {
       status: "resolved";
@@ -453,6 +473,38 @@ export async function deleteCampusDocument(
     DeleteCampusDocumentPayload,
     DeleteCampusDocumentResult
   >(getCampusFunctions(), "deleteCampusDocument");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function deleteCampusEvent(
+  payload: DeleteCampusEventPayload,
+): Promise<DeleteCampusEventResult> {
+  logAuthEvent("info", "Deleting CAMPUS event via callable", {
+    eventId: payload.eventId,
+  });
+
+  const callable = httpsCallable<
+    DeleteCampusEventPayload,
+    DeleteCampusEventResult
+  >(getCampusFunctions(), "deleteCampusEvent");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function deleteCampusPayment(
+  payload: DeleteCampusPaymentPayload,
+): Promise<DeleteCampusPaymentResult> {
+  logAuthEvent("info", "Deleting CAMPUS payment via callable", {
+    paymentId: payload.paymentId,
+  });
+
+  const callable = httpsCallable<
+    DeleteCampusPaymentPayload,
+    DeleteCampusPaymentResult
+  >(getCampusFunctions(), "deleteCampusPayment");
 
   const result = await callable(payload);
   return result.data;

@@ -1145,14 +1145,102 @@ export default function ECStudentLookup() {
       setStatusError(null);
 
       try {
-        const [eventsSnap, paymentSnap] = await Promise.all([
-          getDocs(
-            query(collection(db, "events"), orderBy("createdAt", "desc")),
-          ),
-          getDocs(
-            query(collection(db, "payments"), orderBy("createdAt", "desc")),
-          ),
-        ]);
+        let rawEvents: RawEventDoc[] = [];
+        let paymentDocs: PaymentDocData[] = [];
+        let paymentDocIds: string[] = [];
+
+        if (viewerIsBod && viewerCourseScope) {
+          const [ecEventsSnap, scopedEventsSnap, scopedPaymentsSnap] =
+            await Promise.all([
+              getDocs(
+                query(collection(db, "events"), where("ownerType", "==", "ec")),
+              ),
+              getDocs(
+                query(
+                  collection(db, "events"),
+                  where("courseScope", "==", viewerCourseScope),
+                ),
+              ),
+              getDocs(
+                query(
+                  collection(db, "payments"),
+                  where("courseScope", "==", viewerCourseScope),
+                ),
+              ),
+            ]);
+
+          const mergedEvents = new Map<string, RawEventDoc>();
+          [...ecEventsSnap.docs, ...scopedEventsSnap.docs].forEach((eventDoc) => {
+            const data = eventDoc.data() as Partial<RawEventDoc>;
+            const yearLevels = toTargetList(data.yearLevels);
+            const courses = toTargetList(data.courses);
+
+            mergedEvents.set(eventDoc.id, {
+              id: eventDoc.id,
+              title: String(data.title ?? "Untitled Event"),
+              date: String(data.date ?? ""),
+              scheduledTime: String(data.scheduledTime ?? data.timeStart ?? ""),
+              timeStart: String(data.timeStart ?? ""),
+              timeEnd: String(data.timeEnd ?? ""),
+              location: String(data.location ?? ""),
+              yearLevel:
+                String(data.yearLevel ?? "").trim() ||
+                (yearLevels.length > 0 ? yearLevels.join(", ") : "All Years"),
+              course:
+                String(data.course ?? "").trim() ||
+                (courses.length > 0 ? courses.join(", ") : "All Courses"),
+              yearLevels,
+              courses,
+              targetStudent: String(data.targetStudent ?? ""),
+              details: String(data.details ?? ""),
+            });
+          });
+
+          rawEvents = Array.from(mergedEvents.values());
+          paymentDocs = scopedPaymentsSnap.docs.map(
+            (paymentDoc) => paymentDoc.data() as PaymentDocData,
+          );
+          paymentDocIds = scopedPaymentsSnap.docs.map((paymentDoc) => paymentDoc.id);
+        } else {
+          const [eventsSnap, paymentSnap] = await Promise.all([
+            getDocs(
+              query(collection(db, "events"), orderBy("createdAt", "desc")),
+            ),
+            getDocs(
+              query(collection(db, "payments"), orderBy("createdAt", "desc")),
+            ),
+          ]);
+
+          rawEvents = eventsSnap.docs.map((eventDoc) => {
+            const data = eventDoc.data() as Partial<RawEventDoc>;
+            const yearLevels = toTargetList(data.yearLevels);
+            const courses = toTargetList(data.courses);
+
+            return {
+              id: eventDoc.id,
+              title: String(data.title ?? "Untitled Event"),
+              date: String(data.date ?? ""),
+              scheduledTime: String(data.scheduledTime ?? data.timeStart ?? ""),
+              timeStart: String(data.timeStart ?? ""),
+              timeEnd: String(data.timeEnd ?? ""),
+              location: String(data.location ?? ""),
+              yearLevel:
+                String(data.yearLevel ?? "").trim() ||
+                (yearLevels.length > 0 ? yearLevels.join(", ") : "All Years"),
+              course:
+                String(data.course ?? "").trim() ||
+                (courses.length > 0 ? courses.join(", ") : "All Courses"),
+              yearLevels,
+              courses,
+              targetStudent: String(data.targetStudent ?? ""),
+              details: String(data.details ?? ""),
+            };
+          });
+          paymentDocs = paymentSnap.docs.map(
+            (paymentDoc) => paymentDoc.data() as PaymentDocData,
+          );
+          paymentDocIds = paymentSnap.docs.map((paymentDoc) => paymentDoc.id);
+        }
 
         try {
           const studentProjectionSnap = await getDoc(
@@ -1175,32 +1263,6 @@ export default function ECStudentLookup() {
         } catch {
           // Keep the modal usable even if the fingerprint projection cannot be read.
         }
-
-        const rawEvents: RawEventDoc[] = eventsSnap.docs.map((eventDoc) => {
-          const data = eventDoc.data() as Partial<RawEventDoc>;
-          const yearLevels = toTargetList(data.yearLevels);
-          const courses = toTargetList(data.courses);
-
-          return {
-            id: eventDoc.id,
-            title: String(data.title ?? "Untitled Event"),
-            date: String(data.date ?? ""),
-            scheduledTime: String(data.scheduledTime ?? data.timeStart ?? ""),
-            timeStart: String(data.timeStart ?? ""),
-            timeEnd: String(data.timeEnd ?? ""),
-            location: String(data.location ?? ""),
-            yearLevel:
-              String(data.yearLevel ?? "").trim() ||
-              (yearLevels.length > 0 ? yearLevels.join(", ") : "All Years"),
-            course:
-              String(data.course ?? "").trim() ||
-              (courses.length > 0 ? courses.join(", ") : "All Courses"),
-            yearLevels,
-            courses,
-            targetStudent: String(data.targetStudent ?? ""),
-            details: String(data.details ?? ""),
-          };
-        });
 
         const targetedEvents = rawEvents.filter((event) => {
           const courseMatch = matchesTarget(
@@ -1261,20 +1323,20 @@ export default function ECStudentLookup() {
         );
 
         const paymentRows = await Promise.all(
-          paymentSnap.docs.map(
-            async (paymentDoc): Promise<StudentStatusPayment | null> => {
+          paymentDocIds.map(
+            async (paymentId, index): Promise<StudentStatusPayment | null> => {
               const assignmentSnap = await getDoc(
                 doc(
                   db,
                   "payments",
-                  paymentDoc.id,
+                  paymentId,
                   "students",
                   currentStudent.uid,
                 ),
               );
               if (!assignmentSnap.exists()) return null;
 
-              const paymentData = paymentDoc.data() as PaymentDocData;
+              const paymentData = paymentDocs[index] ?? {};
               const assignmentData =
                 assignmentSnap.data() as PaymentAssignmentData;
               const status =
@@ -1286,9 +1348,9 @@ export default function ECStudentLookup() {
                 toMillis(assignmentData.updatedAt) || createdAtMs;
 
               return {
-                paymentId: paymentDoc.id,
+                paymentId,
                 title: String(paymentData.title ?? "Untitled Payment"),
-                ref: String(paymentData.ref ?? paymentDoc.id),
+                ref: String(paymentData.ref ?? paymentId),
                 date: String(paymentData.date ?? ""),
                 status,
                 updatedAtMs,
@@ -1331,6 +1393,8 @@ export default function ECStudentLookup() {
     selectedStudentReadyForClearance,
     statusModalOpen,
     updateStudentState,
+    viewerCourseScope,
+    viewerIsBod,
   ]);
 
   useECPageErrorToast(loadError, "student lookup");
