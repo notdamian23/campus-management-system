@@ -294,8 +294,7 @@ export function StudentAccountStatusChip({
 type StudentEventCardProps = {
   title: string;
   description?: string;
-  dateLabel: string;
-  timeLabel?: string;
+  scheduleLabel: string;
   location?: string;
   status: StudentEventStatus;
   audienceLabel?: string;
@@ -308,8 +307,7 @@ type StudentEventCardProps = {
 export function StudentEventCard({
   title,
   description,
-  dateLabel,
-  timeLabel,
+  scheduleLabel,
   location,
   status,
   audienceLabel,
@@ -356,8 +354,7 @@ export function StudentEventCard({
           <div className="flex flex-col gap-2 text-sm text-campus-text-secondary sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
             <span className="inline-flex items-center gap-1.5">
               <CalendarDays size={14} />
-              {dateLabel}
-              {timeLabel ? ` | ${timeLabel}` : ""}
+              {scheduleLabel}
             </span>
             {location ? (
               <span className="inline-flex items-center gap-1.5">

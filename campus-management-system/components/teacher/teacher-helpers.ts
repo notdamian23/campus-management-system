@@ -70,18 +70,6 @@ export function capitalizeTeacherLabel(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-export function formatTeacherEventDate(date: Date | null, fallback: string) {
-  if (!date) return fallback || "Date TBA";
-
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 export function formatTeacherDateTime(ms: number) {
   if (!ms) return "Unknown date";
 
@@ -148,14 +136,6 @@ export function teacherAudienceLabel(
   }
 
   return parts.length > 0 ? parts.join(" | ") : "All students";
-}
-
-export function formatTeacherSchedule(
-  event: Pick<TeacherEvent, "scheduledTime" | "timeEnd">,
-) {
-  if (!event.scheduledTime || event.scheduledTime === "TBA") return "Time TBA";
-  if (!event.timeEnd) return event.scheduledTime;
-  return `${event.scheduledTime} to ${event.timeEnd}`;
 }
 
 export function teacherFileKindLabel(kind: TeacherFileKind) {

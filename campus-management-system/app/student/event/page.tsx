@@ -47,7 +47,6 @@ import {
   StudentPageHeader,
   StudentStatsGrid,
   buildStudentAudienceLabel,
-  formatStudentEventDate,
   getStudentEventTone,
   getStudentToneClasses,
   useIsBelowBreakpoint,
@@ -55,6 +54,7 @@ import {
   useStudentPortal,
 } from "@/components/student";
 import { downloadTeacherFile } from "@/components/teacher/teacher-feedback";
+import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import { campusToast } from "@/lib/toast";
 
 type EventSortMode = "oldest_to_latest" | "latest_to_oldest";
@@ -105,6 +105,20 @@ function getSingleSelectionValue(keys: Selection) {
 
   const selected = Array.from(keys)[0];
   return typeof selected === "string" ? selected : null;
+}
+
+function getStudentEventSchedule(
+  event: Pick<
+    StudentEvent,
+    "date" | "eventDate" | "scheduledTime" | "timeStart" | "timeEnd"
+  >,
+) {
+  return formatEventScheduleDisplay({
+    date: event.eventDate ?? event.date,
+    scheduledTime: event.scheduledTime,
+    timeStart: event.timeStart,
+    timeEnd: event.timeEnd,
+  });
 }
 
 export default function StudentEventsPage() {
@@ -203,6 +217,10 @@ export default function StudentEventsPage() {
     () =>
       eventOnlyItems.find((item) => item.id === selectedEventId) ?? null,
     [eventOnlyItems, selectedEventId],
+  );
+  const selectedEventSchedule = useMemo(
+    () => (selectedEvent ? getStudentEventSchedule(selectedEvent) : null),
+    [selectedEvent],
   );
 
   const hasActiveSearch = searchText.trim().length > 0;
@@ -451,6 +469,7 @@ export default function StudentEventsPage() {
                     item.isPreReg ||
                     item.withPayment ||
                     Boolean(item.registrationStatus);
+                  const schedule = getStudentEventSchedule(item);
 
                   return (
                     <StudentEventCard
@@ -463,8 +482,7 @@ export default function StudentEventsPage() {
                       )}
                       title={item.title}
                       description={item.description}
-                      dateLabel={formatStudentEventDate(item.eventDate, item.date)}
-                      timeLabel={item.scheduledTime}
+                      scheduleLabel={schedule.scheduleLabel}
                       location={item.location}
                       status={item.status}
                       audienceLabel={buildStudentAudienceLabel(
@@ -549,10 +567,7 @@ export default function StudentEventsPage() {
                         {selectedEvent.title}
                       </p>
                       <p className="text-sm text-campus-text-secondary">
-                        {`${formatStudentEventDate(
-                          selectedEvent.eventDate,
-                          selectedEvent.date,
-                        )} | ${selectedEvent.scheduledTime} | ${selectedEvent.location}`}
+                        {`${selectedEventSchedule?.scheduleLabel ?? "Date TBA | Time TBA"} | ${selectedEvent.location}`}
                       </p>
                     </div>
                   </DrawerHeader>
@@ -587,10 +602,7 @@ export default function StudentEventsPage() {
                       {selectedEvent.title}
                     </span>
                     <span className="text-sm font-normal text-campus-text-secondary">
-                      {`${formatStudentEventDate(
-                        selectedEvent.eventDate,
-                        selectedEvent.date,
-                      )} | ${selectedEvent.scheduledTime} | ${selectedEvent.location}`}
+                      {`${selectedEventSchedule?.scheduleLabel ?? "Date TBA | Time TBA"} | ${selectedEvent.location}`}
                     </span>
                   </ModalHeader>
                   <ModalBody>
@@ -645,6 +657,7 @@ function StudentEventDetails({
     (registrationStatus === "PRE_REGISTERED" ||
       registrationStatus === "WAITLISTED");
   const previewImageFiles = event.imageFiles.slice(0, 3);
+  const schedule = getStudentEventSchedule(event);
   const slotsRemaining =
     event.preRegRemaining ??
     (typeof event.preRegSlots === "number"
@@ -702,11 +715,11 @@ function StudentEventDetails({
                 <div className="flex flex-col gap-2 text-sm text-campus-text-secondary sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
                   <span className="inline-flex items-center gap-1.5">
                     <CalendarDays size={15} />
-                    {formatStudentEventDate(event.eventDate, event.date)}
+                    {schedule.dateLabel}
                   </span>
                   <span className="inline-flex items-center gap-1.5">
                     <Clock3 size={15} />
-                    {event.scheduledTime}
+                    {schedule.timeLabel}
                   </span>
                   <span className="inline-flex items-center gap-1.5">
                     <MapPin size={15} />
@@ -747,7 +760,7 @@ function StudentEventDetails({
                       />
                       <EventDetailInfoRow
                         label="Schedule"
-                        value={`${formatStudentEventDate(event.eventDate, event.date)} | ${event.scheduledTime}`}
+                        value={schedule.scheduleLabel}
                       />
                       <EventDetailInfoRow
                         label="Location"

@@ -16,9 +16,9 @@ import {
   CampusDataTable,
   type CampusTableColumn,
 } from "@/components/ui/CampusDataTable";
+import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import {
   capitalizeTeacherLabel,
-  formatTeacherEventDate,
   getTeacherLifecycleTone,
   getTeacherToneClasses,
   type TeacherTone,
@@ -271,7 +271,7 @@ export function TeacherActivityChipGroup({
 type TeacherEventSnapshotCardProps = {
   title: string;
   lifecycle: string;
-  dateLabel: string;
+  scheduleLabel: string;
   location: string;
   registrationCount?: number;
   presentCount?: number;
@@ -285,7 +285,7 @@ type TeacherEventSnapshotCardProps = {
 export function TeacherEventSnapshotCard({
   title,
   lifecycle,
-  dateLabel,
+  scheduleLabel,
   location,
   registrationCount,
   presentCount,
@@ -353,7 +353,7 @@ export function TeacherEventSnapshotCard({
             <div className="flex flex-wrap gap-3 text-sm text-campus-text-secondary">
               <span className="inline-flex items-center gap-1.5">
                 <CalendarDays size={14} />
-                {dateLabel}
+                {scheduleLabel}
               </span>
               <span className="inline-flex items-center gap-1.5">
                 <MapPin size={14} />
@@ -448,6 +448,8 @@ export function buildTeacherEventSnapshotFromRecord(event: {
   lifecycle: "upcoming" | "ongoing" | "completed";
   eventDate: Date | null;
   date: string;
+  scheduledTime: string;
+  timeEnd: string;
   location: string;
   registrationCount: number;
   presentCount: number;
@@ -456,10 +458,16 @@ export function buildTeacherEventSnapshotFromRecord(event: {
   documentCount: number;
   imageCount: number;
 }) {
+  const schedule = formatEventScheduleDisplay({
+    date: event.eventDate ?? event.date,
+    scheduledTime: event.scheduledTime,
+    timeEnd: event.timeEnd,
+  });
+
   return {
     title: event.title,
     lifecycle: event.lifecycle,
-    dateLabel: formatTeacherEventDate(event.eventDate, event.date),
+    scheduleLabel: schedule.scheduleLabel,
     location: event.location,
     registrationCount: event.registrationCount,
     presentCount: event.presentCount,

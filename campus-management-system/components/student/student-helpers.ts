@@ -71,18 +71,6 @@ export function getStudentToneClasses(tone: StudentTone = "slate") {
   return studentToneClasses[tone];
 }
 
-export function formatStudentEventDate(date: Date | null, fallback: string) {
-  if (!date) return fallback || "Date TBA";
-
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 export function formatStudentCurrency(value: number) {
   return new Intl.NumberFormat("en-PH", {
     style: "currency",

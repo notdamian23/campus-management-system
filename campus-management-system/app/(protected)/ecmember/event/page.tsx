@@ -117,6 +117,7 @@ import {
   updateCampusEvent,
   logPermissionDeniedAttemptForCurrentUser,
 } from "@/lib/firebase-functions";
+import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import { isStudentAudienceProfile } from "@/lib/student-audience";
 import { campusToast } from "@/lib/toast";
 import { formatStudentFullName } from "@/lib/student-name";
@@ -1124,10 +1125,15 @@ function buildAttendanceSheetRows(
   return [...metadataRows, headerRow, ...bodyRows];
 }
 
-function formatEventScheduleLabel(event: Pick<EventDoc, "scheduledTime" | "timeStart" | "timeEnd">) {
-  const start = String(event.scheduledTime || event.timeStart || "").trim() || "TBA";
-  const end = String(event.timeEnd || "").trim();
-  return end ? `${start} - ${end}` : start;
+function getEventScheduleDisplay(
+  event: Pick<EventDoc, "date" | "scheduledTime" | "timeStart" | "timeEnd">,
+) {
+  return formatEventScheduleDisplay({
+    date: event.date,
+    scheduledTime: event.scheduledTime,
+    timeStart: event.timeStart,
+    timeEnd: event.timeEnd,
+  });
 }
 
 function getEventTargetLabel(
@@ -2709,6 +2715,10 @@ export default function EventDashboard() {
   const selectedEvent = useMemo(
     () => events.find((event) => event.id === expandedEventId) ?? null,
     [events, expandedEventId],
+  );
+  const selectedEventSchedule = useMemo(
+    () => (selectedEvent ? getEventScheduleDisplay(selectedEvent) : null),
+    [selectedEvent],
   );
   const selectedEventImages = useMemo(
     () =>
@@ -6912,6 +6922,7 @@ export default function EventDashboard() {
                   {paginatedEvents.map((ev) => {
                     const liveStatus = computeStatus(ev);
                     const canEditThisEvent = canEditEventRecord(ev);
+                    const schedule = getEventScheduleDisplay(ev);
                     const hasSlots =
                       ev.isPreReg && typeof ev.preRegSlots === "number";
                     const registrations = eventRegistrations[ev.id] ?? [];
@@ -7051,10 +7062,14 @@ export default function EventDashboard() {
                         <ECStatusChipGroup
                           className="mt-3"
                           items={[
-                            { label: "Date", value: ev.date, tone: "blue" },
+                            {
+                              label: "Date",
+                              value: schedule.dateLabel,
+                              tone: "blue",
+                            },
                             {
                               label: "Time",
-                              value: `${ev.scheduledTime || ev.timeStart || "—"}${ev.timeEnd ? ` - ${ev.timeEnd}` : ""}`,
+                              value: schedule.timeLabel,
                               tone: "amber",
                             },
                             {
@@ -7066,11 +7081,8 @@ export default function EventDashboard() {
                         />
 
                         <div className="hidden mt-3 flex-col gap-2 text-sm text-campus-text-secondary sm:flex-row sm:items-center sm:gap-4">
-                          <span>📅 {ev.date}</span>
-                          <span>
-                            ⏰ {ev.scheduledTime || ev.timeStart || "—"}
-                            {ev.timeEnd ? ` - ${ev.timeEnd}` : ""}
-                          </span>
+                          <span>📅 {schedule.dateLabel}</span>
+                          <span>⏰ {schedule.timeLabel}</span>
                           <span>📍 {ev.location || "—"}</span>
                         </div>
 
@@ -7904,11 +7916,11 @@ export default function EventDashboard() {
                         <div className="flex flex-col gap-2 text-sm font-normal text-campus-text-secondary sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
                           <span className="inline-flex items-center gap-1.5">
                             <CalendarDays size={15} />
-                            {selectedEvent.date}
+                            {selectedEventSchedule?.dateLabel ?? "Date TBA"}
                           </span>
                           <span className="inline-flex items-center gap-1.5">
                             <Clock3 size={15} />
-                            {formatEventScheduleLabel(selectedEvent)}
+                            {selectedEventSchedule?.timeLabel ?? "Time TBA"}
                           </span>
                           <span className="inline-flex items-center gap-1.5">
                             <MapPin size={15} />
@@ -8011,7 +8023,7 @@ export default function EventDashboard() {
                             />
                             <EventDetailInfoRow
                               label="Schedule"
-                              value={`${selectedEvent.date} | ${formatEventScheduleLabel(selectedEvent)}`}
+                              value={selectedEventSchedule?.scheduleLabel ?? "Date TBA | Time TBA"}
                             />
                             <EventDetailInfoRow
                               label="Location"

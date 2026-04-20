@@ -35,7 +35,6 @@ export {
   buildStudentAudienceLabel,
   formatStudentCurrency,
   formatStudentDateLabel,
-  formatStudentEventDate,
   formatStudentRelativeTime,
   getStudentAccountStatusTone,
   getStudentEventTone,

@@ -24,13 +24,13 @@ import {
   StudentStatusTabs,
   buildStudentAudienceLabel,
   formatStudentDateLabel,
-  formatStudentEventDate,
   isStudentPaymentOverdue,
   studentPaymentFooter,
   studentStatusIcons,
   useStudentPageErrorToast,
   useStudentPortal,
 } from "@/components/student";
+import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 
 type StatusTab = "attended" | "missed" | "payments";
 type PaymentSortMode = "default" | "paid" | "unpaid";
@@ -261,8 +261,14 @@ export default function StudentStatus() {
                     key={event.id}
                     title={event.title}
                     description={event.description}
-                    dateLabel={formatStudentEventDate(event.eventDate, event.date)}
-                    timeLabel={event.scheduledTime}
+                    scheduleLabel={
+                      formatEventScheduleDisplay({
+                        date: event.eventDate ?? event.date,
+                        scheduledTime: event.scheduledTime,
+                        timeStart: event.timeStart,
+                        timeEnd: event.timeEnd,
+                      }).scheduleLabel
+                    }
                     location={event.location}
                     status={event.status}
                     audienceLabel={buildStudentAudienceLabel(
@@ -306,8 +312,14 @@ export default function StudentStatus() {
                     key={event.id}
                     title={event.title}
                     description={event.description}
-                    dateLabel={formatStudentEventDate(event.eventDate, event.date)}
-                    timeLabel={event.scheduledTime}
+                    scheduleLabel={
+                      formatEventScheduleDisplay({
+                        date: event.eventDate ?? event.date,
+                        scheduledTime: event.scheduledTime,
+                        timeStart: event.timeStart,
+                        timeEnd: event.timeEnd,
+                      }).scheduleLabel
+                    }
                     location={event.location}
                     status={event.status}
                     audienceLabel={buildStudentAudienceLabel(

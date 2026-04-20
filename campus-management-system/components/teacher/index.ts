@@ -27,8 +27,6 @@ export {
   capitalizeTeacherLabel,
   formatTeacherBytes,
   formatTeacherDateTime,
-  formatTeacherEventDate,
-  formatTeacherSchedule,
   getTeacherAttendanceTone,
   getTeacherFileTone,
   getTeacherLifecycleTone,

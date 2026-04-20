@@ -21,11 +21,11 @@ import {
   StudentStatsGrid,
   StudentNotificationCard,
   buildStudentAudienceLabel,
-  formatStudentEventDate,
   formatStudentRelativeTime,
   useStudentPageErrorToast,
   useStudentPortal,
 } from "@/components/student";
+import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 
 function getNotificationHref(type: string) {
   if (type === "payment") return "/student/payment";
@@ -166,8 +166,14 @@ export default function StudentDashboard() {
                     key={event.id}
                     title={event.title}
                     description={event.description}
-                    dateLabel={formatStudentEventDate(event.eventDate, event.date)}
-                    timeLabel={event.scheduledTime}
+                    scheduleLabel={
+                      formatEventScheduleDisplay({
+                        date: event.eventDate ?? event.date,
+                        scheduledTime: event.scheduledTime,
+                        timeStart: event.timeStart,
+                        timeEnd: event.timeEnd,
+                      }).scheduleLabel
+                    }
                     location={event.location}
                     status={event.status}
                     audienceLabel={buildStudentAudienceLabel(

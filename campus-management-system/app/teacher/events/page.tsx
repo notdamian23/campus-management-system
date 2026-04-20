@@ -34,6 +34,7 @@ import {
 } from "@/components/events/EventDetailsShared";
 import type { CampusTableColumn } from "@/components/ui";
 import { CampusMetricSkeleton } from "@/components/ui";
+import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import { db } from "@/lib/firebase";
 import { formatStudentFullName } from "@/lib/student-name";
 import { campusToast } from "@/lib/toast";
@@ -47,8 +48,6 @@ import {
   TeacherStatsGrid,
   capitalizeTeacherLabel,
   downloadTeacherFile,
-  formatTeacherEventDate,
-  formatTeacherSchedule,
   getTeacherLifecycleTone,
   getTeacherToneClasses,
   teacherAudienceLabel,
@@ -66,7 +65,7 @@ const teacherEventColumns: CampusTableColumn<{
   title: string;
   location: string;
   lifecycle: "upcoming" | "ongoing" | "completed";
-  date: string;
+  schedule: string;
   audience: string;
   registrationCount: number;
   presentCount: number;
@@ -154,6 +153,21 @@ function normalizeParticipantStatus(value: string) {
   return "Recorded";
 }
 
+function getTeacherEventSchedule(
+  event: {
+    date: string;
+    eventDate: Date | null;
+    scheduledTime: string;
+    timeEnd: string;
+  },
+) {
+  return formatEventScheduleDisplay({
+    date: event.eventDate ?? event.date,
+    scheduledTime: event.scheduledTime,
+    timeEnd: event.timeEnd,
+  });
+}
+
 export default function TeacherEventsPage() {
   const { attendance, events, files, loading, error } = useTeacherPortal();
   const isCompactView = useIsBelowBreakpoint(1024);
@@ -215,6 +229,10 @@ export default function TeacherEventsPage() {
   const selectedEvent = useMemo(
     () => events.find((event) => event.id === selectedEventId) ?? null,
     [events, selectedEventId],
+  );
+  const selectedEventSchedule = useMemo(
+    () => (selectedEvent ? getTeacherEventSchedule(selectedEvent) : null),
+    [selectedEvent],
   );
 
   const selectedParticipants = useMemo(() => {
@@ -618,19 +636,23 @@ export default function TeacherEventsPage() {
       <TeacherDataTable
         ariaLabel="Teacher event records"
         columns={teacherEventColumns}
-        items={paginatedEvents.map((event) => ({
-          id: event.id,
-          title: event.title,
-          location: event.location,
-          lifecycle: event.lifecycle,
-          date: formatTeacherEventDate(event.eventDate, event.date),
-          audience: teacherAudienceLabel(event),
-          registrationCount: event.registrationCount,
-          presentCount: event.presentCount,
-          absentCount: event.absentCount,
-          documentCount: event.documentCount,
-          imageCount: event.imageCount,
-        }))}
+        items={paginatedEvents.map((event) => {
+          const schedule = getTeacherEventSchedule(event);
+
+          return {
+            id: event.id,
+            title: event.title,
+            location: event.location,
+            lifecycle: event.lifecycle,
+            schedule: schedule.scheduleLabel,
+            audience: teacherAudienceLabel(event),
+            registrationCount: event.registrationCount,
+            presentCount: event.presentCount,
+            absentCount: event.absentCount,
+            documentCount: event.documentCount,
+            imageCount: event.imageCount,
+          };
+        })}
         getRowKey={(event) => event.id}
         emptyTitle="No events found"
         emptyDescription="Try another title, venue, audience, status, or date filter to widen the teacher-visible event results."
@@ -666,7 +688,7 @@ export default function TeacherEventsPage() {
             return (
               <div className="space-y-1">
                 <p className="text-sm font-medium text-campus-text-primary">
-                  {event.date}
+                  {event.schedule}
                 </p>
               </div>
             );
@@ -747,10 +769,7 @@ export default function TeacherEventsPage() {
                 </span>
                 <span className="text-sm font-normal text-campus-text-secondary">
                   {selectedEvent
-                    ? `${formatTeacherEventDate(
-                        selectedEvent.eventDate,
-                        selectedEvent.date,
-                      )} | ${selectedEvent.location}`
+                    ? `${selectedEventSchedule?.scheduleLabel ?? "Date TBA | Time TBA"} | ${selectedEvent.location}`
                     : "-"}
                 </span>
               </ModalHeader>
@@ -801,7 +820,7 @@ export default function TeacherEventsPage() {
                           />
                           <EventDetailInfoRow
                             label="Schedule"
-                            value={selectedEvent ? formatTeacherSchedule(selectedEvent) : "-"}
+                            value={selectedEventSchedule?.scheduleLabel ?? "-"}
                           />
                           <EventDetailInfoRow
                             label="Status"

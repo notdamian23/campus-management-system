@@ -99,6 +99,8 @@ export type StudentEvent = {
   details: string;
   date: string;
   scheduledTime: string;
+  timeStart: string;
+  timeEnd: string;
   location: string;
   course: string;
   yearLevel: string;
@@ -1197,6 +1199,8 @@ export function StudentPortalProvider({
           details: raw.details || "",
           date: raw.date,
           scheduledTime: scheduledTime || "TBA",
+          timeStart: raw.timeStart || scheduledTime || "",
+          timeEnd: raw.timeEnd || "",
           location: raw.location || "TBA",
           course: raw.course || "All Courses",
           yearLevel: raw.yearLevel || "All Years",

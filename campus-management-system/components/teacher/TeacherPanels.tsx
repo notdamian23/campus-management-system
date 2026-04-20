@@ -26,6 +26,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { CampusDetailTile } from "@/components/ui";
+import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import type {
   TeacherAttendanceStatus,
   TeacherEvent,
@@ -38,7 +39,6 @@ import {
   capitalizeTeacherLabel,
   formatTeacherBytes,
   formatTeacherDateTime,
-  formatTeacherEventDate,
   getTeacherAttendanceTone,
   getTeacherFileTone,
   getTeacherLifecycleTone,
@@ -59,6 +59,16 @@ type TeacherStudentDetailProps = {
   attendanceItems: StudentAttendanceItem[];
   className?: string;
 };
+
+function getTeacherEventSchedule(
+  event: Pick<TeacherEvent, "date" | "eventDate" | "scheduledTime" | "timeEnd">,
+) {
+  return formatEventScheduleDisplay({
+    date: event.eventDate ?? event.date,
+    scheduledTime: event.scheduledTime,
+    timeEnd: event.timeEnd,
+  });
+}
 
 export function TeacherStudentDetailPanel({
   student,
@@ -211,6 +221,7 @@ function TeacherStudentDetailContent({
               );
               const StatusIcon =
                 item.status === "Absent" ? TriangleAlert : CheckCircle2;
+              const schedule = getTeacherEventSchedule(item.event);
 
               return (
                 <Card
@@ -225,7 +236,7 @@ function TeacherStudentDetailContent({
                           {item.event.title}
                         </p>
                         <p className="text-sm text-campus-text-secondary">
-                          {formatTeacherEventDate(item.event.eventDate, item.event.date)}
+                          {schedule.scheduleLabel}
                         </p>
                         <p className="text-xs text-campus-text-secondary">
                           {item.event.location}
@@ -267,6 +278,7 @@ function TeacherStudentDetailContent({
               const lifecycleClasses = getTeacherToneClasses(
                 getTeacherLifecycleTone(event.lifecycle),
               );
+              const schedule = getTeacherEventSchedule(event);
 
               return (
                 <Card
@@ -281,7 +293,7 @@ function TeacherStudentDetailContent({
                           {event.title}
                         </p>
                         <p className="text-sm text-campus-text-secondary">
-                          {formatTeacherEventDate(event.eventDate, event.date)}
+                          {schedule.scheduleLabel}
                         </p>
                         <p className="text-xs text-campus-text-secondary">
                           {event.location}
