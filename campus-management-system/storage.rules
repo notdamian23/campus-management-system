@@ -13,6 +13,10 @@ service firebase.storage {
       return /databases/(default)/documents/events/$(eventId);
     }
 
+    function ecDocumentPath(docId) {
+      return /databases/(default)/documents/ecDocuments/$(docId);
+    }
+
     function hasProfile() {
       return signedIn() && firestore.exists(profilePath());
     }
@@ -109,6 +113,60 @@ service firebase.storage {
       return eventExists(eventId) ? firestore.get(eventPath(eventId)).data : null;
     }
 
+    function ecDocumentExists(docId) {
+      return firestore.exists(ecDocumentPath(docId));
+    }
+
+    function ecDocumentData(docId) {
+      return ecDocumentExists(docId) ? firestore.get(ecDocumentPath(docId)).data : null;
+    }
+
+    function ecDocumentOwnerType(data) {
+      return data != null && data.ownerType == "bod" ? "bod" : "ec";
+    }
+
+    function ecDocumentCreatedByUid(data) {
+      return data == null ? "" :
+        data.createdBy != null && data.createdBy != "" ? data.createdBy :
+        (
+          data.createdByUid != null &&
+          data.createdByUid != ""
+        ) ? data.createdByUid :
+        (
+          data.uploadedByUid != null &&
+          data.uploadedByUid != ""
+        ) ? data.uploadedByUid :
+        (
+          data.ownerUid != null &&
+          data.ownerUid != ""
+        ) ? data.ownerUid :
+        "";
+    }
+
+    function ecDocumentCourseScope(data) {
+      return data != null &&
+        data.courseScope != null &&
+        data.courseScope != "" ? data.courseScope : null;
+    }
+
+    function canReadOwnBodEcDocument(docId) {
+      return isBOD() &&
+        currentCourseScope() != null &&
+        ecDocumentExists(docId) &&
+        ecDocumentOwnerType(ecDocumentData(docId)) == "bod" &&
+        ecDocumentCreatedByUid(ecDocumentData(docId)) == request.auth.uid &&
+        ecDocumentCourseScope(ecDocumentData(docId)) == currentCourseScope();
+    }
+
+    function canWriteOwnOrPendingBodEcDocument(docId) {
+      return isBOD() &&
+        currentCourseScope() != null &&
+        (
+          !ecDocumentExists(docId) ||
+          canReadOwnBodEcDocument(docId)
+        );
+    }
+
     function eventOwnerType(data) {
       return data.ownerType == "bod" ? "bod" : "ec";
     }
@@ -150,20 +208,20 @@ service firebase.storage {
     }
 
     match /ec-documents/shared/{docId}/{fileName} {
-      allow read: if isAdminOrEC();
+      allow read: if isAdmin() || isRegularEC();
       allow write: if isAdmin() || isRegularEC();
     }
 
     match /ec-documents/course/{courseScopeSlug}/{docId}/{fileName} {
       allow read: if isAdmin() || isRegularEC() ||
         (
-          isBOD() &&
+          canReadOwnBodEcDocument(docId) &&
           currentCourseScopeSlug() != "" &&
           courseScopeSlug == currentCourseScopeSlug()
         );
       allow write: if isAdmin() || isRegularEC() ||
         (
-          isBOD() &&
+          canWriteOwnOrPendingBodEcDocument(docId) &&
           currentCourseScopeSlug() != "" &&
           courseScopeSlug == currentCourseScopeSlug()
         );

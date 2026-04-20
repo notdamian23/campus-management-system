@@ -52,6 +52,15 @@ type EventLike = {
   createdByCourseScope?: unknown;
 } | null | undefined;
 
+type DocumentLike = {
+  ownerType?: unknown;
+  courseScope?: unknown;
+  createdBy?: unknown;
+  createdByUid?: unknown;
+  uploadedByUid?: unknown;
+  ownerUid?: unknown;
+} | null | undefined;
+
 function trimValue(value: unknown) {
   return String(value ?? "").trim();
 }
@@ -63,6 +72,16 @@ function normalizeLower(value: unknown) {
 function normalizeMaybeCourse(value: unknown) {
   const normalized = normalizeCourse(trimValue(value));
   return normalized || null;
+}
+
+function normalizeCourseList(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as string[];
+  }
+
+  return value
+    .map((entry) => normalizeMaybeCourse(entry))
+    .filter((entry): entry is string => Boolean(entry));
 }
 
 export function isECMemberRole(role: unknown) {
@@ -199,6 +218,8 @@ export function canManagePayment(
   payment?: {
     course?: unknown;
     courseScope?: unknown;
+    targetCourses?: unknown;
+    createdByUid?: unknown;
     createdByCourseScope?: unknown;
   } | null,
 ) {
@@ -207,12 +228,24 @@ export function canManagePayment(
   if (!isBOD(profile)) return false;
 
   const courseScope = getCourseScope(profile);
+  const paymentCourse = normalizeMaybeCourse(payment?.course);
   const paymentScope =
-    normalizeMaybeCourse(payment?.courseScope) ||
-    normalizeMaybeCourse(payment?.createdByCourseScope) ||
-    normalizeMaybeCourse(payment?.course);
+    normalizeMaybeCourse(payment?.courseScope) || paymentCourse;
+  const createdByCourseScope = normalizeMaybeCourse(
+    payment?.createdByCourseScope,
+  );
+  const actorUid = trimValue(profile?.uid);
+  const createdByUid = trimValue(payment?.createdByUid);
 
-  return Boolean(courseScope && paymentScope && courseScope === paymentScope);
+  return Boolean(
+    courseScope &&
+      actorUid &&
+      createdByUid &&
+      actorUid === createdByUid &&
+      paymentCourse === courseScope &&
+      paymentScope === courseScope &&
+      createdByCourseScope === courseScope,
+  );
 }
 
 export function canEditPayment(
@@ -249,6 +282,32 @@ export function canEditPayment(
   );
 }
 
+export function canViewPayment(
+  profile: ECProfileLike,
+  payment?: {
+    course?: unknown;
+    courseScope?: unknown;
+    targetCourses?: unknown;
+    createdByCourseScope?: unknown;
+  } | null,
+) {
+  if (normalizeLower(profile?.role) === "admin") return true;
+  if (isRegularEC(profile)) return true;
+  if (!isBOD(profile)) return false;
+
+  const courseScope = getCourseScope(profile);
+  const paymentScope =
+    normalizeMaybeCourse(payment?.courseScope) ||
+    normalizeMaybeCourse(payment?.createdByCourseScope) ||
+    normalizeMaybeCourse(payment?.course);
+  const targetCourses = normalizeCourseList(payment?.targetCourses);
+
+  return Boolean(
+    courseScope &&
+      (paymentScope === courseScope || targetCourses.includes(courseScope)),
+  );
+}
+
 export function canViewEvent(profile: ECProfileLike, event: EventLike) {
   if (normalizeLower(profile?.role) === "admin") return true;
   if (isRegularEC(profile)) return true;
@@ -263,6 +322,38 @@ export function canViewEvent(profile: ECProfileLike, event: EventLike) {
     normalizeMaybeCourse(event?.createdByCourseScope);
 
   return ownerType === "bod" && Boolean(courseScope && eventScope === courseScope);
+}
+
+export function canViewDocument(profile: ECProfileLike, document: DocumentLike) {
+  if (normalizeLower(profile?.role) === "admin") return true;
+  if (isRegularEC(profile)) return true;
+  if (!isBOD(profile)) return false;
+
+  const courseScope = getCourseScope(profile);
+  const documentScope = normalizeMaybeCourse(document?.courseScope);
+  const ownerType = normalizeLower(document?.ownerType);
+  const actorUid = trimValue(profile?.uid);
+  const createdByUid =
+    trimValue(document?.createdBy) ||
+    trimValue(document?.createdByUid) ||
+    trimValue(document?.uploadedByUid) ||
+    trimValue(document?.ownerUid);
+
+  return Boolean(
+    courseScope &&
+      actorUid &&
+      createdByUid &&
+      ownerType === "bod" &&
+      documentScope === courseScope &&
+      createdByUid === actorUid,
+  );
+}
+
+export function canManageDocument(
+  profile: ECProfileLike,
+  document: DocumentLike,
+) {
+  return canViewDocument(profile, document);
 }
 
 export function canEditEvent(profile: ECProfileLike, event: EventLike) {

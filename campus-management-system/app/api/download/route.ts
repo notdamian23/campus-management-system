@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 const DEFAULT_BUCKET = "campus-27dd9.firebasestorage.app";
 const FIREBASE_HOST = "firebasestorage.googleapis.com";
+const GOOGLE_STORAGE_HOST = "storage.googleapis.com";
 
 const sanitizeFilename = (input: string) => {
     const trimmed = input.trim();
@@ -30,6 +31,27 @@ const jsonError = (status: number, message: string) => {
     return Response.json({ error: message }, { status });
 };
 
+const matchesConfiguredBucket = (sourceUrl: URL, bucket: string) => {
+    if (
+        sourceUrl.hostname === FIREBASE_HOST &&
+        sourceUrl.pathname.startsWith(`/v0/b/${bucket}/o/`)
+    ) {
+        return true;
+    }
+
+    if (
+        sourceUrl.hostname === GOOGLE_STORAGE_HOST &&
+        (
+            sourceUrl.pathname.startsWith(`/${bucket}/`) ||
+            sourceUrl.pathname.startsWith(`/download/storage/v1/b/${bucket}/o/`)
+        )
+    ) {
+        return true;
+    }
+
+    return false;
+};
+
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
@@ -51,12 +73,15 @@ export async function GET(req: NextRequest) {
         return jsonError(400, "Only https URLs are allowed.");
     }
 
-    if (sourceUrl.hostname !== FIREBASE_HOST) {
+    if (
+        sourceUrl.hostname !== FIREBASE_HOST &&
+        sourceUrl.hostname !== GOOGLE_STORAGE_HOST
+    ) {
         return jsonError(400, "Unsupported download host.");
     }
 
     const configuredBucket = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET?.trim() || DEFAULT_BUCKET;
-    if (!sourceUrl.pathname.startsWith(`/v0/b/${configuredBucket}/o/`)) {
+    if (!matchesConfiguredBucket(sourceUrl, configuredBucket)) {
         return jsonError(400, "URL does not match configured storage bucket.");
     }
 

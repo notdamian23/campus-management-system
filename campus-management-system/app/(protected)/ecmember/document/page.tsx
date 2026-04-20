@@ -57,10 +57,16 @@ import {
 } from "@/components/ecmember";
 import { createCampusLogger } from "@/lib/campus-logger";
 import type { CampusProfileDoc } from "@/lib/campus-auth";
-import { getCourseScope, isBOD } from "@/lib/ec-permissions";
+import {
+  canManageDocument,
+  canViewDocument,
+  getCourseScope,
+  isBOD,
+} from "@/lib/ec-permissions";
 import {
   createCampusDocumentMetadata,
   deleteCampusDocument,
+  getCampusDocumentDownloadUrl,
 } from "@/lib/firebase-functions";
 import { auth, db, storage } from "@/lib/firebase";
 import { campusToast } from "@/lib/toast";
@@ -106,6 +112,8 @@ type FirestoreDocumentRecord = {
   courseScope?: string | null;
   createdByCourseScope?: string | null;
   createdBy?: string;
+  createdByUid?: string;
+  ownerUid?: string;
   uploadedByUid?: string;
   createdAt?: FirestoreTimestampLike | string | number | null;
 };
@@ -229,8 +237,8 @@ const mapFirestoreDocumentItem = (
       typeof data.createdByCourseScope === "string"
         ? data.createdByCourseScope
         : null,
-    createdBy: String(data.createdBy ?? ""),
-    uploadedByUid: String(data.uploadedByUid ?? ""),
+    createdBy: String(data.createdBy ?? data.createdByUid ?? data.ownerUid ?? ""),
+    uploadedByUid: String(data.uploadedByUid ?? data.createdByUid ?? ""),
   };
 };
 
@@ -411,6 +419,9 @@ export default function DocumentsPage() {
   const [pendingDeleteDocument, setPendingDeleteDocument] =
     useState<DocumentItem | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [downloadSubmittingId, setDownloadSubmittingId] = useState<
+    string | null
+  >(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -457,26 +468,16 @@ export default function DocumentsPage() {
 
     try {
       if (viewerIsBod && viewerCourseScope) {
-        const [ecSnap, courseScopeSnap] = await Promise.all([
-          getDocs(
-            query(collection(db, "ecDocuments"), where("ownerType", "==", "ec")),
+        const bodDocumentsSnap = await getDocs(
+          query(
+            collection(db, "ecDocuments"),
+            where("ownerType", "==", "bod"),
+            where("createdBy", "==", activeUid),
+            where("courseScope", "==", viewerCourseScope),
           ),
-          getDocs(
-            query(
-              collection(db, "ecDocuments"),
-              where("courseScope", "==", viewerCourseScope),
-            ),
-          ),
-        ]);
+        );
 
-        const merged = new Map<string, DocumentItem>();
-        [...ecSnap.docs, ...courseScopeSnap.docs]
-          .map(mapFirestoreDocumentItem)
-          .forEach((docItem) => {
-            merged.set(docItem.id, docItem);
-          });
-
-        setDocuments(sortDocumentItems(Array.from(merged.values())));
+        setDocuments(sortDocumentItems(bodDocumentsSnap.docs.map(mapFirestoreDocumentItem)));
         setDocumentsLoading(false);
         return;
       }
@@ -550,23 +551,8 @@ export default function DocumentsPage() {
   }, [loadDocuments]);
 
   const scopedDocuments = useMemo(() => {
-    if (!viewerIsBod) {
-      return documents;
-    }
-
-    if (!viewerCourseScope) {
-      return [];
-    }
-
-    return documents.filter((docItem) => {
-      if (docItem.ownerType !== "bod") {
-        return true;
-      }
-
-      const effectiveScope = docItem.courseScope || docItem.createdByCourseScope;
-      return effectiveScope === viewerCourseScope;
-    });
-  }, [documents, viewerCourseScope, viewerIsBod]);
+    return documents.filter((docItem) => canViewDocument(viewerProfile, docItem));
+  }, [documents, viewerProfile]);
 
   useEffect(() => {
     if (scopedDocuments.length === 0) {
@@ -644,6 +630,20 @@ export default function DocumentsPage() {
   const selectedDocument = useMemo(() => {
     return scopedDocuments.find((docItem) => docItem.id === selectedDocId) ?? null;
   }, [scopedDocuments, selectedDocId]);
+
+  const selectedDocumentCanDownload = useMemo(() => {
+    return Boolean(
+      selectedDocument &&
+        canViewDocument(viewerProfile, selectedDocument) &&
+        (selectedDocument.storagePath || selectedDocument.downloadUrl),
+    );
+  }, [selectedDocument, viewerProfile]);
+
+  const selectedDocumentCanDelete = useMemo(() => {
+    return Boolean(
+      selectedDocument && canManageDocument(viewerProfile, selectedDocument),
+    );
+  }, [selectedDocument, viewerProfile]);
 
   useECPageErrorToast(documentsError || null, "documents");
 
@@ -953,8 +953,19 @@ export default function DocumentsPage() {
     }
   };
 
-  const handleDownload = (docItem: DocumentItem) => {
-    if (!docItem.downloadUrl) {
+  const handleDownload = async (docItem: DocumentItem) => {
+    if (!canViewDocument(viewerProfile, docItem)) {
+      addToast({
+        title: "Download unavailable",
+        description:
+          "You can only download documents that belong to your current EC scope.",
+        color: "warning",
+        timeout: 6000,
+      });
+      return;
+    }
+
+    if (!docItem.storagePath && !docItem.downloadUrl) {
       addToast({
         title: "Download unavailable",
         description: "This file has no download link in storage metadata.",
@@ -965,18 +976,25 @@ export default function DocumentsPage() {
     }
 
     try {
+      setDownloadSubmittingId(docItem.id);
       ecDocumentsLogger.info("Starting direct download.", {
         docId: docItem.id,
         name: docItem.name,
       });
 
+      const downloadResult = await withTimeout(
+        getCampusDocumentDownloadUrl({ docId: docItem.id }),
+        FETCH_URL_TIMEOUT_MS,
+        "Get document download URL",
+      );
+
       const params = new URLSearchParams({
-        url: docItem.downloadUrl,
-        name: docItem.name,
+        url: downloadResult.downloadUrl,
+        name: downloadResult.name || docItem.name,
       });
       const anchor = document.createElement("a");
       anchor.href = `/api/download?${params.toString()}`;
-      anchor.download = docItem.name;
+      anchor.download = downloadResult.name || docItem.name;
       anchor.style.display = "none";
       document.body.appendChild(anchor);
       anchor.click();
@@ -1002,6 +1020,10 @@ export default function DocumentsPage() {
         color: "danger",
         timeout: 7000,
       });
+    } finally {
+      setDownloadSubmittingId((current) =>
+        current === docItem.id ? null : current,
+      );
     }
   };
 
@@ -1263,9 +1285,15 @@ export default function DocumentsPage() {
             if (selectedDocument) void handleDownload(selectedDocument);
           }}
           onDelete={() => {
-            if (selectedDocument) setPendingDeleteDocument(selectedDocument);
+            if (selectedDocument && selectedDocumentCanDelete) {
+              setPendingDeleteDocument(selectedDocument);
+            }
           }}
-          deleteDisabled={deleteSubmitting}
+          downloadDisabled={
+            !selectedDocumentCanDownload ||
+            downloadSubmittingId === selectedDocument?.id
+          }
+          deleteDisabled={deleteSubmitting || !selectedDocumentCanDelete}
           deleting={deleteSubmitting}
         />
       </div>
@@ -1290,9 +1318,15 @@ export default function DocumentsPage() {
           if (selectedDocument) void handleDownload(selectedDocument);
         }}
         onDelete={() => {
-          if (selectedDocument) setPendingDeleteDocument(selectedDocument);
+          if (selectedDocument && selectedDocumentCanDelete) {
+            setPendingDeleteDocument(selectedDocument);
+          }
         }}
-        deleteDisabled={deleteSubmitting}
+        downloadDisabled={
+          !selectedDocumentCanDownload ||
+          downloadSubmittingId === selectedDocument?.id
+        }
+        deleteDisabled={deleteSubmitting || !selectedDocumentCanDelete}
         deleting={deleteSubmitting}
       />
 

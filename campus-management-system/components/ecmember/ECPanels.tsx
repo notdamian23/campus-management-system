@@ -30,6 +30,7 @@ type ECDocumentDetailsProps = {
   isLoading?: boolean;
   onDownload?: () => void;
   onDelete?: () => void;
+  downloadDisabled?: boolean;
   deleteDisabled?: boolean;
   deleting?: boolean;
   className?: string;
@@ -40,6 +41,7 @@ export function ECDocumentDetailsPanel({
   isLoading = false,
   onDownload,
   onDelete,
+  downloadDisabled = false,
   deleteDisabled = false,
   deleting = false,
   className,
@@ -58,6 +60,7 @@ export function ECDocumentDetailsPanel({
           document={document}
           onDownload={onDownload}
           onDelete={onDelete}
+          downloadDisabled={downloadDisabled}
           deleteDisabled={deleteDisabled}
           deleting={deleting}
         />
@@ -73,6 +76,7 @@ export function ECDocumentDetailsDrawer({
   onOpenChange,
   onDownload,
   onDelete,
+  downloadDisabled = false,
   deleteDisabled = false,
   deleting = false,
 }: ECDocumentDetailsProps & {
@@ -106,6 +110,7 @@ export function ECDocumentDetailsDrawer({
                   isLoading={isLoading}
                   onDownload={onDownload}
                   onDelete={onDelete}
+                  downloadDisabled={downloadDisabled}
                   deleteDisabled={deleteDisabled}
                   deleting={deleting}
                 />
@@ -128,6 +133,7 @@ function ECDocumentDetailsContent({
   isLoading = false,
   onDownload,
   onDelete,
+  downloadDisabled = false,
   deleteDisabled = false,
   deleting = false,
 }: ECDocumentDetailsProps) {
@@ -181,7 +187,7 @@ function ECDocumentDetailsContent({
           tone="primary"
           icon={<Download size={16} />}
           onPress={onDownload}
-          isDisabled={!document.downloadUrl}
+          isDisabled={downloadDisabled}
         >
           Download document
         </ActionButton>

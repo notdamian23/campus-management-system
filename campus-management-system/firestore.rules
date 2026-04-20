@@ -320,8 +320,20 @@ service cloud.firestore {
         null;
     }
 
+    function paymentTargetCourses(data) {
+      return data.targetCourses is list ? data.targetCourses : [];
+    }
+
     function bodPaymentWriteIsScoped(data) {
       return data.courseScope == currentCourseScope() &&
+        data.createdByUid == request.auth.uid &&
+        data.createdByCourseScope == currentCourseScope() &&
+        data.course == currentCourseScope();
+    }
+
+    function bodExistingPaymentIsScoped(data) {
+      return currentCourseScope() != null &&
+        paymentCourseScope(data) == currentCourseScope() &&
         data.createdByUid == request.auth.uid &&
         data.createdByCourseScope == currentCourseScope() &&
         data.course == currentCourseScope();
@@ -333,7 +345,12 @@ service cloud.firestore {
         (
           isBOD() &&
           currentCourseScope() != null &&
-          paymentCourseScope(data) == currentCourseScope()
+          (
+            paymentCourseScope(data) == currentCourseScope() ||
+            data.createdByCourseScope == currentCourseScope() ||
+            data.course == currentCourseScope() ||
+            paymentTargetCourses(data).hasAny([currentCourseScope()])
+          )
         );
     }
 
@@ -351,7 +368,7 @@ service cloud.firestore {
         (
           isBOD() &&
           currentCourseScope() != null &&
-          paymentCourseScope(resource.data) == currentCourseScope() &&
+          bodExistingPaymentIsScoped(resource.data) &&
           bodPaymentWriteIsScoped(request.resource.data)
         );
     }
@@ -360,12 +377,14 @@ service cloud.firestore {
       return isAdminOrRegularEC();
     }
 
-    function canManagePaymentStudentData(data) {
+    function canManagePaymentStudentData(paymentId, data) {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
           currentCourseScope() != null &&
-          data.course == currentCourseScope()
+          data.course == currentCourseScope() &&
+          exists(paymentPath(paymentId)) &&
+          bodExistingPaymentIsScoped(get(paymentPath(paymentId)).data)
         );
     }
 
@@ -396,18 +415,39 @@ service cloud.firestore {
         ) ? data.createdByCourseScope : null;
     }
 
-    function canViewEcDocumentData(data) {
-      return isAdminOrRegularEC() ||
+    function ecDocumentStrictCourseScope(data) {
+      return data.courseScope != null && data.courseScope != "" ?
+        data.courseScope :
+        null;
+    }
+
+    function ecDocumentCreatedByUid(data) {
+      return data.createdBy != null && data.createdBy != "" ? data.createdBy :
         (
-          isBOD() &&
-          (
-            ecDocumentOwnerType(data) == "ec" ||
-            (
-              currentCourseScope() != null &&
-              ecDocumentCourseScope(data) == currentCourseScope()
-            )
-          )
-        );
+          data.createdByUid != null &&
+          data.createdByUid != ""
+        ) ? data.createdByUid :
+        (
+          data.uploadedByUid != null &&
+          data.uploadedByUid != ""
+        ) ? data.uploadedByUid :
+        (
+          data.ownerUid != null &&
+          data.ownerUid != ""
+        ) ? data.ownerUid :
+        "";
+    }
+
+    function canManageOwnBodEcDocumentData(data) {
+      return isBOD() &&
+        currentCourseScope() != null &&
+        ecDocumentOwnerType(data) == "bod" &&
+        ecDocumentCreatedByUid(data) == request.auth.uid &&
+        ecDocumentStrictCourseScope(data) == currentCourseScope();
+    }
+
+    function canViewEcDocumentData(data) {
+      return isAdminOrRegularEC() || canManageOwnBodEcDocumentData(data);
     }
 
     function enrollmentSessionCourseScope(data) {
@@ -557,9 +597,9 @@ service cloud.firestore {
             currentCourseScope() != null &&
             resource.data.course == currentCourseScope()
           );
-        allow create: if canManagePaymentStudentData(request.resource.data);
-        allow update: if canManagePaymentStudentData(resource.data) &&
-          canManagePaymentStudentData(request.resource.data);
+        allow create: if canManagePaymentStudentData(paymentId, request.resource.data);
+        allow update: if canManagePaymentStudentData(paymentId, resource.data) &&
+          canManagePaymentStudentData(paymentId, request.resource.data);
         allow delete: if canDeletePaymentStudentData(paymentId, resource.data);
       }
     }

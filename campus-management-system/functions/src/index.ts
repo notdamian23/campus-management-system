@@ -4271,10 +4271,32 @@ function ecDocumentOwnerType(data: FirebaseFirestore.DocumentData): "ec" | "bod"
   return normalizeLower(data.ownerType) === "bod" ? "bod" : "ec";
 }
 
-function ecDocumentCourseScope(data: FirebaseFirestore.DocumentData): string {
+function ecDocumentStrictCourseScope(data: FirebaseFirestore.DocumentData): string {
+  return normalizeCourseLabel(data.courseScope);
+}
+
+function ecDocumentCreatedByUid(data: FirebaseFirestore.DocumentData): string {
+  return normalizeText(
+    data.createdBy || data.createdByUid || data.uploadedByUid || data.ownerUid,
+  );
+}
+
+function canEcActorAccessDocument(
+  actor: EcActorContext,
+  data: FirebaseFirestore.DocumentData,
+): boolean {
+  if (actor.isAdmin || actor.isRegularEc) {
+    return true;
+  }
+
+  if (!actor.isBod || !actor.courseScope) {
+    return false;
+  }
+
   return (
-    normalizeCourseLabel(data.courseScope) ||
-    normalizeCourseLabel(data.createdByCourseScope)
+    ecDocumentOwnerType(data) === "bod" &&
+    ecDocumentStrictCourseScope(data) === actor.courseScope &&
+    ecDocumentCreatedByUid(data) === actor.uid
   );
 }
 
@@ -4310,12 +4332,36 @@ function paymentCourseValue(data: FirebaseFirestore.DocumentData): string {
   return normalizeCourseLabel(data.course);
 }
 
+function paymentTargetCourses(data: FirebaseFirestore.DocumentData): string[] {
+  if (!Array.isArray(data.targetCourses)) {
+    return [];
+  }
+
+  return data.targetCourses
+    .map((value) => normalizeCourseLabel(value))
+    .filter(Boolean);
+}
+
 function paymentCreatedByCourseScope(data: FirebaseFirestore.DocumentData): string {
   return normalizeCourseLabel(data.createdByCourseScope);
 }
 
 function paymentCreatedByUid(data: FirebaseFirestore.DocumentData): string {
   return normalizeText(data.createdByUid || data.createdBy);
+}
+
+function paymentMatchesCourseScope(
+  data: FirebaseFirestore.DocumentData,
+  courseScope: string,
+): boolean {
+  if (!courseScope) {
+    return false;
+  }
+
+  return paymentCourseScope(data) === courseScope ||
+    paymentCreatedByCourseScope(data) === courseScope ||
+    paymentCourseValue(data) === courseScope ||
+    paymentTargetCourses(data).includes(courseScope);
 }
 
 async function deleteSnapshotDocumentsInBatches(
@@ -5305,20 +5351,27 @@ export const createCampusDocumentMetadata = onCall({region: REGION}, async (requ
     await documentRef.set(
       {
         name,
+        fileName: name,
         type,
         category,
         sizeBytes,
         downloadURL,
         storagePath,
+        uploadedBy: actor.uid,
         uploadedByUid: actor.uid,
+        ownerUid: actor.uid,
         createdBy: actor.uid,
+        createdByUid: actor.uid,
+        createdByRole: normalizeCampusRoleValue(actor.profile.role) || null,
         createdByPosition,
+        ecScope: resolveProfileEcScope(actor.profile) || null,
         ownerType,
         course,
         courseScope,
         createdByCourseScope,
         courses,
         createdAt: serverTimestamp(),
+        uploadedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       },
     );
@@ -5328,6 +5381,90 @@ export const createCampusDocumentMetadata = onCall({region: REGION}, async (requ
       ownerType,
       courseScope,
     };
+  });
+
+export const getCampusDocumentDownloadUrl = onCall({region: REGION}, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const docId = normalizeText(body.docId);
+
+    if (!docId) {
+      throw new HttpsError("invalid-argument", "docId is required.");
+    }
+
+    const documentRef = db.doc(`ecDocuments/${docId}`);
+    const documentSnapshot = await documentRef.get();
+    if (!documentSnapshot.exists) {
+      throw new HttpsError("not-found", "Document metadata not found.");
+    }
+
+    const documentData = documentSnapshot.data() ?? {};
+    if (!canEcActorAccessDocument(actor, documentData)) {
+      throw new HttpsError(
+        "permission-denied",
+        actor.isBod ?
+          "B.O.D. members can only download their own course documents." :
+          "You do not have permission to download this document.",
+      );
+    }
+
+    const name = normalizeText(documentData.name) || "download";
+    const storagePath = normalizeText(documentData.storagePath);
+    const fallbackDownloadUrl = normalizeText(documentData.downloadURL);
+
+    if (!storagePath && !fallbackDownloadUrl) {
+      throw new HttpsError("not-found", "Document file not found.");
+    }
+
+    try {
+      const downloadUrl = storagePath ?
+        (
+          await admin
+            .storage()
+            .bucket()
+            .file(storagePath)
+            .getSignedUrl({
+              action: "read",
+              expires: Date.now() + 5 * 60 * 1000,
+              version: "v4",
+            })
+        )[0] :
+        fallbackDownloadUrl;
+
+      if (!downloadUrl) {
+        throw new HttpsError("not-found", "Document file not found.");
+      }
+
+      return {
+        docId,
+        name,
+        downloadUrl,
+      };
+    } catch (error) {
+      authLogger.error("getCampusDocumentDownloadUrl failed", {
+        docId,
+        actorUid: actor.uid,
+        storagePath,
+        error,
+      });
+
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      if (fallbackDownloadUrl) {
+        return {
+          docId,
+          name,
+          downloadUrl: fallbackDownloadUrl,
+        };
+      }
+
+      throw new HttpsError(
+        "internal",
+        "Failed to prepare the document download.",
+      );
+    }
   });
 
 export const deleteCampusDocument = onCall({region: REGION}, async (request) => {
@@ -5346,21 +5483,12 @@ export const deleteCampusDocument = onCall({region: REGION}, async (request) => 
     }
 
     const documentData = documentSnapshot.data() ?? {};
-    const ownerType = ecDocumentOwnerType(documentData);
-    const documentScope = ecDocumentCourseScope(documentData);
-    const createdByUid = normalizeText(documentData.createdBy || documentData.uploadedByUid);
 
-    if (actor.isBod) {
-      if (
-        ownerType !== "bod" ||
-        documentScope !== actor.courseScope ||
-        createdByUid !== actor.uid
-      ) {
-        throw new HttpsError(
-          "permission-denied",
-          "B.O.D. members can only delete their own course documents.",
-        );
-      }
+    if (actor.isBod && !canEcActorAccessDocument(actor, documentData)) {
+      throw new HttpsError(
+        "permission-denied",
+        "B.O.D. members can only delete their own course documents.",
+      );
     }
 
     const storagePath = normalizeText(documentData.storagePath);
@@ -5578,6 +5706,176 @@ export const deleteCampusPayment = onCall({region: REGION}, async (request) => {
       paymentId,
       linkedEventUpdated,
     };
+  });
+
+export const listCampusPayments = onCall({region: REGION}, async (request) => {
+    const actor = await resolveEcActorContext(request);
+
+    const toPaymentPayload = (
+      paymentId: string,
+      data: FirebaseFirestore.DocumentData,
+      counts?: {
+        total: number;
+        paidCount: number;
+        unpaidCount: number;
+      } | null,
+    ) => ({
+      id: paymentId,
+      title: normalizeText(data.title) || "Untitled Payment",
+      ref: normalizeText(data.ref) || makePaymentRef(paymentId),
+      amount: Number(data.amount ?? 0),
+      date: normalizeText(data.date),
+      yearLevel: normalizeText(data.yearLevel) || "All Years",
+      course: normalizeText(data.course) || "All Courses",
+      targetStudent: normalizeText(data.targetStudent),
+      targetCourses: paymentTargetCourses(data),
+      details: normalizeText(data.details),
+      totalStudents: counts?.total ?? Number(data.totalStudents ?? 0),
+      paidCount: counts?.paidCount ?? Number(data.paidCount ?? 0),
+      unpaidCount: counts?.unpaidCount ?? Number(data.unpaidCount ?? 0),
+      linkedEventId: normalizeText(data.linkedEventId || data.eventId),
+      linkedEventTitle: normalizeText(data.linkedEventTitle),
+      source: normalizeText(data.source),
+      status: normalizeText(data.status),
+      ownerType: paymentOwnerType(data),
+      createdByUid: paymentCreatedByUid(data),
+      createdByRole: normalizeText(data.createdByRole),
+      createdByCourseScope: paymentCreatedByCourseScope(data) || null,
+      courseScope: paymentCourseScope(data) || null,
+      createdAt: toMillis(data.createdAt),
+    });
+
+    if (actor.isAdmin || actor.isRegularEc) {
+      const paymentSnapshot = await db
+        .collection("payments")
+        .orderBy("createdAt", "desc")
+        .get();
+
+      return {
+        payments: paymentSnapshot.docs
+          .map((paymentDoc) => {
+            const paymentData = paymentDoc.data() ?? {};
+            if (normalizeLower(paymentData.status) === "archived") {
+              return null;
+            }
+
+            return toPaymentPayload(paymentDoc.id, paymentData, null);
+          })
+          .filter(Boolean),
+      };
+    }
+
+    const actorCourseScope = actor.courseScope;
+    const candidatePayments = new Map<string, FirebaseFirestore.DocumentSnapshot>();
+    const scopedCounts = new Map<
+      string,
+      {total: number; paidCount: number; unpaidCount: number}
+    >();
+    const addCandidatePayment = (paymentSnapshot: FirebaseFirestore.DocumentSnapshot) => {
+      if (paymentSnapshot.exists) {
+        candidatePayments.set(paymentSnapshot.id, paymentSnapshot);
+      }
+    };
+
+    const [
+      scopedCourseSnapshot,
+      createdByCourseScopeSnapshot,
+      courseSnapshot,
+      targetCoursesSnapshot,
+      scopedStudentAssignmentsSnapshot,
+    ] = await Promise.all([
+      db.collection("payments")
+        .where("courseScope", "==", actorCourseScope)
+        .get(),
+      db.collection("payments")
+        .where("createdByCourseScope", "==", actorCourseScope)
+        .get(),
+      db.collection("payments")
+        .where("course", "==", actorCourseScope)
+        .get(),
+      db.collection("payments")
+        .where("targetCourses", "array-contains", actorCourseScope)
+        .get(),
+      db.collectionGroup("students")
+        .where("course", "==", actorCourseScope)
+        .get(),
+    ]);
+
+    [
+      ...scopedCourseSnapshot.docs,
+      ...createdByCourseScopeSnapshot.docs,
+      ...courseSnapshot.docs,
+      ...targetCoursesSnapshot.docs,
+    ].forEach(addCandidatePayment);
+
+    const paymentIdsFromAssignments = new Set<string>();
+    scopedStudentAssignmentsSnapshot.docs.forEach((assignmentSnapshot) => {
+      const paymentDoc = assignmentSnapshot.ref.parent.parent;
+      if (!paymentDoc || paymentDoc.parent.id !== "payments") {
+        return;
+      }
+
+      const paymentId = paymentDoc.id;
+      paymentIdsFromAssignments.add(paymentId);
+      const assignmentData = assignmentSnapshot.data() ?? {};
+      const currentCounts = scopedCounts.get(paymentId) ?? {
+        total: 0,
+        paidCount: 0,
+        unpaidCount: 0,
+      };
+
+      currentCounts.total += 1;
+      if (normalizeLower(assignmentData.status) === "paid") {
+        currentCounts.paidCount += 1;
+      } else {
+        currentCounts.unpaidCount += 1;
+      }
+
+      scopedCounts.set(paymentId, currentCounts);
+    });
+
+    const missingPaymentIds = Array.from(paymentIdsFromAssignments).filter(
+      (paymentId) => !candidatePayments.has(paymentId),
+    );
+    for (let index = 0; index < missingPaymentIds.length; index += 200) {
+      const refs = missingPaymentIds
+        .slice(index, index + 200)
+        .map((paymentId) => db.doc(`payments/${paymentId}`));
+      const snapshots = refs.length > 0 ? await db.getAll(...refs) : [];
+      snapshots.forEach(addCandidatePayment);
+    }
+
+    const payments = Array.from(candidatePayments.values())
+      .map((paymentSnapshot) => {
+        if (!paymentSnapshot.exists) {
+          return null;
+        }
+
+        const paymentData = paymentSnapshot.data() ?? {};
+        if (normalizeLower(paymentData.status) === "archived") {
+          return null;
+        }
+
+        const hasScopedAssignments = scopedCounts.has(paymentSnapshot.id);
+        if (
+          !paymentMatchesCourseScope(paymentData, actorCourseScope) &&
+          !hasScopedAssignments
+        ) {
+          return null;
+        }
+
+        const counts = scopedCounts.get(paymentSnapshot.id) ?? {
+          total: 0,
+          paidCount: 0,
+          unpaidCount: 0,
+        };
+
+        return toPaymentPayload(paymentSnapshot.id, paymentData, counts);
+      })
+      .filter((payment): payment is NonNullable<typeof payment> => Boolean(payment))
+      .sort((left, right) => Number(right.createdAt ?? 0) - Number(left.createdAt ?? 0));
+
+    return {payments};
   });
 
 export const listFingerprintEnrollmentSessions = onCall({region: REGION}, async (request) => {

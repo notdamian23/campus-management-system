@@ -176,6 +176,16 @@ export type DeleteCampusDocumentResult = {
   deleted: boolean;
 };
 
+export type GetCampusDocumentDownloadUrlPayload = {
+  docId: string;
+};
+
+export type GetCampusDocumentDownloadUrlResult = {
+  docId: string;
+  name: string;
+  downloadUrl: string;
+};
+
 export type DeleteCampusEventPayload = {
   eventId: string;
 };
@@ -194,6 +204,36 @@ export type DeleteCampusPaymentResult = {
   paymentId: string;
   deleted: boolean;
   linkedEventUpdated?: boolean;
+};
+
+export type CampusPaymentListItem = {
+  id: string;
+  title: string;
+  ref: string;
+  amount: number;
+  date: string;
+  yearLevel: string;
+  course: string;
+  targetStudent: string;
+  targetCourses?: string[];
+  details: string;
+  totalStudents: number;
+  paidCount: number;
+  unpaidCount: number;
+  linkedEventId?: string;
+  linkedEventTitle?: string;
+  source?: string;
+  status?: string;
+  ownerType?: "ec" | "bod";
+  createdByUid?: string;
+  createdByRole?: string;
+  createdByCourseScope?: string | null;
+  courseScope?: string | null;
+  createdAt?: number;
+};
+
+export type ListCampusPaymentsResult = {
+  payments?: CampusPaymentListItem[];
 };
 
 export type AdminUpdateUserProfilePayload = {
@@ -500,6 +540,22 @@ export async function deleteCampusDocument(
   return result.data;
 }
 
+export async function getCampusDocumentDownloadUrl(
+  payload: GetCampusDocumentDownloadUrlPayload,
+): Promise<GetCampusDocumentDownloadUrlResult> {
+  logAuthEvent("info", "Requesting EC document download URL", {
+    docId: payload.docId,
+  });
+
+  const callable = httpsCallable<
+    GetCampusDocumentDownloadUrlPayload,
+    GetCampusDocumentDownloadUrlResult
+  >(getCampusFunctions(), "getCampusDocumentDownloadUrl");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
 export async function deleteCampusEvent(
   payload: DeleteCampusEventPayload,
 ): Promise<DeleteCampusEventResult> {
@@ -530,6 +586,18 @@ export async function deleteCampusPayment(
 
   const result = await callable(payload);
   return result.data;
+}
+
+export async function listCampusPayments(): Promise<CampusPaymentListItem[]> {
+  logAuthEvent("info", "Listing CAMPUS payments via callable");
+
+  const callable = httpsCallable<Record<string, never>, ListCampusPaymentsResult>(
+    getCampusFunctions(),
+    "listCampusPayments",
+  );
+
+  const result = await callable({});
+  return result.data?.payments ?? [];
 }
 
 export async function savePendingEmailVerificationForCurrentUser(

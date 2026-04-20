@@ -65,10 +65,15 @@ import {
   exportPaymentWorkbook,
   filterRowsByCourseScope,
 } from "@/lib/ec-payment-export";
-import { deleteCampusPayment } from "@/lib/firebase-functions";
+import {
+  deleteCampusPayment,
+  listCampusPayments,
+  type CampusPaymentListItem,
+} from "@/lib/firebase-functions";
 import {
   canEditPayment,
   canManagePayment,
+  canViewPayment,
   getCourseScope,
   isBOD,
 } from "@/lib/ec-permissions";
@@ -132,7 +137,10 @@ interface Payment {
   linkedEventTitle?: string;
   source?: string;
   status?: string;
+  targetCourses?: string[];
   createdByUid?: string;
+  createdByRole?: string;
+  ownerType?: "ec" | "bod";
   createdByCourseScope?: string | null;
   courseScope?: string | null;
   createdAt?: unknown;
@@ -344,7 +352,15 @@ function mapPaymentRecord(
     linkedEventTitle: String(data.linkedEventTitle ?? "").trim(),
     source: String(data.source ?? "").trim(),
     status: String(data.status ?? "").trim(),
+    targetCourses: Array.isArray(data.targetCourses)
+      ? data.targetCourses
+          .map((value) => String(value ?? "").trim())
+          .filter(Boolean)
+      : [],
+    ownerType:
+      String(data.ownerType ?? "").trim().toLowerCase() === "bod" ? "bod" : "ec",
     createdByUid: String(data.createdByUid ?? "").trim(),
+    createdByRole: String(data.createdByRole ?? "").trim(),
     createdByCourseScope:
       typeof data.createdByCourseScope === "string"
         ? data.createdByCourseScope
@@ -352,6 +368,42 @@ function mapPaymentRecord(
     courseScope:
       typeof data.courseScope === "string" ? data.courseScope : null,
     createdAt: data.createdAt,
+  };
+}
+
+function mapListedPaymentRecord(payment: CampusPaymentListItem): Payment {
+  return {
+    id: String(payment.id ?? "").trim(),
+    title: String(payment.title ?? "Untitled Payment"),
+    ref: String(payment.ref ?? ""),
+    amount: Number(payment.amount ?? 0),
+    date: String(payment.date ?? ""),
+    yearLevel: String(payment.yearLevel ?? "All Years"),
+    course: String(payment.course ?? "All Courses"),
+    targetStudent: String(payment.targetStudent ?? ""),
+    targetCourses: Array.isArray(payment.targetCourses)
+      ? payment.targetCourses
+          .map((value) => String(value ?? "").trim())
+          .filter(Boolean)
+      : [],
+    details: String(payment.details ?? ""),
+    totalStudents: Number(payment.totalStudents ?? 0),
+    paidCount: Number(payment.paidCount ?? 0),
+    unpaidCount: Number(payment.unpaidCount ?? 0),
+    linkedEventId: String(payment.linkedEventId ?? "").trim(),
+    linkedEventTitle: String(payment.linkedEventTitle ?? "").trim(),
+    source: String(payment.source ?? "").trim(),
+    status: String(payment.status ?? "").trim(),
+    ownerType: payment.ownerType === "bod" ? "bod" : "ec",
+    createdByUid: String(payment.createdByUid ?? "").trim(),
+    createdByRole: String(payment.createdByRole ?? "").trim(),
+    createdByCourseScope:
+      typeof payment.createdByCourseScope === "string"
+        ? payment.createdByCourseScope
+        : null,
+    courseScope:
+      typeof payment.courseScope === "string" ? payment.courseScope : null,
+    createdAt: payment.createdAt ?? 0,
   };
 }
 
@@ -642,41 +694,9 @@ export default function PaymentDashboard() {
 
     try {
       if (viewerIsBod && viewerCourseScope) {
-        const [courseSnap, courseScopeSnap, createdByCourseScopeSnap] =
-          await Promise.all([
-            getDocs(
-              query(
-                collection(db, "payments"),
-                where("course", "==", viewerCourseScope),
-              ),
-            ),
-            getDocs(
-              query(
-                collection(db, "payments"),
-                where("courseScope", "==", viewerCourseScope),
-              ),
-            ),
-            getDocs(
-              query(
-                collection(db, "payments"),
-                where("createdByCourseScope", "==", viewerCourseScope),
-              ),
-            ),
-          ]);
-
-        const merged = new Map<string, Payment>();
-        [
-          ...courseSnap.docs,
-          ...courseScopeSnap.docs,
-          ...createdByCourseScopeSnap.docs,
-        ]
-          .map(mapPaymentRecord)
-          .filter((payment): payment is Payment => payment !== null)
-          .forEach((payment) => {
-            merged.set(payment.id, payment);
-          });
-
-        setPayments(sortRows(Array.from(merged.values())));
+        const scopedPayments = await listCampusPayments();
+        setPayments(sortRows(scopedPayments.map(mapListedPaymentRecord)));
+        setNotice(null);
         setPaymentsLoading(false);
         return;
       }
@@ -689,6 +709,7 @@ export default function PaymentDashboard() {
           .map(mapPaymentRecord)
           .filter((payment): payment is Payment => payment !== null),
       );
+      setNotice(null);
       setPaymentsLoading(false);
     } catch (error) {
       handleLoadError(error);
@@ -852,19 +873,12 @@ export default function PaymentDashboard() {
     }
     if (
       viewerIsBod &&
-      !(
-        canManagePayment(viewerProfileWithUid, {
-          course: currentEditingPayment.course,
-          courseScope: currentEditingPayment.courseScope,
-          createdByCourseScope: currentEditingPayment.createdByCourseScope,
-        }) ||
-        canEditPayment(viewerProfileWithUid, {
-          course: currentEditingPayment.course,
-          courseScope: currentEditingPayment.courseScope,
-          createdByUid: currentEditingPayment.createdByUid,
-          createdByCourseScope: currentEditingPayment.createdByCourseScope,
-        })
-      )
+      !canEditPayment(viewerProfileWithUid, {
+        course: currentEditingPayment.course,
+        courseScope: currentEditingPayment.courseScope,
+        createdByUid: currentEditingPayment.createdByUid,
+        createdByCourseScope: currentEditingPayment.createdByCourseScope,
+      })
     ) {
       return;
     }
@@ -945,6 +959,19 @@ export default function PaymentDashboard() {
         canManagePayment(viewerProfileWithUid, {
           course: payment.course,
           courseScope: payment.courseScope,
+          targetCourses: payment.targetCourses,
+          createdByUid: payment.createdByUid,
+          createdByCourseScope: payment.createdByCourseScope,
+        }),
+    [viewerProfileWithUid],
+  );
+  const canViewPaymentRecord = useMemo(
+    () =>
+      (payment: Payment) =>
+        canViewPayment(viewerProfileWithUid, {
+          course: payment.course,
+          courseScope: payment.courseScope,
+          targetCourses: payment.targetCourses,
           createdByCourseScope: payment.createdByCourseScope,
         }),
     [viewerProfileWithUid],
@@ -963,12 +990,9 @@ export default function PaymentDashboard() {
   const visiblePayments = useMemo(
     () =>
       viewerIsBod
-        ? payments.filter(
-            (payment) =>
-              canManagePaymentRecord(payment) || canEditPaymentRecord(payment),
-          )
+        ? payments.filter((payment) => canViewPaymentRecord(payment))
         : payments,
-    [canEditPaymentRecord, canManagePaymentRecord, payments, viewerIsBod],
+    [canViewPaymentRecord, payments, viewerIsBod],
   );
   const filteredPayments = useMemo(() => {
     const search = queryText.trim().toLowerCase();
@@ -1194,6 +1218,26 @@ export default function PaymentDashboard() {
           : viewerIsBod && viewerCourseScope
             ? viewerCourseScope
             : null,
+      targetCourses: Array.from(
+        new Set(
+          targets
+            .map((student) => normalizeCourse(student.course))
+            .filter(
+              (courseName): courseName is string =>
+                Boolean(courseName) && courseName !== "Unassigned",
+            ),
+        ),
+      ),
+      targetYearLevels: Array.from(
+        new Set(
+          targets
+            .map((student) => normalizeYear(student.year))
+            .filter(
+              (yearName): yearName is string =>
+                Boolean(yearName) && yearName !== "Unassigned",
+            ),
+        ),
+      ),
     };
   }
 
@@ -1391,9 +1435,7 @@ export default function PaymentDashboard() {
   }
 
   async function handleExportAllPaymentReport() {
-    const exportablePayments = [...visiblePayments.filter((payment) =>
-      canManagePaymentRecord(payment),
-    )];
+    const exportablePayments = [...visiblePayments];
 
     if (paymentSortMode === "alphabetical") {
       exportablePayments.sort((left, right) =>
@@ -1556,6 +1598,8 @@ export default function PaymentDashboard() {
         resolvedYearLevel,
         resolvedCourse,
         resolvedCourseScope,
+        targetCourses,
+        targetYearLevels,
       } = resolvePaymentTargets();
       const basePaymentPayload = {
         title: cleanTitle,
@@ -1565,9 +1609,14 @@ export default function PaymentDashboard() {
         yearLevel: resolvedYearLevel,
         course: resolvedCourse,
         targetStudent,
+        targetCourses,
+        targetYearLevels,
         details: cleanDetails,
+        ownerType: viewerIsBod ? "bod" : "ec",
         createdByUid: editingCurrentPayment?.createdByUid || currentUser.uid,
         createdByRole: "ecmember",
+        createdByPosition:
+          String(viewerProfileWithUid?.ecPosition ?? "").trim() || null,
         createdByCourseScope:
           editingCurrentPayment?.createdByCourseScope ?? viewerCourseScope ?? null,
         courseScope:
