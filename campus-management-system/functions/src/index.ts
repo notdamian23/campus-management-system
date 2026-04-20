@@ -472,6 +472,10 @@ function isBodProfileData(data: FirebaseFirestore.DocumentData): boolean {
     );
 }
 
+function isCampusLocalEmail(value: unknown): boolean {
+  return normalizeLower(value).endsWith("@campus.local");
+}
+
 function isValidEmailAddress(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
@@ -2240,6 +2244,442 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
       throw new HttpsError(
         "internal",
         authError.message || "Failed to create user."
+      );
+    }
+  });
+
+export const adminUpdateUserProfile = onCall({region: REGION}, async (request) => {
+    await requireAdmin(request);
+
+    const actorUid = normalizeText(request.auth?.uid);
+    const body = asRecord(request.data);
+    const targetUid = normalizeText(body.targetUid || body.uid);
+    const email = normalizeLower(body.email);
+    const schoolId = normalizeText(body.schoolId);
+    const schoolIdKey = normalizeSchoolIdKey(schoolId);
+    const role = normalizeCampusRoleValue(body.role);
+    const name = normalizeNamePart(body.name);
+    const course = normalizeCourseLabel(body.course) || normalizeText(body.course);
+    const yearLevelRaw = normalizeText(body.yearLevel ?? body.year);
+    const yearLevel = yearLevelRaw ? normalizeYear(body.yearLevel ?? body.year) : "";
+    const requestedEcPosition = normalizeECPosition(body.ecPosition);
+    const requestedEcScope = normalizeEcScope(body.ecScope);
+    const requestedAssignedCourse = normalizeAssignedCourseCode(body.assignedCourse);
+    const inferredCourseScope = inferCourseScopeFromPosition(requestedEcPosition);
+    const inferredAssignedCourse = extractAssignedCourseFromPosition(
+      requestedEcPosition,
+    );
+    const bodAssignedCourse = requestedAssignedCourse || inferredAssignedCourse;
+    const isBod = role === "ecmember" &&
+      (
+        requestedEcScope === "course" ||
+        requestedEcPosition === "B.O.D." ||
+        Boolean(inferredCourseScope) ||
+        Boolean(bodAssignedCourse)
+      );
+    const ecPosition = role !== "ecmember" ?
+      "" :
+      isBod ?
+        (bodAssignedCourse ? `B.O.D. (${bodAssignedCourse})` : "B.O.D.") :
+        requestedEcPosition;
+    const ecScope = role !== "ecmember" ?
+      null :
+      isBod ?
+        "course" :
+        "all";
+    const courseScope = isBod && bodAssignedCourse ?
+      (COURSE_CODE_TO_SCOPE[bodAssignedCourse] ?? "") :
+      "";
+    const requiresAcademicFields = role === "student" || role === "ecmember";
+
+    if (!targetUid) {
+      throw new HttpsError("invalid-argument", "targetUid is required.");
+    }
+
+    if (!email) {
+      throw new HttpsError("invalid-argument", "Email address is required.");
+    }
+
+    if (!isValidEmailAddress(email)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Please provide a valid email address.",
+      );
+    }
+
+    if (!name) {
+      throw new HttpsError("invalid-argument", "Name is required.");
+    }
+
+    if (!schoolId) {
+      throw new HttpsError("invalid-argument", "School ID is required.");
+    }
+
+    if (!["admin", "ecmember", "teacher", "student"].includes(role)) {
+      throw new HttpsError("invalid-argument", "Invalid role.");
+    }
+
+    if (requiresAcademicFields && !course) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Course is required for student and EC member accounts.",
+      );
+    }
+
+    if (requiresAcademicFields && !yearLevelRaw) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Year level is required for student and EC member accounts.",
+      );
+    }
+
+    if (role === "ecmember" && !ecPosition) {
+      throw new HttpsError(
+        "invalid-argument",
+        "EC position is required for EC member accounts.",
+      );
+    }
+
+    if (isBod && !bodAssignedCourse) {
+      throw new HttpsError(
+        "invalid-argument",
+        "assignedCourse is required for B.O.D. accounts.",
+      );
+    }
+
+    let authUpdated = false;
+    let previousAuthEmail = "";
+    let previousDisplayName = "";
+
+    try {
+      const [profileSnap, studentSnap, authUser] = await Promise.all([
+        db.doc(`profiles/${targetUid}`).get(),
+        db.doc(`students/${targetUid}`).get(),
+        admin.auth().getUser(targetUid),
+      ]);
+
+      if (!profileSnap.exists) {
+        throw new HttpsError("not-found", "User profile not found.");
+      }
+
+      const profileData = profileSnap.data() ?? {};
+      const studentData = studentSnap.data() ?? {};
+      const previousRole = normalizeCampusRoleValue(
+        profileData.role || studentData.role,
+      );
+      const previousSchoolId = resolveStudentSchoolId(
+        targetUid,
+        profileData,
+        studentData,
+      );
+      const previousSchoolIdKey = normalizeSchoolIdKey(previousSchoolId);
+      const previousEmail =
+        normalizeLower(authUser.email) || normalizeLower(profileData.email);
+      const previousPendingEmail = normalizeLower(profileData.pendingEmail);
+      previousAuthEmail = normalizeText(authUser.email);
+      previousDisplayName = normalizeText(authUser.displayName);
+
+      const existingProfileMatch = await findExistingSchoolIdDocument(
+        "profiles",
+        schoolId,
+        schoolIdKey,
+      );
+      if (existingProfileMatch && normalizeText(existingProfileMatch.uid) !== targetUid) {
+        throw schoolIdAlreadyExistsError("School ID already exists.");
+      }
+
+      const tracksStudentProjection =
+        role === "student" ||
+        role === "ecmember" ||
+        previousRole === "student" ||
+        previousRole === "ecmember";
+      if (tracksStudentProjection) {
+        const existingStudentMatch = await findExistingStudentSchoolId(schoolId);
+        if (
+          existingStudentMatch &&
+          normalizeText(existingStudentMatch.uid) &&
+          normalizeText(existingStudentMatch.uid) !== targetUid
+        ) {
+          throw schoolIdAlreadyExistsError("School ID already exists.");
+        }
+      }
+
+      const authUpdatePayload: admin.auth.UpdateRequest = {
+        email,
+        displayName: name,
+      };
+      const updatedAuthUser = await admin.auth().updateUser(
+        targetUid,
+        authUpdatePayload,
+      );
+      authUpdated = true;
+      const normalizedUpdatedEmail = normalizeLower(updatedAuthUser.email) || email;
+      const emailChanged = normalizedUpdatedEmail !== previousEmail;
+      const stalePendingEmail =
+        Boolean(previousPendingEmail) &&
+        (
+          previousPendingEmail !== normalizedUpdatedEmail ||
+          (
+            normalizeLower(profileData.email) &&
+            previousPendingEmail !== normalizeLower(profileData.email)
+          )
+        );
+
+      const currentCourse = normalizeText(profileData.course || studentData.course);
+      const currentYear = normalizeText(
+        profileData.yearLevel ||
+          profileData.year ||
+          studentData.yearLevel ||
+          studentData.year,
+      );
+      const timestamp = serverTimestamp();
+      const profilePatch: FirebaseFirestore.DocumentData = {
+        email: normalizedUpdatedEmail,
+        schoolId,
+        schoolIdKey,
+        role,
+        name,
+        fullName: name,
+        course,
+        year: yearLevel,
+        yearLevel,
+        ecPosition: role === "ecmember" ? ecPosition : null,
+        ecScope: role === "ecmember" ? ecScope : null,
+        assignedCourse: role === "ecmember" ? (bodAssignedCourse || null) : null,
+        courseScope: role === "ecmember" ? (courseScope || null) : null,
+        isBod: role === "ecmember" ? isBod : false,
+        updatedAt: timestamp,
+        updatedBy: actorUid,
+      };
+
+      if (emailChanged) {
+        profilePatch.pendingEmail = null;
+        profilePatch.emailVerified = false;
+        profilePatch.emailVerificationPending = true;
+      } else if (stalePendingEmail) {
+        profilePatch.pendingEmail = null;
+      }
+
+      if (role === "teacher") {
+        profilePatch.teacherName = name;
+      } else {
+        profilePatch.studentName = name;
+      }
+
+      const changedFields: string[] = [];
+      const appendChangedField = (
+        field: string,
+        previousValue: unknown,
+        nextValue: unknown,
+      ) => {
+        const previousToken = typeof previousValue === "boolean" ?
+          String(previousValue) :
+          normalizeText(previousValue);
+        const nextToken = typeof nextValue === "boolean" ?
+          String(nextValue) :
+          normalizeText(nextValue);
+        if (previousToken !== nextToken) {
+          changedFields.push(field);
+        }
+      };
+
+      appendChangedField("email", previousEmail, profilePatch.email);
+      if (
+        Object.prototype.hasOwnProperty.call(profilePatch, "pendingEmail")
+      ) {
+        appendChangedField(
+          "pendingEmail",
+          previousPendingEmail,
+          profilePatch.pendingEmail,
+        );
+      }
+      if (emailChanged) {
+        appendChangedField("emailVerified", profileData.emailVerified === true, false);
+        appendChangedField(
+          "emailVerificationPending",
+          profileData.emailVerificationPending === true,
+          true,
+        );
+      }
+      appendChangedField(
+        "name",
+        profileData.name ||
+          profileData.fullName ||
+          profileData.studentName ||
+          profileData.teacherName,
+        name,
+      );
+      appendChangedField("schoolId", previousSchoolId, schoolId);
+      appendChangedField("role", previousRole || profileData.role, role);
+      appendChangedField("course", currentCourse, course);
+      appendChangedField("yearLevel", currentYear, yearLevel);
+      appendChangedField("ecPosition", normalizeECPosition(profileData.ecPosition), ecPosition);
+      appendChangedField("ecScope", resolveProfileEcScope(profileData), ecScope || "");
+      appendChangedField(
+        "assignedCourse",
+        resolveAssignedCourseCode(profileData),
+        bodAssignedCourse,
+      );
+      appendChangedField("courseScope", resolveProfileCourseScope(profileData), courseScope);
+      appendChangedField("isBod", profileData.isBod === true, role === "ecmember" && isBod);
+
+      const updateBatch = db.batch();
+      updateBatch.set(db.doc(`profiles/${targetUid}`), profilePatch, {merge: true});
+
+      if (role === "student" || role === "ecmember") {
+        updateBatch.set(
+          db.doc(`students/${targetUid}`),
+          {
+            uid: targetUid,
+            studentId: targetUid,
+            schoolId,
+            schoolIdKey,
+            name,
+            fullName: name,
+            studentName: name,
+            course,
+            year: yearLevel,
+            yearLevel,
+            status:
+              normalizeText(studentData.status) ||
+              normalizeText(profileData.status) ||
+              "Active",
+            readyForClearance:
+              studentData.readyForClearance === true ||
+              profileData.readyForClearance === true,
+            updatedAt: timestamp,
+          },
+          {merge: true},
+        );
+      }
+
+      await updateBatch.commit();
+
+      if (role === "student" || role === "ecmember") {
+        await syncStudentSchoolIdIndex(schoolId, schoolIdKey, targetUid, "profile").catch(
+          (indexError) => {
+            authLogger.warn("adminUpdateUserProfile school ID index sync failed", {
+              actorUid,
+              targetUid,
+              schoolId,
+              error: indexError,
+            });
+          },
+        );
+      }
+
+      if (
+        previousSchoolIdKey &&
+        previousSchoolIdKey !== schoolIdKey &&
+        (previousRole === "student" || previousRole === "ecmember")
+      ) {
+        await studentSchoolIdIndexRef(previousSchoolIdKey).get().then(async (snapshot) => {
+          const indexedUid = normalizeText(snapshot.data()?.uid);
+          if (snapshot.exists && indexedUid === targetUid) {
+            await studentSchoolIdIndexRef(previousSchoolIdKey)
+              .delete()
+              .catch((indexError) => {
+                authLogger.warn("adminUpdateUserProfile previous school ID cleanup failed", {
+                  actorUid,
+                  targetUid,
+                  previousSchoolId,
+                  error: indexError,
+                });
+              });
+          }
+        }).catch((indexError) => {
+          authLogger.warn("adminUpdateUserProfile previous school ID lookup failed", {
+            actorUid,
+            targetUid,
+            previousSchoolId,
+            error: indexError,
+          });
+        });
+      }
+
+      await db.collection("logs").add({
+        action: "admin_update_user_profile",
+        actorUid,
+        targetUid,
+        targetSchoolId: schoolId,
+        changedFields,
+        createdAt: timestamp,
+      }).catch((logError) => {
+        authLogger.warn("adminUpdateUserProfile log write failed", {
+          actorUid,
+          targetUid,
+          schoolId,
+          error: logError,
+        });
+      });
+
+      authLogger.info("adminUpdateUserProfile updated account", {
+        actorUid,
+        targetUid,
+        role,
+        schoolId,
+        changedFields,
+      });
+
+      return {
+        uid: targetUid,
+        email: profilePatch.email,
+        name,
+        schoolId,
+        role,
+        course,
+        yearLevel,
+      };
+    } catch (error: unknown) {
+      const authError = error as {code?: string; message?: string};
+
+      if (authUpdated && previousAuthEmail) {
+        const rollbackRequest: admin.auth.UpdateRequest = {
+          email: previousAuthEmail,
+          displayName: previousDisplayName || null,
+        };
+        await admin.auth().updateUser(targetUid, rollbackRequest).catch((rollbackError) => {
+          authLogger.error("adminUpdateUserProfile auth rollback failed", {
+            actorUid,
+            targetUid,
+            error: rollbackError,
+          });
+        });
+      }
+
+      authLogger.error("adminUpdateUserProfile failed", {
+        actorUid,
+        targetUid,
+        code: authError.code ?? "unknown",
+        message: authError.message ?? "Unknown profile update failure",
+        error,
+      });
+
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      if (authError.code === "auth/email-already-exists") {
+        throw new HttpsError(
+          "already-exists",
+          "Email address is already in use.",
+        );
+      }
+
+      if (authError.code === "auth/invalid-email") {
+        throw new HttpsError(
+          "invalid-argument",
+          "Please provide a valid email address.",
+        );
+      }
+
+      if (authError.code === "auth/user-not-found") {
+        throw new HttpsError("not-found", "User account not found.");
+      }
+
+      throw new HttpsError(
+        "internal",
+        authError.message || "Failed to update user profile.",
       );
     }
   });
@@ -6865,20 +7305,34 @@ export const getCurrentCampusProfile = onCall({region: REGION}, async (request) 
       const authEmail = normalizeLower(authUser.email);
       const currentEmail = normalizeLower(profileData.email);
       const pendingEmail = normalizeLower(profileData.pendingEmail);
+      const profileSyncPatch: FirebaseFirestore.DocumentData = {};
 
-      if (
-        authEmail &&
-        authEmail !== currentEmail &&
-        (!pendingEmail || pendingEmail === authEmail)
-      ) {
-        await profileRef.set(
-          {
-            email: authEmail,
-            updatedAt: serverTimestamp(),
-          },
-          {merge: true}
-        );
+      if (authEmail && authEmail !== currentEmail) {
+        profileSyncPatch.email = authEmail;
         profileData.email = authEmail;
+      }
+
+      const effectiveEmail = normalizeLower(profileSyncPatch.email ?? profileData.email);
+      const shouldClearPendingEmail = Boolean(
+        pendingEmail &&
+        (
+          (authEmail && !isCampusLocalEmail(authEmail) && pendingEmail !== authEmail) ||
+          (
+            effectiveEmail &&
+            !isCampusLocalEmail(effectiveEmail) &&
+            pendingEmail !== effectiveEmail
+          )
+        ),
+      );
+
+      if (shouldClearPendingEmail) {
+        profileSyncPatch.pendingEmail = null;
+        profileData.pendingEmail = null;
+      }
+
+      if (Object.keys(profileSyncPatch).length > 0) {
+        profileSyncPatch.updatedAt = serverTimestamp();
+        await profileRef.set(profileSyncPatch, {merge: true});
       }
     } catch (error) {
       authLogger.warn("getCurrentCampusProfile unable to sync auth email", {error});
@@ -6925,11 +7379,28 @@ export const savePendingEmailVerification = onCall({region: REGION}, async (requ
       );
     }
 
+    let authEmail = "";
+    try {
+      const authUser = await admin.auth().getUser(uid);
+      authEmail = normalizeLower(authUser.email);
+    } catch (error) {
+      authLogger.warn("savePendingEmailVerification unable to load auth email", {
+        uid,
+        error,
+      });
+    }
+
+    const tracksCurrentAuthEmail =
+      Boolean(authEmail) &&
+      !isCampusLocalEmail(authEmail) &&
+      authEmail === pendingEmail;
+
     // We keep onboarding locked until the verified address comes back through
     // Firebase so School ID logins continue to enforce verification safely.
     await profileRef.set(
       {
-        pendingEmail,
+        email: tracksCurrentAuthEmail ? authEmail : normalizeLower(profileSnap.data()?.email),
+        pendingEmail: tracksCurrentAuthEmail ? null : pendingEmail,
         mustChangePassword: true,
         emailVerificationPending: true,
         emailVerified: false,
@@ -6979,6 +7450,36 @@ export const finalizeVerifiedCampusProfile = onCall({region: REGION}, async (req
     }
 
     const authEmail = normalizeLower(authUser.email);
+    const currentEmail = normalizeLower(profileData.email);
+    const pendingEmail = normalizeLower(profileData.pendingEmail);
+    const stalePendingEmail = Boolean(
+      pendingEmail &&
+      (
+        (authEmail && !isCampusLocalEmail(authEmail) && pendingEmail !== authEmail) ||
+        (
+          currentEmail &&
+          !isCampusLocalEmail(currentEmail) &&
+          pendingEmail !== currentEmail
+        )
+      ),
+    );
+
+    if (authEmail) {
+      const syncPatch: FirebaseFirestore.DocumentData = {};
+      if (authEmail !== currentEmail) {
+        syncPatch.email = authEmail;
+        profileData.email = authEmail;
+      }
+      if (stalePendingEmail) {
+        syncPatch.pendingEmail = null;
+        profileData.pendingEmail = null;
+      }
+      if (Object.keys(syncPatch).length > 0) {
+        syncPatch.updatedAt = serverTimestamp();
+        await profileRef.set(syncPatch, {merge: true});
+      }
+    }
+
     if (!authEmail || authUser.emailVerified !== true) {
       return {
         finalized: false,
@@ -6986,21 +7487,13 @@ export const finalizeVerifiedCampusProfile = onCall({region: REGION}, async (req
       };
     }
 
-    const pendingEmail = normalizeLower(profileData.pendingEmail);
-    const currentEmail = normalizeLower(profileData.email);
-    const shouldFinalize =
-      (pendingEmail && pendingEmail === authEmail) ||
-      (
-        !pendingEmail &&
-        currentEmail === authEmail &&
-        (
-          profileData.emailVerificationPending === true ||
-          profileData.emailVerified === false ||
-          profileData.firstLoginCompleted === false
-        )
-      );
+    const hasVerificationStateToFinalize =
+      profileData.emailVerificationPending === true ||
+      profileData.emailVerified !== true ||
+      profileData.firstLoginCompleted !== true ||
+      Boolean(normalizeLower(profileData.pendingEmail));
 
-    if (!shouldFinalize) {
+    if (!hasVerificationStateToFinalize && normalizeLower(profileData.email) === authEmail) {
       return {
         finalized: false,
         profile: buildCampusProfilePayload(profileData),
@@ -7014,7 +7507,7 @@ export const finalizeVerifiedCampusProfile = onCall({region: REGION}, async (req
         emailVerificationPending: false,
         mustChangePassword: false,
         firstLoginCompleted: true,
-        pendingEmail: admin.firestore.FieldValue.delete(),
+        pendingEmail: null,
         status: profileData.status === "Inactive" ? "Inactive" : "active",
         updatedAt: serverTimestamp(),
       },

@@ -18,6 +18,7 @@ import {
   buildEmailActionSettings,
   getOnboardingRedirect,
   isCampusLocalEmail,
+  resolveCampusVerificationEmailTarget,
   resolveRoleHome,
   setCampusCookies,
 } from "@/lib/campus-auth";
@@ -106,9 +107,11 @@ export default function ChangePasswordPage() {
           return;
         }
 
-        const existingEmail = String(
-          profile.pendingEmail ?? profile.email ?? "",
-        ).trim();
+        const existingEmail =
+          resolveCampusVerificationEmailTarget(
+            profile,
+            auth.currentUser?.email,
+          )?.email ?? "";
         if (existingEmail && !existingEmail.endsWith("@campus.local")) {
           setEmail(existingEmail);
         }

@@ -67,8 +67,6 @@ import {
   onSnapshot,
   orderBy,
   query,
-  serverTimestamp,
-  setDoc,
   updateDoc,
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -78,7 +76,6 @@ import {
 } from "@/lib/campus-auth";
 import { normalizeCampusRole } from "@/lib/campus-role";
 import {
-  buildCampusProfileUpdatePayload,
   normalizeCampusUserRow,
   type CampusUserProjectionSource,
   type CampusUserRow,
@@ -100,6 +97,7 @@ import {
   getECPositionSelectionValue,
 } from "@/lib/ec-permissions";
 import {
+  adminUpdateUserProfile,
   adminDeactivateAllStudents,
   adminDeleteDuplicateStudentSchoolIds,
   adminFindDuplicateStudentSchoolIds,
@@ -717,6 +715,7 @@ export default function AdminDashboardPage() {
     null,
   );
   const [editProfileName, setEditProfileName] = useState("");
+  const [editProfileEmail, setEditProfileEmail] = useState("");
   const [editProfileSchoolId, setEditProfileSchoolId] = useState("");
   const [editProfileRole, setEditProfileRole] = useState<Role>("student");
   const [editProfileCourse, setEditProfileCourse] = useState("");
@@ -822,9 +821,15 @@ export default function AdminDashboardPage() {
   useEffect(() => {
     if (!adminUid) return;
     setLogsLoading(true);
-    return onSnapshot(
-      query(collection(db, "logs"), orderBy("createdAt", "desc"), limit(50)),
-      (snap) => {
+    let mounted = true;
+
+    async function loadLogs() {
+      try {
+        const snap = await getDocs(
+          query(collection(db, "logs"), orderBy("createdAt", "desc"), limit(50)),
+        );
+        if (!mounted) return;
+
         setLogs(
           snap.docs.map((logDoc) => ({
             id: logDoc.id,
@@ -832,8 +837,8 @@ export default function AdminDashboardPage() {
           })),
         );
         setLogsLoading(false);
-      },
-      () => {
+      } catch {
+        if (!mounted) return;
         setLogs([]);
         setLogsLoading(false);
         campusToast.error({
@@ -841,16 +846,25 @@ export default function AdminDashboardPage() {
           description: "Failed to load logs.",
           dedupeKey: "admin:logs-load-error",
         });
-      },
-    );
+      }
+    }
+
+    void loadLogs();
+    return () => {
+      mounted = false;
+    };
   }, [adminUid]);
 
   useEffect(() => {
     if (!adminUid) return;
     setEventsLoading(true);
-    return onSnapshot(
-      collection(db, "events"),
-      (snap) => {
+    let mounted = true;
+
+    async function loadEvents() {
+      try {
+        const snap = await getDocs(collection(db, "events"));
+        if (!mounted) return;
+
         const rows = snap.docs
           .map((eventDoc) => ({
             id: eventDoc.id,
@@ -864,8 +878,8 @@ export default function AdminDashboardPage() {
             : rows[0]?.id || "",
         );
         setEventsLoading(false);
-      },
-      () => {
+      } catch {
+        if (!mounted) return;
         setEvents([]);
         setEventsLoading(false);
         campusToast.error({
@@ -873,8 +887,13 @@ export default function AdminDashboardPage() {
           description: "Failed to load events.",
           dedupeKey: "admin:events-load-error",
         });
-      },
-    );
+      }
+    }
+
+    void loadEvents();
+    return () => {
+      mounted = false;
+    };
   }, [adminUid]);
 
   useEffect(() => {
@@ -1689,6 +1708,10 @@ export default function AdminDashboardPage() {
     setEditingProfile(profile);
     setEditProfileRole(resolvedRole);
     setEditProfileName(profile.fullName);
+    setEditProfileEmail(
+      String(profile.email ?? "").trim() ||
+        `${String(profile.schoolId ?? "").trim()}@campus.local`,
+    );
     setEditProfileSchoolId(profile.schoolId);
     setEditProfileCourse(
       profile.course === "-" ? "" : String(profile.course ?? "").trim(),
@@ -1876,6 +1899,7 @@ export default function AdminDashboardPage() {
     if (!editingProfile) return;
 
     const submittedName = editProfileName.trim();
+    const email = editProfileEmail.trim().toLowerCase();
     const schoolId = editProfileSchoolId.trim();
     const course = editProfileCourse.trim();
     const yearLevel = editProfileYearLevel.trim();
@@ -1900,13 +1924,6 @@ export default function AdminDashboardPage() {
       submittedName === originalDisplayName && originalRawName
         ? originalRawName
         : submittedName;
-    const displayName = formatStudentFullName(
-      {
-        name,
-        schoolId,
-      },
-      schoolId,
-    );
 
     if (!submittedName) {
       campusToast.warning({
@@ -1922,6 +1939,24 @@ export default function AdminDashboardPage() {
         title: "Missing school ID",
         description: "School ID is required before you can save this profile.",
         dedupeKey: "admin:edit-profile:missing-school-id",
+      });
+      return;
+    }
+
+    if (!email) {
+      campusToast.warning({
+        title: "Missing email",
+        description: "Email is required before you can save this profile.",
+        dedupeKey: "admin:edit-profile:missing-email",
+      });
+      return;
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      campusToast.warning({
+        title: "Invalid email",
+        description: "Please provide a valid email address.",
+        dedupeKey: `admin:edit-profile:invalid-email:${editingProfile.uid}`,
       });
       return;
     }
@@ -1969,53 +2004,55 @@ export default function AdminDashboardPage() {
     setSavingProfileUid(editingProfile.uid);
 
     try {
-      const timestamp = serverTimestamp();
-      const { profilePatch, studentPatch } = buildCampusProfileUpdatePayload({
-        role: editProfileRole,
+      await adminUpdateUserProfile(getCampusFunctions(), {
+        targetUid: editingProfile.uid,
+        email,
         name,
         schoolId,
+        role: editProfileRole,
         course,
         yearLevel,
+        ecPosition: editProfileRole === "ecmember" ? ecPosition : null,
+        assignedCourse:
+          editProfileRole === "ecmember" ? ecProfileFields.assignedCourse : null,
       });
-
-      await setDoc(
-        doc(db, "profiles", editingProfile.uid),
-        {
-          role: toStoredCampusRole(editProfileRole),
-          ...profilePatch,
-          ecPosition: ecProfileFields.ecPosition,
-          ecScope: ecProfileFields.ecScope,
-          assignedCourse: ecProfileFields.assignedCourse,
-          courseScope: ecProfileFields.courseScope,
-          isBod: ecProfileFields.isBod,
-          updatedAt: timestamp,
-        },
-        { merge: true },
-      );
-
-      if (studentPatch) {
-        await setDoc(
-          doc(db, "students", editingProfile.uid),
-          {
-            uid: editingProfile.uid,
-            ...studentPatch,
-            updatedAt: timestamp,
-          },
-          { merge: true },
-        );
-      }
 
       campusToast.success({
         title: "Profile updated",
-        description: `${displayName} was updated successfully.`,
-        dedupeKey: `admin:edit-profile:${editingProfile.uid}`,
+        description: "Profile updated successfully.",
+        dedupeKey: `admin:edit-profile:success:${editingProfile.uid}`,
       });
       setEditingProfile(null);
     } catch (error: unknown) {
+      const errorCode =
+        typeof error === "object" &&
+        error !== null &&
+        typeof (error as { code?: unknown }).code === "string"
+          ? String((error as { code: string }).code).replace(/^functions\//, "")
+          : "";
+      const errorMessage =
+        typeof error === "object" &&
+        error !== null &&
+        typeof (error as { message?: unknown }).message === "string"
+          ? String((error as { message: string }).message)
+          : "";
+      let description = toErrorMessage(
+        error,
+        "Failed to update the selected profile.",
+      );
+
+      if (errorCode === "already-exists" && /email/i.test(errorMessage)) {
+        description = "Email address is already in use.";
+      } else if (errorCode === "invalid-argument" && /email/i.test(errorMessage)) {
+        description = "Please provide a valid email address.";
+      } else if (errorCode === "permission-denied") {
+        description = "You do not have permission to update this profile.";
+      }
+
       campusToast.error({
         title: "Profile update failed",
-        description: toErrorMessage(error, "Failed to save profile changes."),
-        dedupeKey: `admin:edit-profile-error:${editingProfile.uid}`,
+        description,
+        dedupeKey: `admin:edit-profile:error:${editingProfile.uid}`,
       });
     } finally {
       setSavingProfileUid(null);
@@ -3811,6 +3848,15 @@ export default function AdminDashboardPage() {
                     value={editProfileSchoolId}
                     onValueChange={setEditProfileSchoolId}
                     placeholder="Enter school ID"
+                    isRequired
+                  />
+                  <Input
+                    label="Email"
+                    type="email"
+                    value={editProfileEmail}
+                    onValueChange={setEditProfileEmail}
+                    placeholder="Enter email address"
+                    autoComplete="email"
                     isRequired
                   />
                   <Select

@@ -46,6 +46,7 @@ type CampusCookieState = {
 export type CampusVerificationEmailTarget = {
   email: string;
   mode: "current-auth-email" | "pending-email-update";
+  hasStalePendingEmail: boolean;
 };
 
 export function normalizeEmail(value: unknown) {
@@ -113,20 +114,41 @@ export function resolveCampusVerificationEmailTarget(
   const normalizedPendingEmail = normalizeEmail(profile?.pendingEmail);
   const normalizedProfileEmail = normalizeEmail(profile?.email);
   const normalizedAuthEmail = normalizeEmail(authEmail);
-  const candidateEmail =
-    normalizedPendingEmail || normalizedProfileEmail || normalizedAuthEmail;
+  const hasUsableAuthEmail =
+    Boolean(normalizedAuthEmail) && !isCampusLocalEmail(normalizedAuthEmail);
 
-  if (!candidateEmail || isCampusLocalEmail(candidateEmail)) {
-    return null;
+  if (hasUsableAuthEmail) {
+    return {
+      email: normalizedAuthEmail,
+      mode: "current-auth-email",
+      hasStalePendingEmail:
+        Boolean(normalizedPendingEmail) &&
+        normalizedPendingEmail !== normalizedAuthEmail,
+    };
   }
 
-  return {
-    email: candidateEmail,
-    mode:
-      normalizedAuthEmail && candidateEmail === normalizedAuthEmail
-        ? "current-auth-email"
-        : "pending-email-update",
-  };
+  if (normalizedPendingEmail && !isCampusLocalEmail(normalizedPendingEmail)) {
+    return {
+      email: normalizedPendingEmail,
+      mode: "pending-email-update",
+      hasStalePendingEmail: false,
+    };
+  }
+
+  if (
+    normalizedProfileEmail &&
+    !isCampusLocalEmail(normalizedProfileEmail) &&
+    normalizedAuthEmail &&
+    normalizedProfileEmail === normalizedAuthEmail
+  ) {
+    return {
+      email: normalizedProfileEmail,
+      mode: "current-auth-email",
+      hasStalePendingEmail: false,
+    };
+  }
+
+  return null;
 }
 
 export function resolveRoleHome(role?: string) {

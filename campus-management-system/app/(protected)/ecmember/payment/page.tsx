@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiCalendar, FiChevronDown } from "react-icons/fi";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { onAuthStateChanged } from "firebase/auth";
@@ -11,7 +11,6 @@ import {
   getDoc,
   getDocs,
   increment,
-  onSnapshot,
   orderBy,
   type QueryDocumentSnapshot,
   query,
@@ -614,6 +613,88 @@ export default function PaymentDashboard() {
     return () => unsub();
   }, []);
 
+  const loadPayments = useCallback(async () => {
+    if (viewerProfileLoading) {
+      return;
+    }
+
+    if (viewerIsBod && !viewerCourseScope) {
+      setPayments([]);
+      setPaymentsLoading(false);
+      return;
+    }
+
+    setPaymentsLoading(true);
+
+    const sortRows = (rows: Payment[]) =>
+      [...rows].sort(
+        (left, right) => toMillis(right.createdAt) - toMillis(left.createdAt),
+      );
+
+    const handleLoadError = (error: unknown) => {
+      setPayments([]);
+      setPaymentsLoading(false);
+      setNotice({
+        type: "err",
+        msg: toErrorMessage(error, "Failed to load payments."),
+      });
+    };
+
+    try {
+      if (viewerIsBod && viewerCourseScope) {
+        const [courseSnap, courseScopeSnap, createdByCourseScopeSnap] =
+          await Promise.all([
+            getDocs(
+              query(
+                collection(db, "payments"),
+                where("course", "==", viewerCourseScope),
+              ),
+            ),
+            getDocs(
+              query(
+                collection(db, "payments"),
+                where("courseScope", "==", viewerCourseScope),
+              ),
+            ),
+            getDocs(
+              query(
+                collection(db, "payments"),
+                where("createdByCourseScope", "==", viewerCourseScope),
+              ),
+            ),
+          ]);
+
+        const merged = new Map<string, Payment>();
+        [
+          ...courseSnap.docs,
+          ...courseScopeSnap.docs,
+          ...createdByCourseScopeSnap.docs,
+        ]
+          .map(mapPaymentRecord)
+          .filter((payment): payment is Payment => payment !== null)
+          .forEach((payment) => {
+            merged.set(payment.id, payment);
+          });
+
+        setPayments(sortRows(Array.from(merged.values())));
+        setPaymentsLoading(false);
+        return;
+      }
+
+      const allPaymentsSnap = await getDocs(
+        query(collection(db, "payments"), orderBy("createdAt", "desc")),
+      );
+      setPayments(
+        allPaymentsSnap.docs
+          .map(mapPaymentRecord)
+          .filter((payment): payment is Payment => payment !== null),
+      );
+      setPaymentsLoading(false);
+    } catch (error) {
+      handleLoadError(error);
+    }
+  }, [viewerCourseScope, viewerIsBod, viewerProfileLoading]);
+
   useEffect(() => {
     if (viewerIsBod && viewerCourseScope) {
       setCourse(viewerCourseScope);
@@ -678,161 +759,62 @@ export default function PaymentDashboard() {
   }, [functions, viewerCourseScope, viewerIsBod, viewerProfileLoading]);
 
   useEffect(() => {
-    if (viewerProfileLoading) {
-      return;
-    }
-
-    if (viewerIsBod && !viewerCourseScope) {
-      setPayments([]);
-      setPaymentsLoading(false);
-      return;
-    }
-
-    setPaymentsLoading(true);
-    const sortRows = (rows: Payment[]) =>
-      [...rows].sort((left, right) => toMillis(right.createdAt) - toMillis(left.createdAt));
-
-    if (viewerIsBod && viewerCourseScope) {
-      let courseRows: Payment[] = [];
-      let courseScopeRows: Payment[] = [];
-      let createdByCourseScopeRows: Payment[] = [];
-
-      const syncRows = () => {
-        const merged = new Map<string, Payment>();
-        [...courseRows, ...courseScopeRows, ...createdByCourseScopeRows].forEach(
-          (payment) => {
-            merged.set(payment.id, payment);
-          },
-        );
-        setPayments(sortRows(Array.from(merged.values())));
-        setPaymentsLoading(false);
-      };
-
-      const handleLoadError = (error: unknown) => {
-        setNotice({
-          type: "err",
-          msg: toErrorMessage(error, "Failed to load payments."),
-        });
-      };
-
-      const unsubCourse = onSnapshot(
-        query(collection(db, "payments"), where("course", "==", viewerCourseScope)),
-        (snap) => {
-          courseRows = snap.docs
-            .map(mapPaymentRecord)
-            .filter((payment): payment is Payment => payment !== null);
-          syncRows();
-        },
-        (error) => {
-          courseRows = [];
-          syncRows();
-          handleLoadError(error);
-        },
-      );
-
-      const unsubCourseScope = onSnapshot(
-        query(
-          collection(db, "payments"),
-          where("courseScope", "==", viewerCourseScope),
-        ),
-        (snap) => {
-          courseScopeRows = snap.docs
-            .map(mapPaymentRecord)
-            .filter((payment): payment is Payment => payment !== null);
-          syncRows();
-        },
-        (error) => {
-          courseScopeRows = [];
-          syncRows();
-          handleLoadError(error);
-        },
-      );
-
-      const unsubCreatedByCourseScope = onSnapshot(
-        query(
-          collection(db, "payments"),
-          where("createdByCourseScope", "==", viewerCourseScope),
-        ),
-        (snap) => {
-          createdByCourseScopeRows = snap.docs
-            .map(mapPaymentRecord)
-            .filter((payment): payment is Payment => payment !== null);
-          syncRows();
-        },
-        (error) => {
-          createdByCourseScopeRows = [];
-          syncRows();
-          handleLoadError(error);
-        },
-      );
-
-      return () => {
-        unsubCourse();
-        unsubCourseScope();
-        unsubCreatedByCourseScope();
-      };
-    }
-
-    const unsub = onSnapshot(
-      query(collection(db, "payments"), orderBy("createdAt", "desc")),
-      (snap) => {
-        setPayments(
-          snap.docs
-            .map(mapPaymentRecord)
-            .filter((payment): payment is Payment => payment !== null),
-        );
-        setPaymentsLoading(false);
-      },
-      (error) => {
-        setPayments([]);
-        setPaymentsLoading(false);
-        setNotice({
-          type: "err",
-          msg: toErrorMessage(error, "Failed to load payments."),
-        });
-      },
-    );
-
-    return () => unsub();
-  }, [viewerCourseScope, viewerIsBod, viewerProfileLoading]);
+    void loadPayments();
+  }, [loadPayments]);
 
   useEffect(() => {
     if (!expandedPayment) return;
+    const currentExpandedPayment = expandedPayment;
 
-    setExpandedStudentsLoading(true);
-    const qy =
-      viewerIsBod && viewerCourseScope ?
-        query(
-          collection(db, "payments", expandedPayment, "students"),
-          where("course", "==", viewerCourseScope),
-        ) :
-        query(
-          collection(db, "payments", expandedPayment, "students"),
-          orderBy("name", "asc"),
-        );
+    let active = true;
 
-    const unsub = onSnapshot(
-      qy,
-      (snap) => {
+    async function loadExpandedStudents() {
+      setExpandedStudentsLoading(true);
+      const qy =
+        viewerIsBod && viewerCourseScope ?
+          query(
+            collection(db, "payments", currentExpandedPayment, "students"),
+            where("course", "==", viewerCourseScope),
+          ) :
+          query(
+            collection(db, "payments", currentExpandedPayment, "students"),
+            orderBy("name", "asc"),
+          );
+
+      try {
+        const snap = await getDocs(qy);
+        if (!active) {
+          return;
+        }
+
         const list: PaymentStudent[] = snap.docs
           .map((d) =>
             mapPaymentStudentRecord(d.id, d.data() as PaymentStudentDocData),
           )
           .sort(sortStudentsByNameAndId);
 
-        setPaymentStudents((prev) => ({ ...prev, [expandedPayment]: list }));
+        setPaymentStudents((prev) => ({
+          ...prev,
+          [currentExpandedPayment]: list,
+        }));
         setExpandedStudentsLoading(false);
-      },
-      (error) => {
+      } catch (error) {
+        if (!active) {
+          return;
+        }
         setExpandedStudentsLoading(false);
         setNotice({
           type: "err",
           msg: toErrorMessage(error, "Failed to load payment students."),
         });
-      },
-    );
+      }
+    }
 
-    return () => unsub();
+    void loadExpandedStudents();
+
+    return () => {
+      active = false;
+    };
   }, [expandedPayment, viewerCourseScope, viewerIsBod]);
 
   useEffect(() => {
@@ -1651,6 +1633,7 @@ export default function PaymentDashboard() {
           dedupeKey: `ec-payments:create:${paymentRef.id}`,
         });
       }
+      await loadPayments();
     } catch (error: unknown) {
       const message = toErrorMessage(
         error,
@@ -1794,6 +1777,7 @@ export default function PaymentDashboard() {
         title: "Payment deleted successfully.",
         preventDuplicate: false,
       });
+      await loadPayments();
     } catch (error: unknown) {
       const message = toErrorMessage(error, "Failed to delete payment.");
       setNotice({
@@ -1847,6 +1831,31 @@ export default function PaymentDashboard() {
       );
 
       await batch.commit();
+      setPaymentStudents((prev) => {
+        const paymentRows = prev[paymentId] ?? [];
+        return {
+          ...prev,
+          [paymentId]: paymentRows.map((row) =>
+            row.uid === student.uid ?
+              {
+                ...row,
+                status: nextStatus,
+              } :
+              row,
+          ),
+        };
+      });
+      setPayments((prev) =>
+        prev.map((payment) =>
+          payment.id === paymentId ?
+            {
+              ...payment,
+              paidCount: Math.max(0, Number(payment.paidCount ?? 0) + paidDelta),
+              unpaidCount: Math.max(0, Number(payment.unpaidCount ?? 0) + unpaidDelta),
+            } :
+            payment,
+        ),
+      );
       campusToast.success({
         title: "Payment status updated",
         description: `${student.name} marked ${nextStatus}.`,

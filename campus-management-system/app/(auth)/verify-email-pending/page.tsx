@@ -59,6 +59,7 @@ export default function VerifyEmailPendingPage() {
       if (!activeUser) {
         throw new Error("Your session expired. Please sign in again.");
       }
+      await activeUser.getIdToken(true);
 
       const syncResult = await finalizeVerifiedProfile(activeUser);
       let nextProfile = syncResult.profile;
@@ -132,22 +133,10 @@ export default function VerifyEmailPendingPage() {
 
   const resendVerification = async () => {
     const user = auth.currentUser;
-    const verificationTarget = resolveCampusVerificationEmailTarget(
-      profile,
-      user?.email,
-    );
-    const verificationEmail = verificationTarget?.email ?? "";
-    const usesCurrentAuthEmail =
-      verificationTarget?.mode === "current-auth-email";
 
     if (!user) {
       setGeneralError("Please sign in again before resending the verification email.");
       router.replace("/login?next=/verify-email-pending");
-      return;
-    }
-
-    if (!verificationEmail) {
-      setGeneralError("No verifiable email address was found for this account.");
       return;
     }
 
@@ -159,12 +148,35 @@ export default function VerifyEmailPendingPage() {
       if (!currentUser) {
         throw new Error("No authenticated user is available for resend.");
       }
+      await currentUser.reload();
+      await currentUser.getIdToken(true);
+      const activeUser = auth.currentUser;
+      if (!activeUser) {
+        throw new Error("Your session expired. Please sign in again.");
+      }
+      const syncedProfile =
+        await getCurrentCampusProfileForCurrentUser().catch(() => null);
+      if (syncedProfile) {
+        setProfile(syncedProfile);
+      }
+      const verificationTarget = resolveCampusVerificationEmailTarget(
+        syncedProfile ?? profile,
+        activeUser.email,
+      );
+      const verificationEmail = verificationTarget?.email ?? "";
+      const usesCurrentAuthEmail =
+        verificationTarget?.mode === "current-auth-email";
+
+      if (!verificationEmail) {
+        throw new Error("No verifiable email address was found for this account.");
+      }
+
       const actionCodeSettings = buildEmailActionSettings();
       logCampusAuthEvent("info", "Resending verification email", {
         firebaseMethod: usesCurrentAuthEmail ?
           "sendEmailVerification" :
           "verifyBeforeUpdateEmail",
-        currentUser: user.email ? "present" : "present-without-email",
+        currentUser: activeUser.email ? "present" : "present-without-email",
         authCurrentUser: auth.currentUser ? "present" : "missing",
         pendingEmailDomain: verificationEmail.split("@")[1] ?? "",
         hasActionUrl: Boolean(actionCodeSettings.url),
@@ -174,10 +186,10 @@ export default function VerifyEmailPendingPage() {
       // Existing auth emails need a normal verification email. Pending email
       // changes still use Firebase's verify-before-update flow.
       if (usesCurrentAuthEmail) {
-        await sendEmailVerification(currentUser, actionCodeSettings);
+        await sendEmailVerification(activeUser, actionCodeSettings);
       } else {
         await verifyBeforeUpdateEmail(
-          currentUser,
+          activeUser,
           verificationEmail,
           actionCodeSettings,
         );
@@ -187,7 +199,7 @@ export default function VerifyEmailPendingPage() {
         firebaseMethod: usesCurrentAuthEmail ?
           "sendEmailVerification" :
           "verifyBeforeUpdateEmail",
-        hasCurrentUserEmail: Boolean(currentUser.email),
+        hasCurrentUserEmail: Boolean(activeUser.email),
         pendingEmailDomain: verificationEmail.split("@")[1] ?? "",
       });
       const refreshedProfile =

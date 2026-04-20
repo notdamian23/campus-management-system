@@ -196,6 +196,28 @@ export type DeleteCampusPaymentResult = {
   linkedEventUpdated?: boolean;
 };
 
+export type AdminUpdateUserProfilePayload = {
+  targetUid: string;
+  email: string;
+  name: string;
+  schoolId: string;
+  role: string;
+  course?: string;
+  yearLevel?: string;
+  ecPosition?: string | null;
+  assignedCourse?: string | null;
+};
+
+export type AdminUpdateUserProfileResult = {
+  uid: string;
+  email: string;
+  name: string;
+  schoolId: string;
+  role: string;
+  course: string;
+  yearLevel: string;
+};
+
 export type SchoolIdLoginResolution =
   | {
       status: "resolved";
@@ -779,6 +801,27 @@ export async function adminDeleteDuplicateStudentSchoolIds(
   >(functions, "adminDeleteDuplicateStudentSchoolIds");
 
   const result = await callable({});
+  return result.data;
+}
+
+export async function adminUpdateUserProfile(
+  functions: ReturnType<typeof getCampusFunctions>,
+  payload: AdminUpdateUserProfilePayload,
+): Promise<AdminUpdateUserProfileResult> {
+  logAuthEvent("info", "Starting admin profile update", {
+    targetUid: trimValue(payload.targetUid),
+    role: trimValue(payload.role),
+  });
+
+  const callable = httpsCallable<
+    AdminUpdateUserProfilePayload,
+    AdminUpdateUserProfileResult
+  >(functions, "adminUpdateUserProfile");
+
+  const result = await callable({
+    ...payload,
+    email: trimValue(payload.email).toLowerCase(),
+  });
   return result.data;
 }
 

@@ -2271,8 +2271,7 @@ export default function EventDashboard() {
     refreshSentNotificationsOnce,
   ]);
 
-  // Live events
-  useEffect(() => {
+  const loadEvents = useCallback(async () => {
     if (roleLoading) {
       return;
     }
@@ -2289,6 +2288,7 @@ export default function EventDashboard() {
       return;
     }
 
+    setEventsLoading(true);
     const mapEventRows = (docs: QueryDocumentSnapshot<DocumentData>[]) =>
       docs
         .map((snapshot) => {
@@ -2300,62 +2300,38 @@ export default function EventDashboard() {
     const sortRows = (rows: EventDoc[]) =>
       [...rows].sort((left, right) => toMillis(right.createdAt) - toMillis(left.createdAt));
 
-    if (viewerIsBod && viewerCourseScope) {
-      let ecRows: EventDoc[] = [];
-      let bodRows: EventDoc[] = [];
+    try {
+      if (viewerIsBod && viewerCourseScope) {
+        const [ecSnap, bodSnap] = await Promise.all([
+          getDocs(query(collection(db, "events"), where("ownerType", "==", "ec"))),
+          getDocs(
+            query(
+              collection(db, "events"),
+              where("courseScope", "==", viewerCourseScope),
+            ),
+          ),
+        ]);
 
-      const syncRows = () => {
         const merged = new Map<string, EventDoc>();
-        [...ecRows, ...bodRows].forEach((event) => {
-          merged.set(event.id, event);
-        });
+        [...mapEventRows(ecSnap.docs), ...mapEventRows(bodSnap.docs)].forEach(
+          (event) => {
+            merged.set(event.id, event);
+          },
+        );
         setEvents(sortRows(Array.from(merged.values())));
         setEventsLoading(false);
-      };
+        return;
+      }
 
-      const unsubEc = onSnapshot(
-        query(collection(db, "events"), where("ownerType", "==", "ec")),
-        (snap) => {
-          ecRows = mapEventRows(snap.docs);
-          syncRows();
-        },
-        () => {
-          ecRows = [];
-          syncRows();
-        },
+      const allEventsSnap = await getDocs(
+        query(collection(db, "events"), orderBy("createdAt", "desc")),
       );
-
-      const unsubBod = onSnapshot(
-        query(collection(db, "events"), where("courseScope", "==", viewerCourseScope)),
-        (snap) => {
-          bodRows = mapEventRows(snap.docs);
-          syncRows();
-        },
-        () => {
-          bodRows = [];
-          syncRows();
-        },
-      );
-
-      return () => {
-        unsubEc();
-        unsubBod();
-      };
+      setEvents(mapEventRows(allEventsSnap.docs));
+      setEventsLoading(false);
+    } catch {
+      setEvents([]);
+      setEventsLoading(false);
     }
-
-    const unsub = onSnapshot(
-      query(collection(db, "events"), orderBy("createdAt", "desc")),
-      (snap) => {
-        setEvents(mapEventRows(snap.docs));
-        setEventsLoading(false);
-      },
-      () => {
-        setEvents([]);
-        setEventsLoading(false);
-      },
-    );
-
-    return () => unsub();
   }, [
     canViewEventRecord,
     isECUser,
@@ -2363,6 +2339,10 @@ export default function EventDashboard() {
     viewerCourseScope,
     viewerIsBod,
   ]);
+
+  useEffect(() => {
+    void loadEvents();
+  }, [loadEvents]);
 
   // Live files for expanded event
   useEffect(() => {
@@ -3647,6 +3627,7 @@ export default function EventDashboard() {
       });
 
       setPendingDeleteEvent(null);
+      await loadEvents();
       addToast({
         title: "Event deleted",
         description: `${eventToDelete.title} was removed.`,
@@ -5030,6 +5011,7 @@ export default function EventDashboard() {
       setEditingEventId(null);
       resetEventComposer();
       setShowAddEventForm(false);
+      await loadEvents();
     } catch (err: any) {
       await logEventPermissionDeniedAttempt(
         isUpdateMode ? "edit_event" : "create_event",

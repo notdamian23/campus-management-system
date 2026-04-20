@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiChevronDown } from "react-icons/fi";
 import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
   doc,
   getDoc,
-  onSnapshot,
+  getDocs,
   orderBy,
   query,
   where,
@@ -420,6 +420,86 @@ export default function DocumentsPage() {
     [viewerProfile],
   );
 
+  const loadDocuments = useCallback(async () => {
+    if (!authReady || !viewerProfileReady) {
+      return;
+    }
+
+    if (!activeUid) {
+      setDocuments([]);
+      setDocumentsLoading(false);
+      setDocumentsError("User session not found.");
+      return;
+    }
+
+    if (viewerIsBod && !viewerCourseScope) {
+      setDocuments([]);
+      setDocumentsLoading(false);
+      setDocumentsError("B.O.D. course scope is missing.");
+      return;
+    }
+
+    setDocumentsLoading(true);
+    setDocumentsError("");
+
+    const handleLoadError = (error: unknown, source: string) => {
+      ecDocumentsLogger.error("Firestore fetch failed.", {
+        uid: activeUid,
+        source,
+        code: toErrorCode(error),
+        message: toErrorMessage(error),
+        raw: error,
+      });
+      setDocuments([]);
+      setDocumentsLoading(false);
+      setDocumentsError("Failed to load documents from Firestore.");
+    };
+
+    try {
+      if (viewerIsBod && viewerCourseScope) {
+        const [ecSnap, courseScopeSnap] = await Promise.all([
+          getDocs(
+            query(collection(db, "ecDocuments"), where("ownerType", "==", "ec")),
+          ),
+          getDocs(
+            query(
+              collection(db, "ecDocuments"),
+              where("courseScope", "==", viewerCourseScope),
+            ),
+          ),
+        ]);
+
+        const merged = new Map<string, DocumentItem>();
+        [...ecSnap.docs, ...courseScopeSnap.docs]
+          .map(mapFirestoreDocumentItem)
+          .forEach((docItem) => {
+            merged.set(docItem.id, docItem);
+          });
+
+        setDocuments(sortDocumentItems(Array.from(merged.values())));
+        setDocumentsLoading(false);
+        return;
+      }
+
+      const allDocumentsSnap = await getDocs(
+        query(collection(db, "ecDocuments"), orderBy("createdAt", "desc")),
+      );
+      setDocuments(sortDocumentItems(allDocumentsSnap.docs.map(mapFirestoreDocumentItem)));
+      setDocumentsLoading(false);
+    } catch (error) {
+      handleLoadError(
+        error,
+        viewerIsBod && viewerCourseScope ? "scopedDocuments" : "allDocuments",
+      );
+    }
+  }, [
+    activeUid,
+    authReady,
+    viewerCourseScope,
+    viewerIsBod,
+    viewerProfileReady,
+  ]);
+
   useEffect(() => {
     let active = true;
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -466,110 +546,8 @@ export default function DocumentsPage() {
   }, []);
 
   useEffect(() => {
-    if (!authReady || !viewerProfileReady) return;
-
-    if (!activeUid) {
-      setDocuments([]);
-      setDocumentsLoading(false);
-      setDocumentsError("User session not found.");
-      return;
-    }
-
-    if (viewerIsBod && !viewerCourseScope) {
-      setDocuments([]);
-      setDocumentsLoading(false);
-      setDocumentsError("B.O.D. course scope is missing.");
-      return;
-    }
-
-    setDocumentsLoading(true);
-    setDocumentsError("");
-
-    const handleSubscribeError = (error: unknown, source: string) => {
-      ecDocumentsLogger.error("Firestore subscribe failed.", {
-        uid: activeUid,
-        source,
-        code: toErrorCode(error),
-        message: toErrorMessage(error),
-        raw: error,
-      });
-      setDocumentsLoading(false);
-      setDocumentsError("Failed to load documents from Firestore.");
-    };
-
-    if (viewerIsBod && viewerCourseScope) {
-      let ecRows: DocumentItem[] = [];
-      let courseRows: DocumentItem[] = [];
-
-      const syncRows = () => {
-        const merged = new Map<string, DocumentItem>();
-        [...ecRows, ...courseRows].forEach((docItem) => {
-          merged.set(docItem.id, docItem);
-        });
-
-        setDocuments(sortDocumentItems(Array.from(merged.values())));
-        setDocumentsLoading(false);
-      };
-
-      const unsubEc = onSnapshot(
-        query(collection(db, "ecDocuments"), where("ownerType", "==", "ec")),
-        (snap) => {
-          ecRows = snap.docs.map(mapFirestoreDocumentItem);
-          syncRows();
-        },
-        (error) => {
-          ecRows = [];
-          syncRows();
-          handleSubscribeError(error, "ownerType=ec");
-        },
-      );
-
-      const unsubCourseScope = onSnapshot(
-        query(
-          collection(db, "ecDocuments"),
-          where("courseScope", "==", viewerCourseScope),
-        ),
-        (snap) => {
-          courseRows = snap.docs.map(mapFirestoreDocumentItem);
-          syncRows();
-        },
-        (error) => {
-          courseRows = [];
-          syncRows();
-          handleSubscribeError(error, "courseScope");
-        },
-      );
-
-      return () => {
-        unsubEc();
-        unsubCourseScope();
-      };
-    }
-
-    const qy = query(
-      collection(db, "ecDocuments"),
-      orderBy("createdAt", "desc"),
-    );
-    const unsub = onSnapshot(
-      qy,
-      (snap) => {
-        setDocuments(sortDocumentItems(snap.docs.map(mapFirestoreDocumentItem)));
-        setDocumentsLoading(false);
-      },
-      (error) => {
-        setDocuments([]);
-        handleSubscribeError(error, "allDocuments");
-      },
-    );
-
-    return () => unsub();
-  }, [
-    activeUid,
-    authReady,
-    viewerCourseScope,
-    viewerIsBod,
-    viewerProfileReady,
-  ]);
+    void loadDocuments();
+  }, [loadDocuments]);
 
   const scopedDocuments = useMemo(() => {
     if (!viewerIsBod) {
@@ -953,6 +931,7 @@ export default function DocumentsPage() {
       if (uploadedCount > 0) {
         setPendingFiles([]);
         setIsCategoryModalOpen(false);
+        void loadDocuments();
       }
     } catch (error) {
       ecDocumentsLogger.error("Unexpected upload flow failure.", {
@@ -1047,6 +1026,7 @@ export default function DocumentsPage() {
       });
 
       setPendingDeleteDocument(null);
+      void loadDocuments();
     } catch (error) {
       ecDocumentsLogger.error("Delete failed.", {
         docId: targetDoc.id,
