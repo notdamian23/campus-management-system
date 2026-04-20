@@ -77,12 +77,14 @@ import {
   formatStudentFullName,
   formatStudentReferenceList,
 } from "@/lib/student-name";
+import { isStudentAudienceProfile } from "@/lib/student-audience";
 
 type PaymentStudentStatus = "Paid" | "Unpaid";
 
 type RemoteStudent = {
   uid?: string;
   schoolId?: string;
+  studentId?: string;
   firstName?: string;
   lastName?: string;
   fullName?: string;
@@ -90,7 +92,9 @@ type RemoteStudent = {
   name?: string;
   course?: string;
   year?: string;
+  yearLevel?: string;
   section?: string;
+  role?: string;
 };
 
 type StudentProfile = {
@@ -642,6 +646,7 @@ export default function PaymentDashboard() {
         if (!mounted) return;
 
         const list = (res.data?.students ?? [])
+          .filter((student) => isStudentAudienceProfile(student))
           .map(mapRemoteStudent)
           .filter((item) => item.uid)
           .sort(sortStudentsByNameAndId);

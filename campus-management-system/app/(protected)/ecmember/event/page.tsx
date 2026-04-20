@@ -116,6 +116,7 @@ import {
   updateCampusEvent,
   logPermissionDeniedAttemptForCurrentUser,
 } from "@/lib/firebase-functions";
+import { isStudentAudienceProfile } from "@/lib/student-audience";
 import { campusToast } from "@/lib/toast";
 import { formatStudentFullName } from "@/lib/student-name";
 
@@ -2004,6 +2005,7 @@ export default function EventDashboard() {
       >(functions, "ecListStudents");
       const res = await fn({ limit: 2000, includeEcMembers: true });
       const rows = (res.data?.students ?? [])
+        .filter((student) => isStudentAudienceProfile(student))
         .map((s) => {
           const uid = String(s.uid ?? "").trim();
           const schoolId = String(s.schoolId ?? "").trim();

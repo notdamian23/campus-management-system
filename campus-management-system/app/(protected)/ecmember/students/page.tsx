@@ -77,6 +77,7 @@ import {
   updateStudentAccountStatus,
   updateStudentClearanceStatus,
 } from "@/lib/firebase-functions";
+import { isStudentAudienceProfile } from "@/lib/student-audience";
 import { campusToast } from "@/lib/toast";
 import { formatStudentFullName } from "@/lib/student-name";
 
@@ -715,12 +716,15 @@ export default function ECStudentLookup() {
         // Student status controls should still load even if the portable projection is unavailable.
       }
 
-      const rows = (res.data?.students ?? []).map((remoteStudent) =>
-        mapRemoteStudent(
-          remoteStudent,
-          projectionByUid.get(String(remoteStudent.uid ?? "").trim()),
-        ),
-      ).filter((student) => canManageStudent(viewerProfile, student));
+      const rows = (res.data?.students ?? [])
+        .filter((remoteStudent) => isStudentAudienceProfile(remoteStudent))
+        .map((remoteStudent) =>
+          mapRemoteStudent(
+            remoteStudent,
+            projectionByUid.get(String(remoteStudent.uid ?? "").trim()),
+          ),
+        )
+        .filter((student) => canManageStudent(viewerProfile, student));
 
       rows.sort(
         (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
@@ -833,6 +837,7 @@ export default function ECStudentLookup() {
         !search ||
         s.name.toLowerCase().includes(search) ||
         s.id.toLowerCase().includes(search) ||
+        s.studentId.toLowerCase().includes(search) ||
         (s.email ?? "").toLowerCase().includes(search);
 
       const matchCourse = courseFilter ? s.course === courseFilter : true;
@@ -2090,6 +2095,11 @@ export default function ECStudentLookup() {
                     <p className="text-base font-semibold text-campus-text-primary break-words">
                       {student.name}
                     </p>
+                    {student.role === "ecmember" && (
+                      <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-campus-text-secondary">
+                        EC member profile
+                      </p>
+                    )}
                     <p className="text-xs text-campus-text-secondary break-all">
                       {student.id}
                     </p>
@@ -2175,6 +2185,11 @@ export default function ECStudentLookup() {
                   <p className="font-semibold text-campus-text-primary">
                     {student.name}
                   </p>
+                  {student.role === "ecmember" && (
+                    <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-campus-text-secondary">
+                      EC member profile
+                    </p>
+                  )}
                   <p className="text-xs text-campus-text-secondary">
                     {student.email || "No email on record"}
                   </p>

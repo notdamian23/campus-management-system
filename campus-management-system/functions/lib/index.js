@@ -2553,21 +2553,35 @@ exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request)
             return;
         studentByUid.set(studentSnap.id, (_a = studentSnap.data()) !== null && _a !== void 0 ? _a : {});
     });
-    const students = profileSnapshot.docs.map((profileDoc) => {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _j;
+    const students = profileSnapshot.docs
+        .map((profileDoc) => {
+        var _a, _b, _c;
         const profileData = (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {};
         const studentData = (_b = studentByUid.get(profileDoc.id)) !== null && _b !== void 0 ? _b : {};
+        if (!isStudentAudienceProfile(profileData, studentData)) {
+            return null;
+        }
         const firstName = normalizeNamePart(profileData.firstName) ||
             normalizeNamePart(studentData.firstName);
         const lastName = normalizeNamePart(profileData.lastName) ||
             normalizeNamePart(studentData.lastName);
         const combinedFullName = buildStudentFullName(firstName, lastName);
+        const schoolId = normalizeText(profileData.schoolId) ||
+            normalizeText(studentData.schoolId) ||
+            normalizeText(profileData.studentId) ||
+            normalizeText(studentData.studentId);
+        const studentId = normalizeText(profileData.studentId) ||
+            normalizeText(studentData.studentId) ||
+            schoolId;
+        const course = resolveStudentCourse(profileData, studentData) ||
+            normalizeText(profileData.course) ||
+            normalizeText(studentData.course);
+        const yearLevel = resolveStudentYearLevel(profileData, studentData);
         return {
             uid: profileDoc.id,
-            role: normalizeText(profileData.role),
-            schoolId: normalizeText(profileData.schoolId) ||
-                normalizeText(studentData.schoolId) ||
-                profileDoc.id,
+            role: normalizeText(profileData.role || studentData.role),
+            schoolId,
+            studentId,
             firstName,
             lastName,
             fullName: normalizeText(profileData.fullName) ||
@@ -2585,23 +2599,23 @@ exports.ecListStudents = (0, https_1.onCall)({ region: REGION }, async (request)
                 normalizeText(profileData.studentName) ||
                 normalizeText(studentData.studentName) ||
                 combinedFullName,
-            course: normalizeText(profileData.course) ||
-                normalizeText(studentData.course) ||
-                "Unassigned",
-            yearLevel: normalizeYear((_e = (_d = (_c = profileData.year) !== null && _c !== void 0 ? _c : profileData.yearLevel) !== null && _d !== void 0 ? _d : studentData.year) !== null && _e !== void 0 ? _e : studentData.yearLevel),
-            year: normalizeYear((_h = (_g = (_f = profileData.year) !== null && _f !== void 0 ? _f : profileData.yearLevel) !== null && _g !== void 0 ? _g : studentData.year) !== null && _h !== void 0 ? _h : studentData.yearLevel),
+            course,
+            yearLevel,
+            year: yearLevel,
             readyForClearance: studentData.readyForClearance === true ||
                 profileData.readyForClearance === true,
             status: normalizeText(studentData.status) ||
                 normalizeText(profileData.status) ||
                 "Active",
             email: normalizeText(profileData.email),
-            createdAtMs: toMillis((_j = profileData.createdAt) !== null && _j !== void 0 ? _j : studentData.createdAt),
+            createdAtMs: toMillis((_c = profileData.createdAt) !== null && _c !== void 0 ? _c : studentData.createdAt),
             ecPosition: normalizeECPosition(profileData.ecPosition),
             courseScope: resolveProfileCourseScope(profileData) || null,
             isBod: isBodProfileData(profileData),
         };
-    }).filter((student) => {
+    })
+        .filter((student) => Boolean(student))
+        .filter((student) => {
         if (!actorIsBod) {
             return true;
         }
@@ -2826,9 +2840,84 @@ function resolveStudentYearLevel(profileData, studentData) {
         normalizeText(studentData.year);
     return rawYear ? normalizeYear(rawYear) : "";
 }
+const INVALID_STUDENT_AUDIENCE_VALUES = new Set([
+    "-",
+    "all courses",
+    "all years",
+    "unassigned",
+    "unknown user",
+]);
+function hasMeaningfulStudentAudienceValue(value) {
+    const normalized = normalizeText(value);
+    if (!normalized) {
+        return false;
+    }
+    return !INVALID_STUDENT_AUDIENCE_VALUES.has(normalized.toLowerCase());
+}
+function resolveStudentAudienceIdentityName(profileData, studentData) {
+    const firstName = normalizeNamePart(profileData.firstName) ||
+        normalizeNamePart(studentData.firstName);
+    const lastName = normalizeNamePart(profileData.lastName) ||
+        normalizeNamePart(studentData.lastName);
+    const combinedName = buildStudentFullName(firstName, lastName);
+    return (normalizeText(profileData.name) ||
+        normalizeText(profileData.fullName) ||
+        normalizeText(profileData.studentName) ||
+        normalizeText(profileData.displayName) ||
+        normalizeText(studentData.name) ||
+        normalizeText(studentData.fullName) ||
+        normalizeText(studentData.studentName) ||
+        combinedName);
+}
+function isStudentAudienceProfile(profileData, studentData = {}) {
+    const mergedData = Object.assign(Object.assign({}, studentData), profileData);
+    if (!isStudentAudienceRole(mergedData.role)) {
+        return false;
+    }
+    const studentIdentifier = normalizeText(mergedData.schoolId) ||
+        normalizeText(mergedData.studentId);
+    const studentCourse = resolveStudentCourse(profileData, studentData) ||
+        normalizeText(mergedData.course);
+    const studentYear = resolveStudentYearLevel(profileData, studentData) ||
+        normalizeText(mergedData.yearLevel) ||
+        normalizeText(mergedData.year);
+    const studentName = resolveStudentAudienceIdentityName(profileData, studentData);
+    return (hasMeaningfulStudentAudienceValue(studentIdentifier) &&
+        hasMeaningfulStudentAudienceValue(studentCourse) &&
+        hasMeaningfulStudentAudienceValue(studentYear) &&
+        hasMeaningfulStudentAudienceValue(studentName));
+}
+async function findStudentAudienceProfilesByIdentifier(identifier, limit = 25) {
+    const normalizedIdentifier = normalizeText(identifier);
+    if (!normalizedIdentifier) {
+        return [];
+    }
+    const [schoolIdSnapshot, studentIdSnapshot] = await Promise.all([
+        db
+            .collection("profiles")
+            .where("schoolId", "==", normalizedIdentifier)
+            .limit(limit)
+            .get(),
+        db
+            .collection("profiles")
+            .where("studentId", "==", normalizedIdentifier)
+            .limit(limit)
+            .get(),
+    ]);
+    const matches = new Map();
+    schoolIdSnapshot.docs.forEach((profileDoc) => {
+        matches.set(profileDoc.id, profileDoc);
+    });
+    studentIdSnapshot.docs.forEach((profileDoc) => {
+        matches.set(profileDoc.id, profileDoc);
+    });
+    return Array.from(matches.values());
+}
 function resolveStudentSchoolId(uid, profileData, studentData) {
     return (normalizeText(profileData.schoolId) ||
+        normalizeText(profileData.studentId) ||
         normalizeText(studentData.schoolId) ||
+        normalizeText(studentData.studentId) ||
         uid);
 }
 function resolveStudentName(uid, profileData, studentData) {
@@ -3440,8 +3529,7 @@ exports.createFingerprintEnrollmentSession = (0, https_1.onCall)({ region: REGIO
         if (!profileExists && !studentExists) {
             throw new https_1.HttpsError("not-found", "One or more selected students no longer exist.");
         }
-        const role = normalizeText(profileData.role || studentData.role || "student");
-        if (!isStudentAudienceRole(role)) {
+        if (!isStudentAudienceProfile(profileData, studentData)) {
             throw new https_1.HttpsError("permission-denied", "Only student and EC-member records can be included in fingerprint enrollment.");
         }
         const course = resolveStudentCourse(profileData, studentData);
@@ -3760,7 +3848,7 @@ exports.createCampusEvent = (0, https_1.onCall)({ region: REGION }, async (reque
                     }
                     const profileData = (_b = profileSnap.data()) !== null && _b !== void 0 ? _b : {};
                     const profileCourseScope = normalizeCourseLabel(profileData.course);
-                    if (!isStudentAudienceRole(profileData.role) ||
+                    if (!isStudentAudienceProfile(profileData) ||
                         profileCourseScope !== actorCourseScope) {
                         throw new https_1.HttpsError("permission-denied", "Selected students must belong to your assigned course scope.");
                     }
@@ -3768,21 +3856,18 @@ exports.createCampusEvent = (0, https_1.onCall)({ region: REGION }, async (reque
                 }
             }
             const selectedScopedSchoolIds = new Set(Array.from(scopedSelectedProfiles.values())
-                .map((profileData) => normalizeText(profileData.schoolId))
+                .map((profileData) => normalizeText(profileData.schoolId) ||
+                normalizeText(profileData.studentId))
                 .filter(Boolean));
             for (const selectedSchoolId of selectedSchoolIds) {
                 if (selectedScopedSchoolIds.has(selectedSchoolId)) {
                     continue;
                 }
-                const scopedSchoolSnapshot = await db
-                    .collection("profiles")
-                    .where("schoolId", "==", selectedSchoolId)
-                    .limit(20)
-                    .get();
-                const scopedSchoolMatch = scopedSchoolSnapshot.docs.some((profileDoc) => {
+                const scopedSchoolProfiles = await findStudentAudienceProfilesByIdentifier(selectedSchoolId, 20);
+                const scopedSchoolMatch = scopedSchoolProfiles.some((profileDoc) => {
                     var _a;
                     const profileData = (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {};
-                    return isStudentAudienceRole(profileData.role) &&
+                    return isStudentAudienceProfile(profileData) &&
                         normalizeCourseLabel(profileData.course) === actorCourseScope;
                 });
                 if (!scopedSchoolMatch) {
@@ -3846,12 +3931,8 @@ exports.createCampusEvent = (0, https_1.onCall)({ region: REGION }, async (reque
             }
             if (selectedSchoolIds.length > 0) {
                 for (const schoolId of selectedSchoolIds) {
-                    const profileSnapshot = await db
-                        .collection("profiles")
-                        .where("schoolId", "==", schoolId)
-                        .limit(25)
-                        .get();
-                    profileSnapshot.docs.forEach((profileDoc) => {
+                    const matchedProfiles = await findStudentAudienceProfilesByIdentifier(schoolId, 25);
+                    matchedProfiles.forEach((profileDoc) => {
                         var _a;
                         audienceCandidates.set(profileDoc.id, (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {});
                     });
@@ -3871,12 +3952,14 @@ exports.createCampusEvent = (0, https_1.onCall)({ region: REGION }, async (reque
             const paymentTargets = Array.from(audienceCandidates.entries())
                 .map(([uid, profileData]) => {
                 var _a;
-                const schoolId = normalizeText(profileData.schoolId) || uid;
+                const schoolId = normalizeText(profileData.schoolId) ||
+                    normalizeText(profileData.studentId) ||
+                    uid;
                 const course = normalizeCourseLabel(profileData.course) ||
                     normalizeText(profileData.course) ||
                     "Unassigned";
                 const year = normalizeYear((_a = profileData.yearLevel) !== null && _a !== void 0 ? _a : profileData.year);
-                const studentName = resolveProfileDisplayName(profileData);
+                const studentName = resolveStudentAudienceIdentityName(profileData, {});
                 const status = normalizeLower(profileData.status);
                 return {
                     uid,
@@ -3888,7 +3971,7 @@ exports.createCampusEvent = (0, https_1.onCall)({ region: REGION }, async (reque
                     role: normalizeText(profileData.role),
                 };
             })
-                .filter((student) => isStudentAudienceRole(student.role))
+                .filter((student) => isStudentAudienceProfile(student))
                 .filter((student) => student.status !== "inactive")
                 .filter((student) => {
                 if (actorIsBod &&
@@ -4221,14 +4304,18 @@ exports.updateCampusEvent = (0, https_1.onCall)({ region: REGION }, async (reque
                         throw new https_1.HttpsError("permission-denied", "B.O.D. members can only target students from their assigned course.");
                     }
                     const selectedProfileData = (_c = selectedProfileSnapshot.data()) !== null && _c !== void 0 ? _c : {};
-                    if (!isStudentAudienceRole(selectedProfileData.role) ||
+                    if (!isStudentAudienceProfile(selectedProfileData) ||
                         normalizeCourseLabel(selectedProfileData.course) !== actorCourseScope) {
                         throw new https_1.HttpsError("permission-denied", "B.O.D. members can only target students from their assigned course.");
                     }
                     selectedProfilesByUid.set(selectedProfileSnapshot.id, selectedProfileData);
                 }
                 selectedSchoolIds = Array.from(new Set(selectedStudentIds
-                    .map((uid) => { var _a; return normalizeText((_a = selectedProfilesByUid.get(uid)) === null || _a === void 0 ? void 0 : _a.schoolId); })
+                    .map((uid) => {
+                    var _a, _b;
+                    return normalizeText((_a = selectedProfilesByUid.get(uid)) === null || _a === void 0 ? void 0 : _a.schoolId) ||
+                        normalizeText((_b = selectedProfilesByUid.get(uid)) === null || _b === void 0 ? void 0 : _b.studentId);
+                })
                     .filter(Boolean)));
                 eventTargetStudent = `Specific students selected (${selectedStudentIds.length})`;
             }
@@ -4316,12 +4403,8 @@ exports.updateCampusEvent = (0, https_1.onCall)({ region: REGION }, async (reque
                 }
                 if (selectedSchoolIds.length > 0) {
                     for (const selectedSchoolId of selectedSchoolIds) {
-                        const schoolSnapshot = await db
-                            .collection("profiles")
-                            .where("schoolId", "==", selectedSchoolId)
-                            .limit(25)
-                            .get();
-                        schoolSnapshot.docs.forEach((schoolDoc) => {
+                        const matchedProfiles = await findStudentAudienceProfilesByIdentifier(selectedSchoolId, 25);
+                        matchedProfiles.forEach((schoolDoc) => {
                             var _a;
                             audienceCandidates.set(schoolDoc.id, (_a = schoolDoc.data()) !== null && _a !== void 0 ? _a : {});
                         });
@@ -4341,12 +4424,14 @@ exports.updateCampusEvent = (0, https_1.onCall)({ region: REGION }, async (reque
                 const paymentTargets = Array.from(audienceCandidates.entries())
                     .map(([uid, profileData]) => {
                     var _a;
-                    const schoolId = normalizeText(profileData.schoolId) || uid;
+                    const schoolId = normalizeText(profileData.schoolId) ||
+                        normalizeText(profileData.studentId) ||
+                        uid;
                     const course = normalizeCourseLabel(profileData.course) ||
                         normalizeText(profileData.course) ||
                         "Unassigned";
                     const year = normalizeYear((_a = profileData.yearLevel) !== null && _a !== void 0 ? _a : profileData.year);
-                    const studentName = resolveProfileDisplayName(profileData);
+                    const studentName = resolveStudentAudienceIdentityName(profileData, {});
                     const status = normalizeLower(profileData.status);
                     return {
                         uid,
@@ -4358,7 +4443,7 @@ exports.updateCampusEvent = (0, https_1.onCall)({ region: REGION }, async (reque
                         role: normalizeText(profileData.role),
                     };
                 })
-                    .filter((student) => isStudentAudienceRole(student.role))
+                    .filter((student) => isStudentAudienceProfile(student))
                     .filter((student) => student.status !== "inactive")
                     .filter((student) => normalizeCourseLabel(student.course) === actorCourseScope)
                     .filter((student) => {

@@ -36,6 +36,7 @@ type StudentFingerprintStatus = "Active" | "Inactive";
 type StudentRosterRow = {
   uid: string;
   id: string;
+  studentId?: string;
   name: string;
   course: string;
   year: string;
@@ -153,6 +154,23 @@ function syncStatusColor(status: string) {
   if (status === "synced") return "success" as const;
   if (status === "failed") return "danger" as const;
   return "default" as const;
+}
+
+function hasEnrollmentCandidateIdentity(student: StudentRosterRow) {
+  const hasId = String(student.id ?? "").trim() || String(student.studentId ?? "").trim();
+  const course = String(student.course ?? "").trim().toLowerCase();
+  const year = String(student.year ?? "").trim().toLowerCase();
+  const name = String(student.name ?? "").trim().toLowerCase();
+
+  if (!hasId || !name || !course || !year) {
+    return false;
+  }
+
+  return (
+    course !== "unassigned" &&
+    year !== "unassigned" &&
+    name !== "unknown user"
+  );
 }
 
 function isActiveSession(status: PortableDeviceEnrollmentSessionStatus) {
@@ -310,6 +328,7 @@ export function FingerprintEnrollmentManager({
 
   const eligibleStudents = useMemo(() => {
     return [...students]
+      .filter((student) => hasEnrollmentCandidateIdentity(student))
       .filter((student) => student.fingerprintStatus !== "Active")
       .filter((student) => !reservedStudentIds.has(student.uid))
       .sort(
@@ -326,6 +345,7 @@ export function FingerprintEnrollmentManager({
     return eligibleStudents.filter((student) => {
       return [
         student.id,
+        student.studentId ?? "",
         student.name,
         student.course,
         student.year,
