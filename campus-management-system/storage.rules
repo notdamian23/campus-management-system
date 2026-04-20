@@ -46,19 +46,45 @@ service firebase.storage {
         null;
     }
 
+    function courseScopeFromAssignedCourse(courseCode) {
+      return courseCode == "ME" ? "Mechanical Engineering" :
+        courseCode == "EE" ? "Electrical Engineering" :
+        courseCode == "IE" ? "Industrial Engineering" :
+        courseCode == "CPE" ? "Computer Engineering" :
+        courseCode == "ECE" ? "Electronics Engineering" :
+        null;
+    }
+
+    function courseScopeSlug(courseScope) {
+      return courseScope == "Mechanical Engineering" ? "mechanical-engineering" :
+        courseScope == "Electrical Engineering" ? "electrical-engineering" :
+        courseScope == "Industrial Engineering" ? "industrial-engineering" :
+        courseScope == "Computer Engineering" ? "computer-engineering" :
+        courseScope == "Electronics Engineering" ? "electronics-engineering" :
+        "";
+    }
+
     function currentCourseScope() {
       return !hasProfile() ? null :
         (
           profile().courseScope != null &&
           profile().courseScope != ""
         ) ? profile().courseScope :
+        courseScopeFromAssignedCourse(profile().assignedCourse) != null ?
+        courseScopeFromAssignedCourse(profile().assignedCourse) :
         inferCourseScopeFromPosition(profile().ecPosition);
+    }
+
+    function currentCourseScopeSlug() {
+      return currentCourseScope() != null ? courseScopeSlug(currentCourseScope()) : "";
     }
 
     function isBOD() {
       return isEC() &&
         (
+          profile().ecScope == "course" ||
           profile().isBod == true ||
+          courseScopeFromAssignedCourse(profile().assignedCourse) != null ||
           inferCourseScopeFromPosition(profile().ecPosition) != null
         );
     }
@@ -124,7 +150,23 @@ service firebase.storage {
     }
 
     match /ec-documents/shared/{docId}/{fileName} {
-      allow read, write: if isAdminOrEC();
+      allow read: if isAdminOrEC();
+      allow write: if isAdmin() || isRegularEC();
+    }
+
+    match /ec-documents/course/{courseScopeSlug}/{docId}/{fileName} {
+      allow read: if isAdmin() || isRegularEC() ||
+        (
+          isBOD() &&
+          currentCourseScopeSlug() != "" &&
+          courseScopeSlug == currentCourseScopeSlug()
+        );
+      allow write: if isAdmin() || isRegularEC() ||
+        (
+          isBOD() &&
+          currentCourseScopeSlug() != "" &&
+          courseScopeSlug == currentCourseScopeSlug()
+        );
     }
 
     match /events/{eventId}/images/{fileId} {

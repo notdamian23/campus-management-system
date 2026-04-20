@@ -23,7 +23,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.auditEventDeletes = exports.auditEventUpdates = exports.auditEventCreates = exports.auditStudentWrites = exports.studentManagePreRegistration = exports.logPermissionDeniedAttempt = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.ecCreateStudent = exports.ecListStudents = exports.adminManageFingerprintCleanup = exports.adminBuildFingerprintMappingsFromProfiles = exports.adminListFingerprintCleanupMappings = exports.adminDeleteDuplicateStudentSchoolIds = exports.adminFindDuplicateStudentSchoolIds = exports.adminDeactivateAllStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
+exports.auditEventDeletes = exports.auditEventUpdates = exports.auditEventCreates = exports.auditStudentWrites = exports.studentManagePreRegistration = exports.logPermissionDeniedAttempt = exports.adminUpsertPortableDevice = exports.finalizeVerifiedCampusProfile = exports.savePendingEmailVerification = exports.getCurrentCampusProfile = exports.resolveSchoolIdLogin = exports.updateCampusEvent = exports.createCampusEvent = exports.closeFingerprintEnrollmentSession = exports.createFingerprintEnrollmentSession = exports.getFingerprintEnrollmentSessionDetail = exports.listFingerprintEnrollmentSessions = exports.deleteCampusDocument = exports.createCampusDocumentMetadata = exports.updateStudentClearanceStatus = exports.updateStudentAccountStatus = exports.updateCampusStudentProfile = exports.createCampusStudent = exports.ecCreateStudent = exports.ecListStudents = exports.adminManageFingerprintCleanup = exports.adminBuildFingerprintMappingsFromProfiles = exports.adminListFingerprintCleanupMappings = exports.adminDeleteDuplicateStudentSchoolIds = exports.adminFindDuplicateStudentSchoolIds = exports.adminDeactivateAllStudents = exports.adminDeleteUser = exports.adminBulkImportStudents = exports.adminCreateUser = void 0;
 const admin = __importStar(require("firebase-admin"));
 const https_1 = require("firebase-functions/v2/https");
 const firestore_1 = require("firebase-functions/v2/firestore");
@@ -105,11 +105,13 @@ function normalizeText(value) {
 function normalizeLower(value) {
     return normalizeText(value).toLowerCase();
 }
+function isEcRole(role) {
+    const normalized = String(role !== null && role !== void 0 ? role : "").trim().toLowerCase();
+    return normalized === "ec" || normalized === "ecmember";
+}
 function isStudentAudienceRole(value) {
     const normalized = normalizeLower(value);
-    return normalized === "student" ||
-        normalized === "ec" ||
-        normalized === "ecmember";
+    return normalized === "student" || isEcRole(value);
 }
 function normalizeSchoolIdKey(value) {
     return normalizeLower(value);
@@ -192,13 +194,13 @@ function normalizeCampusRoleValue(value) {
         return "teacher";
     if (compact === "student")
         return "student";
-    if (compact === "ec" || compact === "ecmember" || compact === "ecmemberprofile") {
+    if (isEcRole(compact) || compact === "ecmemberprofile") {
         return "ecmember";
     }
     return "";
 }
 function isECMemberRole(value) {
-    return normalizeCampusRoleValue(value) === "ecmember";
+    return isEcRole(value) || normalizeCampusRoleValue(value) === "ecmember";
 }
 function normalizeECPosition(value) {
     const position = normalizeText(value);
@@ -2716,6 +2718,1798 @@ exports.ecCreateStudent = (0, https_1.onCall)({ region: REGION }, async (request
             throw new https_1.HttpsError("already-exists", "Account already exists.");
         }
         throw new https_1.HttpsError("internal", authError.message || "Failed to create student account.");
+    }
+});
+const ENROLLMENT_SESSION_QUEUE_HOLD_DEVICE_ID = "__session_only__";
+function normalizeEnrollmentSessionStatus(value) {
+    const normalized = normalizeLower(value);
+    if (normalized === "paired")
+        return "paired";
+    if (normalized === "downloading")
+        return "downloading";
+    if (normalized === "enrolling")
+        return "enrolling";
+    if (normalized === "completed")
+        return "completed";
+    if (normalized === "partially completed" || normalized === "partially-completed") {
+        return "partially-completed";
+    }
+    if (normalized === "closed")
+        return "closed";
+    return "pending";
+}
+function normalizeEnrollmentStudentStatus(value) {
+    const normalized = normalizeLower(value);
+    if (normalized === "downloaded")
+        return "downloaded";
+    if (normalized === "enrolled")
+        return "enrolled";
+    if (normalized === "synced")
+        return "synced";
+    if (normalized === "failed")
+        return "failed";
+    return "pending";
+}
+function normalizeEnrollmentSyncStatus(value) {
+    const normalized = normalizeLower(value);
+    if (normalized === "synced")
+        return "synced";
+    if (normalized === "failed")
+        return "failed";
+    return "pending";
+}
+function sanitizeCourseScopeForStoragePath(value) {
+    return normalizeLower(value)
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+}
+function enrollmentSessionCourseScope(data) {
+    return (normalizeCourseLabel(data.courseScope) ||
+        normalizeCourseLabel(data.createdByCourseScope));
+}
+function ecDocumentOwnerType(data) {
+    return normalizeLower(data.ownerType) === "bod" ? "bod" : "ec";
+}
+function ecDocumentCourseScope(data) {
+    return (normalizeCourseLabel(data.courseScope) ||
+        normalizeCourseLabel(data.createdByCourseScope));
+}
+async function resolveEcActorContext(context) {
+    var _a;
+    await requireAdminOrEC(context);
+    const actorProfile = await callerProfileData(context);
+    const actorUid = normalizeText((_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid);
+    const actorRole = normalizeCampusRoleValue(actorProfile.role);
+    const actorIsAdmin = actorRole === "admin";
+    const actorIsEcMember = isECMemberRole(actorProfile.role);
+    const actorIsBod = actorIsEcMember && isBodProfileData(actorProfile);
+    const actorIsRegularEc = actorIsEcMember &&
+        !actorIsBod &&
+        resolveProfileEcScope(actorProfile) === "all";
+    if (!actorIsAdmin && !actorIsRegularEc && !actorIsBod) {
+        throw new https_1.HttpsError("permission-denied", "Only admin, regular EC, or B.O.D. users can perform this action.");
+    }
+    const actorCourseScope = resolveProfileCourseScope(actorProfile);
+    if (actorIsBod && !actorCourseScope) {
+        throw new https_1.HttpsError("permission-denied", "B.O.D. profile is missing a valid course scope.");
+    }
+    return {
+        uid: actorUid,
+        profile: actorProfile,
+        isAdmin: actorIsAdmin,
+        isRegularEc: actorIsRegularEc,
+        isBod: actorIsBod,
+        courseScope: actorCourseScope,
+    };
+}
+async function readStudentSources(uid) {
+    var _a, _b;
+    const [profileSnap, studentSnap] = await Promise.all([
+        db.doc(`profiles/${uid}`).get(),
+        db.doc(`students/${uid}`).get(),
+    ]);
+    return {
+        profileData: profileSnap.exists ? ((_a = profileSnap.data()) !== null && _a !== void 0 ? _a : {}) : {},
+        studentData: studentSnap.exists ? ((_b = studentSnap.data()) !== null && _b !== void 0 ? _b : {}) : {},
+        profileExists: profileSnap.exists,
+        studentExists: studentSnap.exists,
+    };
+}
+function resolveStudentCourse(profileData, studentData) {
+    return (normalizeCourseLabel(profileData.course) ||
+        normalizeCourseLabel(studentData.course));
+}
+function resolveStudentYearLevel(profileData, studentData) {
+    const rawYear = normalizeText(profileData.yearLevel) ||
+        normalizeText(profileData.year) ||
+        normalizeText(studentData.yearLevel) ||
+        normalizeText(studentData.year);
+    return rawYear ? normalizeYear(rawYear) : "";
+}
+function resolveStudentSchoolId(uid, profileData, studentData) {
+    return (normalizeText(profileData.schoolId) ||
+        normalizeText(studentData.schoolId) ||
+        uid);
+}
+function resolveStudentName(uid, profileData, studentData) {
+    const merged = Object.assign(Object.assign({}, studentData), profileData);
+    return resolveProfileDisplayName(merged) || uid;
+}
+function studentHasFingerprint(profileData, studentData) {
+    var _a, _b, _c;
+    const fingerprintStatus = normalizeLower(profileData.fingerprintStatus) ||
+        normalizeLower(studentData.fingerprintStatus);
+    const fingerprintTemplateId = toPositiveNumber((_c = (_b = (_a = profileData.fingerprintTemplateId) !== null && _a !== void 0 ? _a : profileData.templateId) !== null && _b !== void 0 ? _b : studentData.fingerprintTemplateId) !== null && _c !== void 0 ? _c : studentData.templateId);
+    return (fingerprintTemplateId > 0 ||
+        fingerprintStatus === "enrolled" ||
+        fingerprintStatus === "active");
+}
+function enrollmentSessionPayloadFromSnapshot(snap) {
+    var _a;
+    const data = (_a = snap.data()) !== null && _a !== void 0 ? _a : {};
+    return {
+        sessionId: snap.id,
+        createdBy: normalizeText(data.createdBy),
+        createdByName: normalizeText(data.createdByName),
+        createdBySchoolId: normalizeText(data.createdBySchoolId),
+        status: normalizeEnrollmentSessionStatus(data.status),
+        pairedDeviceId: normalizeText(data.pairedDeviceId),
+        targetDeviceId: normalizeText(data.targetDeviceId),
+        totalStudents: toPositiveNumber(data.totalStudents),
+        pendingCount: toPositiveNumber(data.pendingCount),
+        downloadedCount: toPositiveNumber(data.downloadedCount),
+        enrolledCount: toPositiveNumber(data.enrolledCount),
+        syncedCount: toPositiveNumber(data.syncedCount),
+        failedCount: toPositiveNumber(data.failedCount),
+        selectedStudentIds: normalizeIdentifierList(data.selectedStudentIds),
+        createdAtMs: toMillis(data.createdAt),
+        updatedAtMs: toMillis(data.updatedAt),
+    };
+}
+function enrollmentSessionStudentPayloadFromSnapshot(snap) {
+    var _a, _b, _c;
+    const data = (_a = snap.data()) !== null && _a !== void 0 ? _a : {};
+    const studentId = normalizeText(data.studentId) || snap.id;
+    return {
+        studentId,
+        studentUid: normalizeText(data.studentUid) || studentId,
+        schoolId: normalizeText(data.schoolId) || studentId,
+        fullName: normalizeText(data.fullName) ||
+            normalizeText(data.studentName) ||
+            normalizeText(data.name) ||
+            studentId,
+        course: normalizeText(data.course) || "Unassigned",
+        yearLevel: normalizeYear((_b = data.yearLevel) !== null && _b !== void 0 ? _b : data.year),
+        status: normalizeEnrollmentStudentStatus(data.status),
+        syncStatus: normalizeEnrollmentSyncStatus(data.syncStatus),
+        fingerprintTemplateId: toPositiveNumber((_c = data.fingerprintTemplateId) !== null && _c !== void 0 ? _c : data.templateId),
+        enrolledByDevice: normalizeText(data.enrolledByDevice),
+        assignedDeviceId: normalizeText(data.assignedDeviceId),
+        remarks: normalizeText(data.remarks),
+    };
+}
+function canActorAccessEnrollmentSession(actor, data) {
+    if (actor.isAdmin || actor.isRegularEc) {
+        return true;
+    }
+    if (!actor.isBod || !actor.courseScope) {
+        return false;
+    }
+    return enrollmentSessionCourseScope(data) === actor.courseScope;
+}
+async function assertNoActiveEnrollmentSessionConflicts(studentIds) {
+    var _a;
+    const uniqueIds = Array.from(new Set(studentIds.map((id) => normalizeText(id)).filter(Boolean)));
+    if (uniqueIds.length === 0) {
+        return;
+    }
+    for (let index = 0; index < uniqueIds.length; index += 10) {
+        const chunk = uniqueIds.slice(index, index + 10);
+        const sessionSnapshot = await db
+            .collection("enrollmentSessions")
+            .where("selectedStudentIds", "array-contains-any", chunk)
+            .get();
+        for (const docSnapshot of sessionSnapshot.docs) {
+            const sessionData = (_a = docSnapshot.data()) !== null && _a !== void 0 ? _a : {};
+            const sessionStatus = normalizeEnrollmentSessionStatus(sessionData.status);
+            if (sessionStatus === "completed" || sessionStatus === "closed") {
+                continue;
+            }
+            const selectedStudentIds = normalizeIdentifierList(sessionData.selectedStudentIds);
+            const hasOverlap = selectedStudentIds.some((studentId) => chunk.includes(studentId));
+            if (hasOverlap) {
+                throw new https_1.HttpsError("already-exists", "One or more students are already included in an active fingerprint enrollment session.");
+            }
+        }
+    }
+}
+exports.createCampusStudent = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const schoolId = normalizeText(body.schoolId);
+    const schoolIdKey = normalizeSchoolIdKey(schoolId);
+    const studentName = normalizeNamePart(body.studentName);
+    const requestedCourse = normalizeCourseLabel(body.course) || normalizeText(body.course);
+    const requestedYearRaw = normalizeText(body.year);
+    const year = normalizeYear(body.year);
+    const emailRaw = normalizeText(body.email);
+    if (emailRaw && !isValidEmailAddress(emailRaw)) {
+        throw new https_1.HttpsError("invalid-argument", "Please provide a valid email address.");
+    }
+    if (!schoolId) {
+        throw new https_1.HttpsError("invalid-argument", "School ID is required.");
+    }
+    if (!studentName) {
+        throw new https_1.HttpsError("invalid-argument", "Student name is required.");
+    }
+    if (!requestedCourse) {
+        throw new https_1.HttpsError("invalid-argument", "Course is required.");
+    }
+    if (!requestedYearRaw) {
+        throw new https_1.HttpsError("invalid-argument", "Year is required.");
+    }
+    if (actor.isBod) {
+        ensureBodCourseScopeAccess(actor.profile, requestedCourse, "B.O.D. members can only manage students from their assigned course.");
+    }
+    const course = actor.isBod ? actor.courseScope : requestedCourse;
+    const email = emailRaw || `${schoolId}@campus.local`;
+    let schoolIdReservation = null;
+    let createdUid = null;
+    try {
+        schoolIdReservation = await reserveUniqueStudentSchoolId(schoolId, "ec_create_student");
+        const userRecord = await admin.auth().createUser({
+            email,
+            password: schoolId,
+            disabled: false,
+        });
+        const uid = userRecord.uid;
+        createdUid = uid;
+        await schoolIdReservation.activate(uid);
+        const timestamp = serverTimestamp();
+        const createBatch = db.batch();
+        createBatch.set(db.doc(`profiles/${uid}`), {
+            schoolId,
+            schoolIdKey,
+            email,
+            role: "student",
+            studentName,
+            name: studentName,
+            fullName: studentName,
+            course,
+            year,
+            yearLevel: year,
+            readyForClearance: false,
+            mustChangePassword: true,
+            emailVerified: false,
+            emailVerificationPending: false,
+            pendingEmail: null,
+            firstLoginCompleted: false,
+            status: "pending",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        createBatch.set(db.doc(`students/${uid}`), {
+            uid,
+            studentId: uid,
+            schoolId,
+            schoolIdKey,
+            studentName,
+            name: studentName,
+            fullName: studentName,
+            course,
+            year,
+            yearLevel: year,
+            readyForClearance: false,
+            status: "active",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        await createBatch.commit();
+        await db.collection("logs").add({
+            action: "create_campus_student",
+            actorUid: actor.uid,
+            targetUid: uid,
+            targetSchoolId: schoolId,
+            createdAt: timestamp,
+        }).catch((logError) => {
+            authLogger.warn("createCampusStudent log write failed", {
+                uid,
+                schoolId,
+                error: logError,
+            });
+        });
+        return { uid };
+    }
+    catch (error) {
+        const authError = error;
+        if (createdUid) {
+            await admin.auth().deleteUser(createdUid).catch(() => undefined);
+        }
+        if (schoolIdReservation) {
+            await schoolIdReservation.release();
+        }
+        if (isHttpsErrorCode(error, "already-exists")) {
+            throw schoolIdAlreadyExistsError(authError.message || "School ID already exists.");
+        }
+        if (authError.code === "auth/email-already-exists") {
+            throw new https_1.HttpsError("already-exists", "Account already exists.");
+        }
+        throw new https_1.HttpsError("internal", authError.message || "Failed to create student account.");
+    }
+});
+exports.updateCampusStudentProfile = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const uid = normalizeText(body.uid);
+    const submittedName = normalizeNamePart(body.name);
+    const schoolId = normalizeText(body.schoolId);
+    const requestedCourse = normalizeCourseLabel(body.course) || normalizeText(body.course);
+    const requestedYear = normalizeText(body.yearLevel);
+    if (!uid) {
+        throw new https_1.HttpsError("invalid-argument", "uid is required.");
+    }
+    if (!submittedName) {
+        throw new https_1.HttpsError("invalid-argument", "name is required.");
+    }
+    if (!schoolId) {
+        throw new https_1.HttpsError("invalid-argument", "schoolId is required.");
+    }
+    const { profileData, studentData, profileExists, studentExists } = await readStudentSources(uid);
+    if (!profileExists && !studentExists) {
+        throw new https_1.HttpsError("not-found", "Student profile not found.");
+    }
+    const targetRole = normalizeText(profileData.role || studentData.role || "student");
+    if (!isStudentAudienceRole(targetRole)) {
+        throw new https_1.HttpsError("permission-denied", "Only student and EC-member records can be updated here.");
+    }
+    const currentCourse = resolveStudentCourse(profileData, studentData);
+    if (actor.isBod) {
+        if (!currentCourse || currentCourse !== actor.courseScope) {
+            throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
+        }
+        if (requestedCourse && requestedCourse !== actor.courseScope) {
+            throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
+        }
+    }
+    const effectiveCourse = actor.isBod ? actor.courseScope : (requestedCourse || currentCourse);
+    if (!effectiveCourse) {
+        throw new https_1.HttpsError("invalid-argument", "Course is required.");
+    }
+    const currentYear = resolveStudentYearLevel(profileData, studentData);
+    const effectiveYear = requestedYear ? normalizeYear(requestedYear) : currentYear;
+    if (!effectiveYear || effectiveYear === "Unassigned") {
+        throw new https_1.HttpsError("invalid-argument", "Year level is required.");
+    }
+    const schoolIdKey = normalizeSchoolIdKey(schoolId);
+    const timestamp = serverTimestamp();
+    const profilePatch = {
+        schoolId,
+        schoolIdKey,
+        name: submittedName,
+        fullName: submittedName,
+        studentName: submittedName,
+        course: effectiveCourse,
+        year: effectiveYear,
+        yearLevel: effectiveYear,
+        updatedAt: timestamp,
+    };
+    const studentPatch = {
+        uid,
+        studentId: uid,
+        schoolId,
+        schoolIdKey,
+        name: submittedName,
+        fullName: submittedName,
+        studentName: submittedName,
+        course: effectiveCourse,
+        year: effectiveYear,
+        yearLevel: effectiveYear,
+        status: normalizeText(studentData.status) ||
+            normalizeText(profileData.status) ||
+            "Active",
+        readyForClearance: studentData.readyForClearance === true ||
+            profileData.readyForClearance === true,
+        updatedAt: timestamp,
+    };
+    const updateBatch = db.batch();
+    updateBatch.set(db.doc(`profiles/${uid}`), profilePatch, { merge: true });
+    updateBatch.set(db.doc(`students/${uid}`), studentPatch, { merge: true });
+    await updateBatch.commit();
+    return {
+        uid,
+        schoolId,
+        name: submittedName,
+        course: effectiveCourse,
+        yearLevel: effectiveYear,
+    };
+});
+exports.updateStudentAccountStatus = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const uid = normalizeText(body.uid);
+    const statusRaw = normalizeLower(body.status);
+    const nextStatus = statusRaw === "inactive" ? "Inactive" :
+        statusRaw === "active" ? "Active" :
+            "";
+    if (!uid) {
+        throw new https_1.HttpsError("invalid-argument", "uid is required.");
+    }
+    if (!nextStatus) {
+        throw new https_1.HttpsError("invalid-argument", "status must be Active or Inactive.");
+    }
+    const { profileData, studentData, profileExists, studentExists } = await readStudentSources(uid);
+    if (!profileExists && !studentExists) {
+        throw new https_1.HttpsError("not-found", "Student profile not found.");
+    }
+    const targetRole = normalizeText(profileData.role || studentData.role || "student");
+    if (!isStudentAudienceRole(targetRole)) {
+        throw new https_1.HttpsError("permission-denied", "Only student and EC-member records can be updated here.");
+    }
+    const targetCourse = resolveStudentCourse(profileData, studentData);
+    if (actor.isBod && targetCourse !== actor.courseScope) {
+        throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
+    }
+    const schoolId = resolveStudentSchoolId(uid, profileData, studentData);
+    const studentName = resolveStudentName(uid, profileData, studentData);
+    const yearLevel = resolveStudentYearLevel(profileData, studentData) || "Unassigned";
+    const timestamp = serverTimestamp();
+    const updateBatch = db.batch();
+    updateBatch.set(db.doc(`profiles/${uid}`), {
+        status: nextStatus,
+        updatedAt: timestamp,
+    }, { merge: true });
+    updateBatch.set(db.doc(`students/${uid}`), {
+        uid,
+        studentId: uid,
+        schoolId,
+        studentName,
+        name: studentName,
+        fullName: studentName,
+        course: targetCourse || normalizeText(profileData.course) || normalizeText(studentData.course) || "Unassigned",
+        year: yearLevel,
+        yearLevel,
+        status: nextStatus,
+        updatedAt: timestamp,
+    }, { merge: true });
+    await updateBatch.commit();
+    let deletedRegistrationsCount = 0;
+    if (nextStatus === "Inactive") {
+        const registrationsSnapshot = await db
+            .collectionGroup("registrations")
+            .where("uid", "==", uid)
+            .get();
+        deletedRegistrationsCount = registrationsSnapshot.size;
+        await Promise.all(registrationsSnapshot.docs.map((registrationDoc) => registrationDoc.ref.delete()));
+    }
+    return {
+        uid,
+        status: nextStatus,
+        deletedRegistrationsCount,
+    };
+});
+exports.updateStudentClearanceStatus = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const uid = normalizeText(body.uid);
+    const readyForClearance = body.readyForClearance === true;
+    if (!uid) {
+        throw new https_1.HttpsError("invalid-argument", "uid is required.");
+    }
+    const { profileData, studentData, profileExists, studentExists } = await readStudentSources(uid);
+    if (!profileExists && !studentExists) {
+        throw new https_1.HttpsError("not-found", "Student profile not found.");
+    }
+    const targetRole = normalizeText(profileData.role || studentData.role || "student");
+    if (!isStudentAudienceRole(targetRole)) {
+        throw new https_1.HttpsError("permission-denied", "Only student and EC-member records can be updated here.");
+    }
+    const targetCourse = resolveStudentCourse(profileData, studentData);
+    if (actor.isBod && targetCourse !== actor.courseScope) {
+        throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
+    }
+    const schoolId = resolveStudentSchoolId(uid, profileData, studentData);
+    const studentName = resolveStudentName(uid, profileData, studentData);
+    const yearLevel = resolveStudentYearLevel(profileData, studentData) || "Unassigned";
+    const timestamp = serverTimestamp();
+    const updateBatch = db.batch();
+    updateBatch.set(db.doc(`profiles/${uid}`), {
+        readyForClearance,
+        updatedAt: timestamp,
+    }, { merge: true });
+    updateBatch.set(db.doc(`students/${uid}`), {
+        uid,
+        studentId: uid,
+        schoolId,
+        studentName,
+        name: studentName,
+        fullName: studentName,
+        course: targetCourse || normalizeText(profileData.course) || normalizeText(studentData.course) || "Unassigned",
+        year: yearLevel,
+        yearLevel,
+        readyForClearance,
+        updatedAt: timestamp,
+    }, { merge: true });
+    await updateBatch.commit();
+    let notificationSent = false;
+    if (readyForClearance) {
+        await db
+            .doc(`profiles/${uid}/notifications/clearance-ready-status`)
+            .set({
+            title: "Clearance Ready",
+            message: "You are now ready for clearance signing.",
+            type: "announcement",
+            createdAt: timestamp,
+            date: "",
+            scheduledTime: "",
+            read: false,
+            targetUid: uid,
+        }, { merge: true });
+        notificationSent = true;
+    }
+    return {
+        uid,
+        readyForClearance,
+        notificationSent,
+    };
+});
+exports.createCampusDocumentMetadata = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const docId = normalizeText(body.docId) || db.collection("ecDocuments").doc().id;
+    const name = normalizeText(body.name);
+    const type = normalizeText(body.type) || "PDF";
+    const category = normalizeText(body.category) || "General";
+    const sizeBytes = Number(body.sizeBytes);
+    const storagePath = normalizeText(body.storagePath);
+    const downloadURL = normalizeText(body.downloadURL);
+    if (!name) {
+        throw new https_1.HttpsError("invalid-argument", "name is required.");
+    }
+    if (!storagePath) {
+        throw new https_1.HttpsError("invalid-argument", "storagePath is required.");
+    }
+    if (!downloadURL) {
+        throw new https_1.HttpsError("invalid-argument", "downloadURL is required.");
+    }
+    if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+        throw new https_1.HttpsError("invalid-argument", "sizeBytes must be a positive number.");
+    }
+    if (!storagePath.startsWith("ec-documents/")) {
+        throw new https_1.HttpsError("invalid-argument", "storagePath must be under ec-documents/.");
+    }
+    const documentRef = db.doc(`ecDocuments/${docId}`);
+    const documentSnapshot = await documentRef.get();
+    if (documentSnapshot.exists) {
+        throw new https_1.HttpsError("already-exists", "Document metadata already exists for this file.");
+    }
+    let ownerType = "ec";
+    let courseScope = null;
+    let createdByCourseScope = null;
+    let courses = [];
+    if (actor.isBod) {
+        ownerType = "bod";
+        courseScope = actor.courseScope;
+        createdByCourseScope = actor.courseScope;
+        courses = [actor.courseScope];
+        const expectedPrefix = `ec-documents/course/${sanitizeCourseScopeForStoragePath(actor.courseScope)}/`;
+        if (!storagePath.startsWith(expectedPrefix)) {
+            throw new https_1.HttpsError("permission-denied", "B.O.D. members can only upload documents inside their assigned course scope.");
+        }
+    }
+    await documentRef.set({
+        name,
+        type,
+        category,
+        sizeBytes,
+        downloadURL,
+        storagePath,
+        uploadedByUid: actor.uid,
+        createdBy: actor.uid,
+        ownerType,
+        courseScope,
+        createdByCourseScope,
+        courses,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+    });
+    return {
+        docId,
+        ownerType,
+        courseScope,
+    };
+});
+exports.deleteCampusDocument = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a;
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const docId = normalizeText(body.docId);
+    if (!docId) {
+        throw new https_1.HttpsError("invalid-argument", "docId is required.");
+    }
+    const documentRef = db.doc(`ecDocuments/${docId}`);
+    const documentSnapshot = await documentRef.get();
+    if (!documentSnapshot.exists) {
+        throw new https_1.HttpsError("not-found", "Document metadata not found.");
+    }
+    const documentData = (_a = documentSnapshot.data()) !== null && _a !== void 0 ? _a : {};
+    const ownerType = ecDocumentOwnerType(documentData);
+    const documentScope = ecDocumentCourseScope(documentData);
+    const createdByUid = normalizeText(documentData.createdBy || documentData.uploadedByUid);
+    if (actor.isBod) {
+        if (ownerType !== "bod" ||
+            documentScope !== actor.courseScope ||
+            createdByUid !== actor.uid) {
+            throw new https_1.HttpsError("permission-denied", "B.O.D. members can only delete their own course documents.");
+        }
+    }
+    const storagePath = normalizeText(documentData.storagePath);
+    if (storagePath) {
+        try {
+            await admin.storage().bucket().file(storagePath).delete({ ignoreNotFound: true });
+        }
+        catch (error) {
+            const storageErrorCode = Number(error.code);
+            if (storageErrorCode !== 404) {
+                throw new https_1.HttpsError("internal", "Failed to delete the document file from storage.");
+            }
+        }
+    }
+    await documentRef.delete();
+    return {
+        docId,
+        deleted: true,
+    };
+});
+exports.listFingerprintEnrollmentSessions = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const rawLimit = Number.parseInt(normalizeText(body.limit), 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 50) : 20;
+    const queryLimit = actor.isBod ? Math.min(limit * 5, 200) : limit;
+    const sessionSnapshot = await db
+        .collection("enrollmentSessions")
+        .orderBy("createdAt", "desc")
+        .limit(queryLimit)
+        .get();
+    const sessions = sessionSnapshot.docs
+        .filter((sessionDoc) => { var _a; return canActorAccessEnrollmentSession(actor, (_a = sessionDoc.data()) !== null && _a !== void 0 ? _a : {}); })
+        .map((sessionDoc) => enrollmentSessionPayloadFromSnapshot(sessionDoc))
+        .slice(0, limit);
+    return { sessions };
+});
+exports.getFingerprintEnrollmentSessionDetail = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a;
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const sessionId = normalizeText(body.sessionId);
+    if (!sessionId) {
+        throw new https_1.HttpsError("invalid-argument", "sessionId is required.");
+    }
+    const sessionRef = db.doc(`enrollmentSessions/${sessionId}`);
+    const sessionSnapshot = await sessionRef.get();
+    if (!sessionSnapshot.exists) {
+        throw new https_1.HttpsError("not-found", "Enrollment session not found.");
+    }
+    const sessionData = (_a = sessionSnapshot.data()) !== null && _a !== void 0 ? _a : {};
+    if (!canActorAccessEnrollmentSession(actor, sessionData)) {
+        throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
+    }
+    const studentsSnapshot = await db
+        .collection(`enrollmentSessions/${sessionId}/students`)
+        .orderBy("fullName", "asc")
+        .get();
+    return {
+        session: enrollmentSessionPayloadFromSnapshot(sessionSnapshot),
+        students: studentsSnapshot.docs.map((studentDoc) => enrollmentSessionStudentPayloadFromSnapshot(studentDoc)),
+    };
+});
+exports.createFingerprintEnrollmentSession = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const studentIds = Array.from(new Set(normalizeIdentifierList(body.studentIds).map((studentId) => normalizeText(studentId)).filter(Boolean)));
+    if (studentIds.length === 0) {
+        throw new https_1.HttpsError("invalid-argument", "studentIds must contain at least one student.");
+    }
+    await assertNoActiveEnrollmentSessionConflicts(studentIds);
+    const profileRefs = studentIds.map((studentId) => db.doc(`profiles/${studentId}`));
+    const studentRefs = studentIds.map((studentId) => db.doc(`students/${studentId}`));
+    const [profileSnapshots, studentSnapshots] = await Promise.all([
+        profileRefs.length > 0 ? db.getAll(...profileRefs) : Promise.resolve([]),
+        studentRefs.length > 0 ? db.getAll(...studentRefs) : Promise.resolve([]),
+    ]);
+    const profileByUid = new Map();
+    profileSnapshots.forEach((profileSnapshot) => {
+        var _a;
+        if (profileSnapshot.exists) {
+            profileByUid.set(profileSnapshot.id, (_a = profileSnapshot.data()) !== null && _a !== void 0 ? _a : {});
+        }
+    });
+    const studentByUid = new Map();
+    studentSnapshots.forEach((studentSnapshot) => {
+        var _a;
+        if (studentSnapshot.exists) {
+            studentByUid.set(studentSnapshot.id, (_a = studentSnapshot.data()) !== null && _a !== void 0 ? _a : {});
+        }
+    });
+    const studentRows = studentIds.map((studentId) => {
+        var _a, _b;
+        const profileExists = profileByUid.has(studentId);
+        const studentExists = studentByUid.has(studentId);
+        const profileData = (_a = profileByUid.get(studentId)) !== null && _a !== void 0 ? _a : {};
+        const studentData = (_b = studentByUid.get(studentId)) !== null && _b !== void 0 ? _b : {};
+        if (!profileExists && !studentExists) {
+            throw new https_1.HttpsError("not-found", "One or more selected students no longer exist.");
+        }
+        const role = normalizeText(profileData.role || studentData.role || "student");
+        if (!isStudentAudienceRole(role)) {
+            throw new https_1.HttpsError("permission-denied", "Only student and EC-member records can be included in fingerprint enrollment.");
+        }
+        const course = resolveStudentCourse(profileData, studentData);
+        if (actor.isBod && course !== actor.courseScope) {
+            throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
+        }
+        if (studentHasFingerprint(profileData, studentData)) {
+            const studentName = resolveStudentName(studentId, profileData, studentData);
+            throw new https_1.HttpsError("failed-precondition", `${studentName} already has a fingerprint record.`);
+        }
+        const schoolId = resolveStudentSchoolId(studentId, profileData, studentData);
+        const yearLevel = resolveStudentYearLevel(profileData, studentData) || "Unassigned";
+        const fullName = resolveStudentName(studentId, profileData, studentData);
+        return {
+            studentId,
+            studentUid: studentId,
+            schoolId,
+            fullName,
+            course: course ||
+                normalizeText(profileData.course) ||
+                normalizeText(studentData.course) ||
+                "Unassigned",
+            yearLevel,
+        };
+    });
+    const sessionRef = db.collection("enrollmentSessions").doc();
+    const timestamp = serverTimestamp();
+    const createdBySchoolId = normalizeText(actor.profile.schoolId) || actor.uid;
+    const createdByName = resolveProfileDisplayName(actor.profile);
+    const sessionCourseScope = actor.isBod ? actor.courseScope : null;
+    let createBatch = db.batch();
+    let writesInBatch = 0;
+    const commitCurrentBatch = async () => {
+        if (writesInBatch === 0) {
+            return;
+        }
+        await createBatch.commit();
+        createBatch = db.batch();
+        writesInBatch = 0;
+    };
+    createBatch.set(sessionRef, {
+        sessionId: sessionRef.id,
+        createdBy: actor.uid,
+        createdByName,
+        createdBySchoolId,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        ownerType: actor.isBod ? "bod" : "ec",
+        courseScope: sessionCourseScope,
+        createdByCourseScope: sessionCourseScope,
+        status: "pending",
+        pairedDeviceId: "",
+        targetDeviceId: "",
+        totalStudents: studentRows.length,
+        pendingCount: studentRows.length,
+        downloadedCount: 0,
+        enrolledCount: 0,
+        syncedCount: 0,
+        failedCount: 0,
+        selectedStudentIds: studentIds,
+    });
+    writesInBatch += 1;
+    for (const studentRow of studentRows) {
+        if (writesInBatch + 2 > 400) {
+            await commitCurrentBatch();
+        }
+        createBatch.set(db.doc(`enrollmentSessions/${sessionRef.id}/students/${studentRow.studentId}`), {
+            enrollmentSessionId: sessionRef.id,
+            studentId: studentRow.studentId,
+            studentUid: studentRow.studentUid,
+            schoolId: studentRow.schoolId,
+            fullName: studentRow.fullName,
+            course: studentRow.course,
+            yearLevel: studentRow.yearLevel,
+            status: "pending",
+            syncStatus: "pending",
+            fingerprintTemplateId: null,
+            enrolledByDevice: "",
+            assignedDeviceId: "",
+            remarks: "",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        writesInBatch += 1;
+        const queueId = `${sessionRef.id}_${studentRow.studentId}`;
+        createBatch.set(db.doc(`enrollmentQueue/${queueId}`), {
+            queueId,
+            enrollmentSessionId: sessionRef.id,
+            eventId: sessionRef.id,
+            studentId: studentRow.studentId,
+            studentUid: studentRow.studentUid,
+            schoolId: studentRow.schoolId,
+            studentName: studentRow.fullName,
+            course: studentRow.course,
+            yearLevel: studentRow.yearLevel,
+            status: "pending",
+            assignedDeviceId: ENROLLMENT_SESSION_QUEUE_HOLD_DEVICE_ID,
+            ownerType: actor.isBod ? "bod" : "ec",
+            createdBy: actor.uid,
+            createdByName,
+            createdBySchoolId,
+            courseScope: sessionCourseScope,
+            createdByCourseScope: sessionCourseScope,
+            source: "enrollment-session",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        writesInBatch += 1;
+    }
+    await commitCurrentBatch();
+    const createdSessionSnapshot = await sessionRef.get();
+    return {
+        session: enrollmentSessionPayloadFromSnapshot(createdSessionSnapshot),
+    };
+});
+exports.closeFingerprintEnrollmentSession = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a;
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const sessionId = normalizeText(body.sessionId);
+    if (!sessionId) {
+        throw new https_1.HttpsError("invalid-argument", "sessionId is required.");
+    }
+    const sessionRef = db.doc(`enrollmentSessions/${sessionId}`);
+    const sessionSnapshot = await sessionRef.get();
+    if (!sessionSnapshot.exists) {
+        throw new https_1.HttpsError("not-found", "Enrollment session not found.");
+    }
+    const sessionData = (_a = sessionSnapshot.data()) !== null && _a !== void 0 ? _a : {};
+    if (!canActorAccessEnrollmentSession(actor, sessionData)) {
+        throw new https_1.HttpsError("permission-denied", "B.O.D. members can only manage students from their assigned course.");
+    }
+    const queueSnapshot = await db
+        .collection("enrollmentQueue")
+        .where("enrollmentSessionId", "==", sessionId)
+        .get();
+    if (!queueSnapshot.empty) {
+        const writesPerBatch = 350;
+        for (let index = 0; index < queueSnapshot.docs.length; index += writesPerBatch) {
+            const batch = db.batch();
+            queueSnapshot.docs
+                .slice(index, index + writesPerBatch)
+                .forEach((queueDoc) => {
+                batch.set(queueDoc.ref, {
+                    status: "closed",
+                    closedAt: serverTimestamp(),
+                    updatedAt: serverTimestamp(),
+                }, { merge: true });
+            });
+            await batch.commit();
+        }
+    }
+    await sessionRef.set({
+        status: "closed",
+        closedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+    }, { merge: true });
+    const updatedSessionSnapshot = await sessionRef.get();
+    return {
+        session: enrollmentSessionPayloadFromSnapshot(updatedSessionSnapshot),
+    };
+});
+function makePaymentRef(paymentId) {
+    return `PMT-${paymentId.slice(-6).toUpperCase()}`;
+}
+function toFirestoreDateOrNull(value) {
+    const millis = toMillis(value);
+    if (!Number.isFinite(millis) || millis <= 0) {
+        return null;
+    }
+    return new Date(millis);
+}
+function toUniqueIdentifierList(value) {
+    return Array.from(new Set(normalizeIdentifierList(value)));
+}
+exports.createCampusEvent = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a, _b;
+    if (!((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid)) {
+        throw new https_1.HttpsError("unauthenticated", "Login required.");
+    }
+    try {
+        const actorUid = normalizeText(request.auth.uid);
+        const actorProfile = await callerProfileData(request);
+        const actorRole = normalizeCampusRoleValue(actorProfile.role);
+        const actorIsAdmin = actorRole === "admin";
+        const actorIsEcMember = isECMemberRole(actorProfile.role);
+        const actorIsBod = actorIsEcMember && isBodProfileData(actorProfile);
+        const actorIsRegularEc = actorIsEcMember &&
+            !actorIsBod &&
+            resolveProfileEcScope(actorProfile) === "all";
+        if (!actorIsAdmin && !actorIsRegularEc && !actorIsBod) {
+            throw new https_1.HttpsError("permission-denied", "Only admin, regular EC, or B.O.D. users can create events.");
+        }
+        const actorCourseScope = resolveProfileCourseScope(actorProfile);
+        if (actorIsBod && !actorCourseScope) {
+            throw new https_1.HttpsError("permission-denied", "B.O.D. profile is missing a valid course scope.");
+        }
+        const body = asRecord(request.data);
+        const title = normalizeText(body.title);
+        const location = normalizeText(body.location);
+        const date = normalizeText(body.date);
+        const scheduledTime = normalizeText(body.scheduledTime) ||
+            normalizeText(body.timeStart);
+        const timeEnd = normalizeText(body.timeEnd);
+        const details = normalizeText(body.details);
+        const isPreReg = body.isPreReg === true;
+        const withPayment = body.withPayment === true || body.paymentRequired === true;
+        const waitlistEnabled = isPreReg ? body.waitlistEnabled === true : false;
+        const parsedPreRegSlots = Number(body.preRegSlots);
+        if (!title) {
+            throw new https_1.HttpsError("invalid-argument", "Title is required.");
+        }
+        if (!date) {
+            throw new https_1.HttpsError("invalid-argument", "Date is required.");
+        }
+        if (!scheduledTime) {
+            throw new https_1.HttpsError("invalid-argument", "Scheduled time is required.");
+        }
+        if (!timeEnd) {
+            throw new https_1.HttpsError("invalid-argument", "End time is required.");
+        }
+        const eventStartMs = parseEventStartMs(date, scheduledTime);
+        const eventEndMs = parseEventStartMs(date, timeEnd);
+        if (eventStartMs !== Number.MAX_SAFE_INTEGER &&
+            eventEndMs !== Number.MAX_SAFE_INTEGER &&
+            eventEndMs <= eventStartMs) {
+            throw new https_1.HttpsError("invalid-argument", "End time must be later than start time.");
+        }
+        if (isPreReg && (!Number.isFinite(parsedPreRegSlots) || parsedPreRegSlots < 0)) {
+            throw new https_1.HttpsError("invalid-argument", "Pre-reg slots must be at least 0.");
+        }
+        const preRegSlots = isPreReg ? Math.max(0, Math.trunc(parsedPreRegSlots)) : null;
+        const registrationStartAt = isPreReg ? toFirestoreDateOrNull(body.registrationStartAt) : null;
+        const registrationEndAt = isPreReg ? toFirestoreDateOrNull(body.registrationEndAt) : null;
+        const cancellationDeadlineAt = isPreReg ?
+            toFirestoreDateOrNull(body.cancellationDeadlineAt) :
+            null;
+        if (isPreReg &&
+            (!registrationStartAt || !registrationEndAt || !cancellationDeadlineAt)) {
+            throw new https_1.HttpsError("invalid-argument", "Set valid registration and cancellation date/time values.");
+        }
+        if (isPreReg &&
+            registrationStartAt &&
+            registrationEndAt &&
+            registrationStartAt.getTime() > registrationEndAt.getTime()) {
+            throw new https_1.HttpsError("invalid-argument", "Registration start must be earlier than the end.");
+        }
+        if (isPreReg &&
+            registrationEndAt &&
+            eventStartMs !== Number.MAX_SAFE_INTEGER &&
+            registrationEndAt.getTime() > eventStartMs) {
+            throw new https_1.HttpsError("invalid-argument", "Registration end must be on or before the event start time.");
+        }
+        if (isPreReg &&
+            cancellationDeadlineAt &&
+            registrationStartAt &&
+            cancellationDeadlineAt.getTime() < registrationStartAt.getTime()) {
+            throw new https_1.HttpsError("invalid-argument", "Cancellation deadline cannot be earlier than registration start.");
+        }
+        if (isPreReg &&
+            cancellationDeadlineAt &&
+            registrationEndAt &&
+            cancellationDeadlineAt.getTime() > registrationEndAt.getTime()) {
+            throw new https_1.HttpsError("invalid-argument", "Cancellation deadline must be on or before registration end.");
+        }
+        const selectedStudentIds = toUniqueIdentifierList(body.selectedStudentIds)
+            .filter((uid) => !uid.startsWith("manual-"));
+        const selectedSchoolIds = toUniqueIdentifierList(body.selectedSchoolIds)
+            .filter((schoolId) => schoolId !== "Unknown ID");
+        const requestedCourseValue = normalizeText(body.course);
+        const requestedYearLevelValue = normalizeText(body.yearLevel);
+        const requestedTargetStudent = normalizeText(body.targetStudent);
+        const requestedCourseTargetsRaw = Array.from(new Set(toTargetList(body.courses)
+            .map((value) => normalizeText(value))
+            .filter(Boolean)));
+        const requestedYearTargetsRaw = Array.from(new Set(toTargetList(body.yearLevels)
+            .map((value) => normalizeText(value))
+            .filter(Boolean)));
+        const requestedHasAllCourses = requestedCourseTargetsRaw.some((value) => normalizeLower(value) === "all courses") ||
+            normalizeLower(requestedCourseValue) === "all courses";
+        const requestedHasAllYears = requestedYearTargetsRaw.some((value) => normalizeLower(value) === "all years") ||
+            normalizeLower(requestedYearLevelValue) === "all years";
+        const normalizedCourseTargets = Array.from(new Set(requestedCourseTargetsRaw
+            .map((value) => normalizeCourseLabel(value))
+            .filter(Boolean)));
+        if (!requestedHasAllCourses && normalizedCourseTargets.length === 0) {
+            const fallbackCourse = normalizeCourseLabel(requestedCourseValue);
+            if (fallbackCourse) {
+                normalizedCourseTargets.push(fallbackCourse);
+            }
+        }
+        const normalizedYearTargets = Array.from(new Set(requestedYearTargetsRaw
+            .map((value) => normalizeYear(value))
+            .filter((value) => Boolean(value) &&
+            value !== "Unassigned" &&
+            normalizeLower(value) !== "all years")));
+        if (!requestedHasAllYears && normalizedYearTargets.length === 0) {
+            const fallbackYear = normalizeYear(requestedYearLevelValue);
+            if (fallbackYear &&
+                fallbackYear !== "Unassigned" &&
+                normalizeLower(fallbackYear) !== "all years") {
+                normalizedYearTargets.push(fallbackYear);
+            }
+        }
+        const scopedSelectedProfiles = new Map();
+        if (actorIsBod) {
+            if (selectedStudentIds.length > 250) {
+                throw new https_1.HttpsError("invalid-argument", "Too many selected students. Please reduce the audience size.");
+            }
+            if (selectedStudentIds.length > 0) {
+                const selectedProfileRefs = selectedStudentIds.map((uid) => db.doc(`profiles/${uid}`));
+                const selectedProfileSnaps = await db.getAll(...selectedProfileRefs);
+                for (const profileSnap of selectedProfileSnaps) {
+                    if (!profileSnap.exists) {
+                        throw new https_1.HttpsError("permission-denied", "Selected students must belong to your assigned course scope.");
+                    }
+                    const profileData = (_b = profileSnap.data()) !== null && _b !== void 0 ? _b : {};
+                    const profileCourseScope = normalizeCourseLabel(profileData.course);
+                    if (!isStudentAudienceRole(profileData.role) ||
+                        profileCourseScope !== actorCourseScope) {
+                        throw new https_1.HttpsError("permission-denied", "Selected students must belong to your assigned course scope.");
+                    }
+                    scopedSelectedProfiles.set(profileSnap.id, profileData);
+                }
+            }
+            const selectedScopedSchoolIds = new Set(Array.from(scopedSelectedProfiles.values())
+                .map((profileData) => normalizeText(profileData.schoolId))
+                .filter(Boolean));
+            for (const selectedSchoolId of selectedSchoolIds) {
+                if (selectedScopedSchoolIds.has(selectedSchoolId)) {
+                    continue;
+                }
+                const scopedSchoolSnapshot = await db
+                    .collection("profiles")
+                    .where("schoolId", "==", selectedSchoolId)
+                    .limit(20)
+                    .get();
+                const scopedSchoolMatch = scopedSchoolSnapshot.docs.some((profileDoc) => {
+                    var _a;
+                    const profileData = (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {};
+                    return isStudentAudienceRole(profileData.role) &&
+                        normalizeCourseLabel(profileData.course) === actorCourseScope;
+                });
+                if (!scopedSchoolMatch) {
+                    throw new https_1.HttpsError("permission-denied", "Selected students must belong to your assigned course scope.");
+                }
+            }
+        }
+        let ownerType = "ec";
+        let eventCourse = requestedHasAllCourses ?
+            "All Courses" :
+            requestedCourseValue || normalizedCourseTargets.join(", ") || "All Courses";
+        let eventCourseScope = normalizeCourseLabel(body.courseScope) || null;
+        let eventCourses = requestedHasAllCourses ? [] : [...normalizedCourseTargets];
+        let eventYearLevel = requestedHasAllYears ?
+            "All Years" :
+            requestedYearLevelValue || normalizedYearTargets.join(", ") || "All Years";
+        let eventYearLevels = requestedHasAllYears ? [] : [...normalizedYearTargets];
+        let eventTargetStudent = requestedTargetStudent;
+        let createdByCourseScope = actorIsAdmin ? null : actorCourseScope || null;
+        const createdByPosition = normalizeECPosition(actorProfile.ecPosition) || null;
+        if (actorIsBod) {
+            ownerType = "bod";
+            eventCourse = actorCourseScope;
+            eventCourseScope = actorCourseScope;
+            eventCourses = [actorCourseScope];
+            createdByCourseScope = actorCourseScope;
+            eventTargetStudent = selectedStudentIds.length > 0 ?
+                `Specific students selected (${selectedStudentIds.length})` :
+                "";
+        }
+        const eventDocRef = db.collection("events").doc();
+        const eventId = eventDocRef.id;
+        let linkedPaymentId = null;
+        if (withPayment) {
+            const amountValue = Number(body.paymentAmount);
+            if (!Number.isFinite(amountValue) || amountValue <= 0) {
+                throw new https_1.HttpsError("invalid-argument", "Amount is required for paid events.");
+            }
+            const explicitSelectedStudentIds = new Set(selectedStudentIds.map((uid) => normalizeLower(uid)));
+            const explicitSelectedSchoolIds = new Set(selectedSchoolIds.map((schoolId) => normalizeLower(schoolId)));
+            const hasExplicitSelectedAudience = explicitSelectedStudentIds.size > 0 || explicitSelectedSchoolIds.size > 0;
+            const targetCourseSet = new Set(eventCourses
+                .map((course) => normalizeLower(normalizeCourseLabel(course)))
+                .filter(Boolean));
+            const targetYearLevelSet = new Set(eventYearLevels
+                .map((yearLevel) => normalizeLower(normalizeYear(yearLevel)))
+                .filter((yearLevel) => Boolean(yearLevel) &&
+                yearLevel !== "all years" &&
+                yearLevel !== "unassigned"));
+            const audienceCandidates = new Map();
+            if (selectedStudentIds.length > 0) {
+                const selectedRefs = selectedStudentIds.map((uid) => db.doc(`profiles/${uid}`));
+                const selectedSnaps = await db.getAll(...selectedRefs);
+                selectedSnaps.forEach((profileSnap) => {
+                    var _a;
+                    if (!profileSnap.exists) {
+                        return;
+                    }
+                    audienceCandidates.set(profileSnap.id, (_a = profileSnap.data()) !== null && _a !== void 0 ? _a : {});
+                });
+            }
+            if (selectedSchoolIds.length > 0) {
+                for (const schoolId of selectedSchoolIds) {
+                    const profileSnapshot = await db
+                        .collection("profiles")
+                        .where("schoolId", "==", schoolId)
+                        .limit(25)
+                        .get();
+                    profileSnapshot.docs.forEach((profileDoc) => {
+                        var _a;
+                        audienceCandidates.set(profileDoc.id, (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {});
+                    });
+                }
+            }
+            if (audienceCandidates.size === 0) {
+                const profileSnapshot = await db
+                    .collection("profiles")
+                    .where("role", "in", [...STUDENT_AUDIENCE_LOOKUP_PROFILE_ROLES])
+                    .limit(5000)
+                    .get();
+                profileSnapshot.docs.forEach((profileDoc) => {
+                    var _a;
+                    audienceCandidates.set(profileDoc.id, (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {});
+                });
+            }
+            const paymentTargets = Array.from(audienceCandidates.entries())
+                .map(([uid, profileData]) => {
+                var _a;
+                const schoolId = normalizeText(profileData.schoolId) || uid;
+                const course = normalizeCourseLabel(profileData.course) ||
+                    normalizeText(profileData.course) ||
+                    "Unassigned";
+                const year = normalizeYear((_a = profileData.yearLevel) !== null && _a !== void 0 ? _a : profileData.year);
+                const studentName = resolveProfileDisplayName(profileData);
+                const status = normalizeLower(profileData.status);
+                return {
+                    uid,
+                    schoolId,
+                    studentName,
+                    course,
+                    year,
+                    status,
+                    role: normalizeText(profileData.role),
+                };
+            })
+                .filter((student) => isStudentAudienceRole(student.role))
+                .filter((student) => student.status !== "inactive")
+                .filter((student) => {
+                if (actorIsBod &&
+                    actorCourseScope &&
+                    normalizeCourseLabel(student.course) !== actorCourseScope) {
+                    return false;
+                }
+                if (hasExplicitSelectedAudience) {
+                    return explicitSelectedStudentIds.has(normalizeLower(student.uid)) ||
+                        explicitSelectedSchoolIds.has(normalizeLower(student.schoolId));
+                }
+                const matchesCourse = targetCourseSet.size === 0 ||
+                    targetCourseSet.has(normalizeLower(normalizeCourseLabel(student.course)));
+                const matchesYear = targetYearLevelSet.size === 0 ||
+                    targetYearLevelSet.has(normalizeLower(normalizeYear(student.year)));
+                return matchesCourse && matchesYear;
+            })
+                .sort((left, right) => {
+                const bySchoolId = left.schoolId.localeCompare(right.schoolId);
+                if (bySchoolId !== 0) {
+                    return bySchoolId;
+                }
+                return left.studentName.localeCompare(right.studentName);
+            });
+            if (paymentTargets.length === 0) {
+                throw new https_1.HttpsError("invalid-argument", "No active students match the selected audience for this paid event.");
+            }
+            const paymentDocRef = db.collection("payments").doc();
+            linkedPaymentId = paymentDocRef.id;
+            await paymentDocRef.set({
+                title: normalizeText(body.paymentTitle) || title,
+                ref: makePaymentRef(paymentDocRef.id),
+                amount: amountValue,
+                date: normalizeText(body.paymentDueDate),
+                yearLevel: eventYearLevel || "All Years",
+                course: eventCourse || "All Courses",
+                targetStudent: eventTargetStudent,
+                targetYearLevels: eventYearLevels,
+                targetCourses: eventCourses,
+                details: normalizeText(body.paymentDescription),
+                linkedEventId: eventId,
+                eventId,
+                linkedEventTitle: title,
+                createdByUid: actorUid,
+                createdByRole: actorIsAdmin ? "admin" : "ecmember",
+                createdByCourseScope,
+                courseScope: eventCourses.length === 1 ? eventCourses[0] : null,
+                source: "event",
+                status: "active",
+                totalStudents: paymentTargets.length,
+                paidCount: 0,
+                unpaidCount: paymentTargets.length,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+            }, { merge: true });
+            const writesPerBatch = 350;
+            for (let index = 0; index < paymentTargets.length; index += writesPerBatch) {
+                const batch = db.batch();
+                const chunk = paymentTargets.slice(index, index + writesPerBatch);
+                chunk.forEach((student) => {
+                    batch.set(db.doc(`payments/${paymentDocRef.id}/students/${student.uid}`), {
+                        uid: student.uid,
+                        schoolId: student.schoolId,
+                        name: student.studentName,
+                        studentName: student.studentName,
+                        year: student.year || "-",
+                        section: "-",
+                        course: student.course || "-",
+                        status: "Unpaid",
+                        createdAt: serverTimestamp(),
+                        updatedAt: serverTimestamp(),
+                    }, { merge: true });
+                });
+                await batch.commit();
+            }
+        }
+        const preRegCount = 0;
+        const waitlistCount = 0;
+        const preRegRemaining = isPreReg && typeof preRegSlots === "number" ?
+            Math.max(0, preRegSlots - preRegCount) :
+            0;
+        await eventDocRef.set({
+            title,
+            location,
+            date,
+            scheduledTime,
+            timeStart: scheduledTime,
+            timeEnd,
+            yearLevel: eventYearLevel || "All Years",
+            course: eventCourse || "All Courses",
+            yearLevels: eventYearLevels,
+            courses: eventCourses,
+            targetStudent: eventTargetStudent,
+            selectedStudentIds,
+            selectedSchoolIds,
+            details,
+            isPreReg,
+            withPayment,
+            paymentRequired: withPayment,
+            waitlistEnabled,
+            requiredPaymentId: withPayment && linkedPaymentId ? linkedPaymentId : "",
+            linkedPaymentId: withPayment && linkedPaymentId ? linkedPaymentId : null,
+            registrationStartAt,
+            registrationEndAt,
+            cancellationDeadlineAt,
+            preRegSlots,
+            preRegCount,
+            preRegRemaining,
+            waitlistCount,
+            ownerType,
+            courseScope: eventCourseScope,
+            createdBy: actorUid,
+            createdByPosition,
+            createdByCourseScope,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+            status: "upcoming",
+        });
+        await writeStructuredAuditLog({
+            actorUid,
+            action: "event_created_via_callable",
+            targetType: "event",
+            targetId: eventId,
+            metadata: {
+                ownerType,
+                courseScope: eventCourseScope,
+                withPayment,
+                linkedPaymentId: linkedPaymentId || null,
+            },
+        }).catch((error) => {
+            authLogger.warn("createCampusEvent audit log write failed", { error });
+        });
+        return {
+            eventId,
+            linkedPaymentId,
+        };
+    }
+    catch (error) {
+        if (error instanceof https_1.HttpsError) {
+            throw error;
+        }
+        throw new https_1.HttpsError("internal", error instanceof Error && error.message ?
+            error.message :
+            "Failed to create event.");
+    }
+});
+exports.updateCampusEvent = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    var _a, _b, _c, _d;
+    if (!((_a = request.auth) === null || _a === void 0 ? void 0 : _a.uid)) {
+        throw new https_1.HttpsError("unauthenticated", "You must be signed in to update an event.");
+    }
+    try {
+        const actorUid = normalizeText(request.auth.uid);
+        const actorProfile = await callerProfileData(request);
+        const actorRole = normalizeCampusRoleValue(actorProfile.role);
+        const actorIsAdmin = actorRole === "admin";
+        const actorIsEcMember = isECMemberRole(actorProfile.role);
+        const actorIsBod = actorIsEcMember && isBodProfileData(actorProfile);
+        const actorIsRegularEc = actorIsEcMember &&
+            !actorIsBod &&
+            resolveProfileEcScope(actorProfile) === "all";
+        if (!actorIsAdmin && !actorIsRegularEc && !actorIsBod) {
+            throw new https_1.HttpsError("permission-denied", "Only admin, regular EC, or B.O.D. users can update events.");
+        }
+        const body = asRecord(request.data);
+        const eventId = normalizeText(body.eventId);
+        const title = normalizeText(body.title);
+        const location = normalizeText(body.location);
+        const date = normalizeText(body.date);
+        const timeStart = normalizeText(body.timeStart) ||
+            normalizeText(body.scheduledTime);
+        const scheduledTime = normalizeText(body.scheduledTime) || timeStart;
+        const timeEnd = normalizeText(body.timeEnd);
+        const details = normalizeText(body.details);
+        if (!eventId) {
+            throw new https_1.HttpsError("invalid-argument", "eventId is required.");
+        }
+        if (!title) {
+            throw new https_1.HttpsError("invalid-argument", "Title is required.");
+        }
+        if (!location) {
+            throw new https_1.HttpsError("invalid-argument", "Location is required.");
+        }
+        if (!date) {
+            throw new https_1.HttpsError("invalid-argument", "Date is required.");
+        }
+        if (!timeStart) {
+            throw new https_1.HttpsError("invalid-argument", "timeStart is required.");
+        }
+        if (!timeEnd) {
+            throw new https_1.HttpsError("invalid-argument", "timeEnd is required.");
+        }
+        const eventStartMs = parseEventStartMs(date, scheduledTime);
+        const eventEndMs = parseEventStartMs(date, timeEnd);
+        if (eventStartMs !== Number.MAX_SAFE_INTEGER &&
+            eventEndMs !== Number.MAX_SAFE_INTEGER &&
+            eventEndMs <= eventStartMs) {
+            throw new https_1.HttpsError("invalid-argument", "End time must be later than start time.");
+        }
+        const eventRef = db.doc(`events/${eventId}`);
+        const eventSnapshot = await eventRef.get();
+        if (!eventSnapshot.exists) {
+            throw new https_1.HttpsError("not-found", "Event not found.");
+        }
+        const existingEventData = (_b = eventSnapshot.data()) !== null && _b !== void 0 ? _b : {};
+        const existingEventOwnerType = normalizeLower(existingEventData.ownerType) === "bod" ?
+            "bod" :
+            "ec";
+        const existingEventCourseScope = normalizeCourseLabel(existingEventData.courseScope) ||
+            normalizeCourseLabel(existingEventData.course);
+        const actorCourseScope = resolveProfileCourseScope(actorProfile);
+        if (actorIsBod) {
+            if (!actorCourseScope) {
+                throw new https_1.HttpsError("permission-denied", "B.O.D. profile is missing a valid course scope.");
+            }
+            if (existingEventOwnerType !== "bod") {
+                throw new https_1.HttpsError("permission-denied", "B.O.D. members can only update their own B.O.D.-created events.");
+            }
+            if (normalizeText(existingEventData.createdBy) !== actorUid) {
+                throw new https_1.HttpsError("permission-denied", "B.O.D. members can only update their own B.O.D.-created events.");
+            }
+            if (!existingEventCourseScope || existingEventCourseScope !== actorCourseScope) {
+                throw new https_1.HttpsError("permission-denied", "B.O.D. members can only update events from their assigned course.");
+            }
+        }
+        const isPreReg = body.isPreReg === true;
+        const waitlistEnabled = isPreReg ? body.waitlistEnabled === true : false;
+        const parsedPreRegSlots = Number(body.preRegSlots);
+        if (isPreReg && (!Number.isFinite(parsedPreRegSlots) || parsedPreRegSlots < 0)) {
+            throw new https_1.HttpsError("invalid-argument", "Pre-reg slots must be at least 0.");
+        }
+        const preRegSlots = isPreReg ? Math.max(0, Math.trunc(parsedPreRegSlots)) : null;
+        const registrationStartAt = isPreReg ? toFirestoreDateOrNull(body.registrationStartAt) : null;
+        const registrationEndAt = isPreReg ? toFirestoreDateOrNull(body.registrationEndAt) : null;
+        const cancellationDeadlineAt = isPreReg ?
+            toFirestoreDateOrNull(body.cancellationDeadlineAt) :
+            null;
+        if (isPreReg &&
+            (!registrationStartAt || !registrationEndAt || !cancellationDeadlineAt)) {
+            throw new https_1.HttpsError("invalid-argument", "Set valid registration and cancellation date/time values.");
+        }
+        if (isPreReg &&
+            registrationStartAt &&
+            registrationEndAt &&
+            registrationStartAt.getTime() > registrationEndAt.getTime()) {
+            throw new https_1.HttpsError("invalid-argument", "Registration start must be earlier than the end.");
+        }
+        if (isPreReg &&
+            registrationEndAt &&
+            eventStartMs !== Number.MAX_SAFE_INTEGER &&
+            registrationEndAt.getTime() > eventStartMs) {
+            throw new https_1.HttpsError("invalid-argument", "Registration end must be on or before the event start time.");
+        }
+        if (isPreReg &&
+            cancellationDeadlineAt &&
+            registrationStartAt &&
+            cancellationDeadlineAt.getTime() < registrationStartAt.getTime()) {
+            throw new https_1.HttpsError("invalid-argument", "Cancellation deadline cannot be earlier than registration start.");
+        }
+        if (isPreReg &&
+            cancellationDeadlineAt &&
+            registrationEndAt &&
+            cancellationDeadlineAt.getTime() > registrationEndAt.getTime()) {
+            throw new https_1.HttpsError("invalid-argument", "Cancellation deadline must be on or before registration end.");
+        }
+        const selectedStudentIds = toUniqueIdentifierList(body.selectedStudentIds)
+            .filter((uid) => !uid.startsWith("manual-"));
+        const selectedSchoolIdsInput = toUniqueIdentifierList(body.selectedSchoolIds)
+            .filter((schoolId) => schoolId !== "Unknown ID");
+        let selectedSchoolIds = [...selectedSchoolIdsInput];
+        const requestedCourseValue = normalizeText(body.course);
+        const requestedYearLevelValue = normalizeText(body.yearLevel);
+        const requestedTargetStudent = normalizeText(body.targetStudent);
+        const requestedCourseTargetsRaw = Array.from(new Set(toTargetList(body.courses)
+            .map((value) => normalizeText(value))
+            .filter(Boolean)));
+        const requestedYearTargetsRaw = Array.from(new Set(toTargetList(body.yearLevels)
+            .map((value) => normalizeText(value))
+            .filter(Boolean)));
+        const requestedHasAllCourses = requestedCourseTargetsRaw.some((value) => normalizeLower(value) === "all courses") ||
+            normalizeLower(requestedCourseValue) === "all courses";
+        const requestedHasAllYears = requestedYearTargetsRaw.some((value) => normalizeLower(value) === "all years") ||
+            normalizeLower(requestedYearLevelValue) === "all years";
+        const normalizedCourseTargets = Array.from(new Set(requestedCourseTargetsRaw
+            .map((value) => normalizeCourseLabel(value))
+            .filter(Boolean)));
+        if (!requestedHasAllCourses && normalizedCourseTargets.length === 0) {
+            const fallbackCourse = normalizeCourseLabel(requestedCourseValue);
+            if (fallbackCourse) {
+                normalizedCourseTargets.push(fallbackCourse);
+            }
+        }
+        const normalizedYearTargets = Array.from(new Set(requestedYearTargetsRaw
+            .map((value) => normalizeYear(value))
+            .filter((value) => Boolean(value) &&
+            value !== "Unassigned" &&
+            normalizeLower(value) !== "all years")));
+        if (!requestedHasAllYears && normalizedYearTargets.length === 0) {
+            const fallbackYear = normalizeYear(requestedYearLevelValue);
+            if (fallbackYear &&
+                fallbackYear !== "Unassigned" &&
+                normalizeLower(fallbackYear) !== "all years") {
+                normalizedYearTargets.push(fallbackYear);
+            }
+        }
+        let ownerType = normalizeLower(body.ownerType) === "bod" ? "bod" :
+            normalizeLower(body.ownerType) === "ec" ? "ec" :
+                existingEventOwnerType;
+        let eventCourse = requestedHasAllCourses ?
+            "All Courses" :
+            requestedCourseValue || normalizedCourseTargets.join(", ") || "All Courses";
+        let eventCourseScope = normalizeCourseLabel(body.courseScope) || null;
+        let eventCourses = requestedHasAllCourses ? [] : [...normalizedCourseTargets];
+        let eventYearLevel = requestedHasAllYears ?
+            "All Years" :
+            requestedYearLevelValue || normalizedYearTargets.join(", ") || "All Years";
+        let eventYearLevels = requestedHasAllYears ? [] : [...normalizedYearTargets];
+        let eventTargetStudent = requestedTargetStudent;
+        const selectedProfilesByUid = new Map();
+        if (actorIsBod) {
+            ownerType = "bod";
+            eventCourse = actorCourseScope;
+            eventCourseScope = actorCourseScope;
+            eventCourses = [actorCourseScope];
+            if (selectedStudentIds.length > 0) {
+                const selectedProfileRefs = selectedStudentIds.map((uid) => db.doc(`profiles/${uid}`));
+                const selectedProfileSnapshots = await db.getAll(...selectedProfileRefs);
+                for (const selectedProfileSnapshot of selectedProfileSnapshots) {
+                    if (!selectedProfileSnapshot.exists) {
+                        throw new https_1.HttpsError("permission-denied", "B.O.D. members can only target students from their assigned course.");
+                    }
+                    const selectedProfileData = (_c = selectedProfileSnapshot.data()) !== null && _c !== void 0 ? _c : {};
+                    if (!isStudentAudienceRole(selectedProfileData.role) ||
+                        normalizeCourseLabel(selectedProfileData.course) !== actorCourseScope) {
+                        throw new https_1.HttpsError("permission-denied", "B.O.D. members can only target students from their assigned course.");
+                    }
+                    selectedProfilesByUid.set(selectedProfileSnapshot.id, selectedProfileData);
+                }
+                selectedSchoolIds = Array.from(new Set(selectedStudentIds
+                    .map((uid) => { var _a; return normalizeText((_a = selectedProfilesByUid.get(uid)) === null || _a === void 0 ? void 0 : _a.schoolId); })
+                    .filter(Boolean)));
+                eventTargetStudent = `Specific students selected (${selectedStudentIds.length})`;
+            }
+            else {
+                selectedSchoolIds = [];
+                eventTargetStudent = "";
+            }
+        }
+        const parsedPreRegCount = Number(body.preRegCount);
+        const parsedWaitlistCount = Number(body.waitlistCount);
+        const preRegCount = isPreReg ?
+            (Number.isFinite(parsedPreRegCount) ?
+                Math.max(0, Math.trunc(parsedPreRegCount)) :
+                toPositiveNumber(existingEventData.preRegCount)) :
+            0;
+        const waitlistCount = isPreReg ?
+            (Number.isFinite(parsedWaitlistCount) ?
+                Math.max(0, Math.trunc(parsedWaitlistCount)) :
+                toPositiveNumber(existingEventData.waitlistCount)) :
+            0;
+        const preRegRemaining = isPreReg && typeof preRegSlots === "number" ?
+            Math.max(0, preRegSlots - preRegCount) :
+            0;
+        const withPayment = body.withPayment === true || body.paymentRequired === true;
+        const previousLinkedPaymentId = normalizeText(existingEventData.linkedPaymentId) ||
+            normalizeText(existingEventData.requiredPaymentId);
+        const requestedLinkedPaymentId = normalizeText(body.linkedPaymentId) ||
+            normalizeText(body.requiredPaymentId);
+        const paymentTitle = normalizeText(body.paymentTitle);
+        const paymentDueDate = normalizeText(body.paymentDueDate);
+        const paymentDescription = normalizeText(body.paymentDescription);
+        let linkedPaymentId = null;
+        if (withPayment) {
+            const amountValue = Number(body.paymentAmount);
+            if (!Number.isFinite(amountValue) || amountValue <= 0) {
+                throw new https_1.HttpsError("invalid-argument", "Amount is required for paid events.");
+            }
+            linkedPaymentId =
+                requestedLinkedPaymentId ||
+                    previousLinkedPaymentId ||
+                    db.collection("payments").doc().id;
+            const paymentRef = db.doc(`payments/${linkedPaymentId}`);
+            const paymentSnapshot = await paymentRef.get();
+            const existingPaymentData = (_d = paymentSnapshot.data()) !== null && _d !== void 0 ? _d : {};
+            const createdByUid = normalizeText(existingPaymentData.createdByUid) ||
+                normalizeText(existingEventData.createdBy) ||
+                actorUid;
+            const createdByRole = normalizeText(existingPaymentData.createdByRole) ||
+                (actorIsAdmin ? "admin" : "ecmember");
+            const createdByCourseScope = actorIsBod ?
+                actorCourseScope :
+                normalizeCourseLabel(existingPaymentData.createdByCourseScope) ||
+                    normalizeCourseLabel(existingEventData.createdByCourseScope) ||
+                    resolveProfileCourseScope(actorProfile) ||
+                    null;
+            await paymentRef.set(Object.assign({ title: paymentTitle || title, ref: normalizeText(existingPaymentData.ref) ||
+                    makePaymentRef(linkedPaymentId), amount: amountValue, date: paymentDueDate, yearLevel: eventYearLevel || "All Years", course: eventCourse || "All Courses", targetStudent: eventTargetStudent, targetYearLevels: eventYearLevels, targetCourses: eventCourses, details: paymentDescription, linkedEventId: eventId, eventId, linkedEventTitle: title, createdByUid,
+                createdByRole,
+                createdByCourseScope, courseScope: eventCourses.length === 1 ? eventCourses[0] : null, source: "event", status: "active", updatedAt: serverTimestamp() }, (paymentSnapshot.exists ? {} : { createdAt: serverTimestamp() })), { merge: true });
+            if (actorIsBod) {
+                const assignmentSnapshot = await paymentRef.collection("students").get();
+                const existingAssignments = new Map();
+                assignmentSnapshot.docs.forEach((assignmentDoc) => {
+                    var _a;
+                    const assignmentData = (_a = assignmentDoc.data()) !== null && _a !== void 0 ? _a : {};
+                    const status = normalizeLower(assignmentData.status) === "paid" ? "Paid" : "Unpaid";
+                    existingAssignments.set(assignmentDoc.id, { status });
+                });
+                const explicitStudentIds = new Set(selectedStudentIds.map((uid) => normalizeLower(uid)));
+                const explicitSchoolIds = new Set(selectedSchoolIds.map((schoolId) => normalizeLower(schoolId)));
+                const hasExplicitAudience = explicitStudentIds.size > 0 || explicitSchoolIds.size > 0;
+                const targetYearSet = new Set(eventYearLevels
+                    .map((value) => normalizeLower(normalizeYear(value)))
+                    .filter((value) => Boolean(value) &&
+                    value !== "all years" &&
+                    value !== "unassigned"));
+                const audienceCandidates = new Map();
+                if (selectedStudentIds.length > 0) {
+                    selectedStudentIds.forEach((uid) => {
+                        const selectedProfile = selectedProfilesByUid.get(uid);
+                        if (selectedProfile) {
+                            audienceCandidates.set(uid, selectedProfile);
+                        }
+                    });
+                }
+                if (selectedSchoolIds.length > 0) {
+                    for (const selectedSchoolId of selectedSchoolIds) {
+                        const schoolSnapshot = await db
+                            .collection("profiles")
+                            .where("schoolId", "==", selectedSchoolId)
+                            .limit(25)
+                            .get();
+                        schoolSnapshot.docs.forEach((schoolDoc) => {
+                            var _a;
+                            audienceCandidates.set(schoolDoc.id, (_a = schoolDoc.data()) !== null && _a !== void 0 ? _a : {});
+                        });
+                    }
+                }
+                if (audienceCandidates.size === 0) {
+                    const profileSnapshot = await db
+                        .collection("profiles")
+                        .where("role", "in", [...STUDENT_AUDIENCE_LOOKUP_PROFILE_ROLES])
+                        .limit(5000)
+                        .get();
+                    profileSnapshot.docs.forEach((profileDoc) => {
+                        var _a;
+                        audienceCandidates.set(profileDoc.id, (_a = profileDoc.data()) !== null && _a !== void 0 ? _a : {});
+                    });
+                }
+                const paymentTargets = Array.from(audienceCandidates.entries())
+                    .map(([uid, profileData]) => {
+                    var _a;
+                    const schoolId = normalizeText(profileData.schoolId) || uid;
+                    const course = normalizeCourseLabel(profileData.course) ||
+                        normalizeText(profileData.course) ||
+                        "Unassigned";
+                    const year = normalizeYear((_a = profileData.yearLevel) !== null && _a !== void 0 ? _a : profileData.year);
+                    const studentName = resolveProfileDisplayName(profileData);
+                    const status = normalizeLower(profileData.status);
+                    return {
+                        uid,
+                        schoolId,
+                        studentName,
+                        course,
+                        year,
+                        status,
+                        role: normalizeText(profileData.role),
+                    };
+                })
+                    .filter((student) => isStudentAudienceRole(student.role))
+                    .filter((student) => student.status !== "inactive")
+                    .filter((student) => normalizeCourseLabel(student.course) === actorCourseScope)
+                    .filter((student) => {
+                    if (hasExplicitAudience) {
+                        return explicitStudentIds.has(normalizeLower(student.uid)) ||
+                            explicitSchoolIds.has(normalizeLower(student.schoolId));
+                    }
+                    return targetYearSet.size === 0 ||
+                        targetYearSet.has(normalizeLower(normalizeYear(student.year)));
+                })
+                    .sort((left, right) => {
+                    const bySchoolId = left.schoolId.localeCompare(right.schoolId);
+                    if (bySchoolId !== 0) {
+                        return bySchoolId;
+                    }
+                    return left.studentName.localeCompare(right.studentName);
+                });
+                if (paymentTargets.length === 0) {
+                    throw new https_1.HttpsError("invalid-argument", "No active students match the selected audience for this paid event.");
+                }
+                const nextTargetIds = new Set(paymentTargets.map((student) => student.uid));
+                let paidCount = 0;
+                const upsertRows = paymentTargets.map((student) => {
+                    var _a, _b;
+                    const existingStatus = (_b = (_a = existingAssignments.get(student.uid)) === null || _a === void 0 ? void 0 : _a.status) !== null && _b !== void 0 ? _b : "Unpaid";
+                    if (existingStatus === "Paid") {
+                        paidCount += 1;
+                    }
+                    return {
+                        student,
+                        status: existingStatus,
+                    };
+                });
+                const writesPerBatch = 350;
+                for (let index = 0; index < upsertRows.length; index += writesPerBatch) {
+                    const batch = db.batch();
+                    const chunk = upsertRows.slice(index, index + writesPerBatch);
+                    chunk.forEach(({ student, status }) => {
+                        batch.set(db.doc(`payments/${linkedPaymentId}/students/${student.uid}`), Object.assign({ uid: student.uid, schoolId: student.schoolId, name: student.studentName, studentName: student.studentName, year: student.year || "-", section: "-", course: student.course || "-", status, updatedAt: serverTimestamp() }, (existingAssignments.has(student.uid) ? {} : { createdAt: serverTimestamp() })), { merge: true });
+                    });
+                    await batch.commit();
+                }
+                const removedAssignmentIds = Array.from(existingAssignments.keys()).filter((uid) => !nextTargetIds.has(uid));
+                for (let index = 0; index < removedAssignmentIds.length; index += writesPerBatch) {
+                    const batch = db.batch();
+                    removedAssignmentIds
+                        .slice(index, index + writesPerBatch)
+                        .forEach((uid) => {
+                        batch.delete(db.doc(`payments/${linkedPaymentId}/students/${uid}`));
+                    });
+                    await batch.commit();
+                }
+                await paymentRef.set({
+                    totalStudents: paymentTargets.length,
+                    paidCount,
+                    unpaidCount: Math.max(0, paymentTargets.length - paidCount),
+                    updatedAt: serverTimestamp(),
+                }, { merge: true });
+            }
+        }
+        else if (previousLinkedPaymentId) {
+            await db.doc(`payments/${previousLinkedPaymentId}`).set({
+                status: "archived",
+                linkedEventId: null,
+                eventId: null,
+                linkedEventTitle: "",
+                updatedAt: serverTimestamp(),
+            }, { merge: true });
+        }
+        const updatePayload = {
+            title,
+            location,
+            date,
+            scheduledTime,
+            timeStart,
+            timeEnd,
+            yearLevel: eventYearLevel || "All Years",
+            course: eventCourse || "All Courses",
+            yearLevels: eventYearLevels,
+            courses: eventCourses,
+            targetStudent: eventTargetStudent,
+            selectedStudentIds,
+            selectedSchoolIds,
+            details,
+            isPreReg,
+            withPayment,
+            paymentRequired: withPayment,
+            waitlistEnabled,
+            requiredPaymentId: withPayment && linkedPaymentId ? linkedPaymentId : "",
+            linkedPaymentId: withPayment && linkedPaymentId ? linkedPaymentId : null,
+            registrationStartAt,
+            registrationEndAt,
+            cancellationDeadlineAt,
+            preRegSlots,
+            preRegCount,
+            preRegRemaining,
+            waitlistCount,
+        };
+        if (actorIsBod) {
+            updatePayload.ownerType = "bod";
+            updatePayload.createdBy = normalizeText(existingEventData.createdBy) || actorUid;
+            updatePayload.createdByPosition = normalizeECPosition(actorProfile.ecPosition) || null;
+            updatePayload.course = actorCourseScope;
+            updatePayload.courseScope = actorCourseScope;
+            updatePayload.createdByCourseScope = actorCourseScope;
+            updatePayload.courses = [actorCourseScope];
+        }
+        else {
+            updatePayload.ownerType = ownerType;
+            updatePayload.createdBy =
+                normalizeText(existingEventData.createdBy) ||
+                    normalizeText(body.createdBy) ||
+                    actorUid;
+            updatePayload.createdByPosition =
+                normalizeText(body.createdByPosition) ||
+                    normalizeText(existingEventData.createdByPosition) ||
+                    null;
+            updatePayload.courseScope = eventCourseScope;
+            updatePayload.createdByCourseScope =
+                normalizeCourseLabel(body.createdByCourseScope) ||
+                    normalizeCourseLabel(existingEventData.createdByCourseScope) ||
+                    null;
+        }
+        await eventRef.update(Object.assign(Object.assign({}, updatePayload), { updatedAt: serverTimestamp() }));
+        await writeStructuredAuditLog({
+            actorUid,
+            action: "event_updated_via_callable",
+            targetType: "event",
+            targetId: eventId,
+            metadata: {
+                ownerType: updatePayload.ownerType,
+                courseScope: updatePayload.courseScope,
+                withPayment,
+                linkedPaymentId: withPayment ? linkedPaymentId : null,
+            },
+        }).catch((error) => {
+            authLogger.warn("updateCampusEvent audit log write failed", { error });
+        });
+        return {
+            eventId,
+            updated: true,
+            linkedPaymentId: withPayment ? linkedPaymentId : null,
+        };
+    }
+    catch (error) {
+        if (error instanceof https_1.HttpsError) {
+            throw error;
+        }
+        throw new https_1.HttpsError("internal", error instanceof Error && error.message ?
+            error.message :
+            "Failed to update event.");
     }
 });
 exports.resolveSchoolIdLogin = (0, https_1.onCall)({ region: REGION }, async (request) => {

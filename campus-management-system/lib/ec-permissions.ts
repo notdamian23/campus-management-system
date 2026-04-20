@@ -4,7 +4,7 @@ import {
   normalizeCourseCode,
   resolveCourseFromCode,
 } from "@/lib/courseOptions";
-import { isECMemberCampusRole } from "@/lib/campus-role";
+import { isEcRole } from "@/lib/campus-role";
 
 export const EC_POSITION_OPTIONS = [
   "President",
@@ -66,7 +66,7 @@ function normalizeMaybeCourse(value: unknown) {
 }
 
 export function isECMemberRole(role: unknown) {
-  return isECMemberCampusRole(role);
+  return isEcRole(role);
 }
 
 export function normalizeECScope(value: unknown): ECScope | "" {

@@ -8,6 +8,11 @@ function normalizeLower(value: unknown) {
   return trimValue(value).toLowerCase();
 }
 
+export function isEcRole(role?: unknown) {
+  const normalized = String(role ?? "").trim().toLowerCase();
+  return normalized === "ec" || normalized === "ecmember";
+}
+
 export function normalizeCampusRole(value: unknown): CampusCanonicalRole | "" {
   const normalized = normalizeLower(value);
   if (!normalized) {
@@ -18,11 +23,7 @@ export function normalizeCampusRole(value: unknown): CampusCanonicalRole | "" {
   if (compact === "admin") return "admin";
   if (compact === "teacher") return "teacher";
   if (compact === "student") return "student";
-  if (
-    compact === "ec" ||
-    compact === "ecmember" ||
-    compact === "ecmemberprofile"
-  ) {
+  if (isEcRole(compact) || compact === "ecmemberprofile") {
     return "ecmember";
   }
 
@@ -30,7 +31,7 @@ export function normalizeCampusRole(value: unknown): CampusCanonicalRole | "" {
 }
 
 export function isECMemberCampusRole(value: unknown) {
-  return normalizeCampusRole(value) === "ecmember";
+  return isEcRole(value) || normalizeCampusRole(value) === "ecmember";
 }
 
 export function resolveCampusRoleHome(value: unknown) {

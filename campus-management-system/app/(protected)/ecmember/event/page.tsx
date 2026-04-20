@@ -102,7 +102,7 @@ import {
 } from "@internationalized/date";
 import { createCampusLogger } from "@/lib/campus-logger";
 import type { CampusProfileDoc } from "@/lib/campus-auth";
-import { normalizeCampusRole } from "@/lib/campus-role";
+import { isEcRole } from "@/lib/campus-role";
 import {
   canEditEvent,
   canViewEvent,
@@ -111,11 +111,14 @@ import {
   isRegularEC,
 } from "@/lib/ec-permissions";
 import { normalizeCourse } from "@/lib/courseOptions";
-import { logPermissionDeniedAttemptForCurrentUser } from "@/lib/firebase-functions";
+import {
+  createCampusEvent,
+  updateCampusEvent,
+  logPermissionDeniedAttemptForCurrentUser,
+} from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
 import { formatStudentFullName } from "@/lib/student-name";
 
-type Role = "teacher" | "student" | "ec" | "ecmember" | "admin";
 type EventStatus = "upcoming" | "ongoing" | "completed";
 const ecEventsLogger = createCampusLogger("EC Events");
 
@@ -216,6 +219,44 @@ function describeError(error: unknown, fallback: string) {
   }
 
   return fallback;
+}
+
+function describeCallableError(error: unknown, fallback: string) {
+  if (typeof error === "object" && error !== null) {
+    const maybe = error as {message?: unknown; details?: unknown};
+    const primaryMessage =
+      typeof maybe.message === "string" ? maybe.message.trim() : "";
+
+    let detailsMessage = "";
+    if (typeof maybe.details === "string" && maybe.details.trim()) {
+      detailsMessage = maybe.details.trim();
+    } else if (typeof maybe.details === "object" && maybe.details !== null) {
+      const detailsObj = maybe.details as {
+        message?: unknown;
+        error?: unknown;
+      };
+      if (typeof detailsObj.message === "string" && detailsObj.message.trim()) {
+        detailsMessage = detailsObj.message.trim();
+      } else if (
+        typeof detailsObj.error === "string" &&
+        detailsObj.error.trim()
+      ) {
+        detailsMessage = detailsObj.error.trim();
+      }
+    }
+
+    if (
+      detailsMessage &&
+      (
+        !primaryMessage ||
+        primaryMessage.toLowerCase().includes("missing or insufficient permissions")
+      )
+    ) {
+      return detailsMessage;
+    }
+  }
+
+  return describeError(error, fallback);
 }
 
 async function logEventPermissionDeniedAttempt(
@@ -1916,7 +1957,6 @@ export default function EventDashboard() {
         const data = snap.exists()
           ? (snap.data() as CampusProfileDoc)
           : null;
-        const role = normalizeCampusRole(data?.role) as Role | "";
         setViewerProfile(
           data ?
             {
@@ -1925,7 +1965,7 @@ export default function EventDashboard() {
             } :
             { uid: user.uid },
         );
-        setIsECUser(role === "ecmember");
+        setIsECUser(isEcRole(data?.role));
       } catch {
         setIsECUser(false);
         setViewerProfile({ uid: user.uid });
@@ -4524,47 +4564,55 @@ export default function EventDashboard() {
   };
 
   const handleSaveEvent = async () => {
+    console.log("[EVENT SAVE CLICKED]");
     setSaveError("");
     setSaveMsg("");
 
-    if (roleLoading) return setSaveError("Checking your role, please wait...");
+    const blockSave = (reason: string) => {
+      console.log("[EVENT SAVE BLOCKED]", reason);
+      setSaveError(reason);
+    };
+
+    const authUid = String(auth.currentUser?.uid ?? currentUser?.uid ?? "").trim();
+
+    if (roleLoading) return blockSave("Checking your role, please wait...");
     if (!canCreateEvents) {
-      return setSaveError("Only EC members can save events.");
+      return blockSave("Only EC members can save events.");
     }
-    if (!currentUser?.uid) {
-      return setSaveError("You must be signed in to save events.");
+    if (!authUid) {
+      return blockSave("You must be signed in to save events.");
     }
 
     const viewerCourseScopeValue =
       viewerIsBod ? normalizeCourse(viewerCourseScope ?? "") : "";
 
     if (viewerIsBod && !viewerCourseScopeValue) {
-      return setSaveError("Your B.O.D. profile is missing a course scope.");
+      return blockSave("Your B.O.D. profile is missing a course scope.");
     }
-    if (!title.trim()) return setSaveError("Title is required.");
-    if (!date) return setSaveError("Date is required.");
+    if (!title.trim()) return blockSave("Title is required.");
+    if (!date) return blockSave("Date is required.");
     if (toMinutesFrom24h(eventEnd24) <= toMinutesFrom24h(eventScheduled24)) {
-      return setSaveError("End time must be later than start time.");
+      return blockSave("End time must be later than start time.");
     }
     if (isPreReg && (Number.isNaN(preRegSlots) || preRegSlots < 0)) {
-      return setSaveError("Pre-reg slots must be at least 0.");
+      return blockSave("Pre-reg slots must be at least 0.");
     }
     if (
       withPayment &&
       (!Number.isFinite(Number(paymentAmount)) || Number(paymentAmount) <= 0)
     ) {
       const message = "Amount is required for paid events.";
-      setSaveError(message);
       addToast({
         title: "Missing payment amount",
         description: message,
         color: "danger",
         timeout: 5000,
       });
+      blockSave(message);
       return;
     }
     if (!isPreReg && !hasEventRegistrantSelection && !editingEventId) {
-      return setSaveError(
+      return blockSave(
         "Choose at least one registrant filter or student before creating an event.",
       );
     }
@@ -4573,20 +4621,24 @@ export default function EventDashboard() {
       ? (events.find((ev) => ev.id === editingEventId) ?? null)
       : null;
     if (editingEventId && !eventBeingEdited) {
-      return setSaveError("The event you are editing no longer exists.");
+      return blockSave("The event you are editing no longer exists.");
     }
     if (eventBeingEdited && !canEditEventRecord(eventBeingEdited)) {
-      return setSaveError(
+      return blockSave(
         viewerIsBod ?
           "B.O.D. members can only edit their own upcoming course activities." :
           "You do not have permission to edit this event.",
       );
     }
+    const isUpdateMode = Boolean(eventBeingEdited && editingEventId);
+    if (isUpdateMode && !location.trim()) {
+      return blockSave("Location is required.");
+    }
     if (eventBeingEdited && computeStatus(eventBeingEdited) !== "upcoming") {
-      return setSaveError("Only upcoming events can be edited.");
+      return blockSave("Only upcoming events can be edited.");
     }
     if (viewerIsBod && isAllCoursesExplicit) {
-      return setSaveError(BOD_COURSE_SCOPE_ERROR);
+      return blockSave(BOD_COURSE_SCOPE_ERROR);
     }
     if (
       viewerIsBod &&
@@ -4595,10 +4647,10 @@ export default function EventDashboard() {
         (courseName) => normalizeCourse(courseName) !== viewerCourseScopeValue,
       )
     ) {
-      return setSaveError(BOD_COURSE_SCOPE_ERROR);
+      return blockSave(BOD_COURSE_SCOPE_ERROR);
     }
     if (bodSelectedEventStudentsOutOfScope.length > 0) {
-      setSaveError(BOD_SELECTED_STUDENT_SCOPE_ERROR);
+      blockSave(BOD_SELECTED_STUDENT_SCOPE_ERROR);
       addToast({
         title: "Course restriction",
         description: BOD_SELECTED_STUDENT_SCOPE_ERROR,
@@ -4608,7 +4660,7 @@ export default function EventDashboard() {
       return;
     }
     if (viewerIsBod && selectedEventStudents.length > BOD_SELECTED_STUDENT_LIMIT) {
-      return setSaveError(BOD_SELECTED_STUDENT_LIMIT_ERROR);
+      return blockSave(BOD_SELECTED_STUDENT_LIMIT_ERROR);
     }
 
     try {
@@ -4629,7 +4681,7 @@ export default function EventDashboard() {
         isPreReg &&
         (!registrationStartAt || !registrationEndAt || !cancellationDeadlineAt)
       ) {
-        return setSaveError(
+        return blockSave(
           "Set valid registration and cancellation date/time values.",
         );
       }
@@ -4639,7 +4691,7 @@ export default function EventDashboard() {
         registrationEndAt &&
         registrationStartAt > registrationEndAt
       ) {
-        return setSaveError("Registration start must be earlier than the end.");
+        return blockSave("Registration start must be earlier than the end.");
       }
       if (
         isPreReg &&
@@ -4647,7 +4699,7 @@ export default function EventDashboard() {
         registrationEndAt &&
         registrationEndAt > eventStartAt
       ) {
-        return setSaveError(
+        return blockSave(
           "Registration end must be on or before the event start time.",
         );
       }
@@ -4657,7 +4709,7 @@ export default function EventDashboard() {
         registrationStartAt &&
         cancellationDeadlineAt < registrationStartAt
       ) {
-        return setSaveError(
+        return blockSave(
           "Cancellation deadline cannot be earlier than registration start.",
         );
       }
@@ -4667,7 +4719,7 @@ export default function EventDashboard() {
         registrationEndAt &&
         cancellationDeadlineAt > registrationEndAt
       ) {
-        return setSaveError(
+        return blockSave(
           "Cancellation deadline must be on or before registration end.",
         );
       }
@@ -4756,14 +4808,18 @@ export default function EventDashboard() {
         isPreReg && typeof slots === "number"
           ? Math.max(0, slots - preRegCount)
           : 0;
-      const eventDocRef = editingEventId ?
+      const eventDocRef = isUpdateMode && editingEventId ?
         doc(db, "events", editingEventId) :
         doc(collection(db, "events"));
+      const editingEvent = eventBeingEdited;
+      console.log("[EVENT WRITE MODE]", editingEvent ? "update" : "create");
+      console.log("[EVENT DOC TARGET]", eventDocRef?.path || "addDoc new doc");
+
       const eventDocId = eventDocRef.id;
       let linkedPaymentId = withPayment ? requiredPaymentId.trim() : "";
       const previousLinkedPaymentId = getEventLinkedPaymentId(eventBeingEdited);
 
-      if (withPayment) {
+      if (withPayment && isUpdateMode && !viewerIsBod) {
         let allStudents = studentOptions;
         if (allStudents.length === 0) {
           allStudents = await loadStudentsForNotifications();
@@ -4812,7 +4868,7 @@ export default function EventDashboard() {
           color: "success",
           timeout: 4500,
         });
-      } else if (previousLinkedPaymentId) {
+      } else if (isUpdateMode && !viewerIsBod && previousLinkedPaymentId) {
         await setDoc(
           doc(db, "payments", previousLinkedPaymentId),
           {
@@ -4860,8 +4916,8 @@ export default function EventDashboard() {
           viewerIsBod ? viewerCourseScopeValue : (eventBeingEdited?.courseScope ?? null),
         createdBy:
           viewerIsBod ?
-            currentUser.uid :
-            (eventBeingEdited?.createdBy ?? currentUser.uid),
+            authUid :
+            (eventBeingEdited?.createdBy ?? authUid),
         createdByPosition:
           viewerIsBod ?
             String(viewerProfileWithUid?.ecPosition ?? "").trim() || null :
@@ -4877,7 +4933,7 @@ export default function EventDashboard() {
           {
             ...savePayload,
             ownerType: "bod" as const,
-            createdBy: currentUser.uid,
+            createdBy: authUid,
             course: viewerCourseScopeValue,
             courseScope: viewerCourseScopeValue,
             createdByCourseScope: viewerCourseScopeValue,
@@ -4888,24 +4944,80 @@ export default function EventDashboard() {
           } :
           savePayload;
 
+      const finalEventPayload = {
+        ...eventPayload,
+        createdBy: authUid,
+      };
+
       if (process.env.NODE_ENV !== "production" && viewerIsBod) {
-        console.log("[BOD EVENT CREATE PAYLOAD]", eventPayload);
+        console.log("[BOD EVENT CREATE PAYLOAD]", finalEventPayload);
       }
 
-      if (editingEventId) {
-        await setDoc(eventDocRef, {
-          ...eventPayload,
-          updatedAt: serverTimestamp(),
-        }, {merge: true});
-        setSaveMsg(withPayment ? "Event and payment updated!" : "Event updated!");
-      } else {
-        await setDoc(eventDocRef, {
-          ...eventPayload,
-          createdBy: currentUser.uid,
-          createdAt: serverTimestamp(),
-          status: "upcoming",
+      if (isUpdateMode) {
+        console.log(
+          "[FINAL EVENT UPDATE PAYLOAD]",
+          JSON.stringify(finalEventPayload, null, 2),
+        );
+        const updateResult = await updateCampusEvent({
+          eventId: eventDocId,
+          ...finalEventPayload,
+          registrationStartAt:
+            registrationStartAt ? registrationStartAt.toISOString() : null,
+          registrationEndAt:
+            registrationEndAt ? registrationEndAt.toISOString() : null,
+          cancellationDeadlineAt:
+            cancellationDeadlineAt ? cancellationDeadlineAt.toISOString() : null,
+          ...(withPayment ? {
+            paymentTitle: paymentTitle.trim(),
+            paymentAmount: Number(paymentAmount),
+            paymentDueDate: paymentDueDate.trim(),
+            paymentDescription: paymentDescription.trim(),
+            requiredPaymentId: linkedPaymentId,
+            linkedPaymentId: linkedPaymentId || null,
+          } : {
+            requiredPaymentId: "",
+            linkedPaymentId: null,
+          }),
         });
-        setSaveMsg(withPayment ? "Event and payment saved!" : "Event saved!");
+
+        setRequiredPaymentId(
+          withPayment ?
+            (updateResult.linkedPaymentId ?? linkedPaymentId ?? "") :
+            "",
+        );
+        setSaveMsg("Event updated successfully.");
+      } else {
+        console.log(
+          "[FINAL EVENT CREATE PAYLOAD]",
+          JSON.stringify(finalEventPayload, null, 2),
+        );
+        const createResult = await createCampusEvent({
+          ...finalEventPayload,
+          registrationStartAt:
+            registrationStartAt ? registrationStartAt.toISOString() : null,
+          registrationEndAt:
+            registrationEndAt ? registrationEndAt.toISOString() : null,
+          cancellationDeadlineAt:
+            cancellationDeadlineAt ? cancellationDeadlineAt.toISOString() : null,
+          ...(withPayment ? {
+            paymentTitle: paymentTitle.trim(),
+            paymentAmount: Number(paymentAmount),
+            paymentDueDate: paymentDueDate.trim(),
+            paymentDescription: paymentDescription.trim(),
+          } : {}),
+        });
+
+        setRequiredPaymentId(createResult.linkedPaymentId ?? "");
+        setSaveMsg("Event created successfully.");
+        addToast({
+          title: "Event created successfully.",
+          description:
+            withPayment ?
+              "The event and linked payment record were created." :
+              "The event was created.",
+          color: "success",
+          timeout: 4500,
+        });
       }
 
       setEditingEventId(null);
@@ -4913,15 +5025,15 @@ export default function EventDashboard() {
       setShowAddEventForm(false);
     } catch (err: any) {
       await logEventPermissionDeniedAttempt(
-        editingEventId ? "edit_event" : "create_event",
+        isUpdateMode ? "edit_event" : "create_event",
         editingEventId || title.trim() || "new-event",
         err,
       );
       setSaveError(
-        err?.message ||
-          (editingEventId
-            ? "Failed to update event."
-            : "Failed to save event."),
+        describeCallableError(
+          err,
+          isUpdateMode ? "Failed to update event." : "Failed to save event.",
+        ),
       );
     } finally {
       setSaving(false);
@@ -6073,7 +6185,7 @@ export default function EventDashboard() {
 
           {!roleLoading && !isECUser && (
             <p className="text-xs text-campus-text-secondary">
-              Your Firestore role is not <b>ec</b> in{" "}
+              Your Firestore role must be <b>ecmember</b> or legacy <b>ec</b> in{" "}
               <code>profiles/{`{uid}`}</code>.
             </p>
           )}

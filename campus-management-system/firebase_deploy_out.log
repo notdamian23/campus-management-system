@@ -1,0 +1,24 @@
+
+[1m[37m===[39m Deploying to 'campus-27dd9'...[22m
+
+[36m[1mi [22m[39m deploying [1mfirestore[22m
+[36m[1mi  firestore:[22m[39m ensuring required API [1mfirestore.googleapis.com[22m is enabled...
+[36m[1mi  firestore:[22m[39m ensuring required API [1mfirestore.googleapis.com[22m is enabled...
+[36m[1mi [22m[39m [1m[36mfirestore:[39m[22m reading indexes from [1mfirestore.indexes.json[22m...
+[36m[1mi  cloud.firestore:[22m[39m checking [1mfirestore.rules[22m for compilation errors...
+[33m[1m! [22m[39m [W] 65:36 - Ternary operator result if condition is true has a different type than if condition is false.
+[33m[1m! [22m[39m [W] 74:29 - Ternary operator result if condition is true has a different type than if condition is false.
+[33m[1m! [22m[39m [W] 220:27 - Invalid variable name: request.
+[33m[1m! [22m[39m [W] 247:11 - Invalid function name: exists.
+[33m[1m! [22m[39m [W] 248:33 - Invalid function name: get.
+[33m[1m! [22m[39m [W] 249:11 - Invalid function name: get.
+[33m[1m! [22m[39m [W] 254:15 - Invalid function name: get.
+[33m[1m! [22m[39m [W] 285:14 - Unused function: bodEventAudienceIsScoped.
+[33m[1m! [22m[39m [W] 308:33 - Unused variable: data.
+[32m[1m+  cloud.firestore:[22m[39m rules file [1mfirestore.rules[22m compiled successfully
+[36m[1mi  firestore:[22m[39m latest version of [1mfirestore.rules[22m already up to date, skipping upload...
+[32m[1m+  firestore:[22m[39m released rules [1mfirestore.rules[22m to [1mcloud.firestore[22m
+
+[32m[1m+ [22m[39m [1m[4mDeploy complete![24m[22m
+
+[1mProject Console:[22m https://console.firebase.google.com/project/campus-27dd9/overview

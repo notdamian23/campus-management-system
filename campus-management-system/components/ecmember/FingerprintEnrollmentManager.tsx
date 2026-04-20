@@ -182,11 +182,11 @@ function toEnrollmentError(error: unknown, fallback: string) {
       code.includes("permission-denied") ||
       message.toLowerCase().includes("permission-denied")
     ) {
-      return "Fingerprint enrollment access is blocked. Deploy the updated portable-device functions, or verify that this account is EC/Admin.";
+      return "Fingerprint enrollment access is blocked. Verify that this account has EC permissions and the correct course scope.";
     }
 
     if (code.includes("not-found")) {
-      return "Fingerprint enrollment functions are not available yet. Deploy the updated portable-device functions first.";
+      return "Fingerprint enrollment functions are not available yet. Deploy the updated callable functions first.";
     }
 
     if (message) {
@@ -399,7 +399,7 @@ export function FingerprintEnrollmentManager({
       const fn = httpsCallable<
         { limit?: number },
         { sessions?: EnrollmentSessionWire[] }
-      >(functions, "ecListFingerprintEnrollmentSessions");
+      >(functions, "listFingerprintEnrollmentSessions");
       const result = await fn({ limit: 24 });
       const nextRows = (result.data?.sessions ?? [])
         .map((row) => mapSessionRow(row))
@@ -440,7 +440,7 @@ export function FingerprintEnrollmentManager({
             session?: EnrollmentSessionWire | null;
             students?: EnrollmentSessionStudentWire[];
           }
-        >(functions, "ecGetFingerprintEnrollmentSessionDetail");
+        >(functions, "getFingerprintEnrollmentSessionDetail");
         const result = await fn({ sessionId });
 
         if (result.data?.session?.sessionId) {
@@ -571,7 +571,7 @@ export function FingerprintEnrollmentManager({
       const fn = httpsCallable<
         { studentIds: string[] },
         { session?: EnrollmentSessionWire | null }
-      >(functions, "ecCreateFingerprintEnrollmentSession");
+      >(functions, "createFingerprintEnrollmentSession");
       const result = await fn({
         studentIds: selectedStudents.map((student) => student.uid),
       });
@@ -625,7 +625,7 @@ export function FingerprintEnrollmentManager({
       const fn = httpsCallable<
         { sessionId: string },
         { session?: EnrollmentSessionWire | null }
-      >(functions, "ecCloseFingerprintEnrollmentSession");
+      >(functions, "closeFingerprintEnrollmentSession");
       await fn({ sessionId: activeSession.id });
       setNotice({
         type: "ok",

@@ -5,13 +5,11 @@ import { FiChevronDown } from "react-icons/fi";
 import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
-  deleteDoc,
   doc,
+  getDoc,
   onSnapshot,
   orderBy,
   query,
-  serverTimestamp,
-  setDoc,
 } from "firebase/firestore";
 import {
   deleteObject,
@@ -57,6 +55,12 @@ import {
   useIsBelowBreakpoint,
 } from "@/components/ecmember";
 import { createCampusLogger } from "@/lib/campus-logger";
+import type { CampusProfileDoc } from "@/lib/campus-auth";
+import { getCourseScope, isBOD } from "@/lib/ec-permissions";
+import {
+  createCampusDocumentMetadata,
+  deleteCampusDocument,
+} from "@/lib/firebase-functions";
 import { auth, db, storage } from "@/lib/firebase";
 import { campusToast } from "@/lib/toast";
 
@@ -97,6 +101,11 @@ type FirestoreDocumentRecord = {
   sizeBytes?: number;
   downloadURL?: string;
   storagePath?: string;
+  ownerType?: "ec" | "bod";
+  courseScope?: string | null;
+  createdByCourseScope?: string | null;
+  createdBy?: string;
+  uploadedByUid?: string;
   createdAt?: FirestoreTimestampLike | string | number | null;
 };
 
@@ -110,6 +119,15 @@ type DocumentItem = {
   createdAtMs: number;
   downloadUrl: string;
   storagePath: string;
+  ownerType: "ec" | "bod";
+  courseScope: string | null;
+  createdByCourseScope: string | null;
+  createdBy: string;
+  uploadedByUid: string;
+};
+
+type ViewerProfile = CampusProfileDoc & {
+  uid: string;
 };
 
 type SortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
@@ -161,6 +179,13 @@ const inferDocType = (filename: string): DocType | null => {
   if (WORD_EXTENSIONS.has(ext)) return "Word Files";
   if (EXCEL_EXTENSIONS.has(ext)) return "Spreadsheets";
   return null;
+};
+
+const courseScopeToStorageSlug = (courseScope: string) => {
+  return courseScope
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 };
 
 const normalizeDocType = (
@@ -327,6 +352,8 @@ export default function DocumentsPage() {
   const [documentsError, setDocumentsError] = useState("");
   const [authReady, setAuthReady] = useState(false);
   const [activeUid, setActiveUid] = useState<string | null>(null);
+  const [viewerProfile, setViewerProfile] = useState<ViewerProfile | null>(null);
+  const [viewerProfileReady, setViewerProfileReady] = useState(false);
 
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [documentDrawerOpen, setDocumentDrawerOpen] = useState(false);
@@ -351,16 +378,59 @@ export default function DocumentsPage() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const viewerIsBod = useMemo(() => isBOD(viewerProfile), [viewerProfile]);
+  const viewerCourseScope = useMemo(
+    () => getCourseScope(viewerProfile),
+    [viewerProfile],
+  );
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (user) => {
-      setActiveUid(user?.uid ?? null);
-      setAuthReady(true);
+    let active = true;
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!active) return;
+
+      if (!user) {
+        setActiveUid(null);
+        setViewerProfile(null);
+        setAuthReady(true);
+        setViewerProfileReady(true);
+        return;
+      }
+
+      setActiveUid(user.uid);
+
+      try {
+        const profileSnapshot = await getDoc(doc(db, "profiles", user.uid));
+        if (!active) return;
+
+        if (!profileSnapshot.exists()) {
+          setViewerProfile({ uid: user.uid });
+        } else {
+          setViewerProfile({
+            uid: user.uid,
+            ...(profileSnapshot.data() as CampusProfileDoc),
+          });
+        }
+      } catch {
+        if (active) {
+          setViewerProfile({ uid: user.uid });
+        }
+      } finally {
+        if (active) {
+          setAuthReady(true);
+          setViewerProfileReady(true);
+        }
+      }
     });
-    return () => unsub();
+
+    return () => {
+      active = false;
+      unsub();
+    };
   }, []);
 
   useEffect(() => {
-    if (!authReady) return;
+    if (!authReady || !viewerProfileReady) return;
 
     if (!activeUid) {
       setDocuments([]);
@@ -393,6 +463,14 @@ export default function DocumentsPage() {
             createdAtMs,
             downloadUrl: String(data.downloadURL ?? ""),
             storagePath: String(data.storagePath ?? ""),
+            ownerType: data.ownerType === "bod" ? "bod" : "ec",
+            courseScope: typeof data.courseScope === "string" ? data.courseScope : null,
+            createdByCourseScope:
+              typeof data.createdByCourseScope === "string"
+                ? data.createdByCourseScope
+                : null,
+            createdBy: String(data.createdBy ?? ""),
+            uploadedByUid: String(data.uploadedByUid ?? ""),
           };
         });
         setDocuments(list);
@@ -412,29 +490,48 @@ export default function DocumentsPage() {
     );
 
     return () => unsub();
-  }, [activeUid, authReady]);
+  }, [activeUid, authReady, viewerProfileReady]);
+
+  const scopedDocuments = useMemo(() => {
+    if (!viewerIsBod) {
+      return documents;
+    }
+
+    if (!viewerCourseScope) {
+      return [];
+    }
+
+    return documents.filter((docItem) => {
+      if (docItem.ownerType !== "bod") {
+        return true;
+      }
+
+      const effectiveScope = docItem.courseScope || docItem.createdByCourseScope;
+      return effectiveScope === viewerCourseScope;
+    });
+  }, [documents, viewerCourseScope, viewerIsBod]);
 
   useEffect(() => {
-    if (documents.length === 0) {
+    if (scopedDocuments.length === 0) {
       setSelectedDocId(null);
       return;
     }
 
     if (!selectedDocId) {
-      setSelectedDocId(documents[0].id);
+      setSelectedDocId(scopedDocuments[0].id);
       return;
     }
 
-    const stillExists = documents.some(
+    const stillExists = scopedDocuments.some(
       (docItem) => docItem.id === selectedDocId,
     );
     if (!stillExists) {
-      setSelectedDocId(documents[0].id);
+      setSelectedDocId(scopedDocuments[0].id);
     }
-  }, [documents, selectedDocId]);
+  }, [scopedDocuments, selectedDocId]);
 
   const filteredDocuments = useMemo(() => {
-    return documents.filter((docItem) => {
+    return scopedDocuments.filter((docItem) => {
       const matchesSearch = docItem.name
         .toLowerCase()
         .includes(search.trim().toLowerCase());
@@ -445,7 +542,7 @@ export default function DocumentsPage() {
         docItem.category === categoryFilter;
       return matchesSearch && matchesType && matchesCategory;
     });
-  }, [documents, search, typeFilter, categoryFilter]);
+  }, [scopedDocuments, search, typeFilter, categoryFilter]);
 
   const sortedFilteredDocuments = useMemo(() => {
     const list = [...filteredDocuments];
@@ -473,23 +570,23 @@ export default function DocumentsPage() {
   }, [documentSortMode]);
 
   const totalStorageBytes = useMemo(() => {
-    return documents.reduce((sum, docItem) => sum + docItem.sizeBytes, 0);
-  }, [documents]);
+    return scopedDocuments.reduce((sum, docItem) => sum + docItem.sizeBytes, 0);
+  }, [scopedDocuments]);
 
   const totalStorageMB = totalStorageBytes / ONE_MB_IN_BYTES;
 
   const recentUploads = useMemo(() => {
     const now = Date.now();
     const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
-    return documents.filter(
+    return scopedDocuments.filter(
       (docItem) =>
         docItem.createdAtMs >= sevenDaysAgo && docItem.createdAtMs <= now,
     ).length;
-  }, [documents]);
+  }, [scopedDocuments]);
 
   const selectedDocument = useMemo(() => {
-    return documents.find((docItem) => docItem.id === selectedDocId) ?? null;
-  }, [documents, selectedDocId]);
+    return scopedDocuments.find((docItem) => docItem.id === selectedDocId) ?? null;
+  }, [scopedDocuments, selectedDocId]);
 
   useECPageErrorToast(documentsError || null, "documents");
 
@@ -506,7 +603,7 @@ export default function DocumentsPage() {
     () => [
       {
         label: "Total Documents",
-        value: documents.length,
+        value: scopedDocuments.length,
         description: "All EC files in the shared library",
         tone: "blue",
         icon: FileStack,
@@ -526,7 +623,7 @@ export default function DocumentsPage() {
         icon: HardDriveUpload,
       },
     ],
-    [documents.length, recentUploads, totalStorageMB],
+    [recentUploads, scopedDocuments.length, totalStorageMB],
   );
 
   const handleUploadClick = () => {
@@ -576,6 +673,17 @@ export default function DocumentsPage() {
       return;
     }
 
+    if (viewerIsBod && !viewerCourseScope) {
+      setUploadError("B.O.D. course scope is missing. Please contact an administrator.");
+      addToast({
+        title: "Missing course scope",
+        description: "B.O.D. uploads require an assigned course scope.",
+        color: "danger",
+        timeout: 6000,
+      });
+      return;
+    }
+
     setUploading(true);
     setUploadError("");
 
@@ -591,6 +699,9 @@ export default function DocumentsPage() {
       const rejectedMessages: string[] = [];
       let nextTotalBytes = totalStorageBytes;
       let uploadedCount = 0;
+      const bodStoragePrefix = viewerIsBod && viewerCourseScope
+        ? `ec-documents/course/${courseScopeToStorageSlug(viewerCourseScope)}`
+        : "";
 
       for (const file of pendingFiles) {
         const ext = getFileExtension(file.name);
@@ -621,7 +732,9 @@ export default function DocumentsPage() {
         }
 
         const docRef = doc(collection(db, "ecDocuments"));
-        const storagePath = `ec-documents/shared/${docRef.id}/${file.name}`;
+        const storagePath = viewerIsBod && bodStoragePrefix
+          ? `${bodStoragePrefix}/${docRef.id}/${file.name}`
+          : `ec-documents/shared/${docRef.id}/${file.name}`;
         const storageRef = ref(storage, storagePath);
 
         try {
@@ -645,15 +758,14 @@ export default function DocumentsPage() {
           );
 
           await withTimeout(
-            setDoc(docRef, {
+            createCampusDocumentMetadata({
+              docId: docRef.id,
               name: file.name,
               type: docType,
               category: uploadCategory,
               sizeBytes: file.size,
               downloadURL,
               storagePath,
-              uploadedByUid: activeUid,
-              createdAt: serverTimestamp(),
             }),
             WRITE_DOC_TIMEOUT_MS,
             "Write Firestore metadata",
@@ -842,30 +954,10 @@ export default function DocumentsPage() {
     setDeleteSubmitting(true);
 
     try {
-      if (targetDoc.storagePath) {
-        try {
-          await withTimeout(
-            deleteObject(ref(storage, targetDoc.storagePath)),
-            CLEANUP_TIMEOUT_MS,
-            "Delete storage object",
-          );
-        } catch (storageError) {
-          if (toErrorCode(storageError) !== "storage/object-not-found") {
-            throw storageError;
-          }
-
-          ecDocumentsLogger.warn("Storage object already missing during delete.", {
-            docId: targetDoc.id,
-            name: targetDoc.name,
-            storagePath: targetDoc.storagePath,
-          });
-        }
-      }
-
       await withTimeout(
-        deleteDoc(doc(db, "ecDocuments", targetDoc.id)),
+        deleteCampusDocument({ docId: targetDoc.id }),
         WRITE_DOC_TIMEOUT_MS,
-        "Delete Firestore metadata",
+        "Delete document",
       );
 
       addToast({
@@ -907,7 +999,7 @@ export default function DocumentsPage() {
         meta={
           <>
             <Chip variant="flat" className="bg-white/15 text-white">
-              {documents.length} files
+              {scopedDocuments.length} files
             </Chip>
             <Chip variant="flat" className="bg-white/15 text-white">
               {recentUploads} recent uploads
@@ -915,6 +1007,11 @@ export default function DocumentsPage() {
             <Chip variant="flat" className="bg-white/15 text-white">
               {totalStorageMB.toFixed(2)} MB used
             </Chip>
+            {viewerIsBod && viewerCourseScope && (
+              <Chip variant="flat" className="bg-white/15 text-white">
+                Course scope: {viewerCourseScope}
+              </Chip>
+            )}
           </>
         }
       />

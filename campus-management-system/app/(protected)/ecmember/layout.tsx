@@ -11,7 +11,7 @@ import {
   type CampusProfileDoc,
   getOnboardingRedirect,
 } from "@/lib/campus-auth";
-import { normalizeCampusRole } from "@/lib/campus-role";
+import { isEcRole, normalizeCampusRole } from "@/lib/campus-role";
 
 type Props = {
   children: ReactNode;
@@ -62,7 +62,9 @@ export default function ECLayout({ children }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const [allowed, setAllowed] = useState(false);
-  const [viewerRole, setViewerRole] = useState<"ec" | "admin" | null>(null);
+  const [viewerRole, setViewerRole] = useState<"ecmember" | "admin" | null>(
+    null,
+  );
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -87,13 +89,14 @@ export default function ECLayout({ children }: Props) {
 
       const canOpenStudentLookupAsAdmin =
         role === "admin" && pathname === "/ecmember/students";
+      const canOpenEcWorkspace = isEcRole(data.role);
 
-      if (role !== "ecmember" && !canOpenStudentLookupAsAdmin) {
+      if (!canOpenEcWorkspace && !canOpenStudentLookupAsAdmin) {
         router.replace("/login");
         return;
       }
 
-      setViewerRole(canOpenStudentLookupAsAdmin ? "admin" : "ec");
+      setViewerRole(canOpenStudentLookupAsAdmin ? "admin" : "ecmember");
       setAllowed(true);
     });
 
@@ -123,7 +126,7 @@ export default function ECLayout({ children }: Props) {
             viewerRole === "admin" ? "Admin Student Lookup" : "EC Workspace"
           }
           showLogout
-          showStudentAccountSwitch={viewerRole === "ec"}
+          showStudentAccountSwitch={viewerRole === "ecmember"}
           studentAccountHref="/student"
           studentAccountLabel="Student Portal"
         />

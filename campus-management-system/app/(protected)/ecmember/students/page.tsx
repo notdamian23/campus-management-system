@@ -39,15 +39,11 @@ import {
 import { getFunctions, httpsCallable } from "firebase/functions";
 import {
   collection,
-  collectionGroup,
-  deleteDoc,
   doc,
   getDoc,
   getDocs,
   orderBy,
   query,
-  serverTimestamp,
-  setDoc,
   where,
 } from "firebase/firestore";
 import {
@@ -64,7 +60,6 @@ import {
 import { app, auth, db } from "@/lib/firebase";
 import type { CampusProfileDoc } from "@/lib/campus-auth";
 import {
-  buildCampusProfileUpdatePayload,
   type CampusNormalizedRole,
   normalizeCampusUserRow,
   type CampusUserProfileSource,
@@ -75,7 +70,13 @@ import {
   getCourseScope,
   isBOD,
 } from "@/lib/ec-permissions";
-import { logPermissionDeniedAttemptForCurrentUser } from "@/lib/firebase-functions";
+import {
+  createCampusStudent,
+  logPermissionDeniedAttemptForCurrentUser,
+  updateCampusStudentProfile,
+  updateStudentAccountStatus,
+  updateStudentClearanceStatus,
+} from "@/lib/firebase-functions";
 import { campusToast } from "@/lib/toast";
 import { formatStudentFullName } from "@/lib/student-name";
 
@@ -689,10 +690,10 @@ export default function ECStudentLookup() {
 
     try {
       const fn = httpsCallable<
-        { limit: number },
+        { limit: number; includeEcMembers: boolean },
         { students?: RemoteStudent[] }
       >(functions, "ecListStudents");
-      const res = await fn({ limit: 2000 });
+      const res = await fn({ limit: 2000, includeEcMembers: true });
 
       const projectionByUid = new Map<string, StudentDirectoryProjection>();
       try {
@@ -761,12 +762,16 @@ export default function ECStudentLookup() {
   }, []);
 
   const courseOptions = useMemo(() => {
+    if (viewerIsBod && viewerCourseScope) {
+      return [viewerCourseScope];
+    }
+
     const set = new Set(DEFAULT_COURSES);
     students.forEach((s) => {
       if (s.course && s.course !== "Unassigned") set.add(s.course);
     });
     return Array.from(set);
-  }, [students]);
+  }, [students, viewerCourseScope, viewerIsBod]);
 
   const yearOptions = useMemo(() => {
     const set = new Set(DEFAULT_YEARS);
@@ -777,14 +782,17 @@ export default function ECStudentLookup() {
   }, [students]);
 
   const courseFilterItems = useMemo<SelectOption[]>(
-    () => [
-      { key: "__all_courses__", label: "All Courses" },
-      ...courseOptions.map((courseName) => ({
-        key: courseName,
-        label: courseName,
-      })),
-    ],
-    [courseOptions],
+    () =>
+      viewerIsBod && viewerCourseScope
+        ? [{ key: viewerCourseScope, label: viewerCourseScope }]
+        : [
+            { key: "__all_courses__", label: "All Courses" },
+            ...courseOptions.map((courseName) => ({
+              key: courseName,
+              label: courseName,
+            })),
+          ],
+    [courseOptions, viewerCourseScope, viewerIsBod],
   );
 
   const yearFilterItems = useMemo<SelectOption[]>(
@@ -796,14 +804,17 @@ export default function ECStudentLookup() {
   );
 
   const addCourseItems = useMemo<SelectOption[]>(
-    () => [
-      { key: "__select_course__", label: "Select course" },
-      ...DEFAULT_COURSES.map((courseName) => ({
-        key: courseName,
-        label: courseName,
-      })),
-    ],
-    [],
+    () =>
+      viewerIsBod && viewerCourseScope
+        ? [{ key: viewerCourseScope, label: viewerCourseScope }]
+        : [
+            { key: "__select_course__", label: "Select course" },
+            ...DEFAULT_COURSES.map((courseName) => ({
+              key: courseName,
+              label: courseName,
+            })),
+          ],
+    [viewerCourseScope, viewerIsBod],
   );
 
   const addYearItems = useMemo<SelectOption[]>(
@@ -1394,8 +1405,6 @@ export default function ECStudentLookup() {
     setYearFilter("");
   };
 
-  const clearanceReadyNotificationId = "clearance-ready-status";
-
   const openStudentStatusModal = (student: Student) => {
     setSelectedStudent(student);
     setStatusNotice(null);
@@ -1440,52 +1449,10 @@ export default function ECStudentLookup() {
     setStatusNotice(null);
 
     try {
-      const timestamp = serverTimestamp();
-
-      await setDoc(
-        doc(db, "students", student.uid),
-        {
-          uid: student.uid,
-          studentId: student.uid,
-          schoolId: student.id,
-          studentName: student.name,
-          course: student.course,
-          year: student.year,
-          yearLevel: student.year,
-          status: nextStatus,
-          updatedAt: timestamp,
-        },
-        { merge: true },
-      );
-
-      try {
-        await setDoc(
-          doc(db, "profiles", student.uid),
-          {
-            status: nextStatus,
-            updatedAt: timestamp,
-          },
-          { merge: true },
-        );
-      } catch (error: unknown) {
-        const message = toErrorMessage(error, "");
-        if (!message.toLowerCase().includes("permission-denied")) {
-          throw error;
-        }
-      }
-
-      if (nextStatus === "Inactive") {
-        const registrationsSnap = await getDocs(
-          query(
-            collectionGroup(db, "registrations"),
-            where("uid", "==", student.uid),
-          ),
-        );
-
-        await Promise.all(
-          registrationsSnap.docs.map((snapshot) => deleteDoc(snapshot.ref)),
-        );
-      }
+      await updateStudentAccountStatus({
+        uid: student.uid,
+        status: nextStatus,
+      });
 
       updateStudentState(student.uid, { status: nextStatus });
       setStatusNotice({
@@ -1547,76 +1514,15 @@ export default function ECStudentLookup() {
     setStatusNotice(null);
 
     try {
-      const timestamp = serverTimestamp();
-
-      await setDoc(
-        doc(db, "students", student.uid),
-        {
-          uid: student.uid,
-          studentId: student.uid,
-          schoolId: student.id,
-          studentName: student.name,
-          name: student.name,
-          fullName: student.name,
-          course: student.course,
-          year: student.year,
-          yearLevel: student.year,
-          readyForClearance: nextReady,
-          updatedAt: timestamp,
-        },
-        { merge: true },
-      );
-
-      try {
-        await setDoc(
-          doc(db, "profiles", student.uid),
-          {
-            readyForClearance: nextReady,
-            updatedAt: timestamp,
-          },
-          { merge: true },
-        );
-      } catch (error: unknown) {
-        const message = toErrorMessage(error, "");
-        if (!message.toLowerCase().includes("permission-denied")) {
-          throw error;
-        }
-      }
-
-      let notificationError = "";
-      if (nextReady) {
-        try {
-          await setDoc(
-            doc(
-              db,
-              "profiles",
-              student.uid,
-              "notifications",
-              clearanceReadyNotificationId,
-            ),
-            {
-              title: "Clearance Ready",
-              message: "You are now ready for clearance signing.",
-              type: "announcement",
-              createdAt: timestamp,
-              date: "",
-              scheduledTime: "",
-              read: false,
-              targetUid: student.uid,
-            },
-            { merge: true },
-          );
-        } catch (error: unknown) {
-          notificationError = toErrorMessage(
-            error,
-            "The readiness update was saved, but the notification could not be sent.",
-          );
-        }
-      }
+      const result = await updateStudentClearanceStatus({
+        uid: student.uid,
+        readyForClearance: nextReady,
+      });
 
       updateStudentState(student.uid, { readyForClearance: nextReady });
 
-      const successMessage = notificationError
+      const notificationFailed = nextReady && result.notificationSent === false;
+      const successMessage = notificationFailed
         ? `${student.name} is ready for clearance signing, but the notification could not be sent.`
         : nextReady
           ? "Student marked ready for clearance."
@@ -1624,13 +1530,14 @@ export default function ECStudentLookup() {
 
       setStatusNotice({
         type: "ok",
-        msg: notificationError || successMessage,
+        msg: successMessage,
       });
 
-      if (notificationError) {
+      if (notificationFailed) {
         campusToast.warning({
           title: "Ready for clearance saved",
-          description: notificationError,
+          description:
+            "The readiness update was saved, but the notification could not be sent.",
           dedupeKey: `ec-students:clearance:notification-warning:${student.uid}`,
         });
       } else {
@@ -1732,47 +1639,25 @@ export default function ECStudentLookup() {
     setStatusNotice(null);
 
     try {
-      const timestamp = serverTimestamp();
-      const { profilePatch, studentPatch } = buildCampusProfileUpdatePayload({
-        role: selectedStudentRole,
+      const result = await updateCampusStudentProfile({
+        uid: selectedStudent.uid,
         name,
         schoolId,
         course,
         yearLevel,
       });
 
-      await setDoc(
-        doc(db, "profiles", selectedStudent.uid),
-        {
-          ...profilePatch,
-          updatedAt: timestamp,
-        },
-        { merge: true },
-      );
-
-      if (studentPatch) {
-        await setDoc(
-          doc(db, "students", selectedStudent.uid),
-          {
-            uid: selectedStudent.uid,
-            ...studentPatch,
-            updatedAt: timestamp,
-          },
-          { merge: true },
-        );
-      }
-
       const updatedStudent = mapRemoteStudent(
         {
-          uid: selectedStudent.uid,
+          uid: result.uid,
           role: selectedStudentRole,
-          schoolId,
+          schoolId: result.schoolId,
           studentId: selectedStudent.studentId,
-          fullName: name,
-          name,
-          studentName: name,
-          course,
-          yearLevel,
+          fullName: result.name,
+          name: result.name,
+          studentName: result.name,
+          course: result.course,
+          yearLevel: result.yearLevel,
           status: selectedStudent.status,
           readyForClearance: selectedStudent.readyForClearance,
           email: selectedStudent.email,
@@ -1781,23 +1666,21 @@ export default function ECStudentLookup() {
               ? selectedStudent.createdAt
               : null,
         },
-        studentPatch
-          ? {
-              studentId: selectedStudent.studentId,
-              schoolId,
-              fullName: name,
-              name,
-              studentName: name,
-              course,
-              yearLevel,
-              status: selectedStudent.status,
-              readyForClearance: selectedStudent.readyForClearance,
-              fingerprintStatus:
-                selectedStudent.fingerprintStatus === "Active"
-                  ? "active"
-                  : "inactive",
-            }
-          : undefined,
+        {
+          studentId: selectedStudent.studentId,
+          schoolId: result.schoolId,
+          fullName: result.name,
+          name: result.name,
+          studentName: result.name,
+          course: result.course,
+          yearLevel: result.yearLevel,
+          status: selectedStudent.status,
+          readyForClearance: selectedStudent.readyForClearance,
+          fingerprintStatus:
+            selectedStudent.fingerprintStatus === "Active"
+              ? "active"
+              : "inactive",
+        },
       );
 
       updateStudentState(selectedStudent.uid, {
@@ -1862,18 +1745,7 @@ export default function ECStudentLookup() {
     setNotice(null);
 
     try {
-      const fn = httpsCallable<
-        {
-          schoolId: string;
-          studentName: string;
-          course: string;
-          year: string;
-          email: string | null;
-        },
-        { uid?: string }
-      >(functions, "ecCreateStudent");
-
-      const res = await fn({
+      const res = await createCampusStudent({
         schoolId,
         studentName,
         course,
@@ -1883,7 +1755,7 @@ export default function ECStudentLookup() {
 
       setNotice({
         type: "ok",
-        msg: `Student account created. UID: ${res.data?.uid ?? "-"}`,
+        msg: `Student account created. UID: ${res.uid ?? "-"}`,
       });
       setNewSchoolId("");
       setNewStudentName("");
@@ -1893,8 +1765,8 @@ export default function ECStudentLookup() {
       setShowAddForm(false);
       campusToast.success({
         title: "Student account created",
-        description: `UID: ${res.data?.uid ?? "-"}`,
-        dedupeKey: `ec-students:create:${res.data?.uid ?? schoolId}`,
+        description: `UID: ${res.uid ?? "-"}`,
+        dedupeKey: `ec-students:create:${res.uid ?? schoolId}`,
       });
       await loadStudents();
     } catch (error: unknown) {

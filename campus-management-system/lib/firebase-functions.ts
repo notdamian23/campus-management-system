@@ -21,6 +21,160 @@ type FinalizeCampusProfileResponse = {
   finalized?: boolean;
   profile?: CampusProfileDoc | null;
 };
+export type CreateCampusEventPayload = {
+  title: string;
+  location?: string;
+  date: string;
+  scheduledTime: string;
+  timeStart?: string;
+  timeEnd: string;
+  yearLevel?: string;
+  course?: string;
+  yearLevels?: string[];
+  courses?: string[];
+  targetStudent?: string;
+  selectedStudentIds?: string[];
+  selectedSchoolIds?: string[];
+  details?: string;
+  isPreReg?: boolean;
+  withPayment?: boolean;
+  paymentRequired?: boolean;
+  waitlistEnabled?: boolean;
+  registrationStartAt?: Date | string | number | null;
+  registrationEndAt?: Date | string | number | null;
+  cancellationDeadlineAt?: Date | string | number | null;
+  preRegSlots?: number | null;
+  paymentTitle?: string;
+  paymentAmount?: number | string;
+  paymentDueDate?: string;
+  paymentDescription?: string;
+  courseScope?: string | null;
+};
+
+export type CreateCampusEventResult = {
+  eventId: string;
+  linkedPaymentId: string | null;
+};
+
+export type UpdateCampusEventPayload = {
+  eventId: string;
+  title: string;
+  location: string;
+  date: string;
+  scheduledTime: string;
+  timeStart: string;
+  timeEnd: string;
+  yearLevel?: string;
+  course?: string;
+  yearLevels?: string[];
+  courses?: string[];
+  targetStudent?: string;
+  selectedStudentIds?: string[];
+  selectedSchoolIds?: string[];
+  details?: string;
+  isPreReg?: boolean;
+  withPayment?: boolean;
+  paymentRequired?: boolean;
+  waitlistEnabled?: boolean;
+  registrationStartAt?: Date | string | number | null;
+  registrationEndAt?: Date | string | number | null;
+  cancellationDeadlineAt?: Date | string | number | null;
+  preRegSlots?: number | null;
+  preRegCount?: number;
+  waitlistCount?: number;
+  paymentTitle?: string;
+  paymentAmount?: number | string;
+  paymentDueDate?: string;
+  paymentDescription?: string;
+  requiredPaymentId?: string;
+  linkedPaymentId?: string | null;
+  ownerType?: "ec" | "bod";
+  createdBy?: string | null;
+  createdByPosition?: string | null;
+  createdByCourseScope?: string | null;
+  courseScope?: string | null;
+};
+
+export type UpdateCampusEventResult = {
+  eventId: string;
+  updated: true;
+  linkedPaymentId?: string | null;
+};
+
+export type CreateCampusStudentPayload = {
+  schoolId: string;
+  studentName: string;
+  course: string;
+  year: string;
+  email?: string | null;
+};
+
+export type CreateCampusStudentResult = {
+  uid?: string;
+};
+
+export type UpdateCampusStudentProfilePayload = {
+  uid: string;
+  name: string;
+  schoolId: string;
+  course: string;
+  yearLevel: string;
+};
+
+export type UpdateCampusStudentProfileResult = {
+  uid: string;
+  schoolId: string;
+  name: string;
+  course: string;
+  yearLevel: string;
+};
+
+export type UpdateStudentAccountStatusPayload = {
+  uid: string;
+  status: "Active" | "Inactive";
+};
+
+export type UpdateStudentAccountStatusResult = {
+  uid: string;
+  status: "Active" | "Inactive";
+  deletedRegistrationsCount?: number;
+};
+
+export type UpdateStudentClearanceStatusPayload = {
+  uid: string;
+  readyForClearance: boolean;
+};
+
+export type UpdateStudentClearanceStatusResult = {
+  uid: string;
+  readyForClearance: boolean;
+  notificationSent?: boolean;
+};
+
+export type CreateCampusDocumentMetadataPayload = {
+  docId?: string;
+  name: string;
+  type: string;
+  category: string;
+  sizeBytes: number;
+  storagePath: string;
+  downloadURL: string;
+};
+
+export type CreateCampusDocumentMetadataResult = {
+  docId: string;
+  ownerType: "ec" | "bod";
+  courseScope: string | null;
+};
+
+export type DeleteCampusDocumentPayload = {
+  docId: string;
+};
+
+export type DeleteCampusDocumentResult = {
+  docId: string;
+  deleted: boolean;
+};
 
 export type SchoolIdLoginResolution =
   | {
@@ -168,6 +322,140 @@ export async function getCurrentCampusProfileForCurrentUser(): Promise<CampusPro
   });
 
   return profile;
+}
+
+export async function createCampusEvent(
+  payload: CreateCampusEventPayload,
+): Promise<CreateCampusEventResult> {
+  logAuthEvent("info", "Creating CAMPUS event via callable", {
+    withPayment: payload.withPayment === true || payload.paymentRequired === true,
+    isPreReg: payload.isPreReg === true,
+  });
+
+  const callable = httpsCallable<
+    CreateCampusEventPayload,
+    CreateCampusEventResult
+  >(getCampusFunctions(), "createCampusEvent");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function updateCampusEvent(
+  payload: UpdateCampusEventPayload,
+): Promise<UpdateCampusEventResult> {
+  logAuthEvent("info", "Updating CAMPUS event via callable", {
+    eventId: payload.eventId,
+    withPayment: payload.withPayment === true || payload.paymentRequired === true,
+    isPreReg: payload.isPreReg === true,
+  });
+
+  const callable = httpsCallable<
+    UpdateCampusEventPayload,
+    UpdateCampusEventResult
+  >(getCampusFunctions(), "updateCampusEvent");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function createCampusStudent(
+  payload: CreateCampusStudentPayload,
+): Promise<CreateCampusStudentResult> {
+  logAuthEvent("info", "Creating CAMPUS student via callable", {
+    schoolId: payload.schoolId,
+  });
+
+  const callable = httpsCallable<
+    CreateCampusStudentPayload,
+    CreateCampusStudentResult
+  >(getCampusFunctions(), "createCampusStudent");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function updateCampusStudentProfile(
+  payload: UpdateCampusStudentProfilePayload,
+): Promise<UpdateCampusStudentProfileResult> {
+  logAuthEvent("info", "Updating CAMPUS student profile via callable", {
+    uid: payload.uid,
+  });
+
+  const callable = httpsCallable<
+    UpdateCampusStudentProfilePayload,
+    UpdateCampusStudentProfileResult
+  >(getCampusFunctions(), "updateCampusStudentProfile");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function updateStudentAccountStatus(
+  payload: UpdateStudentAccountStatusPayload,
+): Promise<UpdateStudentAccountStatusResult> {
+  logAuthEvent("info", "Updating student account status via callable", {
+    uid: payload.uid,
+    status: payload.status,
+  });
+
+  const callable = httpsCallable<
+    UpdateStudentAccountStatusPayload,
+    UpdateStudentAccountStatusResult
+  >(getCampusFunctions(), "updateStudentAccountStatus");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function updateStudentClearanceStatus(
+  payload: UpdateStudentClearanceStatusPayload,
+): Promise<UpdateStudentClearanceStatusResult> {
+  logAuthEvent("info", "Updating student clearance status via callable", {
+    uid: payload.uid,
+    readyForClearance: payload.readyForClearance,
+  });
+
+  const callable = httpsCallable<
+    UpdateStudentClearanceStatusPayload,
+    UpdateStudentClearanceStatusResult
+  >(getCampusFunctions(), "updateStudentClearanceStatus");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function createCampusDocumentMetadata(
+  payload: CreateCampusDocumentMetadataPayload,
+): Promise<CreateCampusDocumentMetadataResult> {
+  logAuthEvent("info", "Creating EC document metadata via callable", {
+    docId: payload.docId ?? "",
+    category: payload.category,
+  });
+
+  const callable = httpsCallable<
+    CreateCampusDocumentMetadataPayload,
+    CreateCampusDocumentMetadataResult
+  >(getCampusFunctions(), "createCampusDocumentMetadata");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function deleteCampusDocument(
+  payload: DeleteCampusDocumentPayload,
+): Promise<DeleteCampusDocumentResult> {
+  logAuthEvent("info", "Deleting EC document via callable", {
+    docId: payload.docId,
+  });
+
+  const callable = httpsCallable<
+    DeleteCampusDocumentPayload,
+    DeleteCampusDocumentResult
+  >(getCampusFunctions(), "deleteCampusDocument");
+
+  const result = await callable(payload);
+  return result.data;
 }
 
 export async function savePendingEmailVerificationForCurrentUser(
