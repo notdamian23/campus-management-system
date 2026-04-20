@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "AppTypes.h"
+#include <CampusEligibility.h>
 
 class StorageManager {
  public:
@@ -19,6 +20,8 @@ class StorageManager {
   bool loadPairedEventContext(EventInfo &event,
                               std::vector<StudentInfo> &students,
                               std::vector<String> &recordedStudentIds) const;
+  CampusEligibility::EventEligibilityDecision evaluateStudentEligibilityForEvent(
+      const EventInfo &event, const StudentInfo &student) const;
   bool isStudentAuthorizedForEvent(const String &eventId,
                                    const String &studentUid) const;
   bool isRemoteAttendanceRecorded(const String &eventId,

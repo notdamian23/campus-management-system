@@ -4,6 +4,8 @@
 
 #include <vector>
 
+#include <CampusEligibility.h>
+
 #include "AttendanceManager.h"
 #include "BackendClient.h"
 #include "ButtonInput.h"
@@ -118,13 +120,16 @@ struct SyncController {
   bool keepWifiConnected = false;
   bool timeSyncStarted = false;
   bool contextRefreshNeeded = false;
+  size_t enrollmentAttempts = 0;
   size_t enrollmentUploads = 0;
+  size_t attendanceAttempts = 0;
   size_t attendanceUploads = 0;
   size_t duplicates = 0;
   size_t rejections = 0;
   bool cleanupQueueLoaded = false;
   std::vector<CleanupQueueItem> cleanupQueue;
   String lastError;
+  String lastFailureStage;
 };
 
 AppScreen g_screen = AppScreen::Menu;
@@ -190,6 +195,62 @@ void showWrappedMessage(const String &message, uint32_t holdMs) {
   String lines[4];
   wrapMessage(message, lines);
   showTimedMessage(lines[0], lines[1], holdMs, lines[2], lines[3]);
+}
+
+String eligibilityTargetModeLabel(const EventInfo &event) {
+  return CampusEligibility::isSpecificStudentsMode(event) ? "specificStudents"
+                                                          : "broad";
+}
+
+void logEligibilityDecision(
+    const StudentInfo &student, const EventInfo &event,
+    const CampusEligibility::EventEligibilityDecision &decision) {
+  Serial.printf(
+      "[ATTEND][ELIG] uid=%s schoolId=%s name=%s course=%s year=%s "
+      "section=%s normCourse=%s normYear=%s normSection=%s targetMode=%s "
+      "targetedCount=%u pairedRoster=%u eventCourse=%s eventYear=%s "
+      "eventSection=%s inactiveBlocked=%s preregBlocked=%s "
+      "paymentBlocked=%s bodBlocked=%s stalePairing=%s finalReason=%s\n",
+      student.studentUid.c_str(), student.schoolId.c_str(),
+      student.studentName.c_str(), student.course.c_str(),
+      student.yearLevel.c_str(), student.section.c_str(),
+      decision.normalizedStudentCourse.c_str(),
+      decision.normalizedStudentYearLevel.c_str(),
+      decision.normalizedStudentSection.c_str(),
+      eligibilityTargetModeLabel(event).c_str(),
+      static_cast<unsigned>(CampusEligibility::targetedStudentCount(event)),
+      static_cast<unsigned>(g_cachedPairedStudents.size()),
+      decision.eventCourseFilter.c_str(), decision.eventYearLevelFilter.c_str(),
+      decision.eventSectionFilter.c_str(),
+      decision.blockedByInactive ? "yes" : "no",
+      decision.blockedByPrereg ? "yes" : "no",
+      decision.blockedByPayment ? "yes" : "no",
+      decision.blockedByBodScope ? "yes" : "no",
+      decision.stalePairedEventData ? "yes" : "no",
+      decision.finalReason.c_str());
+}
+
+bool upsertCachedPairedStudent(const StudentInfo &student) {
+  bool updated = false;
+  for (auto &pairedStudent : g_cachedPairedStudents) {
+    if (pairedStudent.studentUid == student.studentUid) {
+      pairedStudent = student;
+      updated = true;
+      break;
+    }
+  }
+
+  if (!updated) {
+    g_cachedPairedStudents.push_back(student);
+  }
+
+  if (!g_pairedEvent.isValid()) {
+    return updated;
+  }
+
+  g_storage.savePairedEventContext(g_pairedEvent, g_cachedPairedStudents,
+                                   g_remoteRecordedStudentIds);
+  return true;
 }
 
 String attendanceModeLabel(AttendanceCaptureMode mode) {
@@ -561,16 +622,21 @@ void cachePairedEventContext(const EventInfo &event,
                              const std::vector<StudentInfo> &students,
                              const std::vector<String> &recordedStudentIds) {
   EventInfo eventToCache = event;
+  CampusEligibility::normalizeEvent(eventToCache);
+  std::vector<StudentInfo> studentsToCache = students;
+  for (auto &student : studentsToCache) {
+    CampusEligibility::normalizeStudent(student);
+  }
   if (g_pairedEvent.isValid() && g_pairedEvent.eventId == event.eventId &&
       g_pairedEvent.timeOutFinalized) {
     eventToCache.timeOutFinalized = true;
   }
 
   g_pairedEvent = eventToCache;
-  g_cachedPairedStudents = students;
+  g_cachedPairedStudents = studentsToCache;
   g_remoteRecordedStudentIds = recordedStudentIds;
   g_pairedEventRecoveredFromAttendance = false;
-  g_storage.savePairedEventContext(eventToCache, students, recordedStudentIds);
+  g_storage.savePairedEventContext(eventToCache, studentsToCache, recordedStudentIds);
 }
 
 bool recoverPairedEventFromAttendance(EventInfo &event) {
@@ -901,6 +967,33 @@ bool hasPendingSyncWork() {
          g_storage.unsyncedEnrollmentCount() > 0;
 }
 
+String syncFailureStageLabel() {
+  if (!g_backend.lastFailureStage().isEmpty() &&
+      g_backend.lastFailureStage() != "none" &&
+      g_backend.lastFailureStage() != "init") {
+    return g_backend.lastFailureStage();
+  }
+
+  switch (g_sync.phase) {
+    case SyncPhase::WaitForWifi:
+      return "wifi";
+    case SyncPhase::WaitForTime:
+      return "time";
+    case SyncPhase::UploadEnrollment:
+      return "enrollment";
+    case SyncPhase::UploadAttendance:
+      return "attendance";
+    case SyncPhase::CleanupMappings:
+      return "cleanup";
+    case SyncPhase::RefreshContext:
+      return "refresh_context";
+    case SyncPhase::Complete:
+    case SyncPhase::Idle:
+    default:
+      return "sync";
+  }
+}
+
 String syncSummaryLine() {
   String line = "A:" + String(g_sync.attendanceUploads) + " D:" +
                 String(g_sync.duplicates);
@@ -919,6 +1012,9 @@ String syncFailureTitle(const String &error) {
     return "NO WIFI";
   }
 
+  if (g_backend.lastFailureStage() == "response_too_large") {
+    return "RESPONSE TOO BIG";
+  }
   const int httpCode = g_backend.lastHttpStatusCode();
   if (httpCode == -1) {
     return "HTTPS CONNECT FAIL";
@@ -937,9 +1033,15 @@ String syncFailureDetail(const String &error) {
     return "Check Wi-Fi setup";
   }
 
+  if (g_backend.lastFailureStage() == "response_too_large") {
+    return "Trim backend body";
+  }
   const int httpCode = g_backend.lastHttpStatusCode();
   if (httpCode == -1) {
     const String detail = g_backend.lastHttpErrorString();
+    if (g_backend.lastTlsMemoryPressure()) {
+      return "TLS heap pressure";
+    }
     return trim16(detail.isEmpty() ? error : detail);
   }
   if (httpCode == 401 || httpCode == 403) {
@@ -952,12 +1054,26 @@ String syncFailureDetail(const String &error) {
 }
 
 void finishSyncSuccess() {
+  const size_t retainedAttendance = g_storage.unsyncedAttendanceCount();
+  const size_t retainedEnrollments = g_storage.unsyncedEnrollmentCount();
   Serial.printf("[SYNC] completed mode=%s E=%u A=%u D=%u R=%u\n",
                 syncModeName(g_sync.mode),
                 static_cast<unsigned>(g_sync.enrollmentUploads),
                 static_cast<unsigned>(g_sync.attendanceUploads),
                 static_cast<unsigned>(g_sync.duplicates),
                 static_cast<unsigned>(g_sync.rejections));
+  Serial.printf(
+      "[SYNC][SUMMARY] mode=%s attemptedE=%u sentE=%u attemptedA=%u sentA=%u "
+      "duplicates=%u rejected=%u retainedE=%u retainedA=%u failureStage=none\n",
+      syncModeName(g_sync.mode),
+      static_cast<unsigned>(g_sync.enrollmentAttempts),
+      static_cast<unsigned>(g_sync.enrollmentUploads),
+      static_cast<unsigned>(g_sync.attendanceAttempts),
+      static_cast<unsigned>(g_sync.attendanceUploads),
+      static_cast<unsigned>(g_sync.duplicates),
+      static_cast<unsigned>(g_sync.rejections),
+      static_cast<unsigned>(retainedEnrollments),
+      static_cast<unsigned>(retainedAttendance));
 
   if (!g_sync.keepWifiConnected) {
     disconnectAfterOnlineTask();
@@ -983,8 +1099,28 @@ void finishSyncSuccess() {
 
 void failSync(const String &error) {
   const String message = error.isEmpty() ? String("Sync failed") : error;
+  g_sync.lastError = message;
+  g_sync.lastFailureStage = syncFailureStageLabel();
+  const size_t retainedAttendance = g_storage.unsyncedAttendanceCount();
+  const size_t retainedEnrollments = g_storage.unsyncedEnrollmentCount();
   Serial.printf("[SYNC] failed mode=%s error=%s\n", syncModeName(g_sync.mode),
                 message.c_str());
+  Serial.printf(
+      "[SYNC][SUMMARY] mode=%s attemptedE=%u sentE=%u attemptedA=%u sentA=%u "
+      "duplicates=%u rejected=%u retainedE=%u retainedA=%u failureStage=%s "
+      "tlsMemoryPressure=%s responseBytes=%u\n",
+      syncModeName(g_sync.mode),
+      static_cast<unsigned>(g_sync.enrollmentAttempts),
+      static_cast<unsigned>(g_sync.enrollmentUploads),
+      static_cast<unsigned>(g_sync.attendanceAttempts),
+      static_cast<unsigned>(g_sync.attendanceUploads),
+      static_cast<unsigned>(g_sync.duplicates),
+      static_cast<unsigned>(g_sync.rejections),
+      static_cast<unsigned>(retainedEnrollments),
+      static_cast<unsigned>(retainedAttendance),
+      g_sync.lastFailureStage.c_str(),
+      g_backend.lastTlsMemoryPressure() ? "yes" : "no",
+      static_cast<unsigned>(g_backend.lastResponsePayloadSize()));
 
   if (!g_sync.keepWifiConnected) {
     disconnectAfterOnlineTask();
@@ -1029,16 +1165,18 @@ void startSync(SyncMode mode, bool keepWifiConnected) {
   g_sync.mode = mode;
   g_sync.phase = SyncPhase::WaitForWifi;
   g_sync.keepWifiConnected = keepWifiConnected;
+  g_sync.contextRefreshNeeded = mode == SyncMode::Manual && g_pairedEvent.isValid();
   g_lastAutoSyncAttemptAt = millis();
 
   if (mode == SyncMode::Manual) {
     setScreen(AppScreen::SyncProgress);
   }
 
-  Serial.printf("[SYNC] start mode=%s pendingA=%u pendingE=%u\n",
+  Serial.printf("[SYNC] start mode=%s pendingA=%u pendingE=%u batchA=%u\n",
                 syncModeName(mode),
                 static_cast<unsigned>(g_storage.unsyncedAttendanceCount()),
-                static_cast<unsigned>(g_storage.unsyncedEnrollmentCount()));
+                static_cast<unsigned>(g_storage.unsyncedEnrollmentCount()),
+                static_cast<unsigned>(CampusConfig::kAttendanceSyncBatchSize));
 
   String error;
   if (!g_wifi.beginConnect(error, CampusConfig::kWifiTimeoutMs)) {
@@ -1100,6 +1238,7 @@ void tickSync() {
 
       String error;
       const StudentInfo &student = pendingEnrollments.front();
+      ++g_sync.enrollmentAttempts;
       if (!g_backend.submitEnrollment(student, error)) {
         failSync(error);
         return;
@@ -1107,6 +1246,7 @@ void tickSync() {
 
       g_storage.markEnrollmentSynced(student.studentUid);
       ++g_sync.enrollmentUploads;
+      g_sync.contextRefreshNeeded = g_pairedEvent.isValid();
       Serial.printf("[SYNC] enrollment uploaded student=%s\n",
                     student.studentUid.c_str());
       markDisplayDirty();
@@ -1115,13 +1255,15 @@ void tickSync() {
 
     case SyncPhase::UploadAttendance: {
       const std::vector<AttendanceRecord> batch =
-          g_storage.loadUnsyncedAttendanceBatch(CampusConfig::kSyncBatchSize);
+          g_storage.loadUnsyncedAttendanceBatch(
+              CampusConfig::kAttendanceSyncBatchSize);
       if (batch.empty()) {
         g_sync.phase = SyncPhase::CleanupMappings;
         markDisplayDirty();
         return;
       }
 
+      g_sync.attendanceAttempts += batch.size();
       std::vector<SyncItemResult> results;
       String error;
       if (!g_backend.syncAttendance(batch, results, error)) {
@@ -1527,23 +1669,21 @@ void enrollSelectedStudent() {
   student.syncStatus = "pending";
   student.remarks = "";
   student.enrolledAtIso = snapshot.iso8601;
+  CampusEligibility::normalizeStudent(student);
   g_cachedPendingStudents[g_pendingStudentIndex] = student;
   g_storage.savePendingStudents(g_cachedPendingStudents);
   g_storage.upsertFingerprintMapping(student);
 
-  for (auto &pairedStudent : g_cachedPairedStudents) {
-    if (pairedStudent.studentUid == student.studentUid) {
-      pairedStudent.templateId = templateId;
-      pairedStudent.fingerprintStatus = "enrolled";
-      pairedStudent.fingerprintDeviceId = g_storage.deviceId();
-      pairedStudent.queueId = student.queueId;
-      break;
-    }
-  }
-
   if (g_pairedEvent.isValid()) {
-    g_storage.savePairedEventContext(g_pairedEvent, g_cachedPairedStudents,
-                                     g_remoteRecordedStudentIds);
+    const CampusEligibility::EventEligibilityDecision decision =
+        g_storage.evaluateStudentEligibilityForEvent(g_pairedEvent, student);
+    logEligibilityDecision(student, g_pairedEvent, decision);
+    if (decision.allowed || decision.matchedPairedRoster ||
+        decision.matchedTargetedStudent) {
+      upsertCachedPairedStudent(student);
+      Serial.printf("[ENROLL] paired context updated student=%s reason=%s\n",
+                    student.studentUid.c_str(), decision.finalReason.c_str());
+    }
   }
 
   Serial.printf("[ENROLL] student=%s template=%d pendingSync=%u\n",
@@ -1670,20 +1810,29 @@ void handleAttendanceLoop() {
 
   Serial.printf("[ATTEND] matched schoolId=%s name=%s\n", student.schoolId.c_str(),
                 student.studentName.c_str());
-  const bool isAllowed = g_storage.isStudentAuthorizedForEvent(
-      g_pairedEvent.eventId, student.studentUid);
+  const CampusEligibility::EventEligibilityDecision decision =
+      g_storage.evaluateStudentEligibilityForEvent(g_pairedEvent, student);
   Serial.printf("[ATTEND] eligibility allowed=%s reason=%s\n",
-                isAllowed ? "yes" : "no",
-                isAllowed ? "paired_roster" : "not_in_event");
-  if (!isAllowed) {
-    Serial.println("[ATTEND] rejected not in event");
-    showTimedMessage("NOT IN EVENT",
+                decision.allowed ? "yes" : "no", decision.finalReason.c_str());
+  if (!decision.allowed) {
+    logEligibilityDecision(student, g_pairedEvent, decision);
+    Serial.printf("[ATTEND] rejected reason=%s\n", decision.finalReason.c_str());
+    showTimedMessage(CampusEligibility::rejectionTitle(decision),
                      trim16(student.studentName.isEmpty() ? student.schoolId
                                                           : student.studentName),
-                     kMediumMessageMs);
+                     kMediumMessageMs,
+                     trim16(CampusEligibility::rejectionDetail(decision)),
+                     trim16(decision.finalReason));
     g_feedback.error();
     startFingerRemovalWait();
     return;
+  }
+
+  if (!decision.matchedPairedRoster &&
+      (decision.usedBroadAudienceFilters || decision.matchedTargetedStudent)) {
+    upsertCachedPairedStudent(student);
+    Serial.printf("[ATTEND] paired roster refreshed student=%s source=%s\n",
+                  student.studentUid.c_str(), decision.finalReason.c_str());
   }
 
   AttendanceRecord record;

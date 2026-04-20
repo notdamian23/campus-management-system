@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
 #include <vector>
 
 #include "AppTypes.h"
@@ -39,20 +40,24 @@ class BackendClient {
   const String &lastRequestUrl() const;
   const String &lastWifiStatus() const;
   const String &lastLocalIp() const;
+  const String &lastFailureStage() const;
   size_t lastRequestPayloadSize() const;
   size_t lastRequestRecordCount() const;
+  size_t lastResponsePayloadSize() const;
+  bool lastTlsMemoryPressure() const;
 
  private:
   bool ensureSession(String &error);
+  bool ensureSessionForRequest(const char *path, String &error);
   bool requestSession(String &error);
   bool parseEnrollmentSession(JsonObjectConst object,
                               EnrollmentSessionInfo &session, String &error);
-  bool parseEventContextResponse(DynamicJsonDocument &response, EventInfo &event,
+  bool parseEventContextResponse(JsonDocument &response, EventInfo &event,
                                  std::vector<StudentInfo> &students,
                                  std::vector<String> &recordedStudentIds,
                                  String &error);
   bool requestJson(const char *method, const String &path, const String &body,
-                   DynamicJsonDocument &response, String &error,
+                   JsonDocument &response, String &error,
                    bool allowRetry = true, uint8_t maxAttempts = 1,
                    size_t recordCount = 0);
 
@@ -63,6 +68,10 @@ class BackendClient {
   String lastRequestUrl_;
   String lastWifiStatus_;
   String lastLocalIp_;
+  String lastFailureStage_;
   size_t lastRequestPayloadSize_ = 0;
   size_t lastRequestRecordCount_ = 0;
+  size_t lastResponsePayloadSize_ = 0;
+  bool lastTlsMemoryPressure_ = false;
+  WiFiClientSecure secureClient_;
 };

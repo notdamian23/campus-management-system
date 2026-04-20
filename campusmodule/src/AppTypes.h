@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <vector>
 
 struct EventInfo {
   String eventId;
@@ -10,7 +11,20 @@ struct EventInfo {
   String scheduledTimeEnd;
   String location;
   String status;
+  String targetMode;
+  String courseFilterLabel;
+  String yearLevelFilterLabel;
+  String sectionFilterLabel;
+  std::vector<String> courseFilters;
+  std::vector<String> yearLevelFilters;
+  std::vector<String> sectionFilters;
+  std::vector<String> targetedStudentIds;
+  String bodScope;
+  String bodScopeCanonical;
   bool requiresRegistration = false;
+  bool preregistrationRequired = false;
+  bool paymentRequired = false;
+  bool activeOnly = false;
   bool timeOutFinalized = false;
 
   bool isValid() const {
@@ -43,6 +57,12 @@ struct StudentInfo {
   String studentName;
   String course;
   String yearLevel;
+  String section;
+  String courseCanonical;
+  String yearLevelCanonical;
+  String sectionCanonical;
+  String bodScope;
+  String bodScopeCanonical;
   String sessionId;
   String queueId;
   String fingerprintStatus;
@@ -52,6 +72,12 @@ struct StudentInfo {
   String remarks;
   String enrolledAtIso;
   int templateId = -1;
+  bool isActive = true;
+  bool activeKnown = false;
+  bool preregistered = false;
+  bool preregisteredKnown = false;
+  bool paymentSatisfied = false;
+  bool paymentKnown = false;
   bool enrollmentSynced = false;
 
   bool isValid() const {

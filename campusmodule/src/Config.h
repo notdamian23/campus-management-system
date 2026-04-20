@@ -29,6 +29,8 @@ inline constexpr char kNtpServerSecondary[] = "pool.ntp.org";
 
 inline constexpr uint32_t kWifiTimeoutMs = 15000;
 inline constexpr uint32_t kHttpTimeoutMs = 15000;
+inline constexpr uint32_t kTlsHandshakeRetryBackoffMs = 1200;
+inline constexpr uint32_t kHttpRetryBaseDelayMs = 250;
 inline constexpr uint32_t kNtpSyncTimeoutMs = 10000;
 inline constexpr uint32_t kEnrollmentTimeoutMs = 20000;
 inline constexpr uint32_t kAttendancePollMs = 180;
@@ -38,8 +40,8 @@ inline constexpr uint32_t kSetupPortalTimeoutMs = 5UL * 60UL * 1000UL;
 inline constexpr uint8_t kHttpRetryAttempts = 3;
 inline constexpr uint16_t kEventListLimit = 20;
 inline constexpr uint16_t kPendingEnrollmentLimit = 20;
-// Keep attendance sync requests to one record during TLS-memory testing.
-inline constexpr uint16_t kSyncBatchSize = 1;
+// Keep attendance sync requests to one record to minimize TLS memory pressure.
+inline constexpr uint16_t kAttendanceSyncBatchSize = 1;
 inline constexpr uint16_t kFingerprintFirstTemplateId = 1;
 inline constexpr uint16_t kFingerprintLastTemplateId = 127;
 inline constexpr long kUtcOffsetSeconds = 8L * 60L * 60L;

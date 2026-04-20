@@ -8,6 +8,8 @@
 #include <SD.h>
 #include <SPI.h>
 
+#include <CampusEligibility.h>
+
 #include "Config.h"
 #include "Pins.h"
 
@@ -30,6 +32,118 @@ constexpr size_t kAttendanceDocSize = 65536;
 constexpr size_t kPairedEventContextDocSize = 65536;
 constexpr size_t kEnrollmentSessionDocSize = 4096;
 
+bool parseBoolValue(JsonVariantConst value, bool fallback = false) {
+  if (value.isNull()) {
+    return fallback;
+  }
+  if (value.is<bool>()) {
+    return value.as<bool>();
+  }
+  if (value.is<int>() || value.is<long>() || value.is<unsigned int>() ||
+      value.is<unsigned long>()) {
+    return value.as<long>() != 0;
+  }
+
+  String text;
+  if (value.is<const char *>()) {
+    const char *raw = value.as<const char *>();
+    text = raw != nullptr ? String(raw) : String("");
+  } else {
+    text = value.as<String>();
+  }
+  text = CampusEligibility::trimAndCollapseWhitespace(text);
+  text.toLowerCase();
+  if (text == "true" || text == "yes" || text == "y" || text == "1" ||
+      text == "active" || text == "paid" || text == "approved" ||
+      text == "registered" || text == "enrolled" || text == "complete") {
+    return true;
+  }
+  if (text == "false" || text == "no" || text == "n" || text == "0" ||
+      text == "inactive" || text == "unpaid" || text == "pending" ||
+      text == "rejected" || text == "disabled") {
+    return false;
+  }
+  return fallback;
+}
+
+bool parseBoolText(const String &text, bool fallback = false) {
+  String normalized = CampusEligibility::trimAndCollapseWhitespace(text);
+  normalized.toLowerCase();
+  if (normalized == "true" || normalized == "yes" || normalized == "y" ||
+      normalized == "1" || normalized == "active" || normalized == "paid" ||
+      normalized == "approved" || normalized == "registered" ||
+      normalized == "enrolled" || normalized == "complete") {
+    return true;
+  }
+  if (normalized == "false" || normalized == "no" || normalized == "n" ||
+      normalized == "0" || normalized == "inactive" || normalized == "unpaid" ||
+      normalized == "pending" || normalized == "rejected" ||
+      normalized == "disabled") {
+    return false;
+  }
+  return fallback;
+}
+
+String parseStringField(JsonVariantConst value) {
+  if (value.isNull()) {
+    return "";
+  }
+  if (value.is<JsonObjectConst>()) {
+    JsonObjectConst object = value.as<JsonObjectConst>();
+    return String(object["studentUid"] | object["studentId"] | object["uid"] |
+                  object["id"] | object["value"] | "");
+  }
+  if (value.is<const char *>()) {
+    const char *raw = value.as<const char *>();
+    return raw != nullptr ? String(raw) : String("");
+  }
+  return value.as<String>();
+}
+
+void appendStringValues(JsonVariantConst value, std::vector<String> &outValues) {
+  if (value.isNull()) {
+    return;
+  }
+
+  if (value.is<JsonArrayConst>()) {
+    for (JsonVariantConst item : value.as<JsonArrayConst>()) {
+      const String parsed = CampusEligibility::trimAndCollapseWhitespace(
+          parseStringField(item));
+      if (parsed.isEmpty()) {
+        continue;
+      }
+      bool exists = false;
+      for (const auto &entry : outValues) {
+        if (entry == parsed) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists) {
+        outValues.push_back(parsed);
+      }
+    }
+    return;
+  }
+
+  const String parsed =
+      CampusEligibility::trimAndCollapseWhitespace(parseStringField(value));
+  if (parsed.isEmpty()) {
+    return;
+  }
+
+  bool exists = false;
+  for (const auto &entry : outValues) {
+    if (entry == parsed) {
+      exists = true;
+      break;
+    }
+  }
+  if (!exists) {
+    outValues.push_back(parsed);
+  }
+}
+
 const char *sdCardTypeName(uint8_t cardType) {
   switch (cardType) {
     case CARD_MMC:
@@ -50,6 +164,12 @@ void studentToJson(JsonObject object, const StudentInfo &student) {
   object["studentName"] = student.studentName;
   object["course"] = student.course;
   object["yearLevel"] = student.yearLevel;
+  object["section"] = student.section;
+  object["courseCanonical"] = student.courseCanonical;
+  object["yearLevelCanonical"] = student.yearLevelCanonical;
+  object["sectionCanonical"] = student.sectionCanonical;
+  object["bodScope"] = student.bodScope;
+  object["bodScopeCanonical"] = student.bodScopeCanonical;
   object["sessionId"] = student.sessionId;
   object["queueId"] = student.queueId;
   object["fingerprintStatus"] = student.fingerprintStatus;
@@ -59,6 +179,12 @@ void studentToJson(JsonObject object, const StudentInfo &student) {
   object["remarks"] = student.remarks;
   object["enrolledAtIso"] = student.enrolledAtIso;
   object["templateId"] = student.templateId;
+  object["isActive"] = student.isActive;
+  object["activeKnown"] = student.activeKnown;
+  object["preregistered"] = student.preregistered;
+  object["preregisteredKnown"] = student.preregisteredKnown;
+  object["paymentSatisfied"] = student.paymentSatisfied;
+  object["paymentKnown"] = student.paymentKnown;
   object["enrollmentSynced"] = student.enrollmentSynced;
 }
 
@@ -69,6 +195,15 @@ StudentInfo studentFromJson(JsonObjectConst object) {
   student.studentName = String(object["studentName"] | "");
   student.course = String(object["course"] | "");
   student.yearLevel = String(object["yearLevel"] | object["year"] | "");
+  student.section = String(object["section"] | "");
+  student.courseCanonical =
+      String(object["courseCanonical"] | object["courseCode"] | "");
+  student.yearLevelCanonical =
+      String(object["yearLevelCanonical"] | object["yearCanonical"] | "");
+  student.sectionCanonical = String(object["sectionCanonical"] | "");
+  student.bodScope =
+      String(object["bodScope"] | object["organization"] | object["scope"] | "");
+  student.bodScopeCanonical = String(object["bodScopeCanonical"] | "");
   student.sessionId = String(object["sessionId"] | "");
   student.queueId = String(object["queueId"] | "");
   student.fingerprintStatus = String(object["fingerprintStatus"] | "");
@@ -78,7 +213,46 @@ StudentInfo studentFromJson(JsonObjectConst object) {
   student.remarks = String(object["remarks"] | "");
   student.enrolledAtIso = String(object["enrolledAtIso"] | "");
   student.templateId = object["templateId"] | -1;
+  student.isActive =
+      parseBoolValue(object["isActive"], parseBoolValue(object["active"], true));
+  student.activeKnown =
+      !object["isActive"].isNull() || !object["active"].isNull() ||
+      !object["accountActive"].isNull() || !object["accountStatus"].isNull();
+  if (!student.activeKnown) {
+    const String accountStatus =
+        String(object["accountStatus"] | object["profileStatus"] | "");
+    if (!accountStatus.isEmpty()) {
+      student.activeKnown = true;
+      student.isActive = parseBoolText(accountStatus, true);
+    }
+  }
+  student.preregistered = parseBoolValue(
+      object["preregistered"],
+      parseBoolValue(object["isPreregistered"],
+                     parseBoolValue(object["hasPreregistration"], false)));
+  student.preregisteredKnown =
+      !object["preregistered"].isNull() || !object["isPreregistered"].isNull() ||
+      !object["hasPreregistration"].isNull() ||
+      !object["registrationStatus"].isNull();
+  if (!object["registrationStatus"].isNull()) {
+    student.preregisteredKnown = true;
+    student.preregistered =
+        parseBoolText(String(object["registrationStatus"] | ""), false);
+  }
+  student.paymentSatisfied = parseBoolValue(
+      object["paymentSatisfied"],
+      parseBoolValue(object["isPaid"],
+                     parseBoolValue(object["paymentCleared"], false)));
+  student.paymentKnown =
+      !object["paymentSatisfied"].isNull() || !object["isPaid"].isNull() ||
+      !object["paymentCleared"].isNull() || !object["paymentStatus"].isNull();
+  if (!object["paymentStatus"].isNull()) {
+    student.paymentKnown = true;
+    student.paymentSatisfied =
+        parseBoolText(String(object["paymentStatus"] | ""), false);
+  }
   student.enrollmentSynced = object["enrollmentSynced"] | false;
+  CampusEligibility::normalizeStudent(student);
   return student;
 }
 
@@ -368,7 +542,32 @@ void eventToJson(JsonObject object, const EventInfo &event) {
   object["scheduledTimeEnd"] = event.scheduledTimeEnd;
   object["location"] = event.location;
   object["status"] = event.status;
+  object["targetMode"] = event.targetMode;
+  object["courseFilterLabel"] = event.courseFilterLabel;
+  object["yearLevelFilterLabel"] = event.yearLevelFilterLabel;
+  object["sectionFilterLabel"] = event.sectionFilterLabel;
+  JsonArray courseFilters = object.createNestedArray("courseFilters");
+  for (const auto &entry : event.courseFilters) {
+    courseFilters.add(entry);
+  }
+  JsonArray yearLevelFilters = object.createNestedArray("yearLevelFilters");
+  for (const auto &entry : event.yearLevelFilters) {
+    yearLevelFilters.add(entry);
+  }
+  JsonArray sectionFilters = object.createNestedArray("sectionFilters");
+  for (const auto &entry : event.sectionFilters) {
+    sectionFilters.add(entry);
+  }
+  JsonArray targetedStudentIds = object.createNestedArray("targetedStudentIds");
+  for (const auto &studentUid : event.targetedStudentIds) {
+    targetedStudentIds.add(studentUid);
+  }
+  object["bodScope"] = event.bodScope;
+  object["bodScopeCanonical"] = event.bodScopeCanonical;
   object["requiresRegistration"] = event.requiresRegistration;
+  object["preregistrationRequired"] = event.preregistrationRequired;
+  object["paymentRequired"] = event.paymentRequired;
+  object["activeOnly"] = event.activeOnly;
   object["timeOutFinalized"] = event.timeOutFinalized;
 }
 
@@ -384,9 +583,52 @@ EventInfo eventFromJson(JsonObjectConst object) {
       String(object["scheduledTimeEnd"] | object["endTime"] | "");
   event.location = String(object["location"] | "");
   event.status = String(object["status"] | "");
+  event.targetMode = String(object["targetMode"] | object["targetingMode"] |
+                            object["audienceMode"] | "");
+  if (event.targetMode.isEmpty() && !object["targetSpecificStudents"].isNull()) {
+    event.targetMode =
+        parseBoolValue(object["targetSpecificStudents"], false) ? "specificStudents"
+                                                                : "broad";
+  } else if (event.targetMode.isEmpty() &&
+             !object["specificStudentsOnly"].isNull()) {
+    event.targetMode =
+        parseBoolValue(object["specificStudentsOnly"], false) ? "specificStudents"
+                                                              : "broad";
+  }
+  event.courseFilterLabel = String(object["courseFilterLabel"] |
+                                   object["courseFilter"] |
+                                   object["targetCourse"] | object["course"] | "");
+  event.yearLevelFilterLabel = String(object["yearLevelFilterLabel"] |
+                                      object["yearLevelFilter"] |
+                                      object["targetYearLevel"] |
+                                      object["yearLevel"] | object["year"] | "");
+  event.sectionFilterLabel = String(object["sectionFilterLabel"] |
+                                    object["sectionFilter"] |
+                                    object["targetSection"] |
+                                    object["section"] | "");
+  appendStringValues(object["courseFilters"], event.courseFilters);
+  appendStringValues(object["targetCourses"], event.courseFilters);
+  appendStringValues(object["yearLevelFilters"], event.yearLevelFilters);
+  appendStringValues(object["targetYearLevels"], event.yearLevelFilters);
+  appendStringValues(object["sectionFilters"], event.sectionFilters);
+  appendStringValues(object["targetSections"], event.sectionFilters);
+  appendStringValues(object["targetedStudentIds"], event.targetedStudentIds);
+  appendStringValues(object["targetedStudents"], event.targetedStudentIds);
+  event.bodScope =
+      String(object["bodScope"] | object["bodScopeFilter"] |
+             object["organizationScope"] | "");
+  event.bodScopeCanonical = String(object["bodScopeCanonical"] | "");
   event.requiresRegistration = object["requiresRegistration"] | false;
+  event.preregistrationRequired =
+      parseBoolValue(object["preregistrationRequired"], event.requiresRegistration);
+  event.paymentRequired = parseBoolValue(object["paymentRequired"],
+                                         parseBoolValue(object["requiresPayment"], false));
+  event.activeOnly =
+      parseBoolValue(object["activeOnly"],
+                     parseBoolValue(object["requiresActiveStatus"], false));
   event.timeOutFinalized = object["timeOutFinalized"] | false;
   normalizeEventSchedule(event);
+  CampusEligibility::normalizeEvent(event);
   return event;
 }
 }  // namespace
@@ -613,16 +855,25 @@ bool StorageManager::clearPairedEvent() {
 bool StorageManager::savePairedEventContext(
     const EventInfo &event, const std::vector<StudentInfo> &students,
     const std::vector<String> &recordedStudentIds) {
-  if (!savePairedEvent(event) || !littleFsReady_) {
+  EventInfo normalizedEvent = event;
+  CampusEligibility::normalizeEvent(normalizedEvent);
+
+  std::vector<StudentInfo> normalizedStudents = students;
+  for (auto &student : normalizedStudents) {
+    CampusEligibility::normalizeStudent(student);
+  }
+
+  if (!savePairedEvent(normalizedEvent) || !littleFsReady_) {
     return false;
   }
 
-  if (!writePairedEventContext(event, students, recordedStudentIds)) {
+  if (!writePairedEventContext(normalizedEvent, normalizedStudents,
+                               recordedStudentIds)) {
     return false;
   }
 
-  pairedEventCache_ = event;
-  pairedStudentsCache_ = students;
+  pairedEventCache_ = normalizedEvent;
+  pairedStudentsCache_ = normalizedStudents;
   remoteRecordedStudentIdsCache_ = recordedStudentIds;
   pairedEventContextLoaded_ = true;
   return true;
@@ -636,6 +887,18 @@ bool StorageManager::loadPairedEventContext(
   students = pairedStudentsCache_;
   recordedStudentIds = remoteRecordedStudentIdsCache_;
   return event.isValid();
+}
+
+CampusEligibility::EventEligibilityDecision
+StorageManager::evaluateStudentEligibilityForEvent(const EventInfo &event,
+                                                   const StudentInfo &student) const {
+  ensurePairedEventContextLoaded();
+  const std::vector<StudentInfo> *pairedStudents = &pairedStudentsCache_;
+  if (!pairedEventCache_.isValid() || pairedEventCache_.eventId != event.eventId) {
+    static const std::vector<StudentInfo> kEmptyStudents;
+    pairedStudents = &kEmptyStudents;
+  }
+  return CampusEligibility::evaluateStudentForEvent(event, *pairedStudents, student);
 }
 
 bool StorageManager::isStudentAuthorizedForEvent(const String &eventId,
@@ -839,26 +1102,30 @@ bool StorageManager::upsertFingerprintMapping(const StudentInfo &student) {
     return false;
   }
 
+  StudentInfo normalizedStudent = student;
+  CampusEligibility::normalizeStudent(normalizedStudent);
+
   ensureFingerprintMappingsLoaded();
   bool updated = false;
 
   for (auto &entry : fingerprintMappingsCache_) {
-    if (entry.studentUid == student.studentUid || entry.templateId == student.templateId) {
-      entry = student;
+    if (entry.studentUid == normalizedStudent.studentUid ||
+        entry.templateId == normalizedStudent.templateId) {
+      entry = normalizedStudent;
       updated = true;
       break;
     }
   }
 
   if (!updated) {
-    fingerprintMappingsCache_.push_back(student);
+    fingerprintMappingsCache_.push_back(normalizedStudent);
   }
 
   if (!writeFingerprintMappings(fingerprintMappingsCache_)) {
     return false;
   }
 
-  return updateEnrollmentArtifacts(student);
+  return updateEnrollmentArtifacts(normalizedStudent);
 }
 
 bool StorageManager::findStudentByTemplate(int templateId, StudentInfo &outStudent) const {
