@@ -64,7 +64,8 @@ void test_broad_audience_non_matching_course_is_rejected() {
 
   TEST_ASSERT_FALSE(decision.allowed);
   TEST_ASSERT_TRUE(decision.blockedByCourse);
-  TEST_ASSERT_EQUAL_STRING("course_mismatch", decision.finalReason.c_str());
+  TEST_ASSERT_EQUAL_STRING("student_not_in_target_scope",
+                           decision.finalReason.c_str());
 }
 
 void test_specific_students_mode_only_selected_students_are_allowed() {
@@ -81,8 +82,41 @@ void test_specific_students_mode_only_selected_students_are_allowed() {
 
   TEST_ASSERT_TRUE(allowed.allowed);
   TEST_ASSERT_FALSE(rejected.allowed);
-  TEST_ASSERT_EQUAL_STRING("student_not_in_targeted_students",
+  TEST_ASSERT_EQUAL_STRING("student_not_in_targeted_list",
                            rejected.finalReason.c_str());
+}
+
+void test_specific_students_mode_accepts_targeted_school_id() {
+  EventInfo event = makeSpecificEvent();
+  event.targetedStudentIds.clear();
+  event.targetedSchoolIds.push_back("2026-student-777");
+  const StudentInfo student =
+      makeStudent("student-777", "Mechanical Engineering", "1");
+
+  const auto decision =
+      CampusEligibility::evaluateStudentForEvent(event, {}, student);
+
+  TEST_ASSERT_TRUE(decision.allowed);
+  TEST_ASSERT_TRUE(decision.matchedTargetedSchoolId);
+  TEST_ASSERT_EQUAL_STRING("matched_targeted_school_id",
+                           decision.finalReason.c_str());
+}
+
+void test_broad_event_without_filters_or_roster_requires_valid_context() {
+  EventInfo event;
+  event.eventId = "evt-broad-empty";
+  event.title = "Broken Event";
+  event.targetMode = "broad";
+  const StudentInfo student =
+      makeStudent("student-008", "Computer Engineering", "4th Year");
+
+  const auto decision =
+      CampusEligibility::evaluateStudentForEvent(event, {}, student);
+
+  TEST_ASSERT_FALSE(decision.allowed);
+  TEST_ASSERT_TRUE(decision.stalePairedEventData);
+  TEST_ASSERT_EQUAL_STRING("paired_event_context_corrupt",
+                           decision.finalReason.c_str());
 }
 
 void test_empty_targeted_students_does_not_reject_broad_audience_event() {
@@ -123,8 +157,10 @@ void setup() {
   RUN_TEST(test_broad_audience_matching_student_is_allowed);
   RUN_TEST(test_broad_audience_non_matching_course_is_rejected);
   RUN_TEST(test_specific_students_mode_only_selected_students_are_allowed);
+  RUN_TEST(test_specific_students_mode_accepts_targeted_school_id);
   RUN_TEST(test_empty_targeted_students_does_not_reject_broad_audience_event);
   RUN_TEST(test_course_and_year_variants_match_after_normalization);
+  RUN_TEST(test_broad_event_without_filters_or_roster_requires_valid_context);
   UNITY_END();
 }
 

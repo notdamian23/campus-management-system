@@ -4,7 +4,12 @@ import {
   normalizeCourseCode,
   resolveCourseFromCode,
 } from "@/lib/courseOptions";
-import { isEcRole } from "@/lib/campus-role";
+import {
+  isBodRole,
+  isEcRole,
+  isEcWorkspaceRole as isEcWorkspaceRoleValue,
+  normalizeCampusRole,
+} from "@/lib/campus-role";
 
 export const EC_POSITION_OPTIONS = [
   "President",
@@ -37,7 +42,9 @@ type ECProfileLike = {
   ecScope?: unknown;
   assignedCourse?: unknown;
   courseScope?: unknown;
+  courseScopeLabel?: unknown;
   isBod?: unknown;
+  isStudent?: unknown;
 } | null | undefined;
 
 type StudentLike = {
@@ -86,6 +93,10 @@ function normalizeCourseList(value: unknown) {
 
 export function isECMemberRole(role: unknown) {
   return isEcRole(role);
+}
+
+export function isECWorkspaceRole(role: unknown) {
+  return isEcWorkspaceRoleValue(role);
 }
 
 export function normalizeECScope(value: unknown): ECScope | "" {
@@ -158,26 +169,36 @@ function resolveRawAssignedCourseCode(profile: ECProfileLike) {
 }
 
 export function getAssignedCourseCode(profile: ECProfileLike) {
-  if (!profile || !isECMemberRole(profile.role)) return null;
-  if (normalizeECScope(profile.ecScope) === "all") return null;
+  if (!profile || !isEcWorkspaceRoleValue(profile.role)) return null;
+  if (!isBOD(profile) && normalizeECScope(profile.ecScope) === "all") return null;
   return resolveRawAssignedCourseCode(profile);
 }
 
 export function getCourseScope(profile: ECProfileLike) {
   if (!profile) return null;
 
+  const normalizedRole = normalizeCampusRole(profile.role);
   const ecScope = normalizeECScope(profile.ecScope);
-  const assignedCourse = getAssignedCourseCode(profile);
+  const assignedCourse = resolveRawAssignedCourseCode(profile);
+  const explicitLegacyScope =
+    normalizeMaybeCourse(profile.courseScope) ||
+    normalizeMaybeCourse(profile.courseScopeLabel);
 
-  if (ecScope === "course" && assignedCourse) {
+  if (isBOD(profile)) {
+    if (explicitLegacyScope) return explicitLegacyScope;
+    if (assignedCourse) {
+      return resolveCourseFromCode(assignedCourse) || null;
+    }
+    return inferCourseScopeFromPosition(profile.ecPosition);
+  }
+
+  if ((normalizedRole === "ecmember" || isEcRole(profile.role)) && ecScope === "course" && assignedCourse) {
     return resolveCourseFromCode(assignedCourse) || null;
   }
 
   if (ecScope === "all") {
     return null;
   }
-
-  const explicitLegacyScope = normalizeMaybeCourse(profile.courseScope);
   if (explicitLegacyScope) return explicitLegacyScope;
 
   if (assignedCourse) {
@@ -188,6 +209,7 @@ export function getCourseScope(profile: ECProfileLike) {
 }
 
 export function isBOD(profile: ECProfileLike) {
+  if (isBodRole(profile?.role)) return true;
   if (!isECMemberRole(profile?.role)) return false;
 
   const ecScope = normalizeECScope(profile?.ecScope);

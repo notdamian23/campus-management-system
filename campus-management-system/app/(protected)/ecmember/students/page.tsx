@@ -70,6 +70,7 @@ import {
   getCourseScope,
   isBOD,
 } from "@/lib/ec-permissions";
+import { normalizeCourse } from "@/lib/courseOptions";
 import {
   createCampusStudent,
   logPermissionDeniedAttemptForCurrentUser,
@@ -242,6 +243,39 @@ const DEFAULT_YEARS = [
   "4th Year",
   "5th Year",
 ];
+const STUDENT_SUMMARY_CARD_CONFIG = [
+  {
+    label: "Mechanical",
+    course: "Mechanical Engineering",
+    tone: "amber" as const,
+    icon: BookMarked,
+  },
+  {
+    label: "Electrical",
+    course: "Electrical Engineering",
+    tone: "green" as const,
+    icon: ShieldCheck,
+  },
+  {
+    label: "Electronics",
+    course: "Electronics Engineering",
+    tone: "purple" as const,
+    icon: Fingerprint,
+  },
+  {
+    label: "Computer",
+    course: "Computer Engineering",
+    tone: "blue" as const,
+    icon: BookOpenText,
+  },
+  {
+    label: "Industrial",
+    course: "Industrial Engineering",
+    tone: "slate" as const,
+    icon: GraduationCap,
+  },
+] as const;
+const BOD_SCOPE_MISSING_ERROR = "Course scope missing for B.O.D account";
 const STUDENTS_PER_PAGE_DESKTOP = 10;
 const STUDENTS_PER_PAGE_PHONE = 5;
 const PHONE_BREAKPOINT_PX = 768;
@@ -545,6 +579,32 @@ function toErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+function toScopedStudentErrorMessage(
+  error: unknown,
+  fallback: string,
+  viewerCourseScope: string | null,
+  viewerIsBod: boolean,
+) {
+  if (!viewerIsBod) {
+    return toErrorMessage(error, fallback);
+  }
+
+  if (!viewerCourseScope) {
+    return "B.O.D course scope is missing. Ask admin to update your account.";
+  }
+
+  const message = toErrorMessage(error, fallback);
+  const lowered = message.toLowerCase();
+  if (
+    lowered.includes("permission-denied") ||
+    lowered.includes("missing or insufficient permissions")
+  ) {
+    return `This B.O.D account can only manage ${viewerCourseScope} records.`;
+  }
+
+  return message;
+}
+
 async function logStudentPermissionDeniedAttempt(
   action: string,
   targetId: string,
@@ -683,6 +743,13 @@ export default function ECStudentLookup() {
 
   const loadStudents = useCallback(async () => {
     if (!viewerProfileReady) {
+      return;
+    }
+
+    if (viewerIsBod && !viewerCourseScope) {
+      setStudents([]);
+      setLoading(false);
+      setLoadError(BOD_SCOPE_MISSING_ERROR);
       return;
     }
 
@@ -986,6 +1053,9 @@ export default function ECStudentLookup() {
   const selectedStudentStatus = selectedStudent?.status ?? "Active";
   const selectedStudentReadyForClearance =
     selectedStudent?.readyForClearance ?? false;
+  const bodStudentOnlyError = viewerCourseScope
+    ? `This B.O.D account can only manage ${viewerCourseScope} student records.`
+    : "B.O.D course scope is missing. Ask admin to update your account.";
 
   const updateStudentState = useCallback(
     (studentUid: string, patch: StudentPatch) => {
@@ -1399,73 +1469,45 @@ export default function ECStudentLookup() {
 
   useECPageErrorToast(loadError, "student lookup");
 
-  const summaryCards = useMemo(
-    () => [
-      { label: "Total Students", count: students.length },
-      {
-        label: "Mechanical",
-        count: students.filter((s) => s.course === "Mechanical Engineering")
-          .length,
-      },
-      {
-        label: "Electrical",
-        count: students.filter((s) => s.course === "Electrical Engineering")
-          .length,
-      },
-      {
-        label: "Electronics",
-        count: students.filter((s) => s.course === "Electronics Engineering")
-          .length,
-      },
-      {
-        label: "Computer",
-        count: students.filter((s) => s.course === "Computer Engineering")
-          .length,
-      },
-      {
-        label: "Industrial",
-        count: students.filter((s) => s.course === "Industrial Engineering")
-          .length,
-      },
-    ],
-    [students],
-  );
-
   const summaryItems = useMemo<ECStatItem[]>(
-    () =>
-      summaryCards.map((item, index) => ({
-        label: item.label,
-        value: item.count,
-        description:
-          item.label === "Total Students"
-            ? "Engineering roster visibility"
-            : "Active roster count",
-        tone:
-          index === 0
-            ? "blue"
-            : index === 1
-              ? "amber"
-              : index === 2
-                ? "green"
-                : index === 3
-                  ? "purple"
-                  : index === 4
-                    ? "blue"
-                    : "slate",
-        icon:
-          item.label === "Total Students"
-            ? Users
-            : item.label === "Mechanical"
-              ? BookMarked
-              : item.label === "Electrical"
-                ? ShieldCheck
-                : item.label === "Electronics"
-                  ? Fingerprint
-                  : item.label === "Computer"
-                    ? BookOpenText
-                    : GraduationCap,
-      })),
-    [summaryCards],
+    () => {
+      const normalizedViewerCourseScope = normalizeCourse(
+        viewerCourseScope ?? "",
+      );
+      const scopedSummaryCards =
+        viewerIsBod ?
+          normalizedViewerCourseScope ?
+            STUDENT_SUMMARY_CARD_CONFIG.filter(
+              (item) =>
+                normalizeCourse(item.course) === normalizedViewerCourseScope,
+            ) :
+            [] :
+          STUDENT_SUMMARY_CARD_CONFIG;
+
+      return [
+        {
+          label: "Total Students",
+          value: students.length,
+          description:
+            viewerIsBod && !viewerCourseScope ?
+              BOD_SCOPE_MISSING_ERROR :
+              "Engineering roster visibility",
+          tone: "blue",
+          icon: Users,
+        },
+        ...scopedSummaryCards.map((item) => ({
+          label: item.label,
+          value: students.filter(
+            (student) =>
+              normalizeCourse(student.course) === normalizeCourse(item.course),
+          ).length,
+          description: "Visible roster count",
+          tone: item.tone,
+          icon: item.icon,
+        })),
+      ];
+    },
+    [students, viewerCourseScope, viewerIsBod],
   );
 
   const clearFilters = () => {
@@ -1490,6 +1532,14 @@ export default function ECStudentLookup() {
   };
 
   const openEditProfileModal = (student: Student) => {
+    if (viewerIsBod && student.role !== "student") {
+      setStatusNotice({
+        type: "err",
+        msg: bodStudentOnlyError,
+      });
+      return;
+    }
+
     setEditProfileName(student.name);
     setEditProfileSchoolId(student.id);
     setEditProfileCourse(toEditableFieldValue(student.course));
@@ -1508,6 +1558,19 @@ export default function ECStudentLookup() {
         title: "Student record incomplete",
         description: "This student record is missing a UID.",
         dedupeKey: "ec-students:missing-uid",
+      });
+      return;
+    }
+
+    if (viewerIsBod && student.role !== "student") {
+      setStatusNotice({
+        type: "err",
+        msg: bodStudentOnlyError,
+      });
+      campusToast.error({
+        title: "Status update unavailable",
+        description: bodStudentOnlyError,
+        dedupeKey: `ec-students:status-role-blocked:${student.uid}`,
       });
       return;
     }
@@ -1539,7 +1602,12 @@ export default function ECStudentLookup() {
         student.uid,
         error,
       );
-      const message = toErrorMessage(error, "Failed to update student status.");
+      const message = toScopedStudentErrorMessage(
+        error,
+        "Failed to update student status.",
+        viewerCourseScope,
+        viewerIsBod,
+      );
       setStatusNotice({
         type: "err",
         msg: message,
@@ -1564,6 +1632,19 @@ export default function ECStudentLookup() {
         title: "Student record incomplete",
         description: "This student record is missing a UID.",
         dedupeKey: "ec-students:clearance:missing-uid",
+      });
+      return;
+    }
+
+    if (viewerIsBod && student.role !== "student") {
+      setStatusNotice({
+        type: "err",
+        msg: bodStudentOnlyError,
+      });
+      campusToast.error({
+        title: "Clearance update unavailable",
+        description: bodStudentOnlyError,
+        dedupeKey: `ec-students:clearance-role-blocked:${student.uid}`,
       });
       return;
     }
@@ -1622,9 +1703,11 @@ export default function ECStudentLookup() {
         student.uid,
         error,
       );
-      const message = toErrorMessage(
+      const message = toScopedStudentErrorMessage(
         error,
         "Failed to mark this student ready for clearance.",
+        viewerCourseScope,
+        viewerIsBod,
       );
       setStatusNotice({
         type: "err",
@@ -1646,6 +1729,15 @@ export default function ECStudentLookup() {
         title: "Profile unavailable",
         description: "Select a student record before editing the profile.",
         dedupeKey: "ec-students:edit-profile:no-student",
+      });
+      return;
+    }
+
+    if (viewerIsBod && selectedStudentRole !== "student") {
+      campusToast.error({
+        title: "Profile update unavailable",
+        description: bodStudentOnlyError,
+        dedupeKey: "ec-students:edit-profile:role-blocked",
       });
       return;
     }
@@ -1779,9 +1871,11 @@ export default function ECStudentLookup() {
         selectedStudent.uid,
         error,
       );
-      const message = toErrorMessage(
+      const message = toScopedStudentErrorMessage(
         error,
         "Failed to save profile changes.",
+        viewerCourseScope,
+        viewerIsBod,
       );
       campusToast.error({
         title: "Profile update failed",
@@ -1844,9 +1938,11 @@ export default function ECStudentLookup() {
         schoolId,
         error,
       );
-      const message = toErrorMessage(
+      const message = toScopedStudentErrorMessage(
         error,
         "Failed to create student account.",
+        viewerCourseScope,
+        viewerIsBod,
       );
       setNotice({ type: "err", msg: message });
       campusToast.error({
@@ -1878,6 +1974,11 @@ export default function ECStudentLookup() {
             {viewerIsBod && viewerCourseScope && (
               <Chip variant="flat" className="bg-white/15 text-white">
                 Course scope: {viewerCourseScope}
+              </Chip>
+            )}
+            {viewerIsBod && !viewerCourseScope && viewerProfileReady && (
+              <Chip variant="flat" className="bg-amber-100 text-amber-900">
+                Scope missing
               </Chip>
             )}
           </>
@@ -2159,9 +2260,9 @@ export default function ECStudentLookup() {
                     <p className="text-base font-semibold text-campus-text-primary break-words">
                       {student.name}
                     </p>
-                    {student.role === "ecmember" && (
+                    {(student.role === "ecmember" || student.role === "bod") && (
                       <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-campus-text-secondary">
-                        EC member profile
+                        {student.role === "bod" ? "B.O.D. profile" : "EC member profile"}
                       </p>
                     )}
                     <p className="text-xs text-campus-text-secondary break-all">
@@ -2249,9 +2350,9 @@ export default function ECStudentLookup() {
                   <p className="font-semibold text-campus-text-primary">
                     {student.name}
                   </p>
-                  {student.role === "ecmember" && (
+                  {(student.role === "ecmember" || student.role === "bod") && (
                     <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-campus-text-secondary">
-                      EC member profile
+                      {student.role === "bod" ? "B.O.D. profile" : "EC member profile"}
                     </p>
                   )}
                   <p className="text-xs text-campus-text-secondary">
@@ -2425,6 +2526,7 @@ export default function ECStudentLookup() {
                           }
                           isLoading={updatingStudentUid === selectedStudent.uid}
                           isDisabled={
+                            (viewerIsBod && selectedStudent.role !== "student") ||
                             markingClearanceStudentUid === selectedStudent.uid ||
                             savingProfileUid === selectedStudent.uid
                           }
@@ -2456,6 +2558,7 @@ export default function ECStudentLookup() {
                             markingClearanceStudentUid === selectedStudent.uid
                           }
                           isDisabled={
+                            (viewerIsBod && selectedStudent.role !== "student") ||
                             updatingStudentUid === selectedStudent.uid ||
                             savingProfileUid === selectedStudent.uid
                           }
@@ -2469,6 +2572,7 @@ export default function ECStudentLookup() {
                           variant="bordered"
                           onPress={() => openEditProfileModal(selectedStudent)}
                           isDisabled={
+                            (viewerIsBod && selectedStudent.role !== "student") ||
                             updatingStudentUid === selectedStudent.uid ||
                             markingClearanceStudentUid === selectedStudent.uid
                           }
@@ -2477,6 +2581,14 @@ export default function ECStudentLookup() {
                         </Button>
                       </div>
                     )}
+                    {selectedStudent &&
+                      viewerIsBod &&
+                      selectedStudent.role !== "student" && (
+                        <p className="mt-2 text-xs text-amber-700">
+                          B.O.D actions stay limited to student records within
+                          {` ${viewerCourseScope ?? "your assigned course"}.`}
+                        </p>
+                      )}
                   </div>
                 </div>
               </ModalHeader>

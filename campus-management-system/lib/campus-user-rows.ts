@@ -24,6 +24,7 @@ export type CampusFingerprintStatus = "Active" | "Inactive";
 export type CampusUserProfileSource = {
   uid?: string;
   role?: string;
+  isStudent?: boolean;
   schoolId?: string;
   studentId?: string;
   email?: string;
@@ -49,6 +50,7 @@ export type CampusUserProfileSource = {
 
 export type CampusUserProjectionSource = {
   uid?: string;
+  isStudent?: boolean;
   studentId?: string;
   schoolId?: string;
   firstName?: string;
@@ -88,6 +90,7 @@ export type CampusUserRow = {
   assignedCourseLabel: string;
   courseScope: string | null;
   isBod: boolean;
+  isStudent: boolean;
   course: string;
   yearLevel: string;
   accountStatus: CampusAccountStatus;
@@ -230,7 +233,11 @@ export function normalizeCampusUserRow(
     }) || missingNameLabel;
   const studentId =
     rawStudentId ||
-    ((role === "student" || role === "ecmember") && fallbackSchoolIdToStudentId
+    ((role === "student" ||
+      role === "bod" ||
+      profile?.isStudent === true ||
+      projection?.isStudent === true) &&
+    fallbackSchoolIdToStudentId
       ? schoolId
       : missingStudentIdLabel);
   const actualCourse =
@@ -241,9 +248,15 @@ export function normalizeCampusUserRow(
     trimValue(projection?.yearLevel) ||
     trimValue(projection?.year);
   const assignedCourse = getAssignedCourseCode(profile);
+  const isBod = isBOD(profile);
+  const isStudent =
+    role === "student" ||
+    profile?.isStudent === true ||
+    projection?.isStudent === true ||
+    isBod;
   const derivedEcScope =
-    role === "ecmember"
-      ? normalizeECScope(profile?.ecScope) || (isBOD(profile) ? "course" : "all")
+    role === "ecmember" || role === "bod"
+      ? normalizeECScope(profile?.ecScope) || (isBod ? "course" : "all")
       : null;
 
   return {
@@ -264,7 +277,8 @@ export function normalizeCampusUserRow(
       ? resolveCourseLabelFromCode(assignedCourse)
       : "",
     courseScope: getCourseScope(profile),
-    isBod: isBOD(profile),
+    isBod,
+    isStudent,
     course:
       role === "teacher" || role === "admin"
         ? "-"
@@ -313,7 +327,7 @@ export function buildCampusProfileUpdatePayload({
   }
 
   const studentPatch =
-    normalizedRole === "student" || normalizedRole === "ecmember"
+    normalizedRole === "student" || normalizedRole === "bod"
       ? {
           schoolId: normalizedSchoolId,
           name: normalizedName,
@@ -322,6 +336,7 @@ export function buildCampusProfileUpdatePayload({
           course: normalizedCourse,
           year: normalizedYearLevel,
           yearLevel: normalizedYearLevel,
+          isStudent: true,
         }
       : null;
 

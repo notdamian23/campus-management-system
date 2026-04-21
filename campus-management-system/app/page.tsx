@@ -24,6 +24,7 @@ import {
   signOut,
 } from "firebase/auth";
 import {
+  canAccessStudentPortal,
   type CampusProfileDoc,
   finalizeVerifiedProfile,
   getOnboardingRedirect,
@@ -402,17 +403,21 @@ function LoginForm() {
         }
       }
 
+      const finalRole = normalizeCampusRole(data.role) || role;
+
       // 3) Set cookies ONCE (middleware uses these)
       setCampusCookies({
-        role,
+        role: finalRole,
         mustChangePassword: data.mustChangePassword === true,
         emailVerificationPending: data.emailVerificationPending === true,
+        canAccessStudentPortal: canAccessStudentPortal(data),
       });
 
       const onboardingRedirect = getOnboardingRedirect(data);
       if (onboardingRedirect) {
         logCampusAuthEvent("info", "Redirecting to onboarding step", {
           onboardingRedirect,
+          role: finalRole,
         });
         router.push(onboardingRedirect);
         return;
@@ -428,9 +433,9 @@ function LoginForm() {
       }
 
       logCampusAuthEvent("info", "Redirecting to role home after login", {
-        role,
+        role: finalRole,
       });
-      router.push(resolveRoleHome(role));
+      router.push(resolveRoleHome(finalRole));
     } catch (e: unknown) {
       const error = e as { code?: string; message?: string };
       const code = error.code;

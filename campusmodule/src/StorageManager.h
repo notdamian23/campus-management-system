@@ -20,6 +20,8 @@ class StorageManager {
   bool loadPairedEventContext(EventInfo &event,
                               std::vector<StudentInfo> &students,
                               std::vector<String> &recordedStudentIds) const;
+  bool hasPairedEventContextCache() const;
+  String pairedEventContextStatus() const;
   CampusEligibility::EventEligibilityDecision evaluateStudentEligibilityForEvent(
       const EventInfo &event, const StudentInfo &student) const;
   bool isStudentAuthorizedForEvent(const String &eventId,
@@ -36,14 +38,29 @@ class StorageManager {
   EnrollmentSessionInfo loadCurrentEnrollmentSession() const;
   bool saveCurrentEnrollmentSession(const EnrollmentSessionInfo &session);
   bool clearCurrentEnrollmentSession();
+  bool saveEnrollmentQueueToSd(const EnrollmentSessionInfo &session,
+                               const std::vector<StudentInfo> &students);
+  bool loadEnrollmentQueuePageFromSd(size_t offset, size_t limit,
+                                     std::vector<StudentInfo> &students,
+                                     bool pendingOnly = true) const;
+  EnrollmentQueueStats getEnrollmentQueueStatsFromSd() const;
+  bool findEnrollmentStudentInSd(const String &studentKey,
+                                 StudentInfo &student) const;
+  bool updateEnrollmentStudentRowOnSd(const StudentInfo &student);
+  bool appendEnrollmentResultToSd(const StudentInfo &student);
+  std::vector<StudentInfo> loadUnsyncedEnrollmentResultsFromSd(size_t limit) const;
+  bool markEnrollmentResultSyncedOnSd(const String &sessionId,
+                                      const String &studentUid);
 
   std::vector<StudentInfo> loadPendingStudents() const;
   bool savePendingStudents(const std::vector<StudentInfo> &students);
 
   std::vector<StudentInfo> loadFingerprintMappings() const;
   bool upsertFingerprintMapping(const StudentInfo &student);
+  bool upsertFingerprintMappingCacheOnly(const StudentInfo &student);
   bool findStudentByTemplate(int templateId, StudentInfo &outStudent) const;
   FingerprintTemplateOwnership resolveTemplateOwnership(int templateId) const;
+  FingerprintTemplateOwnership resolveTemplateOwnershipFromSd(int templateId) const;
   bool applyCleanupQueueItem(const CleanupQueueItem &item, String &error);
   int nextFreeTemplateId(uint16_t startId, uint16_t endId) const;
   std::vector<StudentInfo> loadUnsyncedEnrollments() const;
@@ -62,6 +79,9 @@ class StorageManager {
   bool applySyncResults(const std::vector<SyncItemResult> &results);
   bool exportAttendanceCsv(const EventInfo &event, const TimeSnapshot &generatedAt,
                            String &path) const;
+  bool saveFingerprintRosterToSd(Stream &stream, size_t expectedBytes,
+                                 FingerprintRosterStats &stats, String &error);
+  FingerprintRosterStats getFingerprintRosterStats();
 
   bool ensureSdReady();
   bool isSdReady() const;
@@ -96,6 +116,8 @@ class StorageManager {
   bool lastSdWriteSucceeded_ = false;
 
   mutable bool pairedEventContextLoaded_ = false;
+  mutable bool pairedEventContextAvailable_ = false;
+  mutable String pairedEventContextStatus_ = "paired_event_context_missing";
   mutable EventInfo pairedEventCache_;
   mutable std::vector<StudentInfo> pairedStudentsCache_;
   mutable std::vector<String> remoteRecordedStudentIdsCache_;

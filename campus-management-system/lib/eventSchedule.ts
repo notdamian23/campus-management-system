@@ -104,9 +104,7 @@ function isTimeTba(value: string) {
 }
 
 function splitTimeRange(value: string) {
-  const rangeMatch = value.match(
-    /^(.+?)\s*(?:-|–|—|\bto\b)\s*(.+)$/i,
-  );
+  const rangeMatch = value.match(/^(.+?)\s*(?:-|\u2013|\u2014|\bto\b)\s*(.+)$/i);
   if (!rangeMatch) {
     return { start: value, end: "" };
   }

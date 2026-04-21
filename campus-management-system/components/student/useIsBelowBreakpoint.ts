@@ -1,22 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useIsBelowBreakpointValue } from "@/lib/useIsBelowBreakpoint";
 
 export function useIsBelowBreakpoint(breakpoint = 1024) {
-  const [isBelowBreakpoint, setIsBelowBreakpoint] = useState(false);
-
-  useEffect(() => {
-    const update = () => {
-      setIsBelowBreakpoint(window.innerWidth < breakpoint);
-    };
-
-    update();
-    window.addEventListener("resize", update);
-
-    return () => {
-      window.removeEventListener("resize", update);
-    };
-  }, [breakpoint]);
-
-  return isBelowBreakpoint;
+  return useIsBelowBreakpointValue(breakpoint);
 }

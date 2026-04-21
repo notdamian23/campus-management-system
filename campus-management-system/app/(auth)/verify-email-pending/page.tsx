@@ -21,6 +21,7 @@ import {
 import { campusToast } from "@/lib/toast";
 import {
   buildEmailActionSettings,
+  canAccessStudentPortal,
   clearCampusCookies,
   finalizeVerifiedProfile,
   getOnboardingRedirect,
@@ -76,6 +77,7 @@ export default function VerifyEmailPendingPage() {
         role: nextProfile.role ?? "",
         mustChangePassword: nextProfile.mustChangePassword === true,
         emailVerificationPending: nextProfile.emailVerificationPending === true,
+        canAccessStudentPortal: canAccessStudentPortal(nextProfile),
       });
 
       const onboardingRedirect = getOnboardingRedirect(nextProfile);

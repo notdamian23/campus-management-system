@@ -13,6 +13,7 @@ struct EventEligibilityDecision {
   bool targetModeSpecific = false;
   bool broadAudienceMode = false;
   bool matchedTargetedStudent = false;
+  bool matchedTargetedSchoolId = false;
   bool matchedPairedRoster = false;
   bool usedBroadAudienceFilters = false;
   bool usedPairedRosterFallback = false;

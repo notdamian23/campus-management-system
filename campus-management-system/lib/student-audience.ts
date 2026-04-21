@@ -1,4 +1,4 @@
-import { isEcRole, normalizeCampusRole } from "@/lib/campus-role";
+import { normalizeCampusRole } from "@/lib/campus-role";
 import {
   normalizeStudentNamePart,
   resolveStudentRawFullName,
@@ -6,6 +6,7 @@ import {
 
 export type StudentAudienceProfileLike = {
   role?: unknown;
+  isStudent?: unknown;
   schoolId?: unknown;
   studentId?: unknown;
   course?: unknown;
@@ -17,6 +18,11 @@ export type StudentAudienceProfileLike = {
   displayName?: unknown;
   firstName?: unknown;
   lastName?: unknown;
+  ecPosition?: unknown;
+  ecScope?: unknown;
+  assignedCourse?: unknown;
+  courseScope?: unknown;
+  isBod?: unknown;
 };
 
 const INVALID_STUDENT_AUDIENCE_VALUES = new Set([
@@ -29,6 +35,34 @@ const INVALID_STUDENT_AUDIENCE_VALUES = new Set([
 
 function trimValue(value: unknown) {
   return String(value ?? "").trim();
+}
+
+function normalizeLower(value: unknown) {
+  return trimValue(value).toLowerCase();
+}
+
+function isLegacyBodProfile(
+  profile?: StudentAudienceProfileLike | null,
+) {
+  const normalizedRole = normalizeCampusRole(profile?.role);
+  if (normalizedRole !== "ecmember") {
+    return false;
+  }
+
+  if (profile?.isBod === true) {
+    return true;
+  }
+
+  if (normalizeLower(profile?.ecScope) === "course") {
+    return true;
+  }
+
+  if (trimValue(profile?.assignedCourse) || trimValue(profile?.courseScope)) {
+    return true;
+  }
+
+  const position = trimValue(profile?.ecPosition);
+  return /^B\.O\.D\./i.test(position);
 }
 
 function hasMeaningfulStudentAudienceValue(value: unknown) {
@@ -53,11 +87,21 @@ export function resolveStudentAudienceName(
   }).trim();
 }
 
-export function isStudentAudienceProfile(
+export function hasStudentIdentityProfile(
   profile?: StudentAudienceProfileLike | null,
 ) {
   const normalizedRole = normalizeCampusRole(profile?.role);
-  if (normalizedRole !== "student" && !isEcRole(profile?.role)) {
+  return (
+    normalizedRole === "student" ||
+    profile?.isStudent === true ||
+    isLegacyBodProfile(profile)
+  );
+}
+
+export function isStudentAudienceProfile(
+  profile?: StudentAudienceProfileLike | null,
+) {
+  if (!hasStudentIdentityProfile(profile)) {
     return false;
   }
 

@@ -69,6 +69,7 @@ import {
   getCampusDocumentDownloadUrl,
 } from "@/lib/firebase-functions";
 import { auth, db, storage } from "@/lib/firebase";
+import { normalizeCourse, normalizeCourseSlug } from "@/lib/courseOptions";
 import { campusToast } from "@/lib/toast";
 
 type DocType = "PDF" | "Images" | "Word Files" | "Spreadsheets";
@@ -191,10 +192,7 @@ const inferDocType = (filename: string): DocType | null => {
 };
 
 const courseScopeToStorageSlug = (courseScope: string) => {
-  return courseScope
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  return normalizeCourseSlug(courseScope) || normalizeCourseSlug(normalizeCourse(courseScope));
 };
 
 const normalizeDocType = (
@@ -333,6 +331,35 @@ const toErrorMessage = (error: unknown): string => {
   return "Unknown error";
 };
 
+const toScopedUploadErrorMessage = (
+  error: unknown,
+  viewerCourseScope: string | null,
+  viewerIsBod: boolean,
+): string => {
+  const code = toErrorCode(error).toLowerCase();
+  const message = toErrorMessage(error);
+  const lowered = message.toLowerCase();
+
+  if (!viewerIsBod) {
+    return message;
+  }
+
+  if (!viewerCourseScope) {
+    return "B.O.D course scope is missing. Ask admin to update your account.";
+  }
+
+  if (
+    code.includes("storage/unauthorized") ||
+    code.includes("unauthorized") ||
+    lowered.includes("permission-denied") ||
+    lowered.includes("missing or insufficient permissions")
+  ) {
+    return "Upload path is outside your B.O.D course scope.";
+  }
+
+  return message;
+};
+
 const withTimeout = async <T,>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -430,6 +457,10 @@ export default function DocumentsPage() {
     () => getCourseScope(viewerProfile),
     [viewerProfile],
   );
+  const viewerCourseScopeValue = useMemo(
+    () => normalizeCourse(viewerCourseScope ?? ""),
+    [viewerCourseScope],
+  );
 
   const loadDocuments = useCallback(async () => {
     if (!authReady || !viewerProfileReady) {
@@ -443,7 +474,7 @@ export default function DocumentsPage() {
       return;
     }
 
-    if (viewerIsBod && !viewerCourseScope) {
+    if (viewerIsBod && !viewerCourseScopeValue) {
       setDocuments([]);
       setDocumentsLoading(false);
       setDocumentsError("B.O.D. course scope is missing.");
@@ -467,13 +498,13 @@ export default function DocumentsPage() {
     };
 
     try {
-      if (viewerIsBod && viewerCourseScope) {
+      if (viewerIsBod && viewerCourseScopeValue) {
         const bodDocumentsSnap = await getDocs(
           query(
             collection(db, "ecDocuments"),
             where("ownerType", "==", "bod"),
             where("createdBy", "==", activeUid),
-            where("courseScope", "==", viewerCourseScope),
+            where("courseScope", "==", viewerCourseScopeValue),
           ),
         );
 
@@ -490,13 +521,13 @@ export default function DocumentsPage() {
     } catch (error) {
       handleLoadError(
         error,
-        viewerIsBod && viewerCourseScope ? "scopedDocuments" : "allDocuments",
+        viewerIsBod && viewerCourseScopeValue ? "scopedDocuments" : "allDocuments",
       );
     }
   }, [
     activeUid,
     authReady,
-    viewerCourseScope,
+    viewerCourseScopeValue,
     viewerIsBod,
     viewerProfileReady,
   ]);
@@ -730,7 +761,7 @@ export default function DocumentsPage() {
       return;
     }
 
-    if (viewerIsBod && !viewerCourseScope) {
+    if (viewerIsBod && !viewerCourseScopeValue) {
       setUploadError("B.O.D. course scope is missing. Please contact an administrator.");
       addToast({
         title: "Missing course scope",
@@ -756,9 +787,23 @@ export default function DocumentsPage() {
       const rejectedMessages: string[] = [];
       let nextTotalBytes = totalStorageBytes;
       let uploadedCount = 0;
-      const bodStoragePrefix = viewerIsBod && viewerCourseScope
-        ? `ec-documents/course/${courseScopeToStorageSlug(viewerCourseScope)}`
+      const bodStoragePrefix = viewerIsBod && viewerCourseScopeValue
+        ? `documents/course/${courseScopeToStorageSlug(viewerCourseScopeValue)}`
         : "";
+
+      if (viewerIsBod) {
+        console.info("[DOCUMENT][BOD]", {
+          uid: activeUid,
+          role: String(viewerProfile?.role ?? "").trim(),
+          profileCourseRaw: String(viewerProfile?.course ?? "").trim(),
+          profileCourseScopeRaw: String(viewerProfile?.courseScope ?? "").trim(),
+          profileAssignedCourseRaw: String(viewerProfile?.assignedCourse ?? "").trim(),
+          bodScopeCanonical: viewerCourseScopeValue,
+          selectedCategory: uploadCategory,
+          generatedStoragePrefix: bodStoragePrefix,
+          extractedCourseSlug: bodStoragePrefix.split("/")[2] ?? "",
+        });
+      }
 
       for (const file of pendingFiles) {
         const ext = getFileExtension(file.name);
@@ -791,7 +836,7 @@ export default function DocumentsPage() {
         const docRef = doc(collection(db, "ecDocuments"));
         const storagePath = viewerIsBod && bodStoragePrefix
           ? `${bodStoragePrefix}/${docRef.id}/${file.name}`
-          : `ec-documents/shared/${docRef.id}/${file.name}`;
+          : `documents/shared/${docRef.id}/${file.name}`;
         const storageRef = ref(storage, storagePath);
 
         try {
@@ -840,7 +885,11 @@ export default function DocumentsPage() {
           });
         } catch (error) {
           const code = toErrorCode(error);
-          const message = toErrorMessage(error);
+          const message = toScopedUploadErrorMessage(
+            error,
+            viewerCourseScope,
+            viewerIsBod,
+          );
 
           ecDocumentsLogger.error("File upload failed.", {
             uploadSessionId,
@@ -900,13 +949,12 @@ export default function DocumentsPage() {
       }
 
       if (uploadedCount === 0 && rejectedMessages.length > 0) {
-        setUploadError(
-          "Upload failed. Open browser console for detailed logs.",
-        );
+        const uploadFailureMessage =
+          rejectedMessages[0] ?? "Upload failed. Please try again.";
+        setUploadError(uploadFailureMessage);
         addToast({
           title: "Upload failed",
-          description:
-            "All selected files failed. Check console logs for details.",
+          description: uploadFailureMessage,
           color: "danger",
           timeout: 8000,
         });
@@ -938,13 +986,18 @@ export default function DocumentsPage() {
         uploadSessionId,
         uid: activeUid,
         code: toErrorCode(error),
-        message: toErrorMessage(error),
+        message: toScopedUploadErrorMessage(error, viewerCourseScope, viewerIsBod),
         raw: error,
       });
-      setUploadError(`Unexpected error: ${toErrorMessage(error)}`);
+      const message = toScopedUploadErrorMessage(
+        error,
+        viewerCourseScope,
+        viewerIsBod,
+      );
+      setUploadError(`Unexpected error: ${message}`);
       addToast({
         title: "Unexpected upload error",
-        description: toErrorMessage(error),
+        description: message,
         color: "danger",
         timeout: 8000,
       });

@@ -1,9 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+} from "firebase/firestore";
 import { Button } from "@heroui/button";
 import { Chip } from "@heroui/chip";
 import {
@@ -23,37 +31,154 @@ import {
   type CampusProfileDoc,
   resolveCampusDisplayName,
 } from "@/lib/campus-auth";
+import {
+  canManageStudent,
+  canViewDocument,
+  canViewEvent,
+  getCourseScope,
+  isBOD,
+} from "@/lib/ec-permissions";
+import {
+  getCampusFunctions,
+  listCampusPayments,
+} from "@/lib/firebase-functions";
+import {
+  hasStudentIdentityProfile,
+  isStudentAudienceProfile,
+} from "@/lib/student-audience";
 
-const DASHBOARD_METRICS: ECStatItem[] = [
-  {
-    label: "Total Students",
-    value: 0,
-    description: "No live data yet",
-    tone: "blue",
-    icon: Search,
-  },
-  {
-    label: "Upcoming Events",
-    value: 0,
-    description: "Waiting for sync",
-    tone: "amber",
-    icon: LayoutDashboard,
-  },
-  {
-    label: "Pending Payments",
-    value: 0,
-    description: "No records available",
-    tone: "red",
-    icon: CreditCard,
-  },
-  {
-    label: "Shared Documents",
-    value: 0,
-    description: "Waiting for sync",
-    tone: "purple",
-    icon: FileStack,
-  },
-];
+type ViewerProfile = CampusProfileDoc & {
+  uid: string;
+};
+
+type DashboardMetricKey =
+  | "students"
+  | "events"
+  | "payments"
+  | "documents";
+
+type DashboardMetricState = {
+  value: number | null;
+  loading: boolean;
+  error: string | null;
+};
+
+type DashboardMetricsState = Record<DashboardMetricKey, DashboardMetricState>;
+
+type StudentLookupRow = {
+  uid?: string;
+  role?: string;
+  schoolId?: string;
+  studentId?: string;
+  firstName?: string;
+  lastName?: string;
+  fullName?: string;
+  studentName?: string;
+  name?: string;
+  course?: string;
+  year?: string;
+  yearLevel?: string;
+  status?: string;
+};
+
+type EventDashboardDoc = {
+  id: string;
+  date?: string;
+  scheduledTime?: string;
+  timeStart?: string;
+  timeEnd?: string;
+  ownerType?: "ec" | "bod";
+  courseScope?: string | null;
+  createdByCourseScope?: string | null;
+};
+
+type DocumentDashboardDoc = {
+  id: string;
+  ownerType?: "ec" | "bod";
+  courseScope?: string | null;
+  createdByCourseScope?: string | null;
+  createdBy?: string;
+  createdByUid?: string;
+  ownerUid?: string;
+  uploadedByUid?: string;
+};
+
+const DASHBOARD_SCOPE_MISSING_ERROR = "Course scope missing for B.O.D account";
+
+function createLoadingMetricsState(): DashboardMetricsState {
+  return {
+    students: { value: null, loading: true, error: null },
+    events: { value: null, loading: true, error: null },
+    payments: { value: null, loading: true, error: null },
+    documents: { value: null, loading: true, error: null },
+  };
+}
+
+function parseTime12ToMinutes(timeValue?: string) {
+  const value = String(timeValue ?? "").trim();
+  if (!value) return null;
+
+  const match = value.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const meridiem = match[3].toUpperCase();
+
+  if (hour === 12) hour = 0;
+  if (meridiem === "PM") hour += 12;
+
+  return hour * 60 + minute;
+}
+
+function computeEventStatus(event: Pick<EventDashboardDoc, "date" | "scheduledTime" | "timeStart" | "timeEnd">) {
+  const startMinutes = parseTime12ToMinutes(
+    event.scheduledTime || event.timeStart,
+  );
+  const endMinutes = parseTime12ToMinutes(event.timeEnd);
+  if (startMinutes == null) return "upcoming" as const;
+
+  const [year, month, day] = String(event.date ?? "").split("-").map(Number);
+  if (!year || !month || !day) return "upcoming" as const;
+
+  const now = new Date();
+  const eventDate = new Date(year, month - 1, day);
+  const start = new Date(eventDate);
+  start.setHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0);
+
+  if (endMinutes == null) {
+    return now < start ? ("upcoming" as const) : ("completed" as const);
+  }
+
+  const safeEndMinutes =
+    endMinutes >= startMinutes ? endMinutes : startMinutes + 60;
+  const end = new Date(eventDate);
+  end.setHours(
+    Math.floor(safeEndMinutes / 60),
+    safeEndMinutes % 60,
+    0,
+    0,
+  );
+
+  if (now < start) return "upcoming" as const;
+  if (now >= start && now <= end) return "ongoing" as const;
+  return "completed" as const;
+}
+
+function toMetricErrorMessage(error: unknown, fallback: string) {
+  if (typeof error === "object" && error !== null) {
+    const maybe = error as { message?: unknown };
+    if (typeof maybe.message === "string" && maybe.message.trim()) {
+      return maybe.message;
+    }
+  }
+
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  return fallback;
+}
 
 const QUICK_LINKS = [
   {
@@ -88,32 +213,345 @@ const QUICK_LINKS = [
 
 export default function ECMemberDashboard() {
   const router = useRouter();
+  const functions = useMemo(() => getCampusFunctions(), []);
   const [displayName, setDisplayName] = useState<string | null>(null);
+  const [viewerProfile, setViewerProfile] = useState<ViewerProfile | null>(null);
+  const [viewerProfileReady, setViewerProfileReady] = useState(false);
+  const [metricStates, setMetricStates] = useState<DashboardMetricsState>(
+    createLoadingMetricsState,
+  );
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
         setDisplayName(null);
+        setViewerProfile(null);
+        setViewerProfileReady(true);
         return;
       }
 
       try {
         const snap = await getDoc(doc(db, "profiles", user.uid));
         if (!snap.exists()) {
+          setViewerProfile({ uid: user.uid });
           setDisplayName("User");
           return;
         }
 
-        setDisplayName(
-          resolveCampusDisplayName(snap.data() as CampusProfileDoc),
-        );
+        const profile = {
+          uid: user.uid,
+          ...(snap.data() as CampusProfileDoc),
+        };
+        setViewerProfile(profile);
+        setDisplayName(resolveCampusDisplayName(profile));
       } catch {
+        setViewerProfile({ uid: user.uid });
         setDisplayName("User");
+      } finally {
+        setViewerProfileReady(true);
       }
     });
 
     return () => unsub();
   }, []);
+
+  const loadDashboardMetrics = useCallback(
+    async (profile: ViewerProfile) => {
+      const viewerIsBod = isBOD(profile);
+      const viewerCourseScope = getCourseScope(profile);
+
+      if (viewerIsBod && !viewerCourseScope) {
+        setMetricStates({
+          students: {
+            value: null,
+            loading: false,
+            error: DASHBOARD_SCOPE_MISSING_ERROR,
+          },
+          events: {
+            value: null,
+            loading: false,
+            error: DASHBOARD_SCOPE_MISSING_ERROR,
+          },
+          payments: {
+            value: null,
+            loading: false,
+            error: DASHBOARD_SCOPE_MISSING_ERROR,
+          },
+          documents: {
+            value: null,
+            loading: false,
+            error: DASHBOARD_SCOPE_MISSING_ERROR,
+          },
+        });
+        return;
+      }
+
+      setMetricStates(createLoadingMetricsState());
+
+      const loadStudentsMetric = async () => {
+        const listStudents = httpsCallable<
+          { limit: number; includeEcMembers: boolean },
+          { students?: StudentLookupRow[] }
+        >(functions, "ecListStudents");
+        const response = await listStudents({
+          limit: 2000,
+          includeEcMembers: true,
+        });
+
+        const visibleActiveStudents = (response.data?.students ?? []).filter(
+          (student) =>
+            isStudentAudienceProfile(student) &&
+            hasStudentIdentityProfile(student) &&
+            String(student.status ?? "").trim().toLowerCase() !== "inactive" &&
+            canManageStudent(profile, { course: student.course }),
+        );
+
+        return visibleActiveStudents.length;
+      };
+
+      const loadEventsMetric = async () => {
+        const eventRows: EventDashboardDoc[] = [];
+
+        if (viewerIsBod && viewerCourseScope) {
+          const [ecEventsSnap, scopedEventsSnap] = await Promise.all([
+            getDocs(query(collection(db, "events"), where("ownerType", "==", "ec"))),
+            getDocs(
+              query(
+                collection(db, "events"),
+                where("courseScope", "==", viewerCourseScope),
+              ),
+            ),
+          ]);
+
+          const mergedEvents = new Map<string, EventDashboardDoc>();
+          [...ecEventsSnap.docs, ...scopedEventsSnap.docs].forEach((snapshot) => {
+            const event = {
+              id: snapshot.id,
+              ...(snapshot.data() as Omit<EventDashboardDoc, "id">),
+            };
+
+            if (canViewEvent(profile, event)) {
+              mergedEvents.set(event.id, event);
+            }
+          });
+
+          eventRows.push(...mergedEvents.values());
+        } else {
+          const allEventsSnap = await getDocs(collection(db, "events"));
+          allEventsSnap.docs.forEach((snapshot) => {
+            const event = {
+              id: snapshot.id,
+              ...(snapshot.data() as Omit<EventDashboardDoc, "id">),
+            };
+
+            if (canViewEvent(profile, event)) {
+              eventRows.push(event);
+            }
+          });
+        }
+
+        return eventRows.filter(
+          (event) => computeEventStatus(event) === "upcoming",
+        ).length;
+      };
+
+      const loadPaymentsMetric = async () => {
+        const payments = await listCampusPayments();
+        return payments.filter(
+          (payment) =>
+            Number(payment.totalStudents ?? 0) > 0 &&
+            Number(payment.unpaidCount ?? 0) > 0,
+        ).length;
+      };
+
+      const loadDocumentsMetric = async () => {
+        const documentRows: DocumentDashboardDoc[] = [];
+
+        if (viewerIsBod && viewerCourseScope) {
+          const bodDocumentsSnap = await getDocs(
+            query(
+              collection(db, "ecDocuments"),
+              where("ownerType", "==", "bod"),
+              where("createdBy", "==", profile.uid),
+              where("courseScope", "==", viewerCourseScope),
+            ),
+          );
+
+          bodDocumentsSnap.docs.forEach((snapshot) => {
+            documentRows.push({
+              id: snapshot.id,
+              ...(snapshot.data() as Omit<DocumentDashboardDoc, "id">),
+            });
+          });
+        } else {
+          const allDocumentsSnap = await getDocs(collection(db, "ecDocuments"));
+          allDocumentsSnap.docs.forEach((snapshot) => {
+            documentRows.push({
+              id: snapshot.id,
+              ...(snapshot.data() as Omit<DocumentDashboardDoc, "id">),
+            });
+          });
+        }
+
+        return documentRows.filter((documentRow) =>
+          canViewDocument(profile, documentRow),
+        ).length;
+      };
+
+      const [
+        studentsResult,
+        eventsResult,
+        paymentsResult,
+        documentsResult,
+      ] = await Promise.allSettled([
+        loadStudentsMetric(),
+        loadEventsMetric(),
+        loadPaymentsMetric(),
+        loadDocumentsMetric(),
+      ]);
+
+      setMetricStates({
+        students:
+          studentsResult.status === "fulfilled"
+            ? { value: studentsResult.value, loading: false, error: null }
+            : {
+                value: null,
+                loading: false,
+                error: toMetricErrorMessage(
+                  studentsResult.reason,
+                  "Failed to load students.",
+                ),
+              },
+        events:
+          eventsResult.status === "fulfilled"
+            ? { value: eventsResult.value, loading: false, error: null }
+            : {
+                value: null,
+                loading: false,
+                error: toMetricErrorMessage(
+                  eventsResult.reason,
+                  "Failed to load events.",
+                ),
+              },
+        payments:
+          paymentsResult.status === "fulfilled"
+            ? { value: paymentsResult.value, loading: false, error: null }
+            : {
+                value: null,
+                loading: false,
+                error: toMetricErrorMessage(
+                  paymentsResult.reason,
+                  "Failed to load payments.",
+                ),
+              },
+        documents:
+          documentsResult.status === "fulfilled"
+            ? { value: documentsResult.value, loading: false, error: null }
+            : {
+                value: null,
+                loading: false,
+                error: toMetricErrorMessage(
+                  documentsResult.reason,
+                  "Failed to load documents.",
+                ),
+              },
+      });
+    },
+    [functions],
+  );
+
+  useEffect(() => {
+    if (!viewerProfileReady) {
+      return;
+    }
+
+    if (!viewerProfile) {
+      setMetricStates(createLoadingMetricsState());
+      return;
+    }
+
+    void loadDashboardMetrics(viewerProfile);
+  }, [loadDashboardMetrics, viewerProfile, viewerProfileReady]);
+
+  const dashboardMetrics = useMemo<ECStatItem[]>(
+    () => [
+      {
+        label: "Total Students",
+        value:
+          metricStates.students.loading ?
+            "..." :
+            metricStates.students.error ?
+              "—" :
+              metricStates.students.value ?? "—",
+        description:
+          metricStates.students.loading ?
+            "Loading active student profiles..." :
+            metricStates.students.error ?
+              metricStates.students.error :
+              "Active student profiles in your current view",
+        tone: "blue",
+        icon: Search,
+      },
+      {
+        label: "Upcoming Events",
+        value:
+          metricStates.events.loading ?
+            "..." :
+            metricStates.events.error ?
+              "—" :
+              metricStates.events.value ?? "—",
+        description:
+          metricStates.events.loading ?
+            "Loading visible upcoming events..." :
+            metricStates.events.error ?
+              metricStates.events.error :
+              "Upcoming events you can currently access",
+        tone: "amber",
+        icon: LayoutDashboard,
+      },
+      {
+        label: "Pending Payments",
+        value:
+          metricStates.payments.loading ?
+            "..." :
+            metricStates.payments.error ?
+              "—" :
+              metricStates.payments.value ?? "—",
+        description:
+          metricStates.payments.loading ?
+            "Loading pending payment records..." :
+            metricStates.payments.error ?
+              metricStates.payments.error :
+              "Payment records that still have unpaid assignments",
+        tone: "red",
+        icon: CreditCard,
+      },
+      {
+        label: "Shared Documents",
+        value:
+          metricStates.documents.loading ?
+            "..." :
+            metricStates.documents.error ?
+              "—" :
+              metricStates.documents.value ?? "—",
+        description:
+          metricStates.documents.loading ?
+            "Loading accessible documents..." :
+            metricStates.documents.error ?
+              metricStates.documents.error :
+              "Documents you can access and download right now",
+        tone: "purple",
+        icon: FileStack,
+      },
+    ],
+    [metricStates],
+  );
+
+  const viewerIsBod = useMemo(() => isBOD(viewerProfile), [viewerProfile]);
+  const viewerCourseScope = useMemo(
+    () => getCourseScope(viewerProfile),
+    [viewerProfile],
+  );
 
   return (
     <div className="space-y-5 sm:space-y-6">
@@ -134,11 +572,21 @@ export default function ECMemberDashboard() {
             <Chip variant="flat" className="bg-white/15 text-white">
               Document sharing
             </Chip>
+            {viewerIsBod && viewerCourseScope && (
+              <Chip variant="flat" className="bg-white/15 text-white">
+                Course scope: {viewerCourseScope}
+              </Chip>
+            )}
+            {viewerIsBod && !viewerCourseScope && viewerProfileReady && (
+              <Chip variant="flat" className="bg-amber-100 text-amber-900">
+                Scope missing
+              </Chip>
+            )}
           </>
         }
       />
 
-      <ECStatsGrid items={DASHBOARD_METRICS} />
+      <ECStatsGrid items={dashboardMetrics} />
 
       <section className="space-y-3">
         <div className="space-y-1">

@@ -16,6 +16,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+firebase-debug.log*
+firebase_deploy*.log
 
 # typescript
 *.tsbuildinfo
@@ -29,6 +31,16 @@ next-env.d.ts
 
 # firebase local state
 .firebase/
+
+# generated functions output
+functions/lib/
+portable-device-functions/lib/
+functions/index.js
+portable-device-functions/index.js
+
+# local temp state
+.tmp-config/
+tmp/
 
 # misc
 .DS_Store

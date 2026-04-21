@@ -11,14 +11,20 @@ import React, {
 import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
+  collectionGroup,
   doc,
   getDoc,
   onSnapshot,
   orderBy,
   query,
+  where,
 } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
-import { resolveCampusProfileName } from "@/lib/campus-auth";
+import {
+  canAccessStudentPortal,
+  resolveCampusProfileName,
+} from "@/lib/campus-auth";
+import { normalizeCourse } from "@/lib/courseOptions";
 import { app, auth, db } from "@/lib/firebase";
 import { formatStudentFullName } from "@/lib/student-name";
 
@@ -254,7 +260,9 @@ type ManagePreRegistrationResult = {
 
 type ProfileDocData = {
   role?: string;
+  isStudent?: boolean;
   schoolId?: string;
+  studentId?: string;
   firstName?: string;
   lastName?: string;
   studentName?: string;
@@ -271,6 +279,7 @@ type ProfileDocData = {
 type StudentProjectionDocData = {
   status?: string;
   schoolId?: string;
+  studentId?: string;
   firstName?: string;
   lastName?: string;
   studentName?: string;
@@ -470,6 +479,7 @@ function matchesTarget(
 ) {
   const eventTargets = toTargetList(eventValue);
   const studentTarget = String(studentValue ?? "").trim();
+  const normalizedStudentCourse = normalizeCourse(studentTarget);
 
   if (eventTargets.length === 0) return true;
   if (
@@ -477,9 +487,18 @@ function matchesTarget(
   ) {
     return true;
   }
-  return eventTargets.some(
-    (item) => normalizeText(item) === normalizeText(studentTarget),
-  );
+  return eventTargets.some((item) => {
+    const normalizedItem = String(item ?? "").trim();
+    const normalizedEventCourse = normalizeCourse(normalizedItem);
+    return (
+      normalizeText(normalizedItem) === normalizeText(studentTarget) ||
+      (
+        Boolean(normalizedEventCourse) &&
+        Boolean(normalizedStudentCourse) &&
+        normalizedEventCourse === normalizedStudentCourse
+      )
+    );
+  });
 }
 
 function matchesSpecificStudentTarget(
@@ -584,10 +603,26 @@ export function StudentPortalProvider({
         return;
       }
 
-      const schoolId =
-        String(
-          latestProfileData.schoolId ?? latestStudentData?.schoolId ?? "",
-        ).trim() || uid;
+      if (!canAccessStudentPortal(latestProfileData)) {
+        setProfile(null);
+        setError("Student access is not enabled for this account.");
+        setLoadingProfile(false);
+        return;
+      }
+
+      const schoolId = String(
+        latestProfileData.schoolId ??
+          latestStudentData?.schoolId ??
+          latestProfileData.studentId ??
+          latestStudentData?.studentId ??
+          "",
+      ).trim();
+      if (!schoolId) {
+        setProfile(null);
+        setError("Student profile not linked");
+        setLoadingProfile(false);
+        return;
+      }
       const name = formatStudentFullName(
         {
           firstName:
@@ -606,16 +641,23 @@ export function StudentPortalProvider({
         schoolId,
       );
       const studentName = name || schoolId;
+      const normalizedCourse =
+        normalizeCourse(
+          String(
+            latestProfileData.course ?? latestStudentData?.course ?? "",
+          ).trim(),
+        ) ||
+        String(
+          latestProfileData.course ?? latestStudentData?.course ?? "",
+        ).trim() ||
+        "Unassigned";
 
       setProfile({
         uid,
         schoolId,
         name,
         studentName,
-        course:
-          String(
-            latestProfileData.course ?? latestStudentData?.course ?? "",
-          ).trim() || "Unassigned",
+        course: normalizedCourse,
         year: normalizeYear(
           latestProfileData.year ??
             latestProfileData.yearLevel ??
@@ -630,6 +672,7 @@ export function StudentPortalProvider({
             latestProfileData.readyForClearance,
         ),
       });
+      setError(null);
       setLoadingProfile(false);
     };
 
@@ -780,6 +823,7 @@ export function StudentPortalProvider({
           });
 
         setRawEvents(mapped);
+        setError(null);
         setLoadingEvents(false);
       },
       (e) => {
@@ -877,24 +921,32 @@ export function StudentPortalProvider({
     setLoadingPayments(true);
     let active = true;
 
-    const qy = query(collection(db, "payments"), orderBy("createdAt", "desc"));
+    const qy = query(
+      collectionGroup(db, "students"),
+      where("uid", "==", uid),
+    );
 
     const unsub = onSnapshot(
       qy,
       async (snap) => {
         try {
           const rows = await Promise.all(
-            snap.docs.map(async (paymentDoc) => {
-              const paymentData = paymentDoc.data() as PaymentDocData;
+            snap.docs.map(async (assignmentDoc) => {
+              const paymentRef = assignmentDoc.ref.parent.parent;
+              if (!paymentRef) {
+                return null;
+              }
+              const paymentSnap = await getDoc(paymentRef);
+              if (!paymentSnap.exists()) {
+                return null;
+              }
+
+              const paymentData = paymentSnap.data() as PaymentDocData;
               if (normalizeText(paymentData.status) === "archived") {
                 return null;
               }
-              const assignmentSnap = await getDoc(
-                doc(db, "payments", paymentDoc.id, "students", uid),
-              );
-              if (!assignmentSnap.exists()) return null;
 
-              const assignment = assignmentSnap.data() as PaymentAssignmentData;
+              const assignment = assignmentDoc.data() as PaymentAssignmentData;
               const status =
                 normalizeText(assignment.status) === "paid" ? "PAID" : "UNPAID";
 
@@ -906,9 +958,9 @@ export function StudentPortalProvider({
                 : createdAtMs;
 
               return {
-                paymentId: paymentDoc.id,
+                paymentId: paymentRef.id,
                 title: String(paymentData.title ?? "Untitled Payment"),
-                ref: String(paymentData.ref ?? paymentDoc.id),
+                ref: String(paymentData.ref ?? paymentRef.id),
                 amount: Number(paymentData.amount ?? 0),
                 date: String(paymentData.date ?? ""),
                 details: String(paymentData.details ?? ""),
@@ -932,6 +984,7 @@ export function StudentPortalProvider({
               return dbv - da;
             });
           setPayments(cleaned);
+          setError(null);
         } catch (e: unknown) {
           if (!active) return;
           setPayments([]);
@@ -996,6 +1049,7 @@ export function StudentPortalProvider({
         });
 
         setProfileNotifications(rows);
+        setError(null);
         setLoadingProfileNotifications(false);
       },
       (e) => {

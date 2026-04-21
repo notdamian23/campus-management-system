@@ -12,6 +12,8 @@ import {
 } from "@/components/student";
 import { auth, db } from "@/lib/firebase";
 import {
+  canAccessEcWorkspace,
+  canAccessStudentPortal,
   type CampusProfileDoc,
   getOnboardingRedirect,
 } from "@/lib/campus-auth";
@@ -55,12 +57,12 @@ function StudentLayoutShell({ children }: { children: ReactNode }) {
           return;
         }
 
-        if (role !== "student" && role !== "ecmember") {
+        if (!canAccessStudentPortal(profile)) {
           router.replace("/login");
           return;
         }
 
-        setCanSwitchToEc(role === "ecmember");
+        setCanSwitchToEc(canAccessEcWorkspace(profile) && role !== "student");
         setAuthorized(true);
       } catch {
         router.replace("/login");

@@ -8,10 +8,11 @@ import { CampusLayoutLoadingState } from "@/components/ui";
 import { auth, db } from "@/lib/firebase";
 import { Sidebar, NavItem } from "@/components/Sidebar";
 import {
+  canAccessStudentPortal,
   type CampusProfileDoc,
   getOnboardingRedirect,
 } from "@/lib/campus-auth";
-import { isEcRole, normalizeCampusRole } from "@/lib/campus-role";
+import { isEcWorkspaceRole, normalizeCampusRole } from "@/lib/campus-role";
 
 type Props = {
   children: ReactNode;
@@ -62,9 +63,10 @@ export default function ECLayout({ children }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const [allowed, setAllowed] = useState(false);
-  const [viewerRole, setViewerRole] = useState<"ecmember" | "admin" | null>(
+  const [viewerRole, setViewerRole] = useState<"ecmember" | "bod" | "admin" | null>(
     null,
   );
+  const [showStudentSwitch, setShowStudentSwitch] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -89,14 +91,15 @@ export default function ECLayout({ children }: Props) {
 
       const canOpenStudentLookupAsAdmin =
         role === "admin" && pathname === "/ecmember/students";
-      const canOpenEcWorkspace = isEcRole(data.role);
+      const canOpenEcWorkspace = isEcWorkspaceRole(data.role);
 
       if (!canOpenEcWorkspace && !canOpenStudentLookupAsAdmin) {
         router.replace("/login");
         return;
       }
 
-      setViewerRole(canOpenStudentLookupAsAdmin ? "admin" : "ecmember");
+      setViewerRole(canOpenStudentLookupAsAdmin ? "admin" : (role === "bod" ? "bod" : "ecmember"));
+      setShowStudentSwitch(canAccessStudentPortal(data));
       setAllowed(true);
     });
 
@@ -126,7 +129,7 @@ export default function ECLayout({ children }: Props) {
             viewerRole === "admin" ? "Admin Student Lookup" : "EC Workspace"
           }
           showLogout
-          showStudentAccountSwitch={viewerRole === "ecmember"}
+          showStudentAccountSwitch={viewerRole !== "admin" && showStudentSwitch}
           studentAccountHref="/student"
           studentAccountLabel="Student Portal"
         />

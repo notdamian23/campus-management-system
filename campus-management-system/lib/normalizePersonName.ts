@@ -41,7 +41,7 @@ const UPPERCASE_SUFFIXES = new Set([
   "dvm",
 ]);
 
-const APOSTROPHE_SEPARATORS = ["'", "’"] as const;
+const APOSTROPHE_SEPARATORS = ["'", "\u2019"] as const;
 
 function isSuffix(word: string): boolean {
   const lower = word.toLowerCase().replace(/\.$/g, "");
@@ -88,7 +88,7 @@ function formatWord(word: string): string {
       .join("-");
   }
 
-  // Preserve both straight and curly apostrophes for names like O'Brien/O’Brien.
+  // Preserve both straight and curly apostrophes for names like O'Brien/O\u2019Brien.
   const apostropheSeparator = APOSTROPHE_SEPARATORS.find((separator) =>
     word.includes(separator),
   );

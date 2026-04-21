@@ -77,12 +77,16 @@ import {
   getCourseScope,
   isBOD,
 } from "@/lib/ec-permissions";
+import { normalizeCampusRole } from "@/lib/campus-role";
 import { normalizeCourse } from "@/lib/courseOptions";
 import {
   formatStudentFullName,
   formatStudentReferenceList,
 } from "@/lib/student-name";
-import { isStudentAudienceProfile } from "@/lib/student-audience";
+import {
+  hasStudentIdentityProfile,
+  isStudentAudienceProfile,
+} from "@/lib/student-audience";
 
 type PaymentStudentStatus = "Paid" | "Unpaid";
 
@@ -235,6 +239,32 @@ function toErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+function toScopedPaymentErrorMessage(
+  error: unknown,
+  fallback: string,
+  viewerCourseScope: string | null,
+  viewerIsBod: boolean,
+) {
+  if (!viewerIsBod) {
+    return toErrorMessage(error, fallback);
+  }
+
+  if (!viewerCourseScope) {
+    return "B.O.D course scope is missing. Ask admin to update your account.";
+  }
+
+  const message = toErrorMessage(error, fallback);
+  const lowered = message.toLowerCase();
+  if (
+    lowered.includes("permission-denied") ||
+    lowered.includes("missing or insufficient permissions")
+  ) {
+    return `This B.O.D account can only manage ${viewerCourseScope} records.`;
+  }
+
+  return message;
+}
+
 function mapRemoteStudent(data: RemoteStudent): StudentProfile {
   const uid = String(data.uid ?? "").trim();
   const schoolId = String(data.schoolId ?? "").trim() || uid;
@@ -249,7 +279,8 @@ function mapRemoteStudent(data: RemoteStudent): StudentProfile {
     },
     schoolId,
   );
-  const course = String(data.course ?? "").trim() || "Unassigned";
+  const rawCourse = String(data.course ?? "").trim();
+  const course = normalizeCourse(rawCourse) || rawCourse || "Unassigned";
   const year = normalizeYear(data.year);
   const section = String(data.section ?? "").trim() || "-";
 
@@ -304,7 +335,10 @@ function mapPaymentStudentRecord(
       schoolId,
     year: normalizeYear(data.year ?? data.yearLevel),
     section: getFirstFilledText(data.section, "-") || "-",
-    course: getFirstFilledText(data.course, "Unassigned") || "Unassigned",
+    course:
+      normalizeCourse(getFirstFilledText(data.course)) ||
+      getFirstFilledText(data.course, "Unassigned") ||
+      "Unassigned",
     status,
     paidDate:
       data.paidDate ??
@@ -413,7 +447,15 @@ function matchesPaymentFilters(
   course: string,
 ) {
   const matchesYear = yearLevel === "All Years" || student.year === yearLevel;
-  const matchesCourse = course === "All Courses" || student.course === course;
+  const normalizedSelectedCourse = normalizeCourse(course);
+  const normalizedStudentCourse = normalizeCourse(student.course);
+  const matchesCourse =
+    course === "All Courses" ||
+    (
+      Boolean(normalizedSelectedCourse) &&
+      normalizedSelectedCourse === normalizedStudentCourse
+    ) ||
+    student.course === course;
   return matchesYear && matchesCourse;
 }
 
@@ -634,8 +676,12 @@ export default function PaymentDashboard() {
     () => getCourseScope(viewerProfileWithUid),
     [viewerProfileWithUid],
   );
+  const viewerCourseScopeValue = useMemo(
+    () => normalizeCourse(viewerCourseScope ?? ""),
+    [viewerCourseScope],
+  );
   const selectedPaymentCourse =
-    viewerIsBod && viewerCourseScope ? viewerCourseScope : course;
+    viewerIsBod && viewerCourseScopeValue ? viewerCourseScopeValue : course;
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -670,7 +716,7 @@ export default function PaymentDashboard() {
       return;
     }
 
-    if (viewerIsBod && !viewerCourseScope) {
+    if (viewerIsBod && !viewerCourseScopeValue) {
       setPayments([]);
       setPaymentsLoading(false);
       return;
@@ -693,7 +739,7 @@ export default function PaymentDashboard() {
     };
 
     try {
-      if (viewerIsBod && viewerCourseScope) {
+      if (viewerIsBod && viewerCourseScopeValue) {
         const scopedPayments = await listCampusPayments();
         setPayments(sortRows(scopedPayments.map(mapListedPaymentRecord)));
         setNotice(null);
@@ -714,13 +760,13 @@ export default function PaymentDashboard() {
     } catch (error) {
       handleLoadError(error);
     }
-  }, [viewerCourseScope, viewerIsBod, viewerProfileLoading]);
+  }, [viewerCourseScopeValue, viewerIsBod, viewerProfileLoading]);
 
   useEffect(() => {
-    if (viewerIsBod && viewerCourseScope) {
-      setCourse(viewerCourseScope);
+    if (viewerIsBod && viewerCourseScopeValue) {
+      setCourse(viewerCourseScopeValue);
     }
-  }, [viewerCourseScope, viewerIsBod]);
+  }, [viewerCourseScopeValue, viewerIsBod]);
 
   useEffect(() => {
     let mounted = true;
@@ -730,7 +776,7 @@ export default function PaymentDashboard() {
         return;
       }
 
-      if (viewerIsBod && !viewerCourseScope) {
+      if (viewerIsBod && !viewerCourseScopeValue) {
         if (mounted) {
           setStudents([]);
           setStudentsLoading(false);
@@ -749,15 +795,19 @@ export default function PaymentDashboard() {
         if (!mounted) return;
 
         const list = (res.data?.students ?? [])
-          .filter((student) => isStudentAudienceProfile(student))
+          .filter(
+            (student) =>
+              isStudentAudienceProfile(student) &&
+              hasStudentIdentityProfile(student),
+          )
           .map(mapRemoteStudent)
           .filter((item) => item.uid)
           .sort(sortStudentsByNameAndId);
         const scopedList =
-          viewerIsBod && viewerCourseScope ?
+          viewerIsBod && viewerCourseScopeValue ?
             list.filter(
               (student) =>
-                normalizeCourse(student.course) === viewerCourseScope,
+                normalizeCourse(student.course) === viewerCourseScopeValue,
             ) :
             list;
         setStudents(scopedList);
@@ -777,7 +827,7 @@ export default function PaymentDashboard() {
     return () => {
       mounted = false;
     };
-  }, [functions, viewerCourseScope, viewerIsBod, viewerProfileLoading]);
+  }, [functions, viewerCourseScopeValue, viewerIsBod, viewerProfileLoading]);
 
   useEffect(() => {
     void loadPayments();
@@ -792,10 +842,10 @@ export default function PaymentDashboard() {
     async function loadExpandedStudents() {
       setExpandedStudentsLoading(true);
       const qy =
-        viewerIsBod && viewerCourseScope ?
+        viewerIsBod && viewerCourseScopeValue ?
           query(
             collection(db, "payments", currentExpandedPayment, "students"),
-            where("course", "==", viewerCourseScope),
+            where("course", "==", viewerCourseScopeValue),
           ) :
           query(
             collection(db, "payments", currentExpandedPayment, "students"),
@@ -836,7 +886,7 @@ export default function PaymentDashboard() {
     return () => {
       active = false;
     };
-  }, [expandedPayment, viewerCourseScope, viewerIsBod]);
+  }, [expandedPayment, viewerCourseScopeValue, viewerIsBod]);
 
   useEffect(() => {
     setStudentSearchText("");
@@ -1207,16 +1257,21 @@ export default function PaymentDashboard() {
         : hasSpecificStudentTargets
           ? ""
           : "All Years",
-      resolvedCourse: hasCourseFilter
-        ? selectedPaymentCourse
-        : hasSpecificStudentTargets
-          ? ""
-          : "All Courses",
+      resolvedCourse:
+        viewerIsBod && viewerCourseScopeValue ?
+          viewerCourseScopeValue :
+        hasCourseFilter ?
+          selectedPaymentCourse :
+        hasSpecificStudentTargets ?
+          "" :
+          "All Courses",
       resolvedCourseScope:
+        viewerIsBod && viewerCourseScopeValue ?
+          viewerCourseScopeValue :
         hasCourseFilter && selectedPaymentCourse !== "All Courses"
           ? selectedPaymentCourse
-          : viewerIsBod && viewerCourseScope
-            ? viewerCourseScope
+          : viewerIsBod && viewerCourseScopeValue
+            ? viewerCourseScopeValue
             : null,
       targetCourses: Array.from(
         new Set(
@@ -1407,15 +1462,15 @@ export default function PaymentDashboard() {
     if (hasCachedRows) {
       return filterRowsByCourseScope(
         [...(paymentStudents[paymentId] ?? [])].sort(sortStudentsByNameAndId),
-        viewerIsBod ? viewerCourseScope : null,
+        viewerIsBod ? viewerCourseScopeValue : null,
       );
     }
 
     const studentQuery =
-      viewerIsBod && viewerCourseScope ?
+      viewerIsBod && viewerCourseScopeValue ?
         query(
           collection(db, "payments", paymentId, "students"),
-          where("course", "==", viewerCourseScope),
+          where("course", "==", viewerCourseScopeValue),
         ) :
         collection(db, "payments", paymentId, "students");
     const studentSnap = await getDocs(studentQuery);
@@ -1430,7 +1485,7 @@ export default function PaymentDashboard() {
 
     return filterRowsByCourseScope(
       rows,
-      viewerIsBod ? viewerCourseScope : null,
+      viewerIsBod ? viewerCourseScopeValue : null,
     );
   }
 
@@ -1614,20 +1669,46 @@ export default function PaymentDashboard() {
         details: cleanDetails,
         ownerType: viewerIsBod ? "bod" : "ec",
         createdByUid: editingCurrentPayment?.createdByUid || currentUser.uid,
-        createdByRole: "ecmember",
+        createdByRole:
+          normalizeCampusRole(viewerProfileWithUid?.role) || "ecmember",
         createdByPosition:
           String(viewerProfileWithUid?.ecPosition ?? "").trim() || null,
         createdByCourseScope:
-          editingCurrentPayment?.createdByCourseScope ?? viewerCourseScope ?? null,
+          normalizeCourse(editingCurrentPayment?.createdByCourseScope ?? "") ||
+          viewerCourseScopeValue ||
+          null,
         courseScope:
           editingCurrentPayment?.source === "event"
-            ? editingCurrentPayment.courseScope ?? null
+            ? normalizeCourse(editingCurrentPayment.courseScope ?? "") || null
             : resolvedCourseScope,
         linkedEventId: editingCurrentPayment?.linkedEventId ?? null,
         linkedEventTitle: editingCurrentPayment?.linkedEventTitle ?? "",
         source: editingCurrentPayment?.source || "manual",
         status: editingCurrentPayment?.status || "active",
       };
+
+      if (viewerIsBod) {
+        console.info("[PAYMENT][BOD]", {
+          uid: currentUser.uid,
+          role: normalizeCampusRole(viewerProfileWithUid?.role),
+          profileCourseRaw: String(viewerProfileWithUid?.course ?? "").trim(),
+          profileCourseScopeRaw: String(
+            viewerProfileWithUid?.courseScope ?? "",
+          ).trim(),
+          profileAssignedCourseRaw: String(
+            viewerProfileWithUid?.assignedCourse ?? "",
+          ).trim(),
+          bodScopeCanonical: viewerCourseScopeValue,
+          payloadCourseRaw: selectedPaymentCourse,
+          payloadCourseCanonical: normalizeCourse(selectedPaymentCourse),
+          yearLevel,
+          specificStudentsCount: selectedPaymentStudents.length,
+          finalCourse: basePaymentPayload.course,
+          finalCourseScope: basePaymentPayload.courseScope,
+          finalCreatedByCourseScope: basePaymentPayload.createdByCourseScope,
+          targetCourses,
+        });
+      }
 
       if (!isEditing) {
         await setDoc(
@@ -1684,9 +1765,11 @@ export default function PaymentDashboard() {
       }
       await loadPayments();
     } catch (error: unknown) {
-      const message = toErrorMessage(
+      const message = toScopedPaymentErrorMessage(
         error,
         isEditing ? "Failed to update payment." : "Failed to save payment.",
+        viewerCourseScopeValue || viewerCourseScope,
+        viewerIsBod,
       );
       setNotice({ type: "err", msg: message });
       campusToast.error({
@@ -1929,7 +2012,7 @@ export default function PaymentDashboard() {
   function exportCsv(payment: Payment) {
     const rows = filterRowsByCourseScope(
       paymentStudents[payment.id] ?? [],
-      viewerIsBod ? viewerCourseScope : null,
+      viewerIsBod ? viewerCourseScopeValue || viewerCourseScope : null,
     );
     if (!rows.length) {
       setNotice({ type: "err", msg: "No student rows loaded to export." });
@@ -2069,7 +2152,7 @@ export default function PaymentDashboard() {
           <Button
             onPress={openCreatePaymentEditor}
             className="min-h-12 w-full bg-[#7b0000] text-white"
-            isDisabled={viewerProfileLoading || (viewerIsBod && !viewerCourseScope)}
+            isDisabled={viewerProfileLoading || (viewerIsBod && !viewerCourseScopeValue)}
           >
             Add Payment
           </Button>
@@ -2182,7 +2265,7 @@ export default function PaymentDashboard() {
                 className="w-full mt-1"
                 items={paymentCourseSelectItems}
                 isDisabled={
-                  editingLinkedPayment || (viewerIsBod && Boolean(viewerCourseScope))
+                  editingLinkedPayment || (viewerIsBod && Boolean(viewerCourseScopeValue))
                 }
               >
                 {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}

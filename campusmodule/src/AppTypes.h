@@ -19,6 +19,7 @@ struct EventInfo {
   std::vector<String> yearLevelFilters;
   std::vector<String> sectionFilters;
   std::vector<String> targetedStudentIds;
+  std::vector<String> targetedSchoolIds;
   String bodScope;
   String bodScopeCanonical;
   bool requiresRegistration = false;
@@ -49,6 +50,16 @@ struct EnrollmentSessionInfo {
   bool isValid() const {
     return !sessionId.isEmpty();
   }
+};
+
+struct EnrollmentQueueStats {
+  bool queueExists = false;
+  bool sdReady = false;
+  size_t totalRows = 0;
+  size_t pendingRows = 0;
+  size_t enrolledPendingSyncRows = 0;
+  size_t syncedRows = 0;
+  size_t fileSize = 0;
 };
 
 struct StudentInfo {
@@ -150,6 +161,21 @@ struct FingerprintTemplateOwnership {
   StudentInfo student;
   size_t activeOwners = 0;
   size_t totalMatches = 0;
+};
+
+struct FingerprintRosterStats {
+  bool rosterExists = false;
+  bool headerValid = false;
+  size_t totalRows = 0;
+  size_t fileSize = 0;
+};
+
+struct AttendanceOwnerResolution {
+  bool ownerFound = false;
+  bool eventAllowed = false;
+  int templateId = -1;
+  StudentInfo student;
+  String reason;
 };
 
 struct CleanupQueueItem {

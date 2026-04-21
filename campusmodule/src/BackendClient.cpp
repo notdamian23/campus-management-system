@@ -10,9 +10,13 @@
 #include <CampusEligibility.h>
 
 #include "Config.h"
+#include "StorageManager.h"
 
 namespace {
 constexpr char kCreateSessionPath[] = "/campusDeviceCreateSession";
+constexpr char kPairedEventContextPath[] = "/campusDevicePairedEventContext";
+constexpr char kFingerprintRosterPath[] = "/campusDeviceDownloadFingerprintRoster";
+constexpr char kResolveAttendanceOwnerPath[] = "/campusDeviceResolveAttendanceOwner";
 constexpr char kAttendanceSyncPath[] = "/campusDeviceSyncAttendance";
 constexpr char kCleanupQueuePath[] = "/campusDeviceCleanupQueue";
 constexpr char kCleanupAckPath[] = "/campusDeviceCleanupQueue";
@@ -22,11 +26,15 @@ constexpr size_t kCommandPayloadJsonCapacity = 256;
 constexpr size_t kPairEnrollmentResponseJsonCapacity = 4096;
 constexpr size_t kSubmitEnrollmentPayloadJsonCapacity = 1024;
 constexpr size_t kSubmitEnrollmentResponseJsonCapacity = 1024;
+constexpr size_t kResolveAttendanceOwnerPayloadJsonCapacity = 512;
+constexpr size_t kResolveAttendanceOwnerResponseJsonCapacity = 2048;
 constexpr size_t kAttendancePayloadJsonCapacity = 2048;
 constexpr size_t kCleanupAckPayloadJsonCapacity = 2048;
 constexpr size_t kCleanupAckResponseJsonCapacity = 1024;
 constexpr size_t kSessionResponseJsonCapacity = 512;
 constexpr uint32_t kTlsLargestFreeBlockWarningBytes = 24U * 1024U;
+constexpr uint32_t kSecureClientCooldownMs = 150;
+constexpr uint8_t kPairedEventTlsConnectAttempts = 2;
 
 struct RequestTarget {
   String url;
@@ -283,6 +291,16 @@ void eventFromJson(JsonObjectConst object, EventInfo &event) {
   appendStringValues(object["targetSections"], event.sectionFilters);
   appendStringValues(object["targetedStudentIds"], event.targetedStudentIds);
   appendStringValues(object["targetedStudents"], event.targetedStudentIds);
+  appendStringValues(object["selectedStudentIds"], event.targetedStudentIds);
+  appendStringValues(object["targetedSchoolIds"], event.targetedSchoolIds);
+  appendStringValues(object["selectedSchoolIds"], event.targetedSchoolIds);
+  if (event.targetMode.isEmpty() && !object["targetStudent"].isNull()) {
+    event.targetMode = parseBoolValue(object["targetStudent"], false)
+                           ? "specificStudents"
+                           : "broad";
+  }
+  appendStringValues(object["courses"], event.courseFilters);
+  appendStringValues(object["yearLevels"], event.yearLevelFilters);
   event.bodScope =
       String(object["bodScope"] | object["bodScopeFilter"] |
              object["organizationScope"] | "");
@@ -374,6 +392,46 @@ StudentInfo studentFromJson(JsonObjectConst object) {
   return student;
 }
 
+bool isPairedEventContextRequestPath(const String &path) {
+  return path.startsWith(kPairedEventContextPath);
+}
+
+void forceCloseSecureClient(WiFiClientSecure &client) {
+  client.stop();
+  delay(kSecureClientCooldownMs);
+}
+
+AttendanceOwnerResolution attendanceOwnerResolutionFromJson(
+    JsonObjectConst object) {
+  AttendanceOwnerResolution resolution;
+  resolution.ownerFound = parseBoolValue(object["ownerFound"], false);
+  resolution.eventAllowed = parseBoolValue(object["eventAllowed"], false);
+  resolution.templateId =
+      object["fingerprintTemplateId"] | object["templateId"] | -1;
+  resolution.reason = String(object["reason"] | "");
+
+  if (!resolution.ownerFound) {
+    return resolution;
+  }
+
+  StudentInfo student = studentFromJson(object);
+  if (student.studentName.isEmpty()) {
+    student.studentName = String(object["name"] | "");
+  }
+  if (student.templateId <= 0) {
+    student.templateId = resolution.templateId;
+  }
+  student.isActive = parseBoolValue(object["active"], true);
+  student.activeKnown = true;
+  const bool hasFingerprint =
+      parseBoolValue(object["hasFingerprint"], student.templateId > 0);
+  student.fingerprintStatus =
+      hasFingerprint ? (student.isActive ? "enrolled" : "inactive") : "pending";
+  CampusEligibility::normalizeStudent(student);
+  resolution.student = student;
+  return resolution;
+}
+
 bool parseApiErrorPayload(const String &payload, String &error) {
   DynamicJsonDocument doc(1024);
   if (deserializeJson(doc, payload) != DeserializationError::Ok) {
@@ -420,6 +478,26 @@ void logMemoryStage(const char *stage, const String &path = String(),
       fragmented ? "yes" : "no",
       static_cast<unsigned>(stackHighWaterBytes),
       static_cast<unsigned>(psramSize), static_cast<unsigned>(psramFree));
+}
+
+void logSimpleMemory(const char *label) {
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t largestBlock =
+      heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Serial.printf("[MEM] %s free=%u largest=%u\n", label,
+                static_cast<unsigned>(freeHeap),
+                static_cast<unsigned>(largestBlock));
+}
+
+void logCompactMemory(const char *label) {
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t largestBlock =
+      heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  const uint32_t minHeap = ESP.getMinFreeHeap();
+  Serial.printf("[MEM] %s free=%u largest=%u min=%u\n", label,
+                static_cast<unsigned>(freeHeap),
+                static_cast<unsigned>(largestBlock),
+                static_cast<unsigned>(minHeap));
 }
 
 void warnIfTlsLargestBlockLow(const String &path, uint8_t attempt = 0,
@@ -760,6 +838,7 @@ bool BackendClient::submitEnrollment(const StudentInfo &student, String &error) 
     payload["sessionId"] = student.sessionId;
   }
   payload["studentId"] = student.studentUid;
+  payload["studentUid"] = student.studentUid;
   payload["schoolId"] = student.schoolId;
   payload["studentName"] = student.studentName;
   payload["course"] = student.course;
@@ -770,10 +849,14 @@ bool BackendClient::submitEnrollment(const StudentInfo &student, String &error) 
   payload["sectionCanonical"] = student.sectionCanonical;
   payload["queueId"] = student.queueId;
   payload["status"] = student.enrollmentStatus;
+  payload["enrollmentStatus"] = student.enrollmentStatus;
   payload["syncStatus"] = student.syncStatus;
   payload["remarks"] = student.remarks;
   payload["timestampIso"] = student.enrolledAtIso;
+  payload["enrolledAtIso"] = student.enrolledAtIso;
   payload["fingerprintTemplateId"] = student.templateId;
+  payload["templateId"] = student.templateId;
+  payload["fingerprintDeviceId"] = student.fingerprintDeviceId;
 
   String body;
   reserveJsonBody(payload, body);
@@ -788,6 +871,265 @@ bool BackendClient::submitEnrollment(const StudentInfo &student, String &error) 
   }
   return requestJson("POST", "/campusDeviceSubmitEnrollment", body, response,
                      error, true, CampusConfig::kHttpRetryAttempts, 1);
+}
+
+bool BackendClient::downloadFingerprintRoster(StorageManager &storage,
+                                              FingerprintRosterStats &stats,
+                                              String &error) {
+  stats = FingerprintRosterStats{};
+  const RequestTarget target = buildRequestTarget(kFingerprintRosterPath);
+  lastRequestUrl_ = target.url;
+  lastRequestPayloadSize_ = 0;
+  lastRequestRecordCount_ = 0;
+  lastHttpStatusCode_ = 0;
+  lastHttpErrorString_ = "";
+  lastResponseBody_ = "";
+  lastWifiStatus_ = wifiStatusName(WiFi.status());
+  lastLocalIp_ = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  lastFailureStage_ = "init";
+  lastResponsePayloadSize_ = 0;
+  lastTlsMemoryPressure_ = false;
+  error = "";
+
+  if (WiFi.status() != WL_CONNECTED) {
+    lastFailureStage_ = "wifi";
+    error = "Wi-Fi not connected";
+    return false;
+  }
+
+  if (!target.valid) {
+    lastFailureStage_ = "config";
+    error = "Invalid API base URL";
+    return false;
+  }
+
+  if (!ensureSessionForRequest(kFingerprintRosterPath, error)) {
+    return false;
+  }
+
+  Serial.println("[ROSTER] download started");
+  logSimpleMemory("before roster download");
+
+  bool sessionRefreshAvailable = true;
+  const uint8_t maxAttempts = CampusConfig::kHttpRetryAttempts == 0
+                                  ? 1
+                                  : CampusConfig::kHttpRetryAttempts;
+  for (uint8_t attempt = 1; attempt <= maxAttempts; ++attempt) {
+    lastResponseBody_ = "";
+    lastResponsePayloadSize_ = 0;
+    lastTlsMemoryPressure_ = false;
+    lastWifiStatus_ = wifiStatusName(WiFi.status());
+    lastLocalIp_ = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+
+    auto cleanupRequest = [&](HTTPClient *http, const char *stage) {
+      logMemoryStage("before cleanup", kFingerprintRosterPath, attempt, maxAttempts);
+      if (http != nullptr) {
+        http->end();
+      }
+      secureClient_.stop();
+      delay(5);
+      logMemoryStage(stage, kFingerprintRosterPath, attempt, maxAttempts);
+    };
+
+    if (WiFi.status() != WL_CONNECTED) {
+      lastFailureStage_ = "wifi";
+      error = "Wi-Fi not connected";
+      return false;
+    }
+
+    const uint32_t timeoutSeconds =
+        (CampusConfig::kHttpTimeoutMs + 999UL) / 1000UL;
+    const char *requestHost = target.host.c_str();
+    const char *requestUri = target.uri.c_str();
+
+    logMemoryStage("before secure client", kFingerprintRosterPath, attempt,
+                   maxAttempts);
+    secureClient_.stop();
+    secureClient_.setInsecure();
+    secureClient_.setTimeout(timeoutSeconds);
+    secureClient_.setHandshakeTimeout(timeoutSeconds);
+    logMemoryStage("after secure client", kFingerprintRosterPath, attempt,
+                   maxAttempts);
+
+    IPAddress resolvedIp;
+    const int dnsResult = WiFi.hostByName(requestHost, resolvedIp);
+    lastFailureStage_ = "dns";
+    if (dnsResult != 1) {
+      lastHttpStatusCode_ = -1;
+      lastHttpErrorString_ = "DNS lookup failed";
+      error = lastHttpErrorString_;
+      return false;
+    }
+
+    logMemoryStage("before TLS connect", kFingerprintRosterPath, attempt,
+                   maxAttempts);
+    warnIfTlsLargestBlockLow(kFingerprintRosterPath, attempt, maxAttempts);
+    char tlsErrorBuffer[160] = {0};
+    const bool tlsConnected = secureClient_.connect(requestHost, target.port);
+    if (!tlsConnected) {
+      const int tlsLastError =
+          secureClient_.lastError(tlsErrorBuffer, sizeof(tlsErrorBuffer));
+      lastFailureStage_ = "tls";
+      lastTlsMemoryPressure_ = isTlsMemoryFailure(tlsLastError, tlsErrorBuffer);
+      lastHttpStatusCode_ = -1;
+      lastHttpErrorString_ = "TLS connect failed";
+      error = lastHttpErrorString_;
+      cleanupRequest(nullptr, "after TLS cleanup");
+      if (shouldRetryRequest(lastHttpStatusCode_, attempt, maxAttempts)) {
+        delay(retryDelayMs(attempt, lastTlsMemoryPressure_));
+        continue;
+      }
+      return false;
+    }
+    logMemoryStage("after TLS connect", kFingerprintRosterPath, attempt,
+                   maxAttempts);
+
+    HTTPClient https;
+    https.setReuse(false);
+    https.useHTTP10(true);
+
+    lastFailureStage_ = "http_begin";
+    if (!https.begin(secureClient_, requestHost, target.port, requestUri,
+                     target.https)) {
+      lastHttpStatusCode_ = -1;
+      lastHttpErrorString_ = "HTTP begin failed";
+      error = lastHttpErrorString_;
+      cleanupRequest(&https, "after HTTP begin cleanup");
+      if (shouldRetryRequest(lastHttpStatusCode_, attempt, maxAttempts)) {
+        delay(retryDelayMs(attempt, false));
+        continue;
+      }
+      return false;
+    }
+
+    https.setTimeout(CampusConfig::kHttpTimeoutMs);
+    https.setConnectTimeout(CampusConfig::kHttpTimeoutMs);
+    const char *headerKeys[] = {"X-Campus-Roster-Count"};
+    https.collectHeaders(headerKeys, 1);
+
+    if (!sessionToken_.isEmpty()) {
+      String authHeader;
+      authHeader.reserve(sessionToken_.length() + 8U);
+      authHeader = "Bearer ";
+      authHeader += sessionToken_;
+      https.addHeader("Authorization", authHeader);
+    } else {
+      applyDeviceSecretHeaders(https);
+    }
+
+    lastFailureStage_ = "http_send";
+    const int statusCode = https.GET();
+    lastHttpStatusCode_ = statusCode;
+    lastHttpErrorString_ = https.errorToString(statusCode);
+    const int responseBytes = https.getSize();
+    lastResponsePayloadSize_ = responseBytes > 0 ? static_cast<size_t>(responseBytes)
+                                                 : 0U;
+
+    if ((statusCode == 401 || statusCode == 403) && sessionRefreshAvailable) {
+      cleanupRequest(&https, "after auth failure cleanup");
+      sessionRefreshAvailable = false;
+      clearSession();
+      if (!ensureSession(error)) {
+        return false;
+      }
+      attempt = 0;
+      continue;
+    }
+
+    if (statusCode >= 200 && statusCode < 300) {
+      WiFiClient *stream = https.getStreamPtr();
+      if (stream == nullptr) {
+        lastFailureStage_ = "response_read";
+        error = "Response stream unavailable";
+        cleanupRequest(&https, "after response cleanup");
+        return false;
+      }
+
+      const unsigned receivedCount =
+          static_cast<unsigned>(https.header("X-Campus-Roster-Count").toInt());
+      if (receivedCount > 0) {
+        Serial.printf("[ROSTER] received count=%u\n", receivedCount);
+      }
+
+      lastFailureStage_ = "response_save";
+      if (!storage.saveFingerprintRosterToSd(
+              *stream, lastResponsePayloadSize_, stats, error)) {
+        cleanupRequest(&https, "after response cleanup");
+        lastHttpErrorString_ = error;
+        Serial.printf("[ROSTER] save failed reason=%s\n", error.c_str());
+        return false;
+      }
+
+      cleanupRequest(&https, "after response cleanup");
+      logSimpleMemory("after roster download");
+      Serial.printf("[ROSTER] saved count=%u size=%u\n",
+                    static_cast<unsigned>(stats.totalRows),
+                    static_cast<unsigned>(stats.fileSize));
+      lastFailureStage_ = "none";
+      return true;
+    }
+
+    lastFailureStage_ = statusCode <= 0 ? "http_send" : "response_read";
+    captureErrorPreview(https, lastResponseBody_);
+    cleanupRequest(&https, "after response cleanup");
+
+    if (shouldRetryRequest(statusCode, attempt, maxAttempts)) {
+      delay(retryDelayMs(attempt, false));
+      continue;
+    }
+
+    if (!parseApiErrorPayload(lastResponseBody_, error)) {
+      error = lastResponseBody_.isEmpty()
+                  ? ("HTTP " + String(statusCode))
+                  : ("HTTP " + String(statusCode) + " " + lastResponseBody_);
+    }
+    return false;
+  }
+
+  if (error.isEmpty()) {
+    lastFailureStage_ = "http";
+    error = "Roster download failed";
+  }
+  return false;
+}
+
+bool BackendClient::resolveAttendanceOwner(int templateId, const String &eventId,
+                                           AttendanceOwnerResolution &result,
+                                           String &error) {
+  result = AttendanceOwnerResolution{};
+  if (!ensureSessionForRequest(kResolveAttendanceOwnerPath, error)) {
+    return false;
+  }
+
+  DynamicJsonDocument payload(kResolveAttendanceOwnerPayloadJsonCapacity);
+  if (!ensureDynamicJsonCapacity(payload,
+                                 kResolveAttendanceOwnerPayloadJsonCapacity,
+                                 kResolveAttendanceOwnerPath,
+                                 "resolveAttendanceOwner payload", error)) {
+    return false;
+  }
+  payload["templateId"] = templateId;
+  payload["eventId"] = eventId;
+
+  String body;
+  reserveJsonBody(payload, body);
+  serializeJson(payload, body);
+
+  DynamicJsonDocument response(kResolveAttendanceOwnerResponseJsonCapacity);
+  if (!ensureDynamicJsonCapacity(response,
+                                 kResolveAttendanceOwnerResponseJsonCapacity,
+                                 kResolveAttendanceOwnerPath,
+                                 "resolveAttendanceOwner response", error)) {
+    return false;
+  }
+  if (!requestJson("POST", kResolveAttendanceOwnerPath, body, response, error,
+                   true, CampusConfig::kHttpRetryAttempts, 1)) {
+    return false;
+  }
+
+  JsonObject object = response.as<JsonObject>();
+  result = attendanceOwnerResolutionFromJson(object);
+  return true;
 }
 
 bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
@@ -1081,6 +1423,50 @@ bool BackendClient::parseEventContextResponse(
   }
 
   eventFromJson(eventObject, event);
+  JsonObject eligibilityObject = response["eligibility"];
+  if (!eligibilityObject.isNull()) {
+    EventInfo eligibilityEvent;
+    eventFromJson(eligibilityObject, eligibilityEvent);
+    if (event.targetMode.isEmpty()) {
+      event.targetMode = eligibilityEvent.targetMode;
+    }
+    if (event.courseFilterLabel.isEmpty()) {
+      event.courseFilterLabel = eligibilityEvent.courseFilterLabel;
+    }
+    if (event.yearLevelFilterLabel.isEmpty()) {
+      event.yearLevelFilterLabel = eligibilityEvent.yearLevelFilterLabel;
+    }
+    if (event.sectionFilterLabel.isEmpty()) {
+      event.sectionFilterLabel = eligibilityEvent.sectionFilterLabel;
+    }
+    appendStringValues(eligibilityObject["courseFilters"], event.courseFilters);
+    appendStringValues(eligibilityObject["targetCourses"], event.courseFilters);
+    appendStringValues(eligibilityObject["courses"], event.courseFilters);
+    appendStringValues(eligibilityObject["yearLevelFilters"],
+                       event.yearLevelFilters);
+    appendStringValues(eligibilityObject["targetYearLevels"],
+                       event.yearLevelFilters);
+    appendStringValues(eligibilityObject["yearLevels"], event.yearLevelFilters);
+    appendStringValues(eligibilityObject["sectionFilters"], event.sectionFilters);
+    appendStringValues(eligibilityObject["targetSections"], event.sectionFilters);
+    appendStringValues(eligibilityObject["targetedStudentIds"],
+                       event.targetedStudentIds);
+    appendStringValues(eligibilityObject["targetedStudents"],
+                       event.targetedStudentIds);
+    appendStringValues(eligibilityObject["selectedStudentIds"],
+                       event.targetedStudentIds);
+    appendStringValues(eligibilityObject["targetedSchoolIds"],
+                       event.targetedSchoolIds);
+    appendStringValues(eligibilityObject["selectedSchoolIds"],
+                       event.targetedSchoolIds);
+    event.requiresRegistration =
+        event.requiresRegistration || eligibilityEvent.requiresRegistration;
+    event.preregistrationRequired =
+        event.preregistrationRequired || eligibilityEvent.preregistrationRequired;
+    event.paymentRequired =
+        event.paymentRequired || eligibilityEvent.paymentRequired;
+    event.activeOnly = event.activeOnly || eligibilityEvent.activeOnly;
+  }
   JsonObject rosterObject = response["roster"];
   if (!rosterObject.isNull()) {
     if (event.targetMode.isEmpty()) {
@@ -1108,6 +1494,9 @@ bool BackendClient::parseEventContextResponse(
     appendStringValues(rosterObject["sectionFilters"], event.sectionFilters);
     appendStringValues(rosterObject["targetedStudentIds"], event.targetedStudentIds);
     appendStringValues(rosterObject["targetedStudents"], event.targetedStudentIds);
+    appendStringValues(rosterObject["selectedStudentIds"], event.targetedStudentIds);
+    appendStringValues(rosterObject["targetedSchoolIds"], event.targetedSchoolIds);
+    appendStringValues(rosterObject["selectedSchoolIds"], event.targetedSchoolIds);
   }
   CampusEligibility::normalizeEvent(event);
   students.clear();
@@ -1182,6 +1571,11 @@ bool BackendClient::requestJson(const char *method, const String &path,
     maxAttempts = 1;
   }
 
+  const bool isPairedEventContextRequest = isPairedEventContextRequestPath(path);
+  const uint8_t loopAttempts =
+      isPairedEventContextRequest && maxAttempts < kPairedEventTlsConnectAttempts
+          ? kPairedEventTlsConnectAttempts
+          : maxAttempts;
   const bool isSessionRequest = path == kCreateSessionPath;
   const bool isCleanupRequest = path.startsWith(kCleanupQueuePath);
   if (!isSessionRequest && !isCleanupRequest && !ensureSession(error)) {
@@ -1190,7 +1584,7 @@ bool BackendClient::requestJson(const char *method, const String &path,
 
   response.clear();
   bool sessionRefreshAvailable = allowRetry;
-  for (uint8_t attempt = 1; attempt <= maxAttempts; ++attempt) {
+  for (uint8_t attempt = 1; attempt <= loopAttempts; ++attempt) {
     lastResponseBody_ = "";
     lastResponsePayloadSize_ = 0;
     lastTlsMemoryPressure_ = false;
@@ -1202,13 +1596,16 @@ bool BackendClient::requestJson(const char *method, const String &path,
         (CampusConfig::kHttpTimeoutMs + 999UL) / 1000UL;
 
     auto cleanupRequest = [&](HTTPClient *http, const char *stage) {
-      logMemoryStage("before cleanup", path, attempt, maxAttempts);
+      logMemoryStage("before cleanup", path, attempt, loopAttempts);
       if (http != nullptr) {
         http->end();
       }
-      secureClient_.stop();
-      delay(5);
-      logMemoryStage(stage, path, attempt, maxAttempts);
+      forceCloseSecureClient(secureClient_);
+      logMemoryStage(stage, path, attempt, loopAttempts);
+      if (isPairedEventContextRequest) {
+        Serial.println("[HTTP] cleanup done");
+        logCompactMemory("after paired event cleanup");
+      }
     };
 
     if (WiFi.status() != WL_CONNECTED) {
@@ -1220,12 +1617,19 @@ bool BackendClient::requestJson(const char *method, const String &path,
     // TODO: Replace setInsecure() with the production root CA certificate.
     const bool insecureTls = true;
     const bool caCertConfigured = false;
-    logMemoryStage("before secure client", path, attempt, maxAttempts);
-    secureClient_.stop();
+    logMemoryStage("before secure client", path, attempt, loopAttempts);
+    if (isPairedEventContextRequest) {
+      Serial.println("[HTTP] endpoint=campusDevicePairedEventContext");
+      Serial.printf("[HTTP] host=%s\n", requestHost);
+      Serial.printf("[HTTP] attempt=%u\n", static_cast<unsigned>(attempt));
+      Serial.printf("[HTTP] tlsMode=%s\n", insecureTls ? "insecure" : "caCert");
+      logCompactMemory("before paired event TLS");
+    }
+    forceCloseSecureClient(secureClient_);
     secureClient_.setInsecure();
     secureClient_.setTimeout(timeoutSeconds);
     secureClient_.setHandshakeTimeout(timeoutSeconds);
-    logMemoryStage("after secure client", path, attempt, maxAttempts);
+    logMemoryStage("after secure client", path, attempt, loopAttempts);
 
     IPAddress resolvedIp;
     const int dnsResult = WiFi.hostByName(requestHost, resolvedIp);
@@ -1239,8 +1643,8 @@ bool BackendClient::requestJson(const char *method, const String &path,
     if (caCertConfigured) {
       Serial.println("[BUG] CA cert still enabled during insecure test");
     }
-    logMemoryStage("before TLS connect", path, attempt, maxAttempts);
-    warnIfTlsLargestBlockLow(path, attempt, maxAttempts);
+    logMemoryStage("before TLS connect", path, attempt, loopAttempts);
+    warnIfTlsLargestBlockLow(path, attempt, loopAttempts);
 
     char tlsErrorBuffer[160] = {0};
     const bool tlsConnected = secureClient_.connect(requestHost, target.port);
@@ -1265,12 +1669,21 @@ bool BackendClient::requestJson(const char *method, const String &path,
                     requestHost, static_cast<unsigned>(target.port),
                     tlsLastError,
                     tlsErrorBuffer[0] != '\0' ? tlsErrorBuffer : "-");
+      if (isPairedEventContextRequest) {
+        Serial.printf("[HTTP] tls failed code=%d message=%s\n", tlsLastError,
+                      lastHttpErrorString_.c_str());
+      }
       Serial.printf("[HTTP] tlsMemoryPressure=%s retryBackoffMs=%lu\n",
                     lastTlsMemoryPressure_ ? "yes" : "no",
                     static_cast<unsigned long>(
                         retryDelayMs(attempt, lastTlsMemoryPressure_)));
-      logMemoryStage("after TLS failure", path, attempt, maxAttempts);
+      logMemoryStage("after TLS failure", path, attempt, loopAttempts);
       cleanupRequest(nullptr, "after TLS cleanup");
+      if (isPairedEventContextRequest && attempt < loopAttempts) {
+        Serial.println("[HTTP] retrying after TLS failure");
+        delay(retryDelayMs(attempt, lastTlsMemoryPressure_));
+        continue;
+      }
       if (shouldRetryRequest(lastHttpStatusCode_, attempt, maxAttempts)) {
         delay(retryDelayMs(attempt, lastTlsMemoryPressure_));
         continue;
@@ -1279,13 +1692,13 @@ bool BackendClient::requestJson(const char *method, const String &path,
     }
     Serial.printf("[HTTP] tls host=%s port=%u connected=yes\n",
                   requestHost, static_cast<unsigned>(target.port));
-    logMemoryStage("after TLS connect", path, attempt, maxAttempts);
+    logMemoryStage("after TLS connect", path, attempt, loopAttempts);
 
-    logMemoryStage("before HTTP client", path, attempt, maxAttempts);
+    logMemoryStage("before HTTP client", path, attempt, loopAttempts);
     HTTPClient https;
     https.setReuse(false);
     https.useHTTP10(true);
-    logMemoryStage("after HTTP client", path, attempt, maxAttempts);
+    logMemoryStage("after HTTP client", path, attempt, loopAttempts);
 
     lastFailureStage_ = "http_begin";
     if (!https.begin(secureClient_, requestHost, target.port, requestUri,
@@ -1296,7 +1709,7 @@ bool BackendClient::requestJson(const char *method, const String &path,
       Serial.printf(
           "[HTTP] attempt=%u/%u method=%s wifi=%s ip=%s host=%s port=%u uri=%s "
           "payloadBytes=%u records=%u code=%d err=%s\n",
-          static_cast<unsigned>(attempt), static_cast<unsigned>(maxAttempts),
+          static_cast<unsigned>(attempt), static_cast<unsigned>(loopAttempts),
           method, lastWifiStatus_.c_str(),
           lastLocalIp_.isEmpty() ? "-" : lastLocalIp_.c_str(),
           requestHost, static_cast<unsigned>(target.port), requestUri,
@@ -1345,12 +1758,12 @@ bool BackendClient::requestJson(const char *method, const String &path,
     const int responseBytes = https.getSize();
     lastResponsePayloadSize_ = responseBytes > 0 ? static_cast<size_t>(responseBytes)
                                                  : 0U;
-    logMemoryStage("after HTTP send", path, attempt, maxAttempts);
+    logMemoryStage("after HTTP send", path, attempt, loopAttempts);
 
     Serial.printf(
         "[HTTP] attempt=%u/%u method=%s wifi=%s ip=%s host=%s port=%u uri=%s "
         "payloadBytes=%u records=%u code=%d err=%s responseBytes=%d\n",
-        static_cast<unsigned>(attempt), static_cast<unsigned>(maxAttempts),
+        static_cast<unsigned>(attempt), static_cast<unsigned>(loopAttempts),
         method, lastWifiStatus_.c_str(),
         lastLocalIp_.isEmpty() ? "-" : lastLocalIp_.c_str(),
         requestHost, static_cast<unsigned>(target.port),
@@ -1388,9 +1801,9 @@ bool BackendClient::requestJson(const char *method, const String &path,
       }
 
       lastFailureStage_ = "response_parse";
-      logMemoryStage("before response parse", path, attempt, maxAttempts);
+      logMemoryStage("before response parse", path, attempt, loopAttempts);
       const DeserializationError jsonError = deserializeJson(response, *stream);
-      logMemoryStage("after response parse", path, attempt, maxAttempts);
+      logMemoryStage("after response parse", path, attempt, loopAttempts);
       cleanupRequest(&https, "after response cleanup");
       if (jsonError) {
         if (jsonError == DeserializationError::EmptyInput) {

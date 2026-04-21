@@ -311,12 +311,12 @@ String joinCanonicalList(const std::vector<String> &values) {
 }
 
 size_t targetedStudentCount(const EventInfo &event) {
-  return event.targetedStudentIds.size();
+  return event.targetedStudentIds.size() + event.targetedSchoolIds.size();
 }
 
 bool isSpecificStudentsMode(const EventInfo &event) {
   return normalizeTargetMode(event.targetMode) == "specificStudents" ||
-         !event.targetedStudentIds.empty();
+         !event.targetedStudentIds.empty() || !event.targetedSchoolIds.empty();
 }
 
 bool hasBroadAudienceFilters(const EventInfo &event) {
@@ -375,6 +375,7 @@ void normalizeEvent(EventInfo &event) {
   normalizeStringVector(event.yearLevelFilters, normalizeYearLevel);
   normalizeStringVector(event.sectionFilters, normalizeSection);
   normalizeStringVector(event.targetedStudentIds, trimAndCollapseWhitespace);
+  normalizeStringVector(event.targetedSchoolIds, trimAndCollapseWhitespace);
 
   if (!event.bodScopeCanonical.isEmpty()) {
     event.bodScopeCanonical = normalizeScope(event.bodScopeCanonical);
@@ -390,7 +391,7 @@ void normalizeEvent(EventInfo &event) {
   }
 
   if (event.targetMode.isEmpty()) {
-    if (!event.targetedStudentIds.empty()) {
+    if (!event.targetedStudentIds.empty() || !event.targetedSchoolIds.empty()) {
       event.targetMode = "specificStudents";
     } else if (hasBroadAudienceFilters(event)) {
       event.targetMode = "broad";
@@ -419,10 +420,20 @@ EventEligibilityDecision evaluateStudentForEvent(
       rosterContainsStudent(pairedStudents, normalizedStudent.studentUid);
   decision.matchedTargetedStudent =
       vectorContains(normalizedEvent.targetedStudentIds, normalizedStudent.studentUid);
+  decision.matchedTargetedSchoolId =
+      vectorContains(normalizedEvent.targetedSchoolIds, normalizedStudent.schoolId);
 
   if (decision.targetModeSpecific) {
-    if (!decision.matchedTargetedStudent && !decision.matchedPairedRoster) {
-      decision.finalReason = "student_not_in_targeted_students";
+    if (normalizedEvent.targetedStudentIds.empty() &&
+        normalizedEvent.targetedSchoolIds.empty() && pairedStudents.empty()) {
+      decision.stalePairedEventData = true;
+      decision.finalReason = "paired_event_targeted_roster_missing";
+      return decision;
+    }
+
+    if (!decision.matchedTargetedStudent && !decision.matchedTargetedSchoolId &&
+        !decision.matchedPairedRoster) {
+      decision.finalReason = "student_not_in_targeted_list";
       return decision;
     }
 
@@ -432,9 +443,13 @@ EventEligibilityDecision evaluateStudentForEvent(
 
     decision.allowed = true;
     if (decision.finalReason.isEmpty()) {
-      decision.finalReason =
-          decision.matchedTargetedStudent ? "matched_targeted_student"
-                                          : "matched_specific_roster";
+      if (decision.matchedTargetedStudent) {
+        decision.finalReason = "matched_targeted_student";
+      } else if (decision.matchedTargetedSchoolId) {
+        decision.finalReason = "matched_targeted_school_id";
+      } else {
+        decision.finalReason = "matched_specific_roster";
+      }
     }
     return decision;
   }
@@ -453,16 +468,8 @@ EventEligibilityDecision evaluateStudentForEvent(
     decision.blockedByYearLevel = !yearMatch;
     decision.blockedBySection = !sectionMatch;
 
-    if (!courseMatch) {
-      decision.finalReason = "course_mismatch";
-      return decision;
-    }
-    if (!yearMatch) {
-      decision.finalReason = "year_level_mismatch";
-      return decision;
-    }
-    if (!sectionMatch) {
-      decision.finalReason = "section_mismatch";
+    if (!courseMatch || !yearMatch || !sectionMatch) {
+      decision.finalReason = "student_not_in_target_scope";
       return decision;
     }
 
@@ -487,7 +494,7 @@ EventEligibilityDecision evaluateStudentForEvent(
   }
 
   decision.stalePairedEventData = true;
-  decision.finalReason = "student_missing_from_broad_audience_roster";
+  decision.finalReason = "paired_event_context_corrupt";
   return decision;
 }
 
@@ -520,8 +527,32 @@ String rejectionDetail(const EventEligibilityDecision &decision) {
   if (decision.finalReason == "section_mismatch") {
     return "Section mismatch";
   }
-  if (decision.finalReason == "student_not_in_targeted_students") {
+  if (decision.finalReason == "student_not_in_targeted_list") {
     return "Not targeted";
+  }
+  if (decision.finalReason == "student_not_in_target_scope") {
+    if (decision.blockedByCourse) {
+      return "Course mismatch";
+    }
+    if (decision.blockedByYearLevel) {
+      return "Year mismatch";
+    }
+    if (decision.blockedBySection) {
+      return "Section mismatch";
+    }
+    return "Out of scope";
+  }
+  if (decision.finalReason == "paired_event_context_missing") {
+    return "Context missing";
+  }
+  if (decision.finalReason == "paired_event_context_corrupt") {
+    return "Context invalid";
+  }
+  if (decision.finalReason == "paired_event_id_mismatch") {
+    return "Pairing mismatch";
+  }
+  if (decision.finalReason == "paired_event_targeted_roster_missing") {
+    return "Target list missing";
   }
   if (decision.finalReason == "student_inactive") {
     return "Account inactive";

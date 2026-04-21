@@ -33,12 +33,30 @@ service firebase.storage {
       return signedIn() && role() == "admin";
     }
 
-    function isECMemberRole(value) {
+    function isRegularECMemberRole(value) {
       return value == "ec" || value == "ecmember";
+    }
+
+    function isBodRole(value) {
+      return value == "bod";
+    }
+
+    function isECMemberRole(value) {
+      return isRegularECMemberRole(value) || isBodRole(value);
     }
 
     function isEC() {
       return signedIn() && isECMemberRole(role());
+    }
+
+    function normalizeCourseScopeValue(value) {
+      return !(value is string) || value == "" ? null :
+        value.matches("^([Mm]echanical([ -]?[Ee]ngineering)?|[Mm][.]?[Ee][.]?|[Bb][Ss][Mm][Ee])$") ? "Mechanical Engineering" :
+        value.matches("^([Ee]lectrical([ -]?[Ee]ngineering)?|[Ee][.]?[Ee][.]?|[Bb][Ss][Ee][Ee])$") ? "Electrical Engineering" :
+        value.matches("^([Ee]lectronics([ -]?[Ee]ngineering)?|[Ee]lectronics[ -]?[Aa]nd[ -]?[Cc]ommunications([ -]?[Ee]ngineering)?|[Ee][.]?[Cc][.]?[Ee][.]?|[Bb][Ss][Ee][Cc][Ee])$") ? "Electronics Engineering" :
+        value.matches("^([Cc]omputer([ -]?[Ee]ngineering)?|[Cc][.]?[Pp][.]?[Ee][.]?|[Bb][Ss][Cc][Pp][Ee])$") ? "Computer Engineering" :
+        value.matches("^([Ii]ndustrial([ -]?[Ee]ngineering)?|[Ii][.]?[Ee][.]?|[Bb][Ss][Ii][Ee])$") ? "Industrial Engineering" :
+        null;
     }
 
     function inferCourseScopeFromPosition(position) {
@@ -51,12 +69,7 @@ service firebase.storage {
     }
 
     function courseScopeFromAssignedCourse(courseCode) {
-      return courseCode == "ME" ? "Mechanical Engineering" :
-        courseCode == "EE" ? "Electrical Engineering" :
-        courseCode == "IE" ? "Industrial Engineering" :
-        courseCode == "CPE" ? "Computer Engineering" :
-        courseCode == "ECE" ? "Electronics Engineering" :
-        null;
+      return normalizeCourseScopeValue(courseCode);
     }
 
     function courseScopeSlug(courseScope) {
@@ -70,12 +83,17 @@ service firebase.storage {
 
     function currentCourseScope() {
       return !hasProfile() ? null :
-        (
-          profile().courseScope != null &&
-          profile().courseScope != ""
-        ) ? profile().courseScope :
+        normalizeCourseScopeValue(profile().courseScope) != null ?
+        normalizeCourseScopeValue(profile().courseScope) :
+        normalizeCourseScopeValue(profile().courseScopeLabel) != null ?
+        normalizeCourseScopeValue(profile().courseScopeLabel) :
         courseScopeFromAssignedCourse(profile().assignedCourse) != null ?
         courseScopeFromAssignedCourse(profile().assignedCourse) :
+        (
+          (profile().ecScope == "course" || role() == "bod") &&
+          normalizeCourseScopeValue(profile().course) != null
+        ) ?
+        normalizeCourseScopeValue(profile().course) :
         inferCourseScopeFromPosition(profile().ecPosition);
     }
 
@@ -84,8 +102,9 @@ service firebase.storage {
     }
 
     function isBOD() {
-      return isEC() &&
+      return hasProfile() &&
         (
+          role() == "bod" ||
           profile().ecScope == "course" ||
           profile().isBod == true ||
           courseScopeFromAssignedCourse(profile().assignedCourse) != null ||
@@ -94,7 +113,7 @@ service firebase.storage {
     }
 
     function isRegularEC() {
-      return isEC() && !isBOD();
+      return hasProfile() && isRegularECMemberRole(role()) && !isBOD();
     }
 
     function isTeacher() {
@@ -145,8 +164,9 @@ service firebase.storage {
 
     function ecDocumentCourseScope(data) {
       return data != null &&
-        data.courseScope != null &&
-        data.courseScope != "" ? data.courseScope : null;
+        normalizeCourseScopeValue(data.courseScope) != null ?
+        normalizeCourseScopeValue(data.courseScope) :
+        null;
     }
 
     function canReadOwnBodEcDocument(docId) {
@@ -172,9 +192,29 @@ service firebase.storage {
     }
 
     function eventCourseScope(data) {
-      return data.courseScope != null && data.courseScope != "" ?
-        data.courseScope :
-        null;
+      return normalizeCourseScopeValue(data.courseScope) != null ?
+        normalizeCourseScopeValue(data.courseScope) :
+        normalizeCourseScopeValue(data.createdByCourseScope) != null ?
+        normalizeCourseScopeValue(data.createdByCourseScope) :
+        normalizeCourseScopeValue(data.course);
+    }
+
+    function canReadCourseDocumentAtSlug(docId, courseScopeSlug) {
+      return isAdmin() || isRegularEC() ||
+        (
+          canReadOwnBodEcDocument(docId) &&
+          currentCourseScopeSlug() != "" &&
+          courseScopeSlug == currentCourseScopeSlug()
+        );
+    }
+
+    function canWriteCourseDocumentAtSlug(docId, courseScopeSlug) {
+      return isAdmin() || isRegularEC() ||
+        (
+          canWriteOwnOrPendingBodEcDocument(docId) &&
+          currentCourseScopeSlug() != "" &&
+          courseScopeSlug == currentCourseScopeSlug()
+        );
     }
 
     function canViewEventData(data) {
@@ -213,18 +253,18 @@ service firebase.storage {
     }
 
     match /ec-documents/course/{courseScopeSlug}/{docId}/{fileName} {
-      allow read: if isAdmin() || isRegularEC() ||
-        (
-          canReadOwnBodEcDocument(docId) &&
-          currentCourseScopeSlug() != "" &&
-          courseScopeSlug == currentCourseScopeSlug()
-        );
-      allow write: if isAdmin() || isRegularEC() ||
-        (
-          canWriteOwnOrPendingBodEcDocument(docId) &&
-          currentCourseScopeSlug() != "" &&
-          courseScopeSlug == currentCourseScopeSlug()
-        );
+      allow read: if canReadCourseDocumentAtSlug(docId, courseScopeSlug);
+      allow write: if canWriteCourseDocumentAtSlug(docId, courseScopeSlug);
+    }
+
+    match /documents/shared/{docId}/{fileName} {
+      allow read: if isAdmin() || isRegularEC();
+      allow write: if isAdmin() || isRegularEC();
+    }
+
+    match /documents/course/{courseScopeSlug}/{docId}/{fileName} {
+      allow read: if canReadCourseDocumentAtSlug(docId, courseScopeSlug);
+      allow write: if canWriteCourseDocumentAtSlug(docId, courseScopeSlug);
     }
 
     match /events/{eventId}/images/{fileId} {

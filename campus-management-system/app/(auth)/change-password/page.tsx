@@ -16,6 +16,7 @@ import { CampusAuthShell, CampusAuthShellSkeleton } from "@/components/ui";
 import { auth } from "@/lib/firebase";
 import {
   buildEmailActionSettings,
+  canAccessStudentPortal,
   getOnboardingRedirect,
   isCampusLocalEmail,
   resolveCampusVerificationEmailTarget,
@@ -56,6 +57,7 @@ export default function ChangePasswordPage() {
   const [initializing, setInitializing] = useState(true);
   const [generalError, setGeneralError] = useState("");
   const [role, setRole] = useState<string>("");
+  const [canUseStudentPortal, setCanUseStudentPortal] = useState(false);
 
   const passwordError = useMemo(
     () => (newPassword ? validatePassword(newPassword) : ""),
@@ -90,6 +92,7 @@ export default function ChangePasswordPage() {
           return;
         }
         setRole(profile.role);
+        setCanUseStudentPortal(canAccessStudentPortal(profile));
 
         const onboardingRedirect = getOnboardingRedirect(profile);
         if (onboardingRedirect === "/verify-email-pending") {
@@ -97,6 +100,7 @@ export default function ChangePasswordPage() {
             role: profile.role ?? "",
             mustChangePassword: true,
             emailVerificationPending: true,
+            canAccessStudentPortal: canAccessStudentPortal(profile),
           });
           router.replace("/verify-email-pending");
           return;
@@ -189,6 +193,7 @@ export default function ChangePasswordPage() {
         role,
         mustChangePassword: true,
         emailVerificationPending: true,
+        canAccessStudentPortal: canUseStudentPortal,
       });
 
       campusToast.success({

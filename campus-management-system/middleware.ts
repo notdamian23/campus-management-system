@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { normalizeCampusRole, resolveCampusRoleHome } from "@/lib/campus-role";
+import {
+  isEcWorkspaceRole,
+  normalizeCampusRole,
+  resolveCampusRoleHome,
+} from "@/lib/campus-role";
 
 function redirectToLogin(req: NextRequest) {
   const url = req.nextUrl.clone();
@@ -37,6 +41,9 @@ export function middleware(req: NextRequest) {
 
   const loggedIn = req.cookies.get("campus_logged_in")?.value === "1";
   const role = normalizeCampusRole(req.cookies.get("campus_role")?.value);
+  const canAccessStudentPortal =
+    role === "student" ||
+    req.cookies.get("campus_is_student")?.value === "1";
   const mustChangePassword = req.cookies.get("campus_must_change")?.value === "1";
   const emailVerificationPending =
     req.cookies.get("campus_email_pending")?.value === "1";
@@ -78,7 +85,7 @@ export function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (pathname.startsWith("/student") && role !== "student" && role !== "ecmember") {
+  if (pathname.startsWith("/student") && !canAccessStudentPortal) {
     const url = req.nextUrl.clone();
     url.pathname = resolveCampusRoleHome(role);
     return NextResponse.redirect(url);
@@ -86,7 +93,7 @@ export function middleware(req: NextRequest) {
 
   if (
     pathname.startsWith("/ecmember") &&
-    role !== "ecmember" &&
+    !isEcWorkspaceRole(role) &&
     !(role === "admin" && adminCanUseEcStudentLookup)
   ) {
     const url = req.nextUrl.clone();

@@ -7,6 +7,8 @@
 
 #include "AppTypes.h"
 
+class StorageManager;
+
 class BackendClient {
  public:
   bool fetchAvailableEvents(std::vector<EventInfo> &events, String &error);
@@ -28,6 +30,10 @@ class BackendClient {
                                String &error);
   bool fetchPendingEnrollments(std::vector<StudentInfo> &students, String &error);
   bool submitEnrollment(const StudentInfo &student, String &error);
+  bool downloadFingerprintRoster(StorageManager &storage,
+                                 FingerprintRosterStats &stats, String &error);
+  bool resolveAttendanceOwner(int templateId, const String &eventId,
+                              AttendanceOwnerResolution &result, String &error);
   bool syncAttendance(const std::vector<AttendanceRecord> &records,
                       std::vector<SyncItemResult> &results, String &error);
   bool fetchCleanupQueue(std::vector<CleanupQueueItem> &items, String &error);

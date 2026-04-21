@@ -81,6 +81,17 @@ type EventRegistrationLookup = {
   status: "PRE_REGISTERED" | "WAITLISTED" | "CANCELLED";
 };
 
+type PortableFingerprintOwnerEntry = {
+  templateId: number;
+  studentId: string;
+  schoolId: string;
+  name: string;
+  course: string;
+  yearLevel: string;
+  hasFingerprint: boolean;
+  active: boolean;
+};
+
 type DeviceContext = {
   deviceId: string;
   ref: FirebaseFirestore.DocumentReference;
@@ -308,6 +319,423 @@ async function findActiveFingerprintTemplateConflict(
   }
 
   return templateData;
+}
+
+function normalizeBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  const raw = normalizeLower(value);
+  if (!raw) {
+    return fallback;
+  }
+  if (["true", "1", "yes", "y", "active", "enrolled", "paid"].includes(raw)) {
+    return true;
+  }
+  if (["false", "0", "no", "n", "inactive", "disabled", "deleted", "archived"].includes(raw)) {
+    return false;
+  }
+  return fallback;
+}
+
+function resolveStatusFlag(value: unknown): boolean | null {
+  const raw = normalizeLower(value);
+  if (!raw) {
+    return null;
+  }
+  if (["active", "enabled", "approved", "current"].includes(raw)) {
+    return true;
+  }
+  if (["inactive", "disabled", "deleted", "archived", "stale", "needs_reenrollment"].includes(raw)) {
+    return false;
+  }
+  return null;
+}
+
+function resolveOwnerActiveFlag(data: Record<string, unknown>): boolean {
+  const booleanFields = [
+    data.active,
+    data.isActive,
+    data.accountActive,
+  ];
+  for (const field of booleanFields) {
+    if (field !== null && typeof field !== "undefined" && normalizeText(field)) {
+      return normalizeBoolean(field, true);
+    }
+  }
+
+  const statusFields = [
+    data.status,
+    data.profileStatus,
+    data.accountStatus,
+  ];
+  for (const field of statusFields) {
+    const resolved = resolveStatusFlag(field);
+    if (resolved !== null) {
+      return resolved;
+    }
+  }
+
+  return true;
+}
+
+function extractTemplateIdCandidates(data: Record<string, unknown>): number[] {
+  const fingerprint = asRecord(data.fingerprint);
+  return Array.from(
+    new Set(
+      [
+        toPositiveInt(data.fingerprintTemplateId),
+        toPositiveInt(data.templateId),
+        toPositiveInt(data.fingerprintId),
+        toPositiveInt(fingerprint.fingerprintTemplateId),
+        toPositiveInt(fingerprint.templateId),
+        toPositiveInt(fingerprint.fingerprintId),
+      ].filter((templateId) => templateId > 0)
+    )
+  );
+}
+
+function resolveHasFingerprint(data: Record<string, unknown>, templateId: number): boolean {
+  if (Object.prototype.hasOwnProperty.call(data, "hasFingerprint")) {
+    return normalizeBoolean(data.hasFingerprint, templateId > 0);
+  }
+
+  const fingerprint = asRecord(data.fingerprint);
+  if (Object.prototype.hasOwnProperty.call(fingerprint, "hasFingerprint")) {
+    return normalizeBoolean(fingerprint.hasFingerprint, templateId > 0);
+  }
+
+  const statuses = [
+    normalizeLower(data.fingerprintStatus),
+    normalizeLower(fingerprint.status),
+  ];
+  for (const status of statuses) {
+    if (status === "enrolled" || status === "active") {
+      return true;
+    }
+    if (
+      status === "pending" ||
+      status === "inactive" ||
+      status === "deleted" ||
+      status === "stale" ||
+      status === "needs_reenrollment"
+    ) {
+      return false;
+    }
+  }
+
+  return templateId > 0;
+}
+
+function buildFingerprintOwnerEntry(
+  templateId: number,
+  studentId: string,
+  mergedData: Record<string, unknown>,
+  templateData?: Record<string, unknown>
+): PortableFingerprintOwnerEntry | null {
+  if (templateId <= 0 || !studentId) {
+    return null;
+  }
+
+  const combined = {
+    ...(templateData ?? {}),
+    ...mergedData,
+  };
+  const active = resolveOwnerActiveFlag(combined);
+  const hasFingerprint = resolveHasFingerprint(combined, templateId);
+  if (!active || !hasFingerprint) {
+    return null;
+  }
+
+  return {
+    templateId,
+    studentId,
+    schoolId:
+      normalizeText(mergedData.schoolId) ||
+      normalizeText(templateData?.schoolId) ||
+      studentId,
+    name:
+      normalizeText(mergedData.studentName) ||
+      normalizeText(mergedData.fullName) ||
+      normalizeText(mergedData.name) ||
+      normalizeText(templateData?.studentName) ||
+      normalizeText(templateData?.name) ||
+      studentId,
+    course:
+      normalizeCourse(mergedData.course) ||
+      normalizeCourse(templateData?.course) ||
+      "Unassigned",
+    yearLevel:
+      normalizeYearLevel(mergedData.yearLevel ?? mergedData.year) ||
+      normalizeYearLevel(templateData?.yearLevel ?? templateData?.year) ||
+      "Unassigned",
+    hasFingerprint,
+    active,
+  };
+}
+
+function mergeFingerprintOwnerEntry(
+  current: PortableFingerprintOwnerEntry,
+  next: PortableFingerprintOwnerEntry
+): PortableFingerprintOwnerEntry {
+  return {
+    templateId: current.templateId,
+    studentId: current.studentId || next.studentId,
+    schoolId: current.schoolId || next.schoolId,
+    name: current.name || next.name,
+    course: current.course !== "Unassigned" ? current.course : next.course,
+    yearLevel: current.yearLevel !== "Unassigned" ? current.yearLevel : next.yearLevel,
+    hasFingerprint: current.hasFingerprint || next.hasFingerprint,
+    active: current.active || next.active,
+  };
+}
+
+function addFingerprintOwnerCandidate(
+  candidatesByTemplate: Map<number, Map<string, PortableFingerprintOwnerEntry>>,
+  entry: PortableFingerprintOwnerEntry
+) {
+  const existingByStudent =
+    candidatesByTemplate.get(entry.templateId) ??
+    new Map<string, PortableFingerprintOwnerEntry>();
+  const existing = existingByStudent.get(entry.studentId);
+  existingByStudent.set(
+    entry.studentId,
+    existing ? mergeFingerprintOwnerEntry(existing, entry) : entry
+  );
+  candidatesByTemplate.set(entry.templateId, existingByStudent);
+}
+
+async function loadMergedStudentRecord(
+  studentId: string
+): Promise<Record<string, unknown>> {
+  if (!studentId) {
+    return {};
+  }
+
+  const [profileSnap, studentSnap] = await Promise.all([
+    db.doc(`profiles/${studentId}`).get(),
+    db.doc(`students/${studentId}`).get(),
+  ]);
+
+  return {
+    ...(profileSnap.exists ? profileSnap.data() ?? {} : {}),
+    ...(studentSnap.exists ? studentSnap.data() ?? {} : {}),
+  };
+}
+
+async function queryTemplateMatches(
+  collectionName: "profiles" | "students",
+  field: "fingerprintTemplateId" | "templateId",
+  templateId: number
+): Promise<Map<string, FirebaseFirestore.DocumentData>> {
+  const [numericSnapshot, stringSnapshot] = await Promise.all([
+    db.collection(collectionName).where(field, "==", templateId).get(),
+    db.collection(collectionName).where(field, "==", String(templateId)).get(),
+  ]);
+
+  const matches = new Map<string, FirebaseFirestore.DocumentData>();
+  for (const snapshot of [numericSnapshot, stringSnapshot]) {
+    snapshot.docs.forEach((doc) => {
+      matches.set(doc.id, doc.data() ?? {});
+    });
+  }
+  return matches;
+}
+
+async function findFallbackFingerprintOwnerCandidates(
+  templateId: number
+): Promise<PortableFingerprintOwnerEntry[]> {
+  const queryMatches = await Promise.all([
+    queryTemplateMatches("profiles", "fingerprintTemplateId", templateId),
+    queryTemplateMatches("profiles", "templateId", templateId),
+    queryTemplateMatches("students", "fingerprintTemplateId", templateId),
+    queryTemplateMatches("students", "templateId", templateId),
+  ]);
+
+  const candidateIds = dedupeStrings(
+    queryMatches.flatMap((matches) => Array.from(matches.keys()))
+  );
+  if (candidateIds.length === 0) {
+    return [];
+  }
+
+  const [profilesById, studentsById] = await Promise.all([
+    loadDocsById("profiles", candidateIds),
+    loadDocsById("students", candidateIds),
+  ]);
+
+  return candidateIds
+    .map((studentId) => buildFingerprintOwnerEntry(
+      templateId,
+      studentId,
+      {
+        ...(profilesById.get(studentId) ?? {}),
+        ...(studentsById.get(studentId) ?? {}),
+      }
+    ))
+    .filter((entry): entry is PortableFingerprintOwnerEntry => entry !== null);
+}
+
+async function resolveFingerprintOwnerByTemplate(
+  templateId: number
+): Promise<{entry: PortableFingerprintOwnerEntry | null; reason: string}> {
+  if (templateId <= 0) {
+    return {entry: null, reason: "invalid_template_id"};
+  }
+
+  const candidatesByStudent = new Map<string, PortableFingerprintOwnerEntry>();
+  const templateSnap = await fingerprintTemplateRef(templateId).get();
+  if (templateSnap.exists) {
+    const templateData = templateSnap.data() ?? {};
+    if (resolveOwnerActiveFlag(templateData)) {
+      const ownerId =
+        normalizeText(templateData.uid) ||
+        normalizeText(templateData.studentUid) ||
+        normalizeText(templateData.studentId);
+      if (ownerId) {
+        const merged = await loadMergedStudentRecord(ownerId);
+        const entry = buildFingerprintOwnerEntry(
+          templateId,
+          ownerId,
+          merged,
+          templateData
+        );
+        if (entry) {
+          candidatesByStudent.set(entry.studentId, entry);
+        }
+      }
+    }
+  }
+
+  const fallbackEntries = await findFallbackFingerprintOwnerCandidates(templateId);
+  fallbackEntries.forEach((entry) => {
+    const existing = candidatesByStudent.get(entry.studentId);
+    candidatesByStudent.set(
+      entry.studentId,
+      existing ? mergeFingerprintOwnerEntry(existing, entry) : entry
+    );
+  });
+
+  if (candidatesByStudent.size === 0) {
+    return {entry: null, reason: "owner_not_found"};
+  }
+  if (candidatesByStudent.size > 1) {
+    deviceLogger.warn("Duplicate fingerprint owner candidates detected", {
+      templateId,
+      owners: Array.from(candidatesByStudent.keys()),
+    });
+    return {entry: null, reason: "duplicate_owner_conflict"};
+  }
+
+  return {
+    entry: Array.from(candidatesByStudent.values())[0],
+    reason: "owner_found",
+  };
+}
+
+async function buildPortableFingerprintRoster(): Promise<{
+  entries: PortableFingerprintOwnerEntry[];
+  conflicts: Array<{templateId: number; owners: string[]}>;
+}> {
+  const [templateSnap, profilesSnap, studentsSnap] = await Promise.all([
+    db.collection("fingerprintTemplates").get(),
+    db.collection("profiles").where("role", "==", "student").get(),
+    db.collection("students").get(),
+  ]);
+
+  const profileDataById = new Map<string, FirebaseFirestore.DocumentData>();
+  const studentDataById = new Map<string, FirebaseFirestore.DocumentData>();
+  profilesSnap.docs.forEach((doc) => {
+    profileDataById.set(doc.id, doc.data() ?? {});
+  });
+  studentsSnap.docs.forEach((doc) => {
+    studentDataById.set(doc.id, doc.data() ?? {});
+  });
+
+  const mergedById = new Map<string, Record<string, unknown>>();
+  const allStudentIds = new Set<string>([
+    ...Array.from(profileDataById.keys()),
+    ...Array.from(studentDataById.keys()),
+  ]);
+  allStudentIds.forEach((studentId) => {
+    mergedById.set(studentId, {
+      ...(profileDataById.get(studentId) ?? {}),
+      ...(studentDataById.get(studentId) ?? {}),
+    });
+  });
+
+  const candidatesByTemplate =
+    new Map<number, Map<string, PortableFingerprintOwnerEntry>>();
+
+  templateSnap.docs.forEach((doc) => {
+    const templateData = doc.data() ?? {};
+    const templateId =
+      toPositiveInt(templateData.templateId) || toPositiveInt(doc.id);
+    if (templateId <= 0 || !resolveOwnerActiveFlag(templateData)) {
+      return;
+    }
+
+    const ownerId =
+      normalizeText(templateData.uid) ||
+      normalizeText(templateData.studentUid) ||
+      normalizeText(templateData.studentId);
+    if (!ownerId) {
+      return;
+    }
+
+    const entry = buildFingerprintOwnerEntry(
+      templateId,
+      ownerId,
+      mergedById.get(ownerId) ?? {},
+      templateData
+    );
+    if (entry) {
+      addFingerprintOwnerCandidate(candidatesByTemplate, entry);
+    }
+  });
+
+  mergedById.forEach((mergedData, studentId) => {
+    extractTemplateIdCandidates(mergedData).forEach((templateId) => {
+      const entry = buildFingerprintOwnerEntry(templateId, studentId, mergedData);
+      if (entry) {
+        addFingerprintOwnerCandidate(candidatesByTemplate, entry);
+      }
+    });
+  });
+
+  const entries: PortableFingerprintOwnerEntry[] = [];
+  const conflicts: Array<{templateId: number; owners: string[]}> = [];
+  Array.from(candidatesByTemplate.entries())
+    .sort((left, right) => left[0] - right[0])
+    .forEach(([templateId, ownersByStudent]) => {
+      const owners = Array.from(ownersByStudent.values());
+      if (owners.length === 1) {
+        entries.push(owners[0]);
+        return;
+      }
+
+      conflicts.push({
+        templateId,
+        owners: owners.map((owner) => owner.studentId),
+      });
+    });
+
+  if (conflicts.length > 0) {
+    deviceLogger.warn("Fingerprint roster conflicts detected", {
+      conflictCount: conflicts.length,
+      conflicts,
+    });
+  }
+
+  return {entries, conflicts};
+}
+
+function csvEscapeCell(value: unknown): string {
+  return `"${normalizeText(value).replace(/"/g, "\"\"")}"`;
 }
 
 function parseQueryInt(
@@ -3125,6 +3553,124 @@ export const campusDevicePairedEventContext = deviceEndpoint(
         fingerprintDeviceId: student.fingerprintDeviceId,
         queueId: student.queueId,
       })),
+    });
+  }
+);
+
+export const campusDeviceDownloadFingerprintRoster = deviceEndpoint(
+  "GET",
+  "session-or-secret",
+  async (_req, res, device) => {
+    const {entries, conflicts} = await buildPortableFingerprintRoster();
+    deviceLogger.info("Portable fingerprint roster downloaded", {
+      deviceId: device.deviceId,
+      count: entries.length,
+      conflictCount: conflicts.length,
+    });
+
+    res.status(200);
+    res.set("Content-Type", "text/csv; charset=utf-8");
+    res.set("X-Campus-Roster-Count", String(entries.length));
+    res.write("templateId,studentId,schoolId,name,course,yearLevel,active,hasFingerprint\n");
+    for (const entry of entries) {
+      res.write(
+        [
+          entry.templateId,
+          csvEscapeCell(entry.studentId),
+          csvEscapeCell(entry.schoolId),
+          csvEscapeCell(entry.name),
+          csvEscapeCell(entry.course),
+          csvEscapeCell(entry.yearLevel),
+          entry.active ? "true" : "false",
+          entry.hasFingerprint ? "true" : "false",
+        ].join(",") + "\n"
+      );
+    }
+    res.end();
+  }
+);
+
+export const campusDeviceResolveAttendanceOwner = deviceEndpoint(
+  "POST",
+  "session-or-secret",
+  async (req, res, device) => {
+    const body = asRecord(req.body);
+    const templateId = toPositiveInt(
+      body.templateId ?? body.fingerprintTemplateId,
+      -1
+    );
+    const eventId =
+      normalizeText(body.eventId) ||
+      normalizeText(device.pairingData?.eventId);
+
+    if (templateId <= 0) {
+      throw new ApiError(400, "templateId must be a positive integer.");
+    }
+
+    const resolvedOwner = await resolveFingerprintOwnerByTemplate(templateId);
+    if (!resolvedOwner.entry) {
+      sendJson(res, 200, {
+        ownerFound: false,
+        eventAllowed: false,
+        templateId,
+        fingerprintTemplateId: templateId,
+        reason: resolvedOwner.reason,
+      });
+      return;
+    }
+
+    let eventAllowed = false;
+    let reason = "event_not_provided";
+    if (eventId) {
+      const event = await getEventSummary(eventId);
+      const registrationStatus = await findStudentRegistrationStatusForEvent(
+        eventId,
+        resolvedOwner.entry.studentId
+      );
+      const paymentStatus =
+        event.requiresPayment && event.linkedPaymentId ?
+          await loadPaymentStatusForStudent(
+            event.linkedPaymentId,
+            resolvedOwner.entry.studentId
+          ) :
+          "";
+      const eligibility = evaluateEventEligibility(event, {
+        studentId: resolvedOwner.entry.studentId,
+        schoolId: resolvedOwner.entry.schoolId,
+        studentName: resolvedOwner.entry.name,
+        course: resolvedOwner.entry.course,
+        yearLevel: resolvedOwner.entry.yearLevel,
+        registrationStatus,
+        paymentStatus,
+      });
+      eventAllowed = eligibility.allowed;
+      reason = eligibility.reason;
+    }
+
+    deviceLogger.info("Portable attendance owner resolved", {
+      deviceId: device.deviceId,
+      templateId,
+      studentId: resolvedOwner.entry.studentId,
+      eventId,
+      eventAllowed,
+      reason,
+    });
+
+    sendJson(res, 200, {
+      ownerFound: true,
+      eventAllowed,
+      reason,
+      templateId,
+      fingerprintTemplateId: resolvedOwner.entry.templateId,
+      studentId: resolvedOwner.entry.studentId,
+      studentUid: resolvedOwner.entry.studentId,
+      schoolId: resolvedOwner.entry.schoolId,
+      name: resolvedOwner.entry.name,
+      studentName: resolvedOwner.entry.name,
+      course: resolvedOwner.entry.course,
+      yearLevel: resolvedOwner.entry.yearLevel,
+      hasFingerprint: resolvedOwner.entry.hasFingerprint,
+      active: resolvedOwner.entry.active,
     });
   }
 );

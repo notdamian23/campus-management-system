@@ -47,6 +47,17 @@ const COURSE_ALIASES: Record<string, CampusCourse> = {
   bsee: "Electrical Engineering",
   bsme: "Mechanical Engineering",
   bsece: "Electronics Engineering",
+  computerengineering: "Computer Engineering",
+  computer: "Computer Engineering",
+  industrialengineering: "Industrial Engineering",
+  industrial: "Industrial Engineering",
+  electricalengineering: "Electrical Engineering",
+  electrical: "Electrical Engineering",
+  mechanicalengineering: "Mechanical Engineering",
+  mechanical: "Mechanical Engineering",
+  electronicsengineering: "Electronics Engineering",
+  electronicsandcommunicationsengineering: "Electronics Engineering",
+  electronics: "Electronics Engineering",
   cpe: "Computer Engineering",
   ie: "Industrial Engineering",
   ee: "Electrical Engineering",
@@ -67,6 +78,14 @@ const COURSE_LOOKUP_BY_CODE = CAMPUS_COURSE_CODE_OPTIONS.reduce<
   lookup[option.course] = option.code;
   return lookup;
 }, {} as Record<CampusCourse, CampusCourseCode>);
+
+const COURSE_SCOPE_SLUG_LOOKUP: Record<CampusCourse, string> = {
+  "Computer Engineering": "computer-engineering",
+  "Industrial Engineering": "industrial-engineering",
+  "Electrical Engineering": "electrical-engineering",
+  "Mechanical Engineering": "mechanical-engineering",
+  "Electronics Engineering": "electronics-engineering",
+};
 
 export function isValidCourse(value: string): value is CampusCourse {
   return CAMPUS_COURSE_OPTIONS.includes(value as CampusCourse);
@@ -111,4 +130,13 @@ export function resolveCourseLabelFromCode(raw: string): string {
     (option) => option.code === normalizedCode,
   );
   return matched?.label ?? "";
+}
+
+export function normalizeCourseSlug(raw: string): string {
+  const normalizedCourse = normalizeCourse(raw);
+  if (!normalizedCourse) {
+    return "";
+  }
+
+  return COURSE_SCOPE_SLUG_LOOKUP[normalizedCourse as CampusCourse] ?? "";
 }

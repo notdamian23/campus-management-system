@@ -22,6 +22,13 @@ constexpr char kAttendancePath[] = "/attendance_records.json";
 constexpr char kEnrollmentLogsPath[] = "/logs/enrollment_logs.json";
 constexpr char kEnrollmentSyncQueuePath[] = "/logs/sync_queue.json";
 constexpr char kPairedEventContextPath[] = "/paired_event_context.json";
+constexpr char kSdEnrollmentDir[] = "/enrollment";
+constexpr char kSdEnrollmentQueuePath[] = "/enrollment/session_students.csv";
+constexpr char kSdEnrollmentQueueTempPath[] = "/enrollment/session_students.tmp";
+constexpr char kSdEnrollmentResultsPath[] = "/enrollment/results_queue.csv";
+constexpr char kSdEnrollmentResultsTempPath[] = "/enrollment/results_queue.tmp";
+constexpr char kSdFingerprintRosterPath[] = "/fingerprint_roster.csv";
+constexpr char kSdFingerprintRosterTempPath[] = "/logs/fingerprint_roster.tmp";
 constexpr char kTempPath[] = "/campus_tmp.json";
 constexpr char kSdAuditPath[] = "/attendance_audit.csv";
 constexpr char kSdExportDir[] = "/exports";
@@ -31,6 +38,10 @@ constexpr size_t kFingerprintDocSize = 16384;
 constexpr size_t kAttendanceDocSize = 65536;
 constexpr size_t kPairedEventContextDocSize = 65536;
 constexpr size_t kEnrollmentSessionDocSize = 4096;
+constexpr size_t kFingerprintRosterFieldCount = 8;
+constexpr size_t kFingerprintRosterMaxLineLength = 320;
+constexpr size_t kEnrollmentQueueFieldCount = 12;
+constexpr size_t kEnrollmentResultFieldCount = 12;
 
 bool parseBoolValue(JsonVariantConst value, bool fallback = false) {
   if (value.isNull()) {
@@ -428,28 +439,408 @@ String csvEscape(const String &value) {
   return "\"" + output + "\"";
 }
 
+bool writeCsvLine(File &file, const String &line) {
+  return file.println(line) > 0;
+}
+
+bool readBoundedLine(File &file, String &line, bool &truncated) {
+  line = "";
+  truncated = false;
+
+  while (file.available()) {
+    const char current = static_cast<char>(file.read());
+    if (current == '\r') {
+      continue;
+    }
+    if (current == '\n') {
+      return true;
+    }
+    if (line.length() < kFingerprintRosterMaxLineLength) {
+      line += current;
+    } else {
+      truncated = true;
+    }
+  }
+
+  return !line.isEmpty() || truncated;
+}
+
+size_t splitCsvLine(const String &line, String *fields, size_t maxFields) {
+  if (fields == nullptr || maxFields == 0) {
+    return 0;
+  }
+
+  for (size_t index = 0; index < maxFields; ++index) {
+    fields[index] = "";
+  }
+
+  size_t fieldIndex = 0;
+  String current;
+  bool inQuotes = false;
+
+  for (size_t index = 0; index < line.length(); ++index) {
+    const char currentChar = line[index];
+    if (currentChar == '"') {
+      if (inQuotes && (index + 1U) < line.length() && line[index + 1U] == '"') {
+        current += '"';
+        ++index;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (currentChar == ',' && !inQuotes) {
+      if (fieldIndex < maxFields) {
+        current.trim();
+        fields[fieldIndex] = current;
+      }
+      current = "";
+      ++fieldIndex;
+      continue;
+    }
+
+    current += currentChar;
+  }
+
+  if (fieldIndex < maxFields) {
+    current.trim();
+    fields[fieldIndex] = current;
+  }
+
+  return fieldIndex + 1U;
+}
+
+bool isFingerprintRosterHeader(const String *fields, size_t fieldCount) {
+  if (fields == nullptr || fieldCount == 0) {
+    return false;
+  }
+
+  String header = fields[0];
+  header.toLowerCase();
+  return header == "templateid";
+}
+
+bool parseFingerprintRosterStudent(const String &line, StudentInfo &student,
+                                   bool &active, bool &hasFingerprint) {
+  String fields[kFingerprintRosterFieldCount];
+  const size_t parsedFields =
+      splitCsvLine(line, fields, kFingerprintRosterFieldCount);
+  if (parsedFields == 0 || isFingerprintRosterHeader(fields, parsedFields)) {
+    return false;
+  }
+  if (parsedFields < kFingerprintRosterFieldCount) {
+    return false;
+  }
+
+  const int templateId = fields[0].toInt();
+  if (templateId <= 0) {
+    return false;
+  }
+
+  student = StudentInfo{};
+  student.templateId = templateId;
+  student.studentUid = fields[1];
+  student.schoolId = fields[2];
+  student.studentName = fields[3];
+  student.course = fields[4];
+  student.yearLevel = fields[5];
+  active = parseBoolText(fields[6], true);
+  hasFingerprint = parseBoolText(fields[7], true);
+  student.isActive = active;
+  student.activeKnown = true;
+  student.fingerprintStatus =
+      hasFingerprint ? (active ? "enrolled" : "inactive") : "pending";
+
+  if (!student.isValid()) {
+    return false;
+  }
+
+  CampusEligibility::normalizeStudent(student);
+  return true;
+}
+
+FingerprintRosterStats collectFingerprintRosterStats(fs::FS &fs, const char *path) {
+  FingerprintRosterStats stats;
+  if (!fs.exists(path)) {
+    return stats;
+  }
+
+  File file = fs.open(path, FILE_READ);
+  if (!file) {
+    return stats;
+  }
+
+  stats.rosterExists = true;
+  stats.fileSize = file.size();
+
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(file, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kFingerprintRosterFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kFingerprintRosterFieldCount);
+    if (parsedFields == 0) {
+      continue;
+    }
+    if (!stats.headerValid && isFingerprintRosterHeader(fields, parsedFields)) {
+      stats.headerValid = true;
+      continue;
+    }
+
+    StudentInfo student;
+    bool active = false;
+    bool hasFingerprint = false;
+    if (!parseFingerprintRosterStudent(line, student, active, hasFingerprint)) {
+      continue;
+    }
+    ++stats.totalRows;
+  }
+
+  file.close();
+  return stats;
+}
+
+String normalizeEnrollmentText(const String &value) {
+  String normalized = CampusEligibility::trimAndCollapseWhitespace(value);
+  normalized.toLowerCase();
+  return normalized;
+}
+
+bool isEnrollmentQueueHeader(const String *fields, size_t fieldCount) {
+  if (fields == nullptr || fieldCount < 2) {
+    return false;
+  }
+
+  String first = fields[0];
+  String second = fields[1];
+  first.toLowerCase();
+  second.toLowerCase();
+  return first == "sessionid" && second == "studentuid";
+}
+
+bool isEnrollmentStudentSynced(const StudentInfo &student) {
+  if (student.enrollmentSynced) {
+    return true;
+  }
+
+  const String syncStatus = normalizeEnrollmentText(student.syncStatus);
+  const String enrollmentStatus =
+      normalizeEnrollmentText(student.enrollmentStatus);
+  return syncStatus == "synced" || enrollmentStatus == "synced";
+}
+
+bool isEnrollmentStudentEnrolled(const StudentInfo &student) {
+  if (student.templateId > 0) {
+    return true;
+  }
+
+  const String enrollmentStatus =
+      normalizeEnrollmentText(student.enrollmentStatus);
+  return enrollmentStatus == "enrolled" || enrollmentStatus == "synced";
+}
+
+bool isEnrollmentStudentPendingSelection(const StudentInfo &student) {
+  if (!student.isValid()) {
+    return false;
+  }
+
+  if (isEnrollmentStudentSynced(student)) {
+    return false;
+  }
+
+  return !isEnrollmentStudentEnrolled(student);
+}
+
+bool isEnrollmentStudentEnrolledPendingSync(const StudentInfo &student) {
+  return student.isValid() && !isEnrollmentStudentSynced(student) &&
+         isEnrollmentStudentEnrolled(student);
+}
+
+bool studentKeysMatch(const StudentInfo &left, const StudentInfo &right) {
+  const bool sessionMatches =
+      left.sessionId.isEmpty() || right.sessionId.isEmpty() ||
+      left.sessionId == right.sessionId;
+  if (!sessionMatches) {
+    return false;
+  }
+
+  if (!left.studentUid.isEmpty() && !right.studentUid.isEmpty()) {
+    return left.studentUid == right.studentUid;
+  }
+
+  if (!left.schoolId.isEmpty() && !right.schoolId.isEmpty()) {
+    return left.schoolId == right.schoolId;
+  }
+
+  return false;
+}
+
+int parseCsvTemplateId(const String &value) {
+  const int templateId = value.toInt();
+  return templateId > 0 ? templateId : -1;
+}
+
+StudentInfo enrollmentQueueStudentFromFields(const String *fields,
+                                             size_t fieldCount) {
+  StudentInfo student;
+  if (fields == nullptr || fieldCount < kEnrollmentQueueFieldCount ||
+      isEnrollmentQueueHeader(fields, fieldCount)) {
+    return student;
+  }
+
+  student.sessionId = fields[0];
+  student.studentUid = fields[1];
+  student.schoolId = fields[2];
+  student.studentName = fields[3];
+  student.course = fields[4];
+  student.yearLevel = fields[5];
+  student.section = fields[6];
+  student.enrollmentStatus = fields[7];
+  student.templateId = parseCsvTemplateId(fields[8]);
+  student.syncStatus = fields[9];
+  student.enrolledAtIso = fields[10];
+  student.remarks = fields[11];
+  student.enrollmentSynced = isEnrollmentStudentSynced(student);
+  if (student.templateId > 0) {
+    student.fingerprintStatus = "enrolled";
+  }
+
+  if (!student.isValid()) {
+    return StudentInfo{};
+  }
+
+  CampusEligibility::normalizeStudent(student);
+  return student;
+}
+
+StudentInfo enrollmentResultStudentFromFields(const String *fields,
+                                              size_t fieldCount) {
+  StudentInfo student;
+  if (fields == nullptr || fieldCount < kEnrollmentResultFieldCount ||
+      isEnrollmentQueueHeader(fields, fieldCount)) {
+    return student;
+  }
+
+  student.sessionId = fields[0];
+  student.studentUid = fields[1];
+  student.schoolId = fields[2];
+  student.studentName = fields[3];
+  student.course = fields[4];
+  student.yearLevel = fields[5];
+  student.section = fields[6];
+  student.templateId = parseCsvTemplateId(fields[7]);
+  student.fingerprintDeviceId = fields[8];
+  student.enrolledAtIso = fields[9];
+  student.syncStatus = fields[10];
+  student.remarks = fields[11];
+  student.enrollmentStatus =
+      isEnrollmentStudentSynced(student) ? "synced" : "enrolled";
+  student.enrollmentSynced = isEnrollmentStudentSynced(student);
+  if (student.templateId > 0) {
+    student.fingerprintStatus = "enrolled";
+  }
+
+  if (!student.isValid()) {
+    return StudentInfo{};
+  }
+
+  CampusEligibility::normalizeStudent(student);
+  return student;
+}
+
+String enrollmentQueueCsvHeader() {
+  return "sessionId,studentUid,schoolId,studentName,course,yearLevel,section,"
+         "status,templateId,syncStatus,enrolledAtIso,remarks";
+}
+
+String enrollmentResultCsvHeader() {
+  return "sessionId,studentUid,schoolId,studentName,course,yearLevel,section,"
+         "templateId,fingerprintDeviceId,enrolledAtIso,syncStatus,remarks";
+}
+
+String enrollmentQueueCsvRow(const StudentInfo &student) {
+  const String enrollmentStatus =
+      !student.enrollmentStatus.isEmpty()
+          ? student.enrollmentStatus
+          : (student.templateId > 0 ? "enrolled" : "pending");
+  const String syncStatus = !student.syncStatus.isEmpty()
+                                ? student.syncStatus
+                                : (student.enrollmentSynced ? "synced" : "pending");
+  const int templateId = student.templateId > 0 ? student.templateId : -1;
+
+  String line;
+  line.reserve(256);
+  line += csvEscape(student.sessionId);
+  line += ",";
+  line += csvEscape(student.studentUid);
+  line += ",";
+  line += csvEscape(student.schoolId);
+  line += ",";
+  line += csvEscape(student.studentName);
+  line += ",";
+  line += csvEscape(student.course);
+  line += ",";
+  line += csvEscape(student.yearLevel);
+  line += ",";
+  line += csvEscape(student.section);
+  line += ",";
+  line += csvEscape(enrollmentStatus);
+  line += ",";
+  line += String(templateId);
+  line += ",";
+  line += csvEscape(syncStatus);
+  line += ",";
+  line += csvEscape(student.enrolledAtIso);
+  line += ",";
+  line += csvEscape(student.remarks);
+  return line;
+}
+
+String enrollmentResultCsvRow(const StudentInfo &student) {
+  const String syncStatus = !student.syncStatus.isEmpty()
+                                ? student.syncStatus
+                                : (student.enrollmentSynced ? "synced" : "pending");
+  const int templateId = student.templateId > 0 ? student.templateId : -1;
+
+  String line;
+  line.reserve(256);
+  line += csvEscape(student.sessionId);
+  line += ",";
+  line += csvEscape(student.studentUid);
+  line += ",";
+  line += csvEscape(student.schoolId);
+  line += ",";
+  line += csvEscape(student.studentName);
+  line += ",";
+  line += csvEscape(student.course);
+  line += ",";
+  line += csvEscape(student.yearLevel);
+  line += ",";
+  line += csvEscape(student.section);
+  line += ",";
+  line += String(templateId);
+  line += ",";
+  line += csvEscape(student.fingerprintDeviceId);
+  line += ",";
+  line += csvEscape(student.enrolledAtIso);
+  line += ",";
+  line += csvEscape(syncStatus);
+  line += ",";
+  line += csvEscape(student.remarks);
+  return line;
+}
+
 bool isStudentStillPendingEnrollment(const StudentInfo &student) {
   if (!student.isValid()) {
     return false;
   }
 
-  if (student.enrollmentSynced) {
-    return false;
-  }
-
-  String syncStatus = student.syncStatus;
-  syncStatus.toLowerCase();
-  if (syncStatus == "synced") {
-    return false;
-  }
-
-  String enrollmentStatus = student.enrollmentStatus;
-  enrollmentStatus.toLowerCase();
-  if (enrollmentStatus == "synced") {
-    return false;
-  }
-
-  return true;
+  return !isEnrollmentStudentSynced(student);
 }
 
 std::vector<StudentInfo> filterPendingStudents(
@@ -562,6 +953,10 @@ void eventToJson(JsonObject object, const EventInfo &event) {
   for (const auto &studentUid : event.targetedStudentIds) {
     targetedStudentIds.add(studentUid);
   }
+  JsonArray targetedSchoolIds = object.createNestedArray("targetedSchoolIds");
+  for (const auto &schoolId : event.targetedSchoolIds) {
+    targetedSchoolIds.add(schoolId);
+  }
   object["bodScope"] = event.bodScope;
   object["bodScopeCanonical"] = event.bodScopeCanonical;
   object["requiresRegistration"] = event.requiresRegistration;
@@ -614,6 +1009,16 @@ EventInfo eventFromJson(JsonObjectConst object) {
   appendStringValues(object["targetSections"], event.sectionFilters);
   appendStringValues(object["targetedStudentIds"], event.targetedStudentIds);
   appendStringValues(object["targetedStudents"], event.targetedStudentIds);
+  appendStringValues(object["selectedStudentIds"], event.targetedStudentIds);
+  appendStringValues(object["targetedSchoolIds"], event.targetedSchoolIds);
+  appendStringValues(object["selectedSchoolIds"], event.targetedSchoolIds);
+  if (event.targetMode.isEmpty() && !object["targetStudent"].isNull()) {
+    event.targetMode = parseBoolValue(object["targetStudent"], false)
+                           ? "specificStudents"
+                           : "broad";
+  }
+  appendStringValues(object["courses"], event.courseFilters);
+  appendStringValues(object["yearLevels"], event.yearLevelFilters);
   event.bodScope =
       String(object["bodScope"] | object["bodScopeFilter"] |
              object["organizationScope"] | "");
@@ -715,6 +1120,7 @@ bool StorageManager::mountSdCard() {
   SD.mkdir("/sessions");
   SD.mkdir("/students");
   SD.mkdir("/logs");
+  SD.mkdir(kSdEnrollmentDir);
   SD.mkdir(kSdExportDir);
   return true;
 }
@@ -734,34 +1140,46 @@ bool StorageManager::ensureSdReady() {
 
 bool StorageManager::ensurePairedEventContextLoaded() const {
   if (pairedEventContextLoaded_) {
-    return pairedEventCache_.isValid();
+    return pairedEventContextAvailable_;
   }
 
   pairedEventCache_ = loadPairedEvent();
   pairedStudentsCache_.clear();
   remoteRecordedStudentIdsCache_.clear();
   pairedEventContextLoaded_ = true;
+  pairedEventContextAvailable_ = false;
+  pairedEventContextStatus_ = "paired_event_context_missing";
 
   if (!littleFsReady_ || !LittleFS.exists(kPairedEventContextPath)) {
-    return pairedEventCache_.isValid();
+    return false;
   }
 
   DynamicJsonDocument doc(kPairedEventContextDocSize);
   File file = LittleFS.open(kPairedEventContextPath, FILE_READ);
   if (!file) {
-    return pairedEventCache_.isValid();
+    pairedEventContextStatus_ = "paired_event_context_corrupt";
+    return false;
   }
 
   const DeserializationError error = deserializeJson(doc, file);
   file.close();
   if (error) {
-    return pairedEventCache_.isValid();
+    pairedEventContextStatus_ = "paired_event_context_corrupt";
+    return false;
   }
 
   JsonObject eventObject = doc["event"];
-  if (!eventObject.isNull()) {
-    pairedEventCache_ = eventFromJson(eventObject);
+  if (eventObject.isNull()) {
+    pairedEventContextStatus_ = "paired_event_context_corrupt";
+    return false;
   }
+
+  const EventInfo parsedEvent = eventFromJson(eventObject);
+  if (!parsedEvent.isValid()) {
+    pairedEventContextStatus_ = "paired_event_context_corrupt";
+    return false;
+  }
+  pairedEventCache_ = parsedEvent;
 
   JsonArray studentArray = doc["students"].as<JsonArray>();
   pairedStudentsCache_.reserve(studentArray.size());
@@ -783,7 +1201,9 @@ bool StorageManager::ensurePairedEventContextLoaded() const {
     }
   }
 
-  return pairedEventCache_.isValid();
+  pairedEventContextAvailable_ = true;
+  pairedEventContextStatus_ = "ok";
+  return true;
 }
 
 EventInfo StorageManager::loadPairedEvent() const {
@@ -849,6 +1269,8 @@ bool StorageManager::clearPairedEvent() {
   pairedStudentsCache_.clear();
   remoteRecordedStudentIdsCache_.clear();
   pairedEventContextLoaded_ = true;
+  pairedEventContextAvailable_ = false;
+  pairedEventContextStatus_ = "paired_event_context_missing";
   return true;
 }
 
@@ -863,12 +1285,24 @@ bool StorageManager::savePairedEventContext(
     CampusEligibility::normalizeStudent(student);
   }
 
+  Serial.printf("[PAIR] saving paired event context eventId=%s\n",
+                normalizedEvent.eventId.c_str());
+  if (CampusEligibility::isSpecificStudentsMode(normalizedEvent)) {
+    Serial.printf("[PAIR] saving targeted roster count=%u\n",
+                  static_cast<unsigned>(
+                      CampusEligibility::targetedStudentCount(normalizedEvent)));
+  }
+
   if (!savePairedEvent(normalizedEvent) || !littleFsReady_) {
+    pairedEventContextAvailable_ = false;
+    pairedEventContextStatus_ = "paired_event_context_missing";
     return false;
   }
 
   if (!writePairedEventContext(normalizedEvent, normalizedStudents,
                                recordedStudentIds)) {
+    pairedEventContextAvailable_ = false;
+    pairedEventContextStatus_ = "paired_event_context_corrupt";
     return false;
   }
 
@@ -876,6 +1310,22 @@ bool StorageManager::savePairedEventContext(
   pairedStudentsCache_ = normalizedStudents;
   remoteRecordedStudentIdsCache_ = recordedStudentIds;
   pairedEventContextLoaded_ = true;
+  pairedEventContextAvailable_ = true;
+  pairedEventContextStatus_ = "ok";
+
+  size_t fileSize = 0;
+  File contextFile = LittleFS.open(kPairedEventContextPath, FILE_READ);
+  if (contextFile) {
+    fileSize = static_cast<size_t>(contextFile.size());
+    contextFile.close();
+  }
+  Serial.printf("[PAIR] saved paired event context ok size=%u\n",
+                static_cast<unsigned>(fileSize));
+  if (CampusEligibility::isSpecificStudentsMode(normalizedEvent)) {
+    Serial.printf("[PAIR] saved targeted roster ok count=%u\n",
+                  static_cast<unsigned>(
+                      CampusEligibility::targetedStudentCount(normalizedEvent)));
+  }
   return true;
 }
 
@@ -886,19 +1336,48 @@ bool StorageManager::loadPairedEventContext(
   event = pairedEventCache_;
   students = pairedStudentsCache_;
   recordedStudentIds = remoteRecordedStudentIdsCache_;
-  return event.isValid();
+  return pairedEventContextAvailable_ && event.isValid();
 }
 
 CampusEligibility::EventEligibilityDecision
 StorageManager::evaluateStudentEligibilityForEvent(const EventInfo &event,
                                                    const StudentInfo &student) const {
   ensurePairedEventContextLoaded();
-  const std::vector<StudentInfo> *pairedStudents = &pairedStudentsCache_;
-  if (!pairedEventCache_.isValid() || pairedEventCache_.eventId != event.eventId) {
-    static const std::vector<StudentInfo> kEmptyStudents;
-    pairedStudents = &kEmptyStudents;
+  CampusEligibility::EventEligibilityDecision decision;
+  if (!event.isValid()) {
+    decision.stalePairedEventData = true;
+    decision.finalReason = "paired_event_context_missing";
+    return decision;
   }
-  return CampusEligibility::evaluateStudentForEvent(event, *pairedStudents, student);
+  if (!pairedEventContextAvailable_) {
+    decision.stalePairedEventData = true;
+    decision.finalReason = pairedEventContextStatus_.isEmpty()
+                               ? "paired_event_context_missing"
+                               : pairedEventContextStatus_;
+    return decision;
+  }
+  if (!pairedEventCache_.isValid()) {
+    decision.stalePairedEventData = true;
+    decision.finalReason = "paired_event_context_corrupt";
+    return decision;
+  }
+  if (pairedEventCache_.eventId != event.eventId) {
+    decision.stalePairedEventData = true;
+    decision.finalReason = "paired_event_id_mismatch";
+    return decision;
+  }
+  return CampusEligibility::evaluateStudentForEvent(event, pairedStudentsCache_,
+                                                    student);
+}
+
+bool StorageManager::hasPairedEventContextCache() const {
+  ensurePairedEventContextLoaded();
+  return pairedEventContextAvailable_;
+}
+
+String StorageManager::pairedEventContextStatus() const {
+  ensurePairedEventContextLoaded();
+  return pairedEventContextStatus_;
 }
 
 bool StorageManager::isStudentAuthorizedForEvent(const String &eventId,
@@ -1009,10 +1488,620 @@ bool StorageManager::clearCurrentEnrollmentSession() {
   if (!littleFsReady_) {
     return false;
   }
-  if (!LittleFS.exists(kEnrollmentSessionPath)) {
-    return true;
+
+  bool cleared = true;
+  if (LittleFS.exists(kEnrollmentSessionPath)) {
+    cleared = LittleFS.remove(kEnrollmentSessionPath);
   }
-  return LittleFS.remove(kEnrollmentSessionPath);
+
+  if (CampusConfig::kUseSd && ensureSdReady()) {
+    if (SD.exists(kSdEnrollmentQueueTempPath)) {
+      SD.remove(kSdEnrollmentQueueTempPath);
+    }
+    if (SD.exists(kSdEnrollmentQueuePath)) {
+      cleared = SD.remove(kSdEnrollmentQueuePath) && cleared;
+    }
+  }
+
+  return cleared;
+}
+
+bool StorageManager::saveEnrollmentQueueToSd(
+    const EnrollmentSessionInfo &session, const std::vector<StudentInfo> &students) {
+  if (!ensureSdReady()) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  SD.mkdir(kSdEnrollmentDir);
+  SD.remove(kSdEnrollmentQueueTempPath);
+
+  File file = SD.open(kSdEnrollmentQueueTempPath, FILE_WRITE);
+  if (!file) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  Serial.printf("[ENROLL][QUEUE] saving to SD count=%u\n",
+                static_cast<unsigned>(students.size()));
+  if (!writeCsvLine(file, enrollmentQueueCsvHeader())) {
+    file.close();
+    SD.remove(kSdEnrollmentQueueTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  for (auto student : students) {
+    student.sessionId = session.sessionId;
+    if (student.enrollmentStatus.isEmpty()) {
+      student.enrollmentStatus = "pending";
+    }
+    if (student.syncStatus.isEmpty()) {
+      student.syncStatus = "pending";
+    }
+    if (student.templateId <= 0) {
+      student.templateId = -1;
+    }
+    CampusEligibility::normalizeStudent(student);
+    if (!writeCsvLine(file, enrollmentQueueCsvRow(student))) {
+      file.close();
+      SD.remove(kSdEnrollmentQueueTempPath);
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+  }
+
+  file.close();
+
+  SD.remove(kSdEnrollmentQueuePath);
+  if (!SD.rename(kSdEnrollmentQueueTempPath, kSdEnrollmentQueuePath)) {
+    SD.remove(kSdEnrollmentQueueTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  File savedFile = SD.open(kSdEnrollmentQueuePath, FILE_READ);
+  const size_t fileSize =
+      savedFile ? static_cast<size_t>(savedFile.size()) : 0U;
+  if (savedFile) {
+    savedFile.close();
+  }
+
+  Serial.printf("[ENROLL][QUEUE] saved to SD count=%u size=%u\n",
+                static_cast<unsigned>(students.size()),
+                static_cast<unsigned>(fileSize));
+  lastSdWriteSucceeded_ = true;
+  return true;
+}
+
+bool StorageManager::loadEnrollmentQueuePageFromSd(
+    size_t offset, size_t limit, std::vector<StudentInfo> &students,
+    bool pendingOnly) const {
+  students.clear();
+  if (limit == 0 || !CampusConfig::kUseSd) {
+    return false;
+  }
+
+  StorageManager *storage = const_cast<StorageManager *>(this);
+  if (!storage->ensureSdReady() || !SD.exists(kSdEnrollmentQueuePath)) {
+    return false;
+  }
+
+  File file = SD.open(kSdEnrollmentQueuePath, FILE_READ);
+  if (!file) {
+    return false;
+  }
+
+  size_t matchedRows = 0;
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(file, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kEnrollmentQueueFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kEnrollmentQueueFieldCount);
+    StudentInfo student =
+        enrollmentQueueStudentFromFields(fields, parsedFields);
+    if (!student.isValid()) {
+      continue;
+    }
+
+    if (pendingOnly && !isEnrollmentStudentPendingSelection(student)) {
+      continue;
+    }
+
+    if (matchedRows < offset) {
+      ++matchedRows;
+      continue;
+    }
+
+    students.push_back(student);
+    ++matchedRows;
+    if (students.size() >= limit) {
+      break;
+    }
+  }
+
+  file.close();
+  return true;
+}
+
+EnrollmentQueueStats StorageManager::getEnrollmentQueueStatsFromSd() const {
+  EnrollmentQueueStats stats;
+  if (!CampusConfig::kUseSd) {
+    return stats;
+  }
+
+  StorageManager *storage = const_cast<StorageManager *>(this);
+  stats.sdReady = storage->ensureSdReady();
+  if (!stats.sdReady || !SD.exists(kSdEnrollmentQueuePath)) {
+    return stats;
+  }
+
+  File file = SD.open(kSdEnrollmentQueuePath, FILE_READ);
+  if (!file) {
+    return stats;
+  }
+
+  stats.queueExists = true;
+  stats.fileSize = static_cast<size_t>(file.size());
+
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(file, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kEnrollmentQueueFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kEnrollmentQueueFieldCount);
+    StudentInfo student =
+        enrollmentQueueStudentFromFields(fields, parsedFields);
+    if (!student.isValid()) {
+      continue;
+    }
+
+    ++stats.totalRows;
+    if (isEnrollmentStudentSynced(student)) {
+      ++stats.syncedRows;
+    } else if (isEnrollmentStudentPendingSelection(student)) {
+      ++stats.pendingRows;
+    } else {
+      ++stats.enrolledPendingSyncRows;
+    }
+  }
+
+  file.close();
+  return stats;
+}
+
+bool StorageManager::findEnrollmentStudentInSd(const String &studentKey,
+                                               StudentInfo &student) const {
+  student = StudentInfo{};
+  if (studentKey.isEmpty() || !CampusConfig::kUseSd) {
+    return false;
+  }
+
+  StorageManager *storage = const_cast<StorageManager *>(this);
+  if (!storage->ensureSdReady() || !SD.exists(kSdEnrollmentQueuePath)) {
+    return false;
+  }
+
+  File file = SD.open(kSdEnrollmentQueuePath, FILE_READ);
+  if (!file) {
+    return false;
+  }
+
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(file, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kEnrollmentQueueFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kEnrollmentQueueFieldCount);
+    StudentInfo row = enrollmentQueueStudentFromFields(fields, parsedFields);
+    if (!row.isValid()) {
+      continue;
+    }
+
+    if (row.studentUid == studentKey || row.schoolId == studentKey) {
+      student = row;
+      file.close();
+      return true;
+    }
+  }
+
+  file.close();
+  return false;
+}
+
+bool StorageManager::updateEnrollmentStudentRowOnSd(const StudentInfo &student) {
+  if (!ensureSdReady()) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  SD.mkdir(kSdEnrollmentDir);
+  File source = SD.open(kSdEnrollmentQueuePath, FILE_READ);
+  if (!source) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  SD.remove(kSdEnrollmentQueueTempPath);
+  File temp = SD.open(kSdEnrollmentQueueTempPath, FILE_WRITE);
+  if (!temp) {
+    source.close();
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  StudentInfo updatedStudent = student;
+  if (updatedStudent.templateId <= 0) {
+    updatedStudent.templateId = -1;
+  }
+  CampusEligibility::normalizeStudent(updatedStudent);
+
+  if (!writeCsvLine(temp, enrollmentQueueCsvHeader())) {
+    source.close();
+    temp.close();
+    SD.remove(kSdEnrollmentQueueTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  bool replaced = false;
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(source, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kEnrollmentQueueFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kEnrollmentQueueFieldCount);
+    if (isEnrollmentQueueHeader(fields, parsedFields)) {
+      continue;
+    }
+
+    StudentInfo row = enrollmentQueueStudentFromFields(fields, parsedFields);
+    if (row.isValid() && studentKeysMatch(row, updatedStudent)) {
+      if (updatedStudent.sessionId.isEmpty()) {
+        updatedStudent.sessionId = row.sessionId;
+      }
+      if (!writeCsvLine(temp, enrollmentQueueCsvRow(updatedStudent))) {
+        source.close();
+        temp.close();
+        SD.remove(kSdEnrollmentQueueTempPath);
+        lastSdWriteSucceeded_ = false;
+        return false;
+      }
+      replaced = true;
+      continue;
+    }
+
+    if (row.isValid()) {
+      if (!writeCsvLine(temp, enrollmentQueueCsvRow(row))) {
+        source.close();
+        temp.close();
+        SD.remove(kSdEnrollmentQueueTempPath);
+        lastSdWriteSucceeded_ = false;
+        return false;
+      }
+    } else {
+      if (!writeCsvLine(temp, line)) {
+        source.close();
+        temp.close();
+        SD.remove(kSdEnrollmentQueueTempPath);
+        lastSdWriteSucceeded_ = false;
+        return false;
+      }
+    }
+  }
+
+  if (!replaced) {
+    if (!writeCsvLine(temp, enrollmentQueueCsvRow(updatedStudent))) {
+      source.close();
+      temp.close();
+      SD.remove(kSdEnrollmentQueueTempPath);
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+  }
+
+  source.close();
+  temp.close();
+
+  SD.remove(kSdEnrollmentQueuePath);
+  if (!SD.rename(kSdEnrollmentQueueTempPath, kSdEnrollmentQueuePath)) {
+    SD.remove(kSdEnrollmentQueueTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  Serial.printf("[ENROLL][QUEUE] update row student=%s template=%d\n",
+                updatedStudent.studentUid.c_str(), updatedStudent.templateId);
+  lastSdWriteSucceeded_ = true;
+  return true;
+}
+
+bool StorageManager::appendEnrollmentResultToSd(const StudentInfo &student) {
+  if (!ensureSdReady()) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  SD.mkdir(kSdEnrollmentDir);
+  SD.remove(kSdEnrollmentResultsTempPath);
+
+  File temp = SD.open(kSdEnrollmentResultsTempPath, FILE_WRITE);
+  if (!temp) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  StudentInfo updatedStudent = student;
+  if (updatedStudent.templateId <= 0) {
+    updatedStudent.templateId = -1;
+  }
+  CampusEligibility::normalizeStudent(updatedStudent);
+
+  if (!writeCsvLine(temp, enrollmentResultCsvHeader())) {
+    temp.close();
+    SD.remove(kSdEnrollmentResultsTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  bool replaced = false;
+  if (SD.exists(kSdEnrollmentResultsPath)) {
+    File source = SD.open(kSdEnrollmentResultsPath, FILE_READ);
+    if (!source) {
+      temp.close();
+      SD.remove(kSdEnrollmentResultsTempPath);
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+
+    String line;
+    bool truncated = false;
+    while (readBoundedLine(source, line, truncated)) {
+      if (truncated || line.isEmpty()) {
+        continue;
+      }
+
+      String fields[kEnrollmentResultFieldCount];
+      const size_t parsedFields =
+          splitCsvLine(line, fields, kEnrollmentResultFieldCount);
+      if (isEnrollmentQueueHeader(fields, parsedFields)) {
+        continue;
+      }
+
+      StudentInfo row = enrollmentResultStudentFromFields(fields, parsedFields);
+      if (row.isValid() && studentKeysMatch(row, updatedStudent)) {
+        if (updatedStudent.sessionId.isEmpty()) {
+          updatedStudent.sessionId = row.sessionId;
+        }
+        if (!writeCsvLine(temp, enrollmentResultCsvRow(updatedStudent))) {
+          source.close();
+          temp.close();
+          SD.remove(kSdEnrollmentResultsTempPath);
+          lastSdWriteSucceeded_ = false;
+          return false;
+        }
+        replaced = true;
+        continue;
+      }
+
+      if (row.isValid()) {
+        if (!writeCsvLine(temp, enrollmentResultCsvRow(row))) {
+          source.close();
+          temp.close();
+          SD.remove(kSdEnrollmentResultsTempPath);
+          lastSdWriteSucceeded_ = false;
+          return false;
+        }
+      } else {
+        if (!writeCsvLine(temp, line)) {
+          source.close();
+          temp.close();
+          SD.remove(kSdEnrollmentResultsTempPath);
+          lastSdWriteSucceeded_ = false;
+          return false;
+        }
+      }
+    }
+
+    source.close();
+  }
+
+  if (!replaced) {
+    if (!writeCsvLine(temp, enrollmentResultCsvRow(updatedStudent))) {
+      temp.close();
+      SD.remove(kSdEnrollmentResultsTempPath);
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+  }
+
+  temp.close();
+
+  SD.remove(kSdEnrollmentResultsPath);
+  if (!SD.rename(kSdEnrollmentResultsTempPath, kSdEnrollmentResultsPath)) {
+    SD.remove(kSdEnrollmentResultsTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  Serial.printf("[ENROLL][RESULT] queued student=%s template=%d\n",
+                updatedStudent.studentUid.c_str(), updatedStudent.templateId);
+  lastSdWriteSucceeded_ = true;
+  return true;
+}
+
+std::vector<StudentInfo> StorageManager::loadUnsyncedEnrollmentResultsFromSd(
+    size_t limit) const {
+  std::vector<StudentInfo> students;
+  if (limit == 0 || !CampusConfig::kUseSd) {
+    return students;
+  }
+
+  StorageManager *storage = const_cast<StorageManager *>(this);
+  if (!storage->ensureSdReady() || !SD.exists(kSdEnrollmentResultsPath)) {
+    return students;
+  }
+
+  File file = SD.open(kSdEnrollmentResultsPath, FILE_READ);
+  if (!file) {
+    return students;
+  }
+
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(file, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kEnrollmentResultFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kEnrollmentResultFieldCount);
+    StudentInfo student =
+        enrollmentResultStudentFromFields(fields, parsedFields);
+    if (!student.isValid() || isEnrollmentStudentSynced(student) ||
+        student.templateId <= 0) {
+      continue;
+    }
+
+    students.push_back(student);
+    if (students.size() >= limit) {
+      break;
+    }
+  }
+
+  file.close();
+  return students;
+}
+
+bool StorageManager::markEnrollmentResultSyncedOnSd(const String &sessionId,
+                                                    const String &studentUid) {
+  if (studentUid.isEmpty() || !ensureSdReady() ||
+      !SD.exists(kSdEnrollmentResultsPath)) {
+    return false;
+  }
+
+  SD.remove(kSdEnrollmentResultsTempPath);
+  File source = SD.open(kSdEnrollmentResultsPath, FILE_READ);
+  File temp = SD.open(kSdEnrollmentResultsTempPath, FILE_WRITE);
+  if (!source || !temp) {
+    if (source) {
+      source.close();
+    }
+    if (temp) {
+      temp.close();
+    }
+    SD.remove(kSdEnrollmentResultsTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  if (!writeCsvLine(temp, enrollmentResultCsvHeader())) {
+    source.close();
+    temp.close();
+    SD.remove(kSdEnrollmentResultsTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  bool updated = false;
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(source, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kEnrollmentResultFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kEnrollmentResultFieldCount);
+    if (isEnrollmentQueueHeader(fields, parsedFields)) {
+      continue;
+    }
+
+    StudentInfo row = enrollmentResultStudentFromFields(fields, parsedFields);
+    if (!row.isValid()) {
+      if (!writeCsvLine(temp, line)) {
+        source.close();
+        temp.close();
+        SD.remove(kSdEnrollmentResultsTempPath);
+        lastSdWriteSucceeded_ = false;
+        return false;
+      }
+      continue;
+    }
+
+    if (row.studentUid == studentUid &&
+        (sessionId.isEmpty() || row.sessionId == sessionId)) {
+      row.syncStatus = "synced";
+      row.enrollmentStatus = "synced";
+      row.enrollmentSynced = true;
+      if (!writeCsvLine(temp, enrollmentResultCsvRow(row))) {
+        source.close();
+        temp.close();
+        SD.remove(kSdEnrollmentResultsTempPath);
+        lastSdWriteSucceeded_ = false;
+        return false;
+      }
+      updated = true;
+      continue;
+    }
+
+    if (!writeCsvLine(temp, enrollmentResultCsvRow(row))) {
+      source.close();
+      temp.close();
+      SD.remove(kSdEnrollmentResultsTempPath);
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+  }
+
+  source.close();
+  temp.close();
+
+  if (!updated) {
+    SD.remove(kSdEnrollmentResultsTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  SD.remove(kSdEnrollmentResultsPath);
+  if (!SD.rename(kSdEnrollmentResultsTempPath, kSdEnrollmentResultsPath)) {
+    SD.remove(kSdEnrollmentResultsTempPath);
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  StudentInfo queueStudent;
+  if (findEnrollmentStudentInSd(studentUid, queueStudent)) {
+    if (sessionId.isEmpty() || queueStudent.sessionId == sessionId) {
+      queueStudent.syncStatus = "synced";
+      queueStudent.enrollmentStatus = "synced";
+      queueStudent.enrollmentSynced = true;
+      updateEnrollmentStudentRowOnSd(queueStudent);
+    }
+  }
+
+  Serial.printf("[ENROLL][SYNC] marked synced student=%s\n", studentUid.c_str());
+  lastSdWriteSucceeded_ = true;
+  return true;
 }
 
 bool StorageManager::ensurePendingStudentsLoaded() const {
@@ -1128,6 +2217,33 @@ bool StorageManager::upsertFingerprintMapping(const StudentInfo &student) {
   return updateEnrollmentArtifacts(normalizedStudent);
 }
 
+bool StorageManager::upsertFingerprintMappingCacheOnly(const StudentInfo &student) {
+  if (!littleFsReady_) {
+    return false;
+  }
+
+  StudentInfo normalizedStudent = student;
+  CampusEligibility::normalizeStudent(normalizedStudent);
+
+  ensureFingerprintMappingsLoaded();
+  bool updated = false;
+
+  for (auto &entry : fingerprintMappingsCache_) {
+    if (entry.studentUid == normalizedStudent.studentUid ||
+        entry.templateId == normalizedStudent.templateId) {
+      entry = normalizedStudent;
+      updated = true;
+      break;
+    }
+  }
+
+  if (!updated) {
+    fingerprintMappingsCache_.push_back(normalizedStudent);
+  }
+
+  return writeFingerprintMappings(fingerprintMappingsCache_);
+}
+
 bool StorageManager::findStudentByTemplate(int templateId, StudentInfo &outStudent) const {
   const FingerprintTemplateOwnership ownership = resolveTemplateOwnership(templateId);
   if (ownership.state != FingerprintOwnershipState::Unique) {
@@ -1162,6 +2278,65 @@ FingerprintTemplateOwnership StorageManager::resolveTemplateOwnership(
   } else if (ownership.activeOwners > 1) {
     ownership.state = FingerprintOwnershipState::Duplicate;
   }
+  return ownership;
+}
+
+FingerprintTemplateOwnership StorageManager::resolveTemplateOwnershipFromSd(
+    int templateId) const {
+  FingerprintTemplateOwnership ownership;
+  if (templateId <= 0 || !CampusConfig::kUseSd) {
+    return ownership;
+  }
+
+  StorageManager *storage = const_cast<StorageManager *>(this);
+  if (!storage->ensureSdReady() || !SD.exists(kSdFingerprintRosterPath)) {
+    return ownership;
+  }
+
+  File file = SD.open(kSdFingerprintRosterPath, FILE_READ);
+  if (!file) {
+    return ownership;
+  }
+
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(file, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    StudentInfo student;
+    bool active = false;
+    bool hasFingerprint = false;
+    if (!parseFingerprintRosterStudent(line, student, active, hasFingerprint)) {
+      continue;
+    }
+    if (student.templateId != templateId) {
+      continue;
+    }
+
+    ++ownership.totalMatches;
+    if (!active || !hasFingerprint || !isActiveFingerprintOwner(student)) {
+      continue;
+    }
+
+    ++ownership.activeOwners;
+    if (ownership.activeOwners == 1) {
+      ownership.student = student;
+      ownership.state = FingerprintOwnershipState::Unique;
+    } else {
+      ownership.state = FingerprintOwnershipState::Duplicate;
+    }
+  }
+
+  file.close();
+
+  if (ownership.activeOwners == 0) {
+    ownership.state = FingerprintOwnershipState::None;
+  } else if (ownership.activeOwners > 1) {
+    ownership.state = FingerprintOwnershipState::Duplicate;
+  }
+
   return ownership;
 }
 
@@ -1297,6 +2472,12 @@ bool StorageManager::ensureEnrollmentSyncQueueLoaded() const {
 }
 
 std::vector<StudentInfo> StorageManager::loadUnsyncedEnrollments() const {
+  const std::vector<StudentInfo> sdResults =
+      loadUnsyncedEnrollmentResultsFromSd(1);
+  if (!sdResults.empty()) {
+    return sdResults;
+  }
+
   ensureEnrollmentSyncQueueLoaded();
   std::vector<StudentInfo> pending;
   pending.reserve(enrollmentSyncQueueCache_.size());
@@ -1321,6 +2502,37 @@ std::vector<StudentInfo> StorageManager::loadUnsyncedEnrollments() const {
 }
 
 size_t StorageManager::unsyncedEnrollmentCount() const {
+  if (CampusConfig::kUseSd) {
+    StorageManager *storage = const_cast<StorageManager *>(this);
+    if (storage->ensureSdReady() && SD.exists(kSdEnrollmentResultsPath)) {
+      File file = SD.open(kSdEnrollmentResultsPath, FILE_READ);
+      if (file) {
+        size_t count = 0;
+        String line;
+        bool truncated = false;
+        while (readBoundedLine(file, line, truncated)) {
+          if (truncated || line.isEmpty()) {
+            continue;
+          }
+
+          String fields[kEnrollmentResultFieldCount];
+          const size_t parsedFields =
+              splitCsvLine(line, fields, kEnrollmentResultFieldCount);
+          StudentInfo student =
+              enrollmentResultStudentFromFields(fields, parsedFields);
+          if (student.isValid() && !isEnrollmentStudentSynced(student) &&
+              student.templateId > 0) {
+            ++count;
+          }
+        }
+        file.close();
+        if (count > 0) {
+          return count;
+        }
+      }
+    }
+  }
+
   ensureEnrollmentSyncQueueLoaded();
   size_t count = 0;
   for (const auto &student : enrollmentSyncQueueCache_) {
@@ -1367,10 +2579,13 @@ bool StorageManager::markEnrollmentSynced(const String &studentUid) {
       changed ? writeFingerprintMappings(fingerprintMappingsCache_) : true;
   const bool pendingSaved = savePendingStudents(pendingStudentsCache_);
   const bool queueSaved = removeFromSyncQueue(studentUid);
+  const EnrollmentQueueStats sdQueueStats = getEnrollmentQueueStatsFromSd();
+  const bool hasPendingQueue =
+      sdQueueStats.queueExists ? sdQueueStats.pendingRows > 0
+                               : !pendingStudentsCache_.empty();
   const bool clearedSession =
-      pendingStudentsCache_.empty() && unsyncedEnrollmentCount() == 0
-          ? clearCurrentEnrollmentSession()
-          : true;
+      !hasPendingQueue && unsyncedEnrollmentCount() == 0 ? clearCurrentEnrollmentSession()
+                                                         : true;
   return mappingSaved && pendingSaved && queueSaved && clearedSession;
 }
 
@@ -1628,6 +2843,95 @@ bool StorageManager::exportAttendanceCsv(const EventInfo &event,
   return true;
 }
 
+bool StorageManager::saveFingerprintRosterToSd(
+    Stream &stream, size_t expectedBytes, FingerprintRosterStats &stats,
+    String &error) {
+  stats = FingerprintRosterStats{};
+  error = "";
+
+  if (!ensureSdReady()) {
+    error = "SD unavailable";
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  SD.mkdir("/logs");
+  SD.remove(kSdFingerprintRosterTempPath);
+
+  File file = SD.open(kSdFingerprintRosterTempPath, FILE_WRITE);
+  if (!file) {
+    error = "SD temp file open failed";
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  uint8_t buffer[256];
+  size_t writtenBytes = 0;
+  while (expectedBytes == 0 || writtenBytes < expectedBytes) {
+    size_t requestedBytes = sizeof(buffer);
+    if (expectedBytes > 0) {
+      const size_t remainingBytes = expectedBytes - writtenBytes;
+      if (remainingBytes < requestedBytes) {
+        requestedBytes = remainingBytes;
+      }
+    }
+
+    const size_t chunkSize =
+        stream.readBytes(reinterpret_cast<char *>(buffer), requestedBytes);
+    if (chunkSize == 0) {
+      break;
+    }
+
+    const size_t savedBytes = file.write(buffer, chunkSize);
+    if (savedBytes != chunkSize) {
+      file.close();
+      SD.remove(kSdFingerprintRosterTempPath);
+      error = "SD roster write failed";
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+
+    writtenBytes += chunkSize;
+  }
+
+  file.close();
+
+  if (expectedBytes > 0 && writtenBytes != expectedBytes) {
+    SD.remove(kSdFingerprintRosterTempPath);
+    error = "Roster download incomplete";
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  const FingerprintRosterStats tempStats =
+      collectFingerprintRosterStats(SD, kSdFingerprintRosterTempPath);
+  if (!tempStats.rosterExists || !tempStats.headerValid) {
+    SD.remove(kSdFingerprintRosterTempPath);
+    error = "Roster file invalid";
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  SD.remove(kSdFingerprintRosterPath);
+  if (!SD.rename(kSdFingerprintRosterTempPath, kSdFingerprintRosterPath)) {
+    SD.remove(kSdFingerprintRosterTempPath);
+    error = "Roster file replace failed";
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  stats = collectFingerprintRosterStats(SD, kSdFingerprintRosterPath);
+  lastSdWriteSucceeded_ = true;
+  return true;
+}
+
+FingerprintRosterStats StorageManager::getFingerprintRosterStats() {
+  if (!ensureSdReady()) {
+    return FingerprintRosterStats{};
+  }
+  return collectFingerprintRosterStats(SD, kSdFingerprintRosterPath);
+}
+
 bool StorageManager::writePendingStudents(
     const std::vector<StudentInfo> &students) const {
   return writeStudentList(kPendingStudentsPath, students);
@@ -1707,34 +3011,51 @@ bool StorageManager::updateEnrollmentArtifacts(const StudentInfo &student) {
   }
   logs.push_back(student);
 
-  ensureEnrollmentSyncQueueLoaded();
-  std::vector<StudentInfo> syncQueue;
-  syncQueue.reserve(enrollmentSyncQueueCache_.size() + 1);
-  for (const auto &row : enrollmentSyncQueueCache_) {
-    if (row.isValid() && row.studentUid != student.studentUid) {
-      syncQueue.push_back(row);
-    }
-  }
-  syncQueue.push_back(student);
-  enrollmentSyncQueueCache_ = syncQueue;
-  enrollmentSyncQueueLoaded_ = true;
+  const bool sdQueueAvailable =
+      CampusConfig::kUseSd && ensureSdReady() && SD.exists(kSdEnrollmentQueuePath);
 
-  ensurePendingStudentsLoaded();
-  bool queueChanged = false;
-  for (auto &entry : pendingStudentsCache_) {
-    if (entry.studentUid == student.studentUid) {
-      entry = student;
-      queueChanged = true;
-      break;
+  bool syncQueueSaved = true;
+  if (sdQueueAvailable) {
+    syncQueueSaved = updateEnrollmentStudentRowOnSd(student) &&
+                     appendEnrollmentResultToSd(student);
+  } else {
+    ensureEnrollmentSyncQueueLoaded();
+    std::vector<StudentInfo> syncQueue;
+    syncQueue.reserve(enrollmentSyncQueueCache_.size() + 1);
+    for (const auto &row : enrollmentSyncQueueCache_) {
+      if (row.isValid() && row.studentUid != student.studentUid) {
+        syncQueue.push_back(row);
+      }
     }
-  }
-  if (!queueChanged) {
-    pendingStudentsCache_.push_back(student);
+    syncQueue.push_back(student);
+    enrollmentSyncQueueCache_ = syncQueue;
+    enrollmentSyncQueueLoaded_ = true;
+    syncQueueSaved = writeStudentList(kEnrollmentSyncQueuePath,
+                                      enrollmentSyncQueueCache_);
   }
 
-  return writeStudentList(kEnrollmentLogsPath, logs) &&
-         writeStudentList(kEnrollmentSyncQueuePath, enrollmentSyncQueueCache_) &&
-         writePendingStudents(pendingStudentsCache_);
+  bool pendingSaved = true;
+  if (!sdQueueAvailable) {
+    ensurePendingStudentsLoaded();
+    bool queueChanged = false;
+    for (auto &entry : pendingStudentsCache_) {
+      if (entry.studentUid == student.studentUid) {
+        entry = student;
+        queueChanged = true;
+        break;
+      }
+    }
+    if (!queueChanged) {
+      pendingStudentsCache_.push_back(student);
+    }
+    pendingSaved = writePendingStudents(pendingStudentsCache_);
+  }
+
+  const bool logsSaved = writeStudentList(kEnrollmentLogsPath, logs);
+  if (!logsSaved) {
+    Serial.println("[ENROLL][RESULT] enrollment log save skipped");
+  }
+  return syncQueueSaved && pendingSaved;
 }
 
 bool StorageManager::removeFromSyncQueue(const String &studentUid) {

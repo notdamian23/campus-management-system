@@ -1,10 +1,12 @@
 import type { User } from "firebase/auth";
 import { finalizeVerifiedCampusProfileForCurrentUser } from "@/lib/firebase-functions";
 import {
+  isEcWorkspaceRole,
   normalizeCampusRole,
   resolveCampusRoleHome,
   type CampusCanonicalRole,
 } from "@/lib/campus-role";
+import { isBOD } from "@/lib/ec-permissions";
 import { formatStudentFullName } from "@/lib/student-name";
 
 export type CampusRole = CampusCanonicalRole;
@@ -30,17 +32,20 @@ export type CampusProfileDoc = {
   ecScope?: "all" | "course" | null;
   assignedCourse?: string | null;
   courseScope?: string | null;
+  courseScopeLabel?: string | null;
   year?: string;
   yearLevel?: string;
   readyForClearance?: boolean;
   ecPosition?: string | null;
   isBod?: boolean;
+  isStudent?: boolean;
 };
 
 type CampusCookieState = {
   role: string;
   mustChangePassword: boolean;
   emailVerificationPending: boolean;
+  canAccessStudentPortal: boolean;
 };
 
 export type CampusVerificationEmailTarget = {
@@ -155,6 +160,37 @@ export function resolveRoleHome(role?: string) {
   return resolveCampusRoleHome(role);
 }
 
+export function canAccessStudentPortal(
+  profile?:
+    | {
+        role?: unknown;
+        isStudent?: unknown;
+        ecPosition?: unknown;
+        ecScope?: unknown;
+        assignedCourse?: unknown;
+        courseScope?: unknown;
+        isBod?: unknown;
+      }
+    | null,
+) {
+  const normalizedRole = normalizeCampusRole(profile?.role);
+  return (
+    normalizedRole === "student" ||
+    profile?.isStudent === true ||
+    isBOD(profile)
+  );
+}
+
+export function canAccessEcWorkspace(
+  profile?:
+    | {
+        role?: unknown;
+      }
+    | null,
+) {
+  return isEcWorkspaceRole(profile?.role);
+}
+
 export function needsPasswordChange(profile: CampusProfileDoc) {
   return (
     profile.mustChangePassword === true &&
@@ -183,6 +219,7 @@ export function setCampusCookies({
   role,
   mustChangePassword,
   emailVerificationPending,
+  canAccessStudentPortal,
 }: CampusCookieState) {
   if (typeof document === "undefined") return;
 
@@ -190,6 +227,7 @@ export function setCampusCookies({
   const maxAge = 60 * 60 * 24 * 7;
   document.cookie = `campus_logged_in=1; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
   document.cookie = `campus_role=${normalizedRole}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  document.cookie = `campus_is_student=${canAccessStudentPortal ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
   document.cookie = `campus_must_change=${mustChangePassword ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
   document.cookie = `campus_email_pending=${emailVerificationPending ? "1" : "0"}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
 }
@@ -199,6 +237,7 @@ export function clearCampusCookies() {
 
   document.cookie = "campus_logged_in=; Path=/; Max-Age=0";
   document.cookie = "campus_role=; Path=/; Max-Age=0";
+  document.cookie = "campus_is_student=; Path=/; Max-Age=0";
   document.cookie = "campus_must_change=; Path=/; Max-Age=0";
   document.cookie = "campus_email_pending=; Path=/; Max-Age=0";
 }

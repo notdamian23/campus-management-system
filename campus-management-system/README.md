@@ -1,36 +1,30 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CAMPUS
 
-## Getting Started
+CAMPUS is an IoT-based fingerprint biometric management system for the Engineering Council Organization. It combines a Next.js web app, Firebase services, and portable fingerprint-device synchronization for attendance, events, payments, documents, notifications, and role-based dashboards.
 
-First, run the development server:
+## Main Modules
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+- Web app: `app/`, `components/`, and `lib/` contain the Next.js frontend, shared UI, and client-side Firebase helpers.
+- Cloud Functions: `functions/` contains the main Firebase Functions codebase for account management, events, payments, documents, and onboarding flows.
+- Portable device sync: `portable-device-functions/` contains the device-facing APIs used for pairing, enrollment sessions, and attendance synchronization.
+- Security rules: `firestore.rules` and `storage.rules` define Firestore and Storage access control.
+- Integration docs: `docs/` contains the current device and enrollment workflow notes.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Basic Setup
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. Install the root app dependencies with `npm install`.
+2. Create `.env.local` with the required Firebase web config values such as `NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`, `NEXT_PUBLIC_FIREBASE_PROJECT_ID`, `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`, `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID`, and `NEXT_PUBLIC_FIREBASE_APP_ID`.
+3. Install backend dependencies in `functions/` and `portable-device-functions/` with `npm install`.
+4. Start local frontend development with `npm run dev:hot`.
+5. Use `npm run dev` for the current production-like build-and-start workflow.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Common Commands
 
-## Learn More
+- `npm run dev`: build the app, then start the standalone server.
+- `npm run dev:hot`: run the Next.js development server with hot reload.
+- `npm run build`: build the frontend app.
+- `npm run lint`: run the current ESLint configuration.
 
-To learn more about Next.js, take a look at the following resources:
+## Notes
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- This repository contains the web app and Firebase backends. The ESP32/PlatformIO firmware referenced in the docs is maintained separately and is not present in this checkout.

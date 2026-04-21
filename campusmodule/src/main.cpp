@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include <time.h>
 #include <Wire.h>
 
@@ -36,6 +37,7 @@ int g_pairEventIndex = 0;
 int g_enrollmentSessionIndex = 0;
 int g_pendingStudentIndex = 0;
 int g_attendanceModeIndex = 0;
+int g_syncRecordsMenuIndex = 0;
 int g_timeOutConfirmIndex = 1;
 int g_clearPairConfirmIndex = 1;
 std::vector<EventInfo> g_cachedAvailableEvents;
@@ -43,6 +45,9 @@ std::vector<StudentInfo> g_cachedPendingStudents;
 std::vector<StudentInfo> g_cachedPairedStudents;
 std::vector<EnrollmentSessionInfo> g_cachedEnrollmentSessions;
 std::vector<String> g_remoteRecordedStudentIds;
+EnrollmentQueueStats g_enrollmentQueueStats;
+size_t g_enrollmentQueuePageOffset = 0;
+bool g_enrollmentQueuePagedFromSd = false;
 bool g_pairedEventRecoveredFromAttendance = false;
 
 constexpr const char *kMenuItems[] = {
@@ -61,6 +66,17 @@ constexpr const char *kAttendanceModeItems[] = {
 };
 constexpr size_t kAttendanceModeItemCount =
     sizeof(kAttendanceModeItems) / sizeof(kAttendanceModeItems[0]);
+constexpr const char *kSyncRecordsMenuItems[] = {
+    "Attendance Only",
+    "Enrollment Only",
+    "Fingerprint Roster",
+    "Paired Event Data",
+    "Cleanup Queue",
+    "Full Sync",
+    "Back",
+};
+constexpr size_t kSyncRecordsMenuItemCount =
+    sizeof(kSyncRecordsMenuItems) / sizeof(kSyncRecordsMenuItems[0]);
 constexpr uint32_t kUiActionGapMs = 140;
 constexpr uint32_t kShortMessageMs = 1200;
 constexpr uint32_t kMediumMessageMs = 1500;
@@ -69,6 +85,7 @@ constexpr uint32_t kDebugIntervalMs = 30000;
 constexpr uint32_t kFingerRemovalTimeoutMs = 3000;
 constexpr uint32_t kAutoSyncQuietPeriodMs = 5000;
 constexpr uint32_t kMaxAutoSyncBackoffMs = 15UL * 60UL * 1000UL;
+constexpr size_t kEnrollmentQueuePageSize = 6;
 
 enum class AppScreen : uint8_t {
   Menu,
@@ -76,6 +93,7 @@ enum class AppScreen : uint8_t {
   EnrollmentSessionSelection,
   EnrollmentStudentSelection,
   AttendanceMenu,
+  SyncRecordsMenu,
   TimeOutConfirmation,
   ClearPairConfirmation,
   AttendanceScan,
@@ -91,7 +109,12 @@ enum class AttendanceCaptureMode : uint8_t {
 enum class SyncMode : uint8_t {
   None,
   Auto,
-  Manual,
+  AttendanceOnly,
+  EnrollmentOnly,
+  FingerprintRoster,
+  PairedEventData,
+  CleanupQueue,
+  Full,
 };
 
 enum class SyncPhase : uint8_t {
@@ -102,6 +125,7 @@ enum class SyncPhase : uint8_t {
   UploadAttendance,
   CleanupMappings,
   RefreshContext,
+  DownloadFingerprintRoster,
   Complete,
 };
 
@@ -126,6 +150,9 @@ struct SyncController {
   size_t attendanceUploads = 0;
   size_t duplicates = 0;
   size_t rejections = 0;
+  size_t cleanupProcessed = 0;
+  size_t rosterRows = 0;
+  bool rosterDownloaded = false;
   bool cleanupQueueLoaded = false;
   std::vector<CleanupQueueItem> cleanupQueue;
   String lastError;
@@ -150,9 +177,14 @@ AttendanceCaptureMode g_attendanceCaptureMode = AttendanceCaptureMode::None;
 void showTimedMessage(const String &line1, const String &line2, uint32_t holdMs,
                       const String &line3 = "", const String &line4 = "");
 void loadStoredPairedEventContext();
+bool loadEnrollmentQueuePage(size_t offset);
+bool hasOfflineEnrollmentQueue();
 bool recoverPairedEventFromAttendance(EventInfo &event);
 void addBackupEventCandidate(const AttendanceRecord &record,
                              std::vector<EventInfo> &events);
+bool upsertCachedPairedStudent(const StudentInfo &student);
+void startFingerRemovalWait();
+bool hasPendingSyncWork();
 
 String trim16(const String &value) {
   String output = value;
@@ -228,6 +260,181 @@ void logEligibilityDecision(
       decision.blockedByBodScope ? "yes" : "no",
       decision.stalePairedEventData ? "yes" : "no",
       decision.finalReason.c_str());
+}
+
+void logQuickMemory(const char *label) {
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t largestBlock =
+      heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Serial.printf("[MEM] %s free=%u largest=%u\n", label,
+                static_cast<unsigned>(freeHeap),
+                static_cast<unsigned>(largestBlock));
+}
+
+void logDetailedMemory(const char *label) {
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t largestBlock =
+      heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  const uint32_t minHeap = ESP.getMinFreeHeap();
+  Serial.printf("[MEM] %s free=%u largest=%u min=%u\n", label,
+                static_cast<unsigned>(freeHeap),
+                static_cast<unsigned>(largestBlock),
+                static_cast<unsigned>(minHeap));
+}
+
+String backendEligibilityTitle(const String &reason) {
+  if (reason == "payment_required") {
+    return "PAYMENT REQUIRED";
+  }
+  if (reason == "registration_required") {
+    return "PREREG REQUIRED";
+  }
+  return "NOT INCLUDED";
+}
+
+String backendEligibilityDetail(const String &reason) {
+  if (reason == "not_selected_student") {
+    return "Not selected";
+  }
+  if (reason == "not_target_student") {
+    return "Not targeted";
+  }
+  if (reason == "not_target_course") {
+    return "Course mismatch";
+  }
+  if (reason == "not_target_year") {
+    return "Year mismatch";
+  }
+  if (reason == "registration_required") {
+    return "Pre-reg required";
+  }
+  if (reason == "payment_required") {
+    return "Payment required";
+  }
+  return "See operator";
+}
+
+bool handleOwnershipLookupFailure(int templateId, const String &line1,
+                                  const String &line2,
+                                  const String &line3 = "",
+                                  const String &line4 = "") {
+  Serial.printf("[ATTEND] owner sync required template=%d\n", templateId);
+  showTimedMessage(line1, line2, kMediumMessageMs, line3, line4);
+  g_feedback.error();
+  startFingerRemovalWait();
+  return false;
+}
+
+bool resolveAttendanceOwnerForMatch(const FingerprintMatch &match,
+                                    StudentInfo &student,
+                                    bool &backendEligibilityKnown,
+                                    bool &backendEventAllowed,
+                                    String &backendReason) {
+  backendEligibilityKnown = false;
+  backendEventAllowed = false;
+  backendReason = "";
+
+  const FingerprintTemplateOwnership localOwnership =
+      g_storage.resolveTemplateOwnership(match.templateId);
+  if (localOwnership.state == FingerprintOwnershipState::Duplicate) {
+    Serial.printf("[ATTEND] template=%d ownership=duplicate active=%u total=%u\n",
+                  match.templateId,
+                  static_cast<unsigned>(localOwnership.activeOwners),
+                  static_cast<unsigned>(localOwnership.totalMatches));
+    showTimedMessage("Duplicate FP", "Fix Required", kMediumMessageMs);
+    g_feedback.error();
+    startFingerRemovalWait();
+    return false;
+  }
+  if (localOwnership.state == FingerprintOwnershipState::Unique) {
+    student = localOwnership.student;
+    return true;
+  }
+
+  Serial.printf("[ATTEND] local ownership lookup failed template=%d totalMatches=%u\n",
+                match.templateId,
+                static_cast<unsigned>(localOwnership.totalMatches));
+
+  Serial.printf("[ATTEND] SD ownership lookup started template=%d\n",
+                match.templateId);
+  logQuickMemory("before SD ownership lookup");
+  const FingerprintTemplateOwnership sdOwnership =
+      g_storage.resolveTemplateOwnershipFromSd(match.templateId);
+  logQuickMemory("after SD ownership lookup");
+  if (sdOwnership.state == FingerprintOwnershipState::Duplicate) {
+    Serial.printf(
+        "[ATTEND] template=%d ownership=duplicate active=%u total=%u source=sd\n",
+        match.templateId, static_cast<unsigned>(sdOwnership.activeOwners),
+        static_cast<unsigned>(sdOwnership.totalMatches));
+    showTimedMessage("Duplicate FP", "Fix Required", kMediumMessageMs);
+    g_feedback.error();
+    startFingerRemovalWait();
+    return false;
+  }
+  if (sdOwnership.state == FingerprintOwnershipState::Unique) {
+    student = sdOwnership.student;
+    Serial.printf("[ATTEND] SD owner found template=%d name=%s\n",
+                  match.templateId, student.studentName.c_str());
+    if (g_storage.upsertFingerprintMappingCacheOnly(student)) {
+      Serial.printf(
+          "[ATTEND] local fingerprint map updated template=%d student=%s source=sd\n",
+          match.templateId, student.studentUid.c_str());
+    }
+    return true;
+  }
+
+  Serial.printf("[ATTEND] SD owner not found template=%d\n", match.templateId);
+  if (!g_wifi.isConnected()) {
+    return handleOwnershipLookupFailure(match.templateId, "Owner sync", "required",
+                                        "Connect Wi-Fi", "");
+  }
+
+  Serial.printf("[ATTEND] backend ownership fallback started template=%d\n",
+                match.templateId);
+  AttendanceOwnerResolution resolution;
+  String error;
+  if (!g_backend.resolveAttendanceOwner(match.templateId, g_pairedEvent.eventId,
+                                        resolution, error)) {
+    Serial.printf("[ATTEND] backend owner lookup failed template=%d error=%s\n",
+                  match.templateId, error.c_str());
+    return handleOwnershipLookupFailure(match.templateId, "Owner sync", "required",
+                                        trim16(error), "");
+  }
+
+  if (!resolution.ownerFound) {
+    if (resolution.reason == "duplicate_owner_conflict") {
+      Serial.printf(
+          "[ATTEND] backend owner not found template=%d reason=%s\n",
+          match.templateId, resolution.reason.c_str());
+      showTimedMessage("Duplicate FP", "Fix Required", kMediumMessageMs,
+                       "Backend conflict", "");
+      g_feedback.error();
+      startFingerRemovalWait();
+      return false;
+    }
+
+    Serial.printf("[ATTEND] backend owner not found template=%d reason=%s\n",
+                  match.templateId, resolution.reason.c_str());
+    return handleOwnershipLookupFailure(match.templateId, "Owner Not Found",
+                                        "Sync roster",
+                                        trim16(resolution.reason), "");
+  }
+
+  student = resolution.student;
+  backendEligibilityKnown = true;
+  backendEventAllowed = resolution.eventAllowed;
+  backendReason = resolution.reason;
+  Serial.printf("[ATTEND] backend owner found template=%d name=%s\n",
+                match.templateId, student.studentName.c_str());
+  if (g_storage.upsertFingerprintMappingCacheOnly(student)) {
+    Serial.printf(
+        "[ATTEND] local fingerprint map updated template=%d student=%s source=backend\n",
+        match.templateId, student.studentUid.c_str());
+  }
+  if (backendEventAllowed) {
+    upsertCachedPairedStudent(student);
+  }
+  return true;
 }
 
 bool upsertCachedPairedStudent(const StudentInfo &student) {
@@ -504,6 +711,8 @@ const char *screenName(AppScreen screen) {
       return "enroll-student";
     case AppScreen::AttendanceMenu:
       return "attendance-menu";
+    case AppScreen::SyncRecordsMenu:
+      return "sync-menu";
     case AppScreen::TimeOutConfirmation:
       return "timeout-confirm";
     case AppScreen::ClearPairConfirmation:
@@ -521,11 +730,204 @@ const char *syncModeName(SyncMode mode) {
   switch (mode) {
     case SyncMode::Auto:
       return "auto";
-    case SyncMode::Manual:
-      return "manual";
+    case SyncMode::AttendanceOnly:
+      return "attendance-only";
+    case SyncMode::EnrollmentOnly:
+      return "enrollment-only";
+    case SyncMode::FingerprintRoster:
+      return "fingerprint-roster";
+    case SyncMode::PairedEventData:
+      return "paired-event-data";
+    case SyncMode::CleanupQueue:
+      return "cleanup-queue";
+    case SyncMode::Full:
+      return "full";
     case SyncMode::None:
     default:
       return "none";
+  }
+}
+
+const char *syncModeMenuLabel(SyncMode mode) {
+  switch (mode) {
+    case SyncMode::Auto:
+      return "Auto Sync";
+    case SyncMode::AttendanceOnly:
+      return "Attendance Only";
+    case SyncMode::EnrollmentOnly:
+      return "Enrollment Only";
+    case SyncMode::FingerprintRoster:
+      return "Fingerprint Roster";
+    case SyncMode::PairedEventData:
+      return "Paired Event Data";
+    case SyncMode::CleanupQueue:
+      return "Cleanup Queue";
+    case SyncMode::Full:
+      return "Full Sync";
+    case SyncMode::None:
+    default:
+      return "Sync Records";
+  }
+}
+
+const char *syncModeStatusLabel(SyncMode mode) {
+  switch (mode) {
+    case SyncMode::Auto:
+      return "Auto Sync...";
+    case SyncMode::AttendanceOnly:
+      return "Sync Attendance...";
+    case SyncMode::EnrollmentOnly:
+      return "Sync Enrollment...";
+    case SyncMode::FingerprintRoster:
+      return "Sync Roster...";
+    case SyncMode::PairedEventData:
+      return "Sync Event Data...";
+    case SyncMode::CleanupQueue:
+      return "Sync Cleanup...";
+    case SyncMode::Full:
+      return "Full Sync...";
+    case SyncMode::None:
+    default:
+      return "Sync Idle";
+  }
+}
+
+bool isInteractiveSyncMode(SyncMode mode) {
+  return mode != SyncMode::None && mode != SyncMode::Auto;
+}
+
+bool syncModeIncludesEnrollment(SyncMode mode) {
+  return mode == SyncMode::Auto || mode == SyncMode::EnrollmentOnly ||
+         mode == SyncMode::Full;
+}
+
+bool syncModeIncludesAttendance(SyncMode mode) {
+  return mode == SyncMode::Auto || mode == SyncMode::AttendanceOnly ||
+         mode == SyncMode::Full;
+}
+
+bool syncModeIncludesCleanupQueue(SyncMode mode) {
+  return mode == SyncMode::Auto || mode == SyncMode::CleanupQueue ||
+         mode == SyncMode::Full;
+}
+
+bool syncModeIncludesContextRefresh(SyncMode mode) {
+  return mode == SyncMode::Auto || mode == SyncMode::EnrollmentOnly ||
+         mode == SyncMode::PairedEventData || mode == SyncMode::CleanupQueue ||
+         mode == SyncMode::Full;
+}
+
+bool syncModeIncludesFingerprintRoster(SyncMode mode) {
+  return mode == SyncMode::Auto || mode == SyncMode::FingerprintRoster ||
+         mode == SyncMode::Full;
+}
+
+bool syncModeStartsWithContextRefresh(SyncMode mode) {
+  return mode == SyncMode::Full;
+}
+
+bool syncModeShouldFailOnRefreshError(SyncMode mode) {
+  return mode == SyncMode::EnrollmentOnly ||
+         mode == SyncMode::PairedEventData ||
+         mode == SyncMode::CleanupQueue;
+}
+
+bool syncModeShouldFailOnRosterError(SyncMode mode) {
+  return mode == SyncMode::FingerprintRoster;
+}
+
+SyncPhase nextSyncPhaseAfterTime(SyncMode mode) {
+  switch (mode) {
+    case SyncMode::Auto:
+    case SyncMode::EnrollmentOnly:
+    case SyncMode::Full:
+      return SyncPhase::UploadEnrollment;
+    case SyncMode::AttendanceOnly:
+      return SyncPhase::UploadAttendance;
+    case SyncMode::CleanupQueue:
+      return SyncPhase::CleanupMappings;
+    case SyncMode::PairedEventData:
+      return SyncPhase::RefreshContext;
+    case SyncMode::FingerprintRoster:
+      return SyncPhase::DownloadFingerprintRoster;
+    case SyncMode::None:
+    default:
+      return SyncPhase::Complete;
+  }
+}
+
+SyncPhase nextSyncPhaseAfterEnrollment(SyncMode mode,
+                                       bool contextRefreshNeeded,
+                                       bool pairedEventValid) {
+  if (mode == SyncMode::Auto || mode == SyncMode::Full) {
+    return SyncPhase::UploadAttendance;
+  }
+  if (contextRefreshNeeded && pairedEventValid &&
+      syncModeIncludesContextRefresh(mode)) {
+    return SyncPhase::RefreshContext;
+  }
+  return SyncPhase::Complete;
+}
+
+SyncPhase nextSyncPhaseAfterAttendance(SyncMode mode) {
+  return syncModeIncludesCleanupQueue(mode) ? SyncPhase::CleanupMappings
+                                            : SyncPhase::Complete;
+}
+
+SyncPhase nextSyncPhaseAfterCleanup(SyncMode mode, bool contextRefreshNeeded,
+                                    bool pairedEventValid) {
+  if (contextRefreshNeeded && pairedEventValid &&
+      syncModeIncludesContextRefresh(mode)) {
+    return SyncPhase::RefreshContext;
+  }
+  return syncModeIncludesFingerprintRoster(mode)
+             ? SyncPhase::DownloadFingerprintRoster
+             : SyncPhase::Complete;
+}
+
+SyncPhase nextSyncPhaseAfterRefresh(SyncMode mode) {
+  return syncModeIncludesFingerprintRoster(mode)
+             ? SyncPhase::DownloadFingerprintRoster
+             : SyncPhase::Complete;
+}
+
+bool canStartSyncMode(SyncMode mode, String &title, String &detail) {
+  title = "Sync Records";
+  detail = "";
+
+  switch (mode) {
+    case SyncMode::None:
+      detail = "Select a sync mode";
+      return false;
+    case SyncMode::Auto:
+      detail = "Nothing pending";
+      return hasPendingSyncWork();
+    case SyncMode::AttendanceOnly:
+      if (g_storage.unsyncedAttendanceCount() == 0) {
+        detail = "No attendance queue";
+        return false;
+      }
+      return true;
+    case SyncMode::EnrollmentOnly:
+      if (g_storage.unsyncedEnrollmentCount() == 0) {
+        detail = "No enrollment queue";
+        return false;
+      }
+      return true;
+    case SyncMode::PairedEventData:
+      if (!g_pairedEvent.isValid()) {
+        title = "No Paired Event";
+        detail = "Pair Event first";
+        return false;
+      }
+      return true;
+    case SyncMode::FingerprintRoster:
+    case SyncMode::CleanupQueue:
+    case SyncMode::Full:
+      return true;
+    default:
+      detail = "Select a sync mode";
+      return false;
   }
 }
 
@@ -543,6 +945,8 @@ const char *syncPhaseName(SyncPhase phase) {
       return "Cleanup";
     case SyncPhase::RefreshContext:
       return "Refresh evt";
+    case SyncPhase::DownloadFingerprintRoster:
+      return "FP roster";
     case SyncPhase::Complete:
       return "Complete";
     case SyncPhase::Idle:
@@ -677,6 +1081,7 @@ bool recoverPairedEventFromAttendance(EventInfo &event) {
 
 void loadStoredPairedEventContext() {
   g_pairedEventRecoveredFromAttendance = false;
+  Serial.println("[PAIR] loading cached paired event context");
   EventInfo event;
   std::vector<StudentInfo> students;
   std::vector<String> recordedStudentIds;
@@ -684,13 +1089,37 @@ void loadStoredPairedEventContext() {
     g_pairedEvent = event;
     g_cachedPairedStudents = students;
     g_remoteRecordedStudentIds = recordedStudentIds;
+    Serial.printf("[PAIR] loaded cached paired event context eventId=%s\n",
+                  g_pairedEvent.eventId.c_str());
+    Serial.printf("[PAIR] cached event title=%s\n", g_pairedEvent.title.c_str());
+    Serial.printf("[PAIR] cached targetMode=%s\n",
+                  eligibilityTargetModeLabel(g_pairedEvent).c_str());
+    Serial.printf("[PAIR] cached course=%s year=%s section=%s\n",
+                  CampusEligibility::joinCanonicalList(g_pairedEvent.courseFilters)
+                      .c_str(),
+                  CampusEligibility::joinCanonicalList(g_pairedEvent.yearLevelFilters)
+                      .c_str(),
+                  CampusEligibility::joinCanonicalList(g_pairedEvent.sectionFilters)
+                      .c_str());
+    Serial.printf("[PAIR] cached targeted count=%u\n",
+                  static_cast<unsigned>(
+                      CampusEligibility::targetedStudentCount(g_pairedEvent)));
     return;
   }
 
   g_pairedEvent = g_storage.loadPairedEvent();
   g_cachedPairedStudents.clear();
   g_remoteRecordedStudentIds.clear();
+  const String pairedContextStatus = g_storage.pairedEventContextStatus();
+  if (pairedContextStatus == "paired_event_context_corrupt") {
+    Serial.printf("[PAIR] cached paired event context corrupt reason=%s\n",
+                  pairedContextStatus.c_str());
+  } else {
+    Serial.println("[PAIR] cached paired event context missing");
+  }
   if (g_pairedEvent.isValid()) {
+    Serial.printf("[PAIR] cached paired event metadata eventId=%s title=%s\n",
+                  g_pairedEvent.eventId.c_str(), g_pairedEvent.title.c_str());
     return;
   }
 
@@ -706,13 +1135,90 @@ void loadStoredPairedEventContext() {
   }
 }
 
+bool loadEnrollmentQueuePage(size_t offset) {
+  g_enrollmentQueueStats = g_storage.getEnrollmentQueueStatsFromSd();
+  g_enrollmentQueuePagedFromSd =
+      g_enrollmentQueueStats.sdReady && g_enrollmentQueueStats.queueExists;
+  g_cachedPendingStudents.clear();
+  g_enrollmentQueuePageOffset = 0;
+
+  if (!g_enrollmentQueuePagedFromSd) {
+    return false;
+  }
+
+  if (g_enrollmentQueueStats.pendingRows == 0) {
+    Serial.printf("[ENROLL][QUEUE] loading page offset=%u limit=%u\n",
+                  static_cast<unsigned>(offset),
+                  static_cast<unsigned>(kEnrollmentQueuePageSize));
+    Serial.println("[ENROLL][QUEUE] page loaded count=0");
+    return true;
+  }
+
+  size_t safeOffset = offset;
+  if (safeOffset >= g_enrollmentQueueStats.pendingRows) {
+    safeOffset =
+        ((g_enrollmentQueueStats.pendingRows - 1U) / kEnrollmentQueuePageSize) *
+        kEnrollmentQueuePageSize;
+  }
+
+  Serial.printf("[ENROLL][QUEUE] loading page offset=%u limit=%u\n",
+                static_cast<unsigned>(safeOffset),
+                static_cast<unsigned>(kEnrollmentQueuePageSize));
+  logDetailedMemory("before enrollment queue page load");
+  if (!g_storage.loadEnrollmentQueuePageFromSd(
+          safeOffset, kEnrollmentQueuePageSize, g_cachedPendingStudents, true)) {
+    g_enrollmentQueuePagedFromSd = false;
+    g_enrollmentQueueStats = EnrollmentQueueStats{};
+    return false;
+  }
+  logDetailedMemory("after enrollment queue page load");
+
+  g_enrollmentQueuePageOffset = safeOffset;
+  Serial.printf("[ENROLL][QUEUE] page loaded count=%u\n",
+                static_cast<unsigned>(g_cachedPendingStudents.size()));
+  return true;
+}
+
+bool hasOfflineEnrollmentQueue() {
+  if (!g_currentEnrollmentSession.isValid()) {
+    return false;
+  }
+
+  if (g_enrollmentQueuePagedFromSd) {
+    return g_enrollmentQueueStats.pendingRows > 0;
+  }
+
+  return !g_cachedPendingStudents.empty();
+}
+
 void loadStoredEnrollmentSession() {
   g_currentEnrollmentSession = g_storage.loadCurrentEnrollmentSession();
-  g_cachedPendingStudents = g_storage.loadPendingStudents();
-  if (g_currentEnrollmentSession.isValid() && g_cachedPendingStudents.empty() &&
+  g_cachedPendingStudents.clear();
+  g_enrollmentQueueStats = EnrollmentQueueStats{};
+  g_enrollmentQueuePageOffset = 0;
+  g_enrollmentQueuePagedFromSd = false;
+
+  if (g_currentEnrollmentSession.isValid()) {
+    if (!loadEnrollmentQueuePage(0)) {
+      g_cachedPendingStudents = g_storage.loadPendingStudents();
+    } else {
+      Serial.printf(
+          "[ENROLL][QUEUE] loaded SD queue pending=%u enrolledPendingSync=%u "
+          "synced=%u\n",
+          static_cast<unsigned>(g_enrollmentQueueStats.pendingRows),
+          static_cast<unsigned>(g_enrollmentQueueStats.enrolledPendingSyncRows),
+          static_cast<unsigned>(g_enrollmentQueueStats.syncedRows));
+    }
+  }
+
+  if (g_currentEnrollmentSession.isValid() && !hasOfflineEnrollmentQueue() &&
       g_storage.unsyncedEnrollmentCount() == 0) {
     g_storage.clearCurrentEnrollmentSession();
     g_currentEnrollmentSession = EnrollmentSessionInfo{};
+    g_cachedPendingStudents.clear();
+    g_enrollmentQueueStats = EnrollmentQueueStats{};
+    g_enrollmentQueuePageOffset = 0;
+    g_enrollmentQueuePagedFromSd = false;
   }
 }
 
@@ -837,14 +1343,32 @@ void renderEnrollmentStudentSelection() {
   }
 
   g_pendingStudentIndex = clampIndex(g_pendingStudentIndex, g_cachedPendingStudents);
+  const int displayIndex =
+      g_enrollmentQueuePagedFromSd
+          ? static_cast<int>(g_enrollmentQueuePageOffset +
+                             static_cast<size_t>(g_pendingStudentIndex))
+          : g_pendingStudentIndex;
+  const int displayTotal =
+      g_enrollmentQueuePagedFromSd
+          ? static_cast<int>(g_enrollmentQueueStats.pendingRows)
+          : static_cast<int>(g_cachedPendingStudents.size());
   g_display.showStudent(g_cachedPendingStudents[g_pendingStudentIndex],
-                        g_pendingStudentIndex,
-                        static_cast<int>(g_cachedPendingStudents.size()));
+                        displayIndex, displayTotal);
 }
 
 void renderAttendanceMenu() {
   g_display.showMenu("Attendance Mode", kAttendanceModeItems, g_attendanceModeIndex,
                      static_cast<int>(kAttendanceModeItemCount));
+}
+
+void renderSyncRecordsMenu() {
+  if (g_syncRecordsMenuIndex < 0 ||
+      g_syncRecordsMenuIndex >= static_cast<int>(kSyncRecordsMenuItemCount)) {
+    g_syncRecordsMenuIndex = 0;
+  }
+
+  g_display.showMenu("Sync Records", kSyncRecordsMenuItems, g_syncRecordsMenuIndex,
+                     static_cast<int>(kSyncRecordsMenuItemCount));
 }
 
 void renderTimeOutConfirmation() {
@@ -887,16 +1411,24 @@ void renderAttendancePrompt() {
 }
 
 void renderSyncProgress() {
-  String line2 = String(syncModeName(g_sync.mode)) + " " + syncPhaseName(g_sync.phase);
-  String line3 = "E:" + String(g_sync.enrollmentUploads) + " A:" +
+  String line3 = syncPhaseName(g_sync.phase);
+  String line4 = "E:" + String(g_sync.enrollmentUploads) + " A:" +
                  String(g_sync.attendanceUploads);
-  if (g_sync.rejections > 0) {
-    line3 += " R:";
-    line3 += String(g_sync.rejections);
+  if (g_sync.cleanupProcessed > 0) {
+    line4 += " C:";
+    line4 += String(g_sync.cleanupProcessed);
   }
-  String line4 = "Dup:" + String(g_sync.duplicates) + " Q:" +
-                 String(g_storage.unsyncedAttendanceCount());
-  g_display.showLines("Sync Records", line2, line3, line4);
+  if (g_sync.rosterDownloaded) {
+    line4 = "Roster rows:" + String(g_sync.rosterRows);
+  } else if (g_sync.rejections > 0) {
+    line4 += " R:";
+    line4 += String(g_sync.rejections);
+  } else if (g_sync.duplicates > 0) {
+    line4 += " D:";
+    line4 += String(g_sync.duplicates);
+  }
+  g_display.showLines("Sync Records", syncModeStatusLabel(g_sync.mode), line3,
+                      line4);
 }
 
 void renderCurrentScreen() {
@@ -926,6 +1458,9 @@ void renderCurrentScreen() {
       break;
     case AppScreen::AttendanceMenu:
       renderAttendanceMenu();
+      break;
+    case AppScreen::SyncRecordsMenu:
+      renderSyncRecordsMenu();
       break;
     case AppScreen::TimeOutConfirmation:
       renderTimeOutConfirmation();
@@ -987,6 +1522,8 @@ String syncFailureStageLabel() {
       return "cleanup";
     case SyncPhase::RefreshContext:
       return "refresh_context";
+    case SyncPhase::DownloadFingerprintRoster:
+      return "fingerprint_roster";
     case SyncPhase::Complete:
     case SyncPhase::Idle:
     default:
@@ -995,16 +1532,35 @@ String syncFailureStageLabel() {
 }
 
 String syncSummaryLine() {
-  String line = "A:" + String(g_sync.attendanceUploads) + " D:" +
-                String(g_sync.duplicates);
-  if (g_sync.enrollmentUploads > 0) {
-    line = "E:" + String(g_sync.enrollmentUploads) + " " + line;
+  switch (g_sync.mode) {
+    case SyncMode::EnrollmentOnly:
+      return "Uploaded E:" + String(g_sync.enrollmentUploads);
+    case SyncMode::FingerprintRoster:
+      return g_sync.rosterDownloaded
+                 ? "Rows:" + String(g_sync.rosterRows)
+                 : String("Roster refresh done");
+    case SyncMode::PairedEventData:
+      return "Event context updated";
+    case SyncMode::CleanupQueue:
+      return "Cleanup applied:" + String(g_sync.cleanupProcessed);
+    case SyncMode::AttendanceOnly:
+    case SyncMode::Auto:
+    case SyncMode::Full: {
+      String line = "A:" + String(g_sync.attendanceUploads) + " D:" +
+                    String(g_sync.duplicates);
+      if (g_sync.enrollmentUploads > 0) {
+        line = "E:" + String(g_sync.enrollmentUploads) + " " + line;
+      }
+      if (g_sync.rejections > 0) {
+        line += " R:";
+        line += String(g_sync.rejections);
+      }
+      return line;
+    }
+    case SyncMode::None:
+    default:
+      return "No sync active";
   }
-  if (g_sync.rejections > 0) {
-    line += " R:";
-    line += String(g_sync.rejections);
-  }
-  return line;
 }
 
 String syncFailureTitle(const String &error) {
@@ -1082,12 +1638,14 @@ void finishSyncSuccess() {
   if (g_sync.mode == SyncMode::Auto) {
     g_autoSyncBackoffMs = CampusConfig::kAutoSyncIntervalMs;
   } else {
-    setScreen(AppScreen::Menu);
-    showTimedMessage("SYNC OK", syncSummaryLine(), kLongMessageMs);
+    setScreen(AppScreen::SyncRecordsMenu);
+    showTimedMessage("SYNC OK", syncModeMenuLabel(g_sync.mode), kLongMessageMs,
+                     syncSummaryLine());
     g_feedback.success();
   }
 
   if (g_pairedEventRecoveredFromAttendance &&
+      syncModeIncludesAttendance(g_sync.mode) &&
       g_storage.unsyncedAttendanceCount() == 0) {
     Serial.println("[PAIR] cleared recovered event after sync completion");
     resetPairedEventState();
@@ -1131,9 +1689,10 @@ void failSync(const String &error) {
     g_autoSyncBackoffMs =
         nextBackoff > kMaxAutoSyncBackoffMs ? kMaxAutoSyncBackoffMs : nextBackoff;
   } else {
-    setScreen(AppScreen::Menu);
-    showTimedMessage(syncFailureTitle(message), syncFailureDetail(message),
-                     kLongMessageMs, trim16(message));
+    setScreen(AppScreen::SyncRecordsMenu);
+    showTimedMessage(syncFailureTitle(message), syncModeMenuLabel(g_sync.mode),
+                     kLongMessageMs, syncFailureDetail(message),
+                     trim16(message));
     g_feedback.warning();
   }
 
@@ -1146,15 +1705,18 @@ void startSync(SyncMode mode, bool keepWifiConnected) {
     return;
   }
 
-  if (!hasPendingSyncWork() && mode != SyncMode::Manual) {
-    if (mode == SyncMode::Manual) {
-      showTimedMessage("Sync Records", "Nothing pending", kShortMessageMs);
+  String validationTitle;
+  String validationDetail;
+  if (!canStartSyncMode(mode, validationTitle, validationDetail)) {
+    if (isInteractiveSyncMode(mode)) {
+      showTimedMessage(validationTitle, validationDetail, kShortMessageMs);
+      g_feedback.warning();
     }
     return;
   }
 
   if (!g_wifi.hasCredentials()) {
-    if (mode == SyncMode::Manual) {
+    if (isInteractiveSyncMode(mode)) {
       showTimedMessage("Wi-Fi not set", "Use Wi-Fi Setup", kMediumMessageMs);
       g_feedback.warning();
     }
@@ -1165,10 +1727,11 @@ void startSync(SyncMode mode, bool keepWifiConnected) {
   g_sync.mode = mode;
   g_sync.phase = SyncPhase::WaitForWifi;
   g_sync.keepWifiConnected = keepWifiConnected;
-  g_sync.contextRefreshNeeded = mode == SyncMode::Manual && g_pairedEvent.isValid();
+  g_sync.contextRefreshNeeded =
+      syncModeStartsWithContextRefresh(mode) && g_pairedEvent.isValid();
   g_lastAutoSyncAttemptAt = millis();
 
-  if (mode == SyncMode::Manual) {
+  if (isInteractiveSyncMode(mode)) {
     setScreen(AppScreen::SyncProgress);
   }
 
@@ -1222,16 +1785,26 @@ void tickSync() {
         Serial.printf("[TIME] sync failed during %s sync: %s\n",
                       syncModeName(g_sync.mode), error.c_str());
       }
-      g_sync.phase = SyncPhase::UploadEnrollment;
+      g_sync.phase = nextSyncPhaseAfterTime(g_sync.mode);
       markDisplayDirty();
       return;
     }
 
     case SyncPhase::UploadEnrollment: {
+      if (!syncModeIncludesEnrollment(g_sync.mode)) {
+        g_sync.phase = nextSyncPhaseAfterEnrollment(
+            g_sync.mode, g_sync.contextRefreshNeeded, g_pairedEvent.isValid());
+        markDisplayDirty();
+        return;
+      }
+
+      Serial.printf("[ENROLL][SYNC] loading result batch limit=%u\n", 1U);
+      logDetailedMemory("before enrollment sync upload");
       const std::vector<StudentInfo> pendingEnrollments =
           g_storage.loadUnsyncedEnrollments();
       if (pendingEnrollments.empty()) {
-        g_sync.phase = SyncPhase::UploadAttendance;
+        g_sync.phase = nextSyncPhaseAfterEnrollment(
+            g_sync.mode, g_sync.contextRefreshNeeded, g_pairedEvent.isValid());
         markDisplayDirty();
         return;
       }
@@ -1244,21 +1817,30 @@ void tickSync() {
         return;
       }
 
+      g_storage.markEnrollmentResultSyncedOnSd(student.sessionId,
+                                               student.studentUid);
       g_storage.markEnrollmentSynced(student.studentUid);
       ++g_sync.enrollmentUploads;
       g_sync.contextRefreshNeeded = g_pairedEvent.isValid();
-      Serial.printf("[SYNC] enrollment uploaded student=%s\n",
+      logDetailedMemory("after enrollment sync upload");
+      Serial.printf("[ENROLL][SYNC] uploaded student=%s\n",
                     student.studentUid.c_str());
       markDisplayDirty();
       return;
     }
 
     case SyncPhase::UploadAttendance: {
+      if (!syncModeIncludesAttendance(g_sync.mode)) {
+        g_sync.phase = nextSyncPhaseAfterAttendance(g_sync.mode);
+        markDisplayDirty();
+        return;
+      }
+
       const std::vector<AttendanceRecord> batch =
           g_storage.loadUnsyncedAttendanceBatch(
               CampusConfig::kAttendanceSyncBatchSize);
       if (batch.empty()) {
-        g_sync.phase = SyncPhase::CleanupMappings;
+        g_sync.phase = nextSyncPhaseAfterAttendance(g_sync.mode);
         markDisplayDirty();
         return;
       }
@@ -1306,6 +1888,13 @@ void tickSync() {
     }
 
     case SyncPhase::CleanupMappings: {
+      if (!syncModeIncludesCleanupQueue(g_sync.mode)) {
+        g_sync.phase = nextSyncPhaseAfterCleanup(
+            g_sync.mode, g_sync.contextRefreshNeeded, g_pairedEvent.isValid());
+        markDisplayDirty();
+        return;
+      }
+
       if (!g_sync.cleanupQueueLoaded) {
         String error;
         if (!g_backend.fetchCleanupQueue(g_sync.cleanupQueue, error)) {
@@ -1316,9 +1905,8 @@ void tickSync() {
       }
 
       if (g_sync.cleanupQueue.empty()) {
-        g_sync.phase = g_sync.contextRefreshNeeded && g_pairedEvent.isValid()
-                           ? SyncPhase::RefreshContext
-                           : SyncPhase::Complete;
+        g_sync.phase = nextSyncPhaseAfterCleanup(
+            g_sync.mode, g_sync.contextRefreshNeeded, g_pairedEvent.isValid());
         markDisplayDirty();
         return;
       }
@@ -1354,6 +1942,7 @@ void tickSync() {
       loadStoredPairedEventContext();
       loadStoredEnrollmentSession();
       g_sync.contextRefreshNeeded = true;
+      ++g_sync.cleanupProcessed;
       Serial.printf("[SYNC][CLEANUP] cleanupId=%s type=%s template=%d schoolId=%s\n",
                     item.cleanupId.c_str(), item.type.c_str(), item.templateId,
                     item.schoolId.c_str());
@@ -1365,6 +1954,34 @@ void tickSync() {
       String error;
       if (!refreshPairedEventContext(error)) {
         Serial.printf("[SYNC] paired event refresh failed: %s\n", error.c_str());
+        if (syncModeShouldFailOnRefreshError(g_sync.mode)) {
+          failSync(error);
+          return;
+        }
+      }
+      g_sync.phase = nextSyncPhaseAfterRefresh(g_sync.mode);
+      markDisplayDirty();
+      return;
+    }
+
+    case SyncPhase::DownloadFingerprintRoster: {
+      const FingerprintRosterStats previousStats =
+          g_storage.getFingerprintRosterStats();
+      FingerprintRosterStats stats;
+      String error;
+      if (!g_backend.downloadFingerprintRoster(g_storage, stats, error)) {
+        Serial.printf(
+            "[ROSTER] download failed reason=%s keepExisting=%s count=%u size=%u\n",
+            error.c_str(), previousStats.rosterExists ? "yes" : "no",
+            static_cast<unsigned>(previousStats.totalRows),
+            static_cast<unsigned>(previousStats.fileSize));
+        if (syncModeShouldFailOnRosterError(g_sync.mode)) {
+          failSync(error);
+          return;
+        }
+      } else {
+        g_sync.rosterDownloaded = true;
+        g_sync.rosterRows = stats.totalRows;
       }
       g_sync.phase = SyncPhase::Complete;
       markDisplayDirty();
@@ -1402,11 +2019,24 @@ void maybeStartAutoSync() {
   startSync(SyncMode::Auto, false);
 }
 
-void startManualSync() {
+void enterSyncRecordsMenu() {
   if (!allowInteractiveOnlineTask()) {
     return;
   }
-  startSync(SyncMode::Manual, false);
+
+  if (g_syncRecordsMenuIndex < 0 ||
+      g_syncRecordsMenuIndex >= static_cast<int>(kSyncRecordsMenuItemCount)) {
+    g_syncRecordsMenuIndex = 0;
+  }
+  setScreen(AppScreen::SyncRecordsMenu);
+}
+
+void runSync(SyncMode mode) {
+  if (!allowInteractiveOnlineTask()) {
+    return;
+  }
+
+  startSync(mode, false);
 }
 
 void beginPairEventFlow() {
@@ -1506,8 +2136,7 @@ void beginEnrollmentFlow() {
   }
 
   loadStoredEnrollmentSession();
-  const bool hasOfflineSession =
-      g_currentEnrollmentSession.isValid() && !g_cachedPendingStudents.empty();
+  const bool hasOfflineSession = hasOfflineEnrollmentQueue();
 
   if (g_wifi.hasCredentials() && connectForOnlineTask("Enroll Student")) {
     String error;
@@ -1535,7 +2164,7 @@ void beginEnrollmentFlow() {
     return;
   }
 
-  if (g_cachedPendingStudents.empty()) {
+  if (!hasOfflineEnrollmentQueue()) {
     showTimedMessage("Queue Empty", "Nothing to enroll", kMediumMessageMs);
     return;
   }
@@ -1574,9 +2203,13 @@ void confirmSelectedEnrollmentSession() {
     return;
   }
 
+  Serial.printf("[ENROLL][QUEUE] download started session=%s\n",
+                session.sessionId.c_str());
+  logDetailedMemory("before enrollment session download");
   const bool downloaded = g_backend.downloadEnrollmentSession(
       session.sessionId, session, downloadedStudents, error);
   disconnectAfterOnlineTask();
+  logDetailedMemory("after enrollment session download");
 
   if (!downloaded) {
     showTimedMessage("Queue Failed", trim16(error), kMediumMessageMs);
@@ -1585,12 +2218,49 @@ void confirmSelectedEnrollmentSession() {
   }
 
   g_currentEnrollmentSession = session;
-  g_cachedPendingStudents = downloadedStudents;
-  g_storage.saveCurrentEnrollmentSession(session);
-  g_storage.savePendingStudents(downloadedStudents);
+  if (!g_storage.saveCurrentEnrollmentSession(session)) {
+    Serial.println("[ENROLL][QUEUE] failed to save current session metadata");
+  }
+  logDetailedMemory("before enrollment queue save");
+  const bool queueSavedToSd =
+      g_storage.saveEnrollmentQueueToSd(session, downloadedStudents);
+  logDetailedMemory("after enrollment queue save");
+
+  bool usingSdQueue = false;
+  if (queueSavedToSd) {
+    g_storage.savePendingStudents({});
+    std::vector<StudentInfo>().swap(g_cachedPendingStudents);
+    usingSdQueue = loadEnrollmentQueuePage(0);
+  }
+
+  if (!usingSdQueue) {
+    if (!queueSavedToSd) {
+      Serial.println("[ENROLL][QUEUE] SD unavailable, falling back to LittleFS");
+    }
+    g_enrollmentQueuePagedFromSd = false;
+    g_enrollmentQueueStats = EnrollmentQueueStats{};
+    g_enrollmentQueuePageOffset = 0;
+    g_cachedPendingStudents = downloadedStudents;
+    g_storage.savePendingStudents(downloadedStudents);
+  } else {
+    std::vector<StudentInfo>().swap(downloadedStudents);
+  }
+
+  if (g_cachedPendingStudents.empty()) {
+    showTimedMessage("Queue Empty", "Nothing to enroll", kMediumMessageMs);
+    g_feedback.warning();
+    return;
+  }
+
   g_pendingStudentIndex = 0;
   setScreen(AppScreen::EnrollmentStudentSelection);
-  showTimedMessage("Session Ready", trim16(session.sessionId), kShortMessageMs);
+  if (usingSdQueue) {
+    showTimedMessage("Session Ready", trim16(session.sessionId), kShortMessageMs,
+                     "SD queue ready", "");
+  } else {
+    showTimedMessage("SD unavailable", "Limited queue", kMediumMessageMs,
+                     trim16(session.sessionId), "");
+  }
 }
 
 void enrollSelectedStudent() {
@@ -1619,8 +2289,29 @@ void enrollSelectedStudent() {
     return;
   }
   if (existingMatch.status == FingerprintScanStatus::Matched) {
-    const FingerprintTemplateOwnership ownership =
+    FingerprintTemplateOwnership ownership =
         g_storage.resolveTemplateOwnership(existingMatch.templateId);
+    if (ownership.state == FingerprintOwnershipState::None) {
+      ownership =
+          g_storage.resolveTemplateOwnershipFromSd(existingMatch.templateId);
+    }
+    if (ownership.state == FingerprintOwnershipState::None &&
+        g_wifi.hasCredentials() && connectForOnlineTask("Check Finger")) {
+      AttendanceOwnerResolution resolution;
+      String ownerError;
+      const String eventId =
+          g_pairedEvent.isValid() ? g_pairedEvent.eventId : String("");
+      if (g_backend.resolveAttendanceOwner(existingMatch.templateId, eventId,
+                                          resolution, ownerError) &&
+          resolution.ownerFound) {
+        ownership.state = FingerprintOwnershipState::Unique;
+        ownership.student = resolution.student;
+        ownership.activeOwners = 1;
+        ownership.totalMatches = 1;
+        g_storage.upsertFingerprintMappingCacheOnly(resolution.student);
+      }
+      disconnectAfterOnlineTask();
+    }
     if (ownership.state == FingerprintOwnershipState::Unique) {
       if (ownership.student.studentUid == student.studentUid) {
         showTimedMessage("Already Enrolled", student.schoolId, kLongMessageMs,
@@ -1653,6 +2344,7 @@ void enrollSelectedStudent() {
   g_display.show("Enroll Finger", "Place finger...");
 
   String enrollError;
+  logDetailedMemory("before enroll operation");
   if (!g_fingerprint.enrollTemplate(templateId, enrollError)) {
     showTimedMessage("Enroll Failed", trim16(enrollError), kLongMessageMs);
     g_feedback.error();
@@ -1671,15 +2363,35 @@ void enrollSelectedStudent() {
   student.enrolledAtIso = snapshot.iso8601;
   CampusEligibility::normalizeStudent(student);
   g_cachedPendingStudents[g_pendingStudentIndex] = student;
-  g_storage.savePendingStudents(g_cachedPendingStudents);
-  g_storage.upsertFingerprintMapping(student);
+  if (!g_enrollmentQueuePagedFromSd) {
+    g_storage.savePendingStudents(g_cachedPendingStudents);
+  }
+  if (!g_storage.upsertFingerprintMapping(student)) {
+    showTimedMessage("Save Failed", "Check storage", kLongMessageMs,
+                     student.schoolId, "");
+    g_feedback.error();
+    return;
+  }
+  if (g_enrollmentQueuePagedFromSd) {
+    const int currentIndex = g_pendingStudentIndex;
+    loadEnrollmentQueuePage(g_enrollmentQueuePageOffset);
+    if (!g_cachedPendingStudents.empty()) {
+      g_pendingStudentIndex =
+          currentIndex >= static_cast<int>(g_cachedPendingStudents.size())
+              ? static_cast<int>(g_cachedPendingStudents.size()) - 1
+              : currentIndex;
+    } else {
+      g_pendingStudentIndex = 0;
+    }
+  }
+  logDetailedMemory("after enroll operation");
 
   if (g_pairedEvent.isValid()) {
     const CampusEligibility::EventEligibilityDecision decision =
         g_storage.evaluateStudentEligibilityForEvent(g_pairedEvent, student);
     logEligibilityDecision(student, g_pairedEvent, decision);
     if (decision.allowed || decision.matchedPairedRoster ||
-        decision.matchedTargetedStudent) {
+        decision.matchedTargetedStudent || decision.matchedTargetedSchoolId) {
       upsertCachedPairedStudent(student);
       Serial.printf("[ENROLL] paired context updated student=%s reason=%s\n",
                     student.studentUid.c_str(), decision.finalReason.c_str());
@@ -1784,55 +2496,89 @@ void handleAttendanceLoop() {
   }
 
   setFingerprintState("matched");
-  const FingerprintTemplateOwnership ownership =
-      g_storage.resolveTemplateOwnership(match.templateId);
-  if (ownership.state == FingerprintOwnershipState::None) {
-    Serial.printf("[ATTEND] template=%d ownership=none totalMatches=%u\n",
-                  match.templateId,
-                  static_cast<unsigned>(ownership.totalMatches));
-    showTimedMessage("Unknown Finger", "Re-enroll Needed", kMediumMessageMs);
-    g_feedback.error();
-    startFingerRemovalWait();
+  StudentInfo student;
+  bool backendEligibilityKnown = false;
+  bool backendEventAllowed = false;
+  String backendReason;
+  if (!resolveAttendanceOwnerForMatch(match, student, backendEligibilityKnown,
+                                      backendEventAllowed, backendReason)) {
     return;
   }
-
-  if (ownership.state == FingerprintOwnershipState::Duplicate) {
-    Serial.printf("[ATTEND] template=%d ownership=duplicate active=%u total=%u\n",
-                  match.templateId,
-                  static_cast<unsigned>(ownership.activeOwners),
-                  static_cast<unsigned>(ownership.totalMatches));
-    showTimedMessage("Duplicate FP", "Fix Required", kMediumMessageMs);
-    g_feedback.error();
-    startFingerRemovalWait();
-    return;
-  }
-  StudentInfo student = ownership.student;
 
   Serial.printf("[ATTEND] matched schoolId=%s name=%s\n", student.schoolId.c_str(),
                 student.studentName.c_str());
-  const CampusEligibility::EventEligibilityDecision decision =
-      g_storage.evaluateStudentEligibilityForEvent(g_pairedEvent, student);
-  Serial.printf("[ATTEND] eligibility allowed=%s reason=%s\n",
-                decision.allowed ? "yes" : "no", decision.finalReason.c_str());
-  if (!decision.allowed) {
-    logEligibilityDecision(student, g_pairedEvent, decision);
-    Serial.printf("[ATTEND] rejected reason=%s\n", decision.finalReason.c_str());
-    showTimedMessage(CampusEligibility::rejectionTitle(decision),
-                     trim16(student.studentName.isEmpty() ? student.schoolId
-                                                          : student.studentName),
-                     kMediumMessageMs,
-                     trim16(CampusEligibility::rejectionDetail(decision)),
-                     trim16(decision.finalReason));
-    g_feedback.error();
-    startFingerRemovalWait();
-    return;
-  }
+  if (backendEligibilityKnown) {
+    Serial.printf(
+        "[ATTEND] eligibility allowed=%s reason=%s ownerFound=yes source=backend\n",
+        backendEventAllowed ? "yes" : "no", backendReason.c_str());
+    if (!backendEventAllowed) {
+      Serial.printf("[ATTEND] rejected reason=%s ownerFound=yes\n",
+                    backendReason.c_str());
+      showTimedMessage(
+          backendEligibilityTitle(backendReason),
+          trim16(student.studentName.isEmpty() ? student.schoolId
+                                               : student.studentName),
+          kMediumMessageMs, trim16(backendEligibilityDetail(backendReason)),
+          trim16(backendReason));
+      g_feedback.error();
+      startFingerRemovalWait();
+      return;
+    }
+  } else {
+    Serial.printf("[ATTEND][ELIG] using cached paired event context=%s\n",
+                  g_storage.hasPairedEventContextCache() ? "yes" : "no");
+    const CampusEligibility::EventEligibilityDecision decision =
+        g_storage.evaluateStudentEligibilityForEvent(g_pairedEvent, student);
+    Serial.printf("[ATTEND][ELIG] targetMode=%s\n",
+                  eligibilityTargetModeLabel(g_pairedEvent).c_str());
+    Serial.printf("[ATTEND][ELIG] student normCourse=%s normYear=%s normSection=%s\n",
+                  decision.normalizedStudentCourse.c_str(),
+                  decision.normalizedStudentYearLevel.c_str(),
+                  decision.normalizedStudentSection.c_str());
+    Serial.printf("[ATTEND][ELIG] event normCourse=%s normYear=%s normSection=%s\n",
+                  decision.eventCourseFilter.c_str(),
+                  decision.eventYearLevelFilter.c_str(),
+                  decision.eventSectionFilter.c_str());
+    if (decision.targetModeSpecific) {
+      Serial.println("[ATTEND][ELIG] targeted list check started");
+    }
+    Serial.printf("[ATTEND] eligibility allowed=%s reason=%s\n",
+                  decision.allowed ? "yes" : "no", decision.finalReason.c_str());
+    if (decision.allowed) {
+      if (decision.targetModeSpecific) {
+        Serial.println("[ATTEND][ELIG] targeted list accepted");
+      } else if (decision.usedBroadAudienceFilters) {
+        Serial.println("[ATTEND][ELIG] broad scope accepted");
+      }
+    } else if (decision.targetModeSpecific) {
+      Serial.printf("[ATTEND][ELIG] targeted list rejected reason=%s\n",
+                    decision.finalReason.c_str());
+    } else if (decision.finalReason == "student_not_in_target_scope") {
+      Serial.printf("[ATTEND][ELIG] broad scope rejected reason=%s\n",
+                    decision.finalReason.c_str());
+    }
+    if (!decision.allowed) {
+      logEligibilityDecision(student, g_pairedEvent, decision);
+      Serial.printf("[ATTEND] rejected reason=%s ownerFound=yes\n",
+                    decision.finalReason.c_str());
+      showTimedMessage(CampusEligibility::rejectionTitle(decision),
+                       trim16(student.studentName.isEmpty() ? student.schoolId
+                                                            : student.studentName),
+                       kMediumMessageMs,
+                       trim16(CampusEligibility::rejectionDetail(decision)),
+                       trim16(decision.finalReason));
+      g_feedback.error();
+      startFingerRemovalWait();
+      return;
+    }
 
-  if (!decision.matchedPairedRoster &&
-      (decision.usedBroadAudienceFilters || decision.matchedTargetedStudent)) {
-    upsertCachedPairedStudent(student);
-    Serial.printf("[ATTEND] paired roster refreshed student=%s source=%s\n",
-                  student.studentUid.c_str(), decision.finalReason.c_str());
+    if (!decision.matchedPairedRoster &&
+        (decision.usedBroadAudienceFilters || decision.matchedTargetedStudent ||
+         decision.matchedTargetedSchoolId)) {
+      upsertCachedPairedStudent(student);
+      Serial.printf("[ATTEND] paired roster refreshed student=%s source=%s\n",
+                    student.studentUid.c_str(), decision.finalReason.c_str());
+    }
   }
 
   AttendanceRecord record;
@@ -2090,7 +2836,7 @@ void handleMenuAction(ButtonAction action) {
       enterAttendanceMode();
       break;
     case 3:
-      startManualSync();
+      enterSyncRecordsMenu();
       break;
     case 4:
       runExportBackup();
@@ -2104,6 +2850,63 @@ void handleMenuAction(ButtonAction action) {
     default:
       break;
   }
+}
+
+void handleSyncRecordsMenuAction(ButtonAction action) {
+  if (action == ButtonAction::Up) {
+    g_syncRecordsMenuIndex =
+        (g_syncRecordsMenuIndex == 0)
+            ? static_cast<int>(kSyncRecordsMenuItemCount) - 1
+            : g_syncRecordsMenuIndex - 1;
+    markDisplayDirty();
+    return;
+  }
+
+  if (action == ButtonAction::Down) {
+    g_syncRecordsMenuIndex =
+        (g_syncRecordsMenuIndex + 1) %
+        static_cast<int>(kSyncRecordsMenuItemCount);
+    markDisplayDirty();
+    return;
+  }
+
+  if (action == ButtonAction::Back) {
+    setScreen(AppScreen::Menu);
+    return;
+  }
+
+  if (action != ButtonAction::Select) {
+    return;
+  }
+
+  SyncMode selectedMode = SyncMode::None;
+  switch (g_syncRecordsMenuIndex) {
+    case 0:
+      selectedMode = SyncMode::AttendanceOnly;
+      break;
+    case 1:
+      selectedMode = SyncMode::EnrollmentOnly;
+      break;
+    case 2:
+      selectedMode = SyncMode::FingerprintRoster;
+      break;
+    case 3:
+      selectedMode = SyncMode::PairedEventData;
+      break;
+    case 4:
+      selectedMode = SyncMode::CleanupQueue;
+      break;
+    case 5:
+      selectedMode = SyncMode::Full;
+      break;
+    case 6:
+    default:
+      setScreen(AppScreen::Menu);
+      return;
+  }
+
+  Serial.printf("[SYNC][MENU] selected=%s\n", syncModeName(selectedMode));
+  runSync(selectedMode);
 }
 
 void handlePairEventAction(ButtonAction action) {
@@ -2178,6 +2981,31 @@ void handleEnrollmentStudentAction(ButtonAction action) {
   }
 
   if (action == ButtonAction::Up) {
+    if (g_enrollmentQueuePagedFromSd && !g_cachedPendingStudents.empty()) {
+      if (g_pendingStudentIndex > 0) {
+        --g_pendingStudentIndex;
+      } else if (g_enrollmentQueueStats.pendingRows > 0) {
+        if (g_enrollmentQueuePageOffset == 0) {
+          const size_t lastOffset =
+              ((g_enrollmentQueueStats.pendingRows - 1U) / kEnrollmentQueuePageSize) *
+              kEnrollmentQueuePageSize;
+          loadEnrollmentQueuePage(lastOffset);
+        } else {
+          const size_t previousOffset =
+              g_enrollmentQueuePageOffset >= kEnrollmentQueuePageSize
+                  ? g_enrollmentQueuePageOffset - kEnrollmentQueuePageSize
+                  : 0;
+          loadEnrollmentQueuePage(previousOffset);
+        }
+        if (!g_cachedPendingStudents.empty()) {
+          g_pendingStudentIndex =
+              static_cast<int>(g_cachedPendingStudents.size()) - 1;
+        }
+      }
+      markDisplayDirty();
+      return;
+    }
+
     g_pendingStudentIndex = (g_pendingStudentIndex == 0)
                                 ? static_cast<int>(g_cachedPendingStudents.size()) - 1
                                 : g_pendingStudentIndex - 1;
@@ -2186,6 +3014,24 @@ void handleEnrollmentStudentAction(ButtonAction action) {
   }
 
   if (action == ButtonAction::Down) {
+    if (g_enrollmentQueuePagedFromSd && !g_cachedPendingStudents.empty()) {
+      if ((g_pendingStudentIndex + 1) <
+          static_cast<int>(g_cachedPendingStudents.size())) {
+        ++g_pendingStudentIndex;
+      } else if (g_enrollmentQueueStats.pendingRows > 0) {
+        const size_t nextOffset = g_enrollmentQueuePageOffset +
+                                  g_cachedPendingStudents.size();
+        if (nextOffset >= g_enrollmentQueueStats.pendingRows) {
+          loadEnrollmentQueuePage(0);
+        } else {
+          loadEnrollmentQueuePage(nextOffset);
+        }
+        g_pendingStudentIndex = 0;
+      }
+      markDisplayDirty();
+      return;
+    }
+
     g_pendingStudentIndex =
         (g_pendingStudentIndex + 1) % static_cast<int>(g_cachedPendingStudents.size());
     markDisplayDirty();
@@ -2333,7 +3179,7 @@ void handleAttendanceScanAction(ButtonAction action) {
 
 void handleSyncScreenAction(ButtonAction action) {
   if (action == ButtonAction::Back && !isSyncActive()) {
-    setScreen(AppScreen::Menu);
+    setScreen(AppScreen::SyncRecordsMenu);
   }
 }
 
@@ -2428,6 +3274,9 @@ void loop() {
         break;
       case AppScreen::AttendanceMenu:
         handleAttendanceMenuAction(action);
+        break;
+      case AppScreen::SyncRecordsMenu:
+        handleSyncRecordsMenuAction(action);
         break;
       case AppScreen::TimeOutConfirmation:
         handleTimeOutConfirmationAction(action);
