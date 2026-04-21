@@ -6,7 +6,6 @@ import {
   resolveCampusRoleHome,
   type CampusCanonicalRole,
 } from "@/lib/campus-role";
-import { isBOD } from "@/lib/ec-permissions";
 import { formatStudentFullName } from "@/lib/student-name";
 
 export type CampusRole = CampusCanonicalRole;
@@ -14,6 +13,8 @@ export type CampusRole = CampusCanonicalRole;
 export type CampusProfileDoc = {
   role?: string;
   schoolId?: string;
+  schoolIdKey?: string;
+  studentId?: string;
   email?: string;
   pendingEmail?: string | null;
   mustChangePassword?: boolean;
@@ -165,19 +166,26 @@ export function canAccessStudentPortal(
     | {
         role?: unknown;
         isStudent?: unknown;
-        ecPosition?: unknown;
-        ecScope?: unknown;
-        assignedCourse?: unknown;
-        courseScope?: unknown;
-        isBod?: unknown;
+        schoolId?: unknown;
+        schoolIdKey?: unknown;
+        studentId?: unknown;
       }
     | null,
 ) {
   const normalizedRole = normalizeCampusRole(profile?.role);
+  const hasStudentIdentity =
+    Boolean(trimProfileText(profile?.schoolId)) ||
+    Boolean(trimProfileText(profile?.schoolIdKey)) ||
+    Boolean(trimProfileText(profile?.studentId));
+
+  if (!hasStudentIdentity) {
+    return false;
+  }
+
   return (
     normalizedRole === "student" ||
     profile?.isStudent === true ||
-    isBOD(profile)
+    isEcWorkspaceRole(profile?.role)
   );
 }
 

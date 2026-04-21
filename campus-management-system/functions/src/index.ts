@@ -5570,6 +5570,8 @@ export const createCampusDocumentMetadata = onCall({region: REGION}, async (requ
         storagePath,
         pathCourseSlug,
         normalizedPathCourse,
+        allowedPrefixes,
+        ownerType,
         metadataCourse: course,
         metadataCourseScope: courseScope,
       });

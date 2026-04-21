@@ -65,17 +65,33 @@ service cloud.firestore {
       return value == "student";
     }
 
+    function hasStudentIdentityFields(data) {
+      return data != null &&
+        (
+          (data.schoolId is string && data.schoolId != "") ||
+          (data.schoolIdKey is string && data.schoolIdKey != "") ||
+          (data.studentId is string && data.studentId != "")
+        );
+    }
+
     function hasStudentSelfIdentity() {
       return hasProfile() &&
         (
           role() == "student" ||
           profile().isStudent == true ||
-          isBOD()
+          isECMemberRole(role())
         ) &&
+        hasStudentIdentityFields(profile());
+    }
+
+    function targetHasStudentSelfIdentity(uid) {
+      return exists(userProfilePath(uid)) &&
         (
-          (profile().schoolId is string && profile().schoolId != "") ||
-          (profile().studentId is string && profile().studentId != "")
-        );
+          get(userProfilePath(uid)).data.role == "student" ||
+          get(userProfilePath(uid)).data.isStudent == true ||
+          isECMemberRole(get(userProfilePath(uid)).data.role)
+        ) &&
+        hasStudentIdentityFields(get(userProfilePath(uid)).data);
     }
 
     function normalizeCourseScopeValue(value) {
@@ -211,8 +227,7 @@ service cloud.firestore {
     }
 
     function canManageStudentNotification(targetUid) {
-      return exists(userProfilePath(targetUid)) &&
-        isStudentOnlyRole(get(userProfilePath(targetUid)).data.role) &&
+      return targetHasStudentSelfIdentity(targetUid) &&
         (
           isAdminOrRegularEC() ||
           (
@@ -633,7 +648,7 @@ service cloud.firestore {
       }
 
       match /notifications/{notificationId} {
-        allow read: if isSelf(uid) || isAdminOrRegularEC() ||
+        allow read: if (isSelf(uid) && hasStudentSelfIdentity()) || isAdminOrRegularEC() ||
           (isBOD() && canManageStudentNotification(uid));
         allow create: if isAdminOrRegularEC() ||
           bodNotificationWriteIsScoped(uid, request.resource.data);
@@ -691,7 +706,8 @@ service cloud.firestore {
       }
 
       match /attendance/{uid} {
-        allow read: if isAdminOrRegularEC() || isTeacher() || isSelf(uid) ||
+        allow read: if isAdminOrRegularEC() || isTeacher() ||
+          (isSelf(uid) && hasStudentSelfIdentity()) ||
           (
             isBOD() &&
             currentCourseScope() != null &&
@@ -714,7 +730,8 @@ service cloud.firestore {
       }
 
       match /registrations/{uid} {
-        allow read: if isAdminOrRegularEC() || isSelf(uid) ||
+        allow read: if isAdminOrRegularEC() ||
+          (isSelf(uid) && hasStudentSelfIdentity()) ||
           (
             isBOD() &&
             currentCourseScope() != null &&
@@ -753,8 +770,12 @@ service cloud.firestore {
 
       match /students/{studentUid} {
         allow read: if isAdminOrRegularEC() ||
-          isSelf(studentUid) ||
-          (signedIn() && resource.data.uid == request.auth.uid) ||
+          (isSelf(studentUid) && hasStudentSelfIdentity()) ||
+          (
+            signedIn() &&
+            resource.data.uid == request.auth.uid &&
+            hasStudentSelfIdentity()
+          ) ||
           (
             isBOD() &&
             currentCourseScope() != null &&
@@ -781,7 +802,9 @@ service cloud.firestore {
     }
 
     match /students/{studentId} {
-      allow read: if isTeacher() || isSelf(studentId) || canManageStudentData(resource.data);
+      allow read: if isTeacher() ||
+        (isSelf(studentId) && hasStudentSelfIdentity()) ||
+        canManageStudentData(resource.data);
       allow create: if isAdminOrRegularEC() ||
         (
           isBOD() &&

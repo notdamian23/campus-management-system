@@ -4149,6 +4149,9 @@ export default function EventDashboard() {
         sampleRecipientCourses: recipients
           .slice(0, 5)
           .map((student) => String(student.course ?? "").trim()),
+        sampleRecipientRoles: recipients
+          .slice(0, 5)
+          .map((student) => String(student.role ?? "").trim()),
         payloadCourse: courseValue,
         payloadCourses: effectiveSelectedNotifCourses,
       });

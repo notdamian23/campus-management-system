@@ -1691,9 +1691,13 @@ export default function PaymentDashboard() {
         console.info("[PAYMENT][BOD]", {
           uid: currentUser.uid,
           role: normalizeCampusRole(viewerProfileWithUid?.role),
+          isBod: viewerIsBod,
           profileCourseRaw: String(viewerProfileWithUid?.course ?? "").trim(),
           profileCourseScopeRaw: String(
             viewerProfileWithUid?.courseScope ?? "",
+          ).trim(),
+          profileCourseScopeLabelRaw: String(
+            viewerProfileWithUid?.courseScopeLabel ?? "",
           ).trim(),
           profileAssignedCourseRaw: String(
             viewerProfileWithUid?.assignedCourse ?? "",
@@ -1703,6 +1707,8 @@ export default function PaymentDashboard() {
           payloadCourseCanonical: normalizeCourse(selectedPaymentCourse),
           yearLevel,
           specificStudentsCount: selectedPaymentStudents.length,
+          ownerType: basePaymentPayload.ownerType,
+          createdByRole: basePaymentPayload.createdByRole,
           finalCourse: basePaymentPayload.course,
           finalCourseScope: basePaymentPayload.courseScope,
           finalCreatedByCourseScope: basePaymentPayload.createdByCourseScope,
@@ -1765,6 +1771,27 @@ export default function PaymentDashboard() {
       }
       await loadPayments();
     } catch (error: unknown) {
+      if (viewerIsBod) {
+        console.error("[PAYMENT][BOD][ERROR]", {
+          uid: currentUser?.uid ?? "",
+          role: normalizeCampusRole(viewerProfileWithUid?.role),
+          isBod: viewerIsBod,
+          profileCourseRaw: String(viewerProfileWithUid?.course ?? "").trim(),
+          profileCourseScopeRaw: String(
+            viewerProfileWithUid?.courseScope ?? "",
+          ).trim(),
+          profileCourseScopeLabelRaw: String(
+            viewerProfileWithUid?.courseScopeLabel ?? "",
+          ).trim(),
+          profileAssignedCourseRaw: String(
+            viewerProfileWithUid?.assignedCourse ?? "",
+          ).trim(),
+          bodScopeCanonical: viewerCourseScopeValue,
+          selectedPaymentCourse,
+          selectedPaymentCourseCanonical: normalizeCourse(selectedPaymentCourse),
+          error,
+        });
+      }
       const message = toScopedPaymentErrorMessage(
         error,
         isEditing ? "Failed to update payment." : "Failed to save payment.",

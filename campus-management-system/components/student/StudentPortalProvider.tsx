@@ -24,7 +24,9 @@ import {
   canAccessStudentPortal,
   resolveCampusProfileName,
 } from "@/lib/campus-auth";
+import { normalizeCampusRole } from "@/lib/campus-role";
 import { normalizeCourse } from "@/lib/courseOptions";
+import { getCourseScope, isBOD } from "@/lib/ec-permissions";
 import { app, auth, db } from "@/lib/firebase";
 import { formatStudentFullName } from "@/lib/student-name";
 
@@ -72,6 +74,9 @@ export type StudentProfile = {
   year: string;
   accountStatus: StudentAccountStatus;
   readyForClearance: boolean;
+  campusRole: string;
+  viewerIsBod: boolean;
+  viewerCourseScope: string | null;
 };
 
 export type StudentPayment = {
@@ -262,6 +267,7 @@ type ProfileDocData = {
   role?: string;
   isStudent?: boolean;
   schoolId?: string;
+  schoolIdKey?: string;
   studentId?: string;
   firstName?: string;
   lastName?: string;
@@ -279,6 +285,7 @@ type ProfileDocData = {
 type StudentProjectionDocData = {
   status?: string;
   schoolId?: string;
+  schoolIdKey?: string;
   studentId?: string;
   firstName?: string;
   lastName?: string;
@@ -612,7 +619,9 @@ export function StudentPortalProvider({
 
       const schoolId = String(
         latestProfileData.schoolId ??
+          latestProfileData.schoolIdKey ??
           latestStudentData?.schoolId ??
+          latestStudentData?.schoolIdKey ??
           latestProfileData.studentId ??
           latestStudentData?.studentId ??
           "",
@@ -651,6 +660,9 @@ export function StudentPortalProvider({
           latestProfileData.course ?? latestStudentData?.course ?? "",
         ).trim() ||
         "Unassigned";
+      const campusRole = normalizeCampusRole(latestProfileData.role) || "";
+      const viewerIsBod = isBOD(latestProfileData);
+      const viewerCourseScope = getCourseScope(latestProfileData);
 
       setProfile({
         uid,
@@ -671,6 +683,9 @@ export function StudentPortalProvider({
           latestStudentData?.readyForClearance ??
             latestProfileData.readyForClearance,
         ),
+        campusRole,
+        viewerIsBod,
+        viewerCourseScope,
       });
       setError(null);
       setLoadingProfile(false);
@@ -733,104 +748,176 @@ export function StudentPortalProvider({
       return;
     }
 
+    const viewerIsBod = profile.viewerIsBod === true;
+    const viewerCourseScope =
+      normalizeCourse(profile.viewerCourseScope ?? "") || null;
+
+    if (viewerIsBod && !viewerCourseScope) {
+      setRawEvents([]);
+      setLoadingEvents(false);
+      return;
+    }
+
     setLoadingEvents(true);
-    const qy = query(collection(db, "events"), orderBy("createdAt", "desc"));
+
+    const mapEventRows = (
+      docs: Array<{
+        id: string;
+        data: () => Partial<RawEventDoc> & {
+          yearLevels?: unknown;
+          courses?: unknown;
+          paymentRequired?: unknown;
+          linkedPaymentId?: unknown;
+        };
+      }>,
+    ) =>
+      docs
+        .map((d) => {
+          const data = d.data();
+          const yearLevels = toTargetList(data.yearLevels);
+          const courses = toTargetList(data.courses);
+          const linkedPaymentId = getLinkedPaymentId({
+            linkedPaymentId: String(
+              (data as { linkedPaymentId?: unknown }).linkedPaymentId ?? "",
+            ).trim(),
+            requiredPaymentId: String(data.requiredPaymentId ?? "").trim(),
+          });
+          const paymentRequired =
+            data.paymentRequired === true ||
+            data.withPayment === true ||
+            linkedPaymentId.length > 0;
+          return {
+            id: d.id,
+            title: String(data.title ?? "Untitled Event"),
+            date: String(data.date ?? ""),
+            scheduledTime: String(data.scheduledTime ?? data.timeStart ?? ""),
+            timeStart: String(data.timeStart ?? ""),
+            timeEnd: String(data.timeEnd ?? ""),
+            location: String(data.location ?? ""),
+            yearLevel:
+              String(data.yearLevel ?? "").trim() ||
+              (yearLevels.length > 0 ? yearLevels.join(", ") : "All Years"),
+            course:
+              String(data.course ?? "").trim() ||
+              (courses.length > 0 ? courses.join(", ") : "All Courses"),
+            yearLevels,
+            courses,
+            targetStudent: String(data.targetStudent ?? ""),
+            details: String(data.details ?? ""),
+            isPreReg: data.isPreReg === true,
+            withPayment: paymentRequired,
+            paymentRequired,
+            waitlistEnabled: data.waitlistEnabled === true,
+            requiredPaymentId: linkedPaymentId,
+            linkedPaymentId,
+            registrationStartAtMs: toMillis(
+              (data as { registrationStartAt?: unknown }).registrationStartAt,
+            ),
+            registrationEndAtMs: toMillis(
+              (data as { registrationEndAt?: unknown }).registrationEndAt,
+            ),
+            cancellationDeadlineAtMs: toMillis(
+              (data as { cancellationDeadlineAt?: unknown })
+                .cancellationDeadlineAt,
+            ),
+            preRegSlots:
+              typeof data.preRegSlots === "number"
+                ? Math.max(0, Math.trunc(data.preRegSlots))
+                : null,
+            preRegCount: Math.max(0, Number(data.preRegCount ?? 0)),
+            waitlistCount: Math.max(0, Number(data.waitlistCount ?? 0)),
+            preRegRemaining:
+              typeof data.preRegRemaining === "number"
+                ? Math.max(0, Math.trunc(data.preRegRemaining))
+                : null,
+          };
+        })
+        .filter((event) => {
+          const courseMatch = matchesTarget(
+            event.courses.length > 0 ? event.courses : event.course,
+            profile.course,
+            "All Courses",
+          );
+          const yearMatch = matchesTarget(
+            event.yearLevels.length > 0 ? event.yearLevels : event.yearLevel,
+            profile.year,
+            "All Years",
+          );
+          const studentMatch = matchesSpecificStudentTarget(
+            event.targetStudent,
+            profile.schoolId,
+            profile.studentName,
+          );
+          return courseMatch && yearMatch && studentMatch;
+        });
+
+    const handleEventLoadError = (
+      error: unknown,
+      queryName: "all" | "ec" | "scoped-course",
+    ) => {
+      console.error("[STUDENT][EVENTS]", {
+        queryName,
+        campusRole: profile.campusRole,
+        viewerIsBod,
+        viewerCourseScope,
+        error,
+      });
+      setRawEvents([]);
+      setLoadingEvents(false);
+      setError(toErrorMessage(error, "Failed to load events."));
+    };
+
+    if (viewerIsBod && viewerCourseScope) {
+      const ecRows = new Map<string, RawEventDoc>();
+      const scopedRows = new Map<string, RawEventDoc>();
+
+      const syncScopedRows = () => {
+        const merged = new Map<string, RawEventDoc>();
+        Array.from(ecRows.values()).forEach((event) => merged.set(event.id, event));
+        Array.from(scopedRows.values()).forEach((event) =>
+          merged.set(event.id, event),
+        );
+        setRawEvents(Array.from(merged.values()));
+        setError(null);
+        setLoadingEvents(false);
+      };
+
+      const unsubEc = onSnapshot(
+        query(collection(db, "events"), where("ownerType", "==", "ec")),
+        (snap) => {
+          ecRows.clear();
+          mapEventRows(snap.docs).forEach((event) => ecRows.set(event.id, event));
+          syncScopedRows();
+        },
+        (e) => handleEventLoadError(e, "ec"),
+      );
+
+      const unsubScoped = onSnapshot(
+        query(collection(db, "events"), where("courseScope", "==", viewerCourseScope)),
+        (snap) => {
+          scopedRows.clear();
+          mapEventRows(snap.docs).forEach((event) =>
+            scopedRows.set(event.id, event),
+          );
+          syncScopedRows();
+        },
+        (e) => handleEventLoadError(e, "scoped-course"),
+      );
+
+      return () => {
+        unsubEc();
+        unsubScoped();
+      };
+    }
 
     const unsub = onSnapshot(
-      qy,
+      query(collection(db, "events"), orderBy("createdAt", "desc")),
       (snap) => {
-        const mapped: RawEventDoc[] = snap.docs
-          .map((d) => {
-            const data = d.data() as Partial<RawEventDoc> & {
-              yearLevels?: unknown;
-              courses?: unknown;
-              paymentRequired?: unknown;
-              linkedPaymentId?: unknown;
-            };
-            const yearLevels = toTargetList(data.yearLevels);
-            const courses = toTargetList(data.courses);
-            const linkedPaymentId = getLinkedPaymentId({
-              linkedPaymentId: String((data as { linkedPaymentId?: unknown }).linkedPaymentId ?? "").trim(),
-              requiredPaymentId: String(data.requiredPaymentId ?? "").trim(),
-            });
-            const paymentRequired =
-              data.paymentRequired === true ||
-              data.withPayment === true ||
-              linkedPaymentId.length > 0;
-            return {
-              id: d.id,
-              title: String(data.title ?? "Untitled Event"),
-              date: String(data.date ?? ""),
-              scheduledTime: String(data.scheduledTime ?? data.timeStart ?? ""),
-              timeStart: String(data.timeStart ?? ""),
-              timeEnd: String(data.timeEnd ?? ""),
-              location: String(data.location ?? ""),
-              yearLevel:
-                String(data.yearLevel ?? "").trim() ||
-                (yearLevels.length > 0 ? yearLevels.join(", ") : "All Years"),
-              course:
-                String(data.course ?? "").trim() ||
-                (courses.length > 0 ? courses.join(", ") : "All Courses"),
-              yearLevels,
-              courses,
-              targetStudent: String(data.targetStudent ?? ""),
-              details: String(data.details ?? ""),
-              isPreReg: data.isPreReg === true,
-              withPayment: paymentRequired,
-              paymentRequired,
-              waitlistEnabled: data.waitlistEnabled === true,
-              requiredPaymentId: linkedPaymentId,
-              linkedPaymentId,
-              registrationStartAtMs: toMillis(
-                (data as { registrationStartAt?: unknown }).registrationStartAt,
-              ),
-              registrationEndAtMs: toMillis(
-                (data as { registrationEndAt?: unknown }).registrationEndAt,
-              ),
-              cancellationDeadlineAtMs: toMillis(
-                (data as { cancellationDeadlineAt?: unknown })
-                  .cancellationDeadlineAt,
-              ),
-              preRegSlots:
-                typeof data.preRegSlots === "number"
-                  ? Math.max(0, Math.trunc(data.preRegSlots))
-                  : null,
-              preRegCount: Math.max(0, Number(data.preRegCount ?? 0)),
-              waitlistCount: Math.max(0, Number(data.waitlistCount ?? 0)),
-              preRegRemaining:
-                typeof data.preRegRemaining === "number"
-                  ? Math.max(0, Math.trunc(data.preRegRemaining))
-                  : null,
-            };
-          })
-          .filter((event) => {
-            const courseMatch = matchesTarget(
-              event.courses.length > 0 ? event.courses : event.course,
-              profile.course,
-              "All Courses",
-            );
-            const yearMatch = matchesTarget(
-              event.yearLevels.length > 0 ? event.yearLevels : event.yearLevel,
-              profile.year,
-              "All Years",
-            );
-            const studentMatch = matchesSpecificStudentTarget(
-              event.targetStudent,
-              profile.schoolId,
-              profile.studentName,
-            );
-            return courseMatch && yearMatch && studentMatch;
-          });
-
-        setRawEvents(mapped);
+        setRawEvents(mapEventRows(snap.docs));
         setError(null);
         setLoadingEvents(false);
       },
-      (e) => {
-        setRawEvents([]);
-        setLoadingEvents(false);
-        setError(toErrorMessage(e, "Failed to load events."));
-      },
+      (e) => handleEventLoadError(e, "all"),
     );
 
     return () => unsub();
