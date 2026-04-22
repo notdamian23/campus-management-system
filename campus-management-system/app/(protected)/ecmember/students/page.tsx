@@ -165,7 +165,7 @@ type AttendanceDocData = {
 };
 
 type Notice = {
-  type: "ok" | "err";
+  type: "ok" | "warn" | "err";
   msg: string;
 };
 
@@ -1593,21 +1593,37 @@ export default function ECStudentLookup() {
     setStatusNotice(null);
 
     try {
-      await updateStudentAccountStatus({
+      const result = await updateStudentAccountStatus({
         uid: student.uid,
         status: nextStatus,
       });
 
-      updateStudentState(student.uid, { status: nextStatus });
-      setStatusNotice({
-        type: "ok",
-        msg: `${student.name} is now ${nextStatus}.`,
-      });
-      campusToast.success({
-        title: "Student status updated",
-        description: `${student.name} is now ${nextStatus}.`,
-        dedupeKey: `ec-students:status:${student.uid}:${nextStatus}`,
-      });
+      const resolvedStatus = result.status || nextStatus;
+      updateStudentState(student.uid, { status: resolvedStatus });
+
+      if (result.cleanupFailed) {
+        setStatusNotice({
+          type: "warn",
+          msg: "Student status was updated, but cleanup had a warning.",
+        });
+        campusToast.warning({
+          title: "Student status updated with warning",
+          description: result.cleanupError
+            ? `Student status was updated, but cleanup had a warning. ${result.cleanupError}`
+            : "Student status was updated, but cleanup had a warning.",
+          dedupeKey: `ec-students:status-warning:${student.uid}:${resolvedStatus}`,
+        });
+      } else {
+        setStatusNotice({
+          type: "ok",
+          msg: `${student.name} is now ${resolvedStatus}.`,
+        });
+        campusToast.success({
+          title: "Student status updated",
+          description: `${student.name} is now ${resolvedStatus}.`,
+          dedupeKey: `ec-students:status:${student.uid}:${resolvedStatus}`,
+        });
+      }
     } catch (error: unknown) {
       await logStudentPermissionDeniedAttempt(
         "toggle_account_status",
@@ -2614,6 +2630,8 @@ export default function ECStudentLookup() {
                       "rounded-lg border px-4 py-3 text-sm",
                       statusNotice.type === "ok"
                         ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                        : statusNotice.type === "warn"
+                          ? "border-amber-200 bg-amber-50 text-amber-900"
                         : "border-red-200 bg-red-50 text-red-900",
                     ].join(" ")}
                   >

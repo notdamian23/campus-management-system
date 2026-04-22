@@ -6497,103 +6497,402 @@ export const updateCampusStudentProfile = onCall({region: REGION}, async (reques
   });
 
 export const updateStudentAccountStatus = onCall({region: REGION}, async (request) => {
-    const actor = await resolveEcActorContext(request);
-    const body = asRecord(request.data);
-    const uid = normalizeText(body.uid);
-    const statusRaw = normalizeLower(body.status);
-    const nextStatus =
-      statusRaw === "inactive" ? "Inactive" :
-      statusRaw === "active" ? "Active" :
-      "";
-
-    if (!uid) {
-      throw new HttpsError("invalid-argument", "uid is required.");
-    }
-    if (!nextStatus) {
-      throw new HttpsError("invalid-argument", "status must be Active or Inactive.");
-    }
-
-    const {profileData, studentData, profileExists, studentExists} = await readStudentSources(uid);
-    if (!profileExists && !studentExists) {
-      throw new HttpsError("not-found", "Student profile not found.");
-    }
-
-    const targetRole = normalizeText(profileData.role || studentData.role || "student");
-    if (!hasStudentIdentityData({...studentData, ...profileData})) {
-      throw new HttpsError(
-        "permission-denied",
-        "Only student and EC-member records can be updated here.",
-      );
-    }
-    if (actor.isBod && !isStudentOnlyRole(targetRole)) {
-      throw new HttpsError(
-        "permission-denied",
-        "B.O.D. members can only update student records from their assigned course.",
-      );
-    }
-
-    const targetCourse = resolveStudentCourse(profileData, studentData);
-    if (actor.isBod && targetCourse !== actor.courseScope) {
-      throw new HttpsError(
-        "permission-denied",
-        "B.O.D. members can only manage students from their assigned course.",
-      );
-    }
-
-    const schoolId = resolveStudentSchoolId(uid, profileData, studentData);
-    const studentName = resolveStudentName(uid, profileData, studentData);
-    const yearLevel = resolveStudentYearLevel(profileData, studentData) || "Unassigned";
-    const timestamp = serverTimestamp();
-
-    const updateBatch = db.batch();
-    updateBatch.set(
-      db.doc(`profiles/${uid}`),
-      {
-        status: nextStatus,
-        isStudent: true,
-        updatedAt: timestamp,
-      },
-      {merge: true},
-    );
-    updateBatch.set(
-      db.doc(`students/${uid}`),
-      {
-        uid,
-        studentId: uid,
-        schoolId,
-        role: targetRole,
-        isStudent: true,
-        studentName,
-        name: studentName,
-        fullName: studentName,
-        course: targetCourse || normalizeText(profileData.course) || normalizeText(studentData.course) || "Unassigned",
-        year: yearLevel,
-        yearLevel,
-        status: nextStatus,
-        updatedAt: timestamp,
-      },
-      {merge: true},
-    );
-    await updateBatch.commit();
-
+    let currentStage = "callable start";
+    let actorUid = normalizeText(request.auth?.uid);
+    let actorRole = "";
+    let actorCourseScope = "";
+    let targetUid = "";
+    let targetRole = "";
+    let targetCourse = "";
+    let targetSchoolId = "";
+    let requestedStatus = "";
     let deletedRegistrationsCount = 0;
-    if (nextStatus === "Inactive") {
-      const registrationsSnapshot = await db
-        .collectionGroup("registrations")
-        .where("uid", "==", uid)
-        .get();
+    let cleanupFailed = false;
+    let cleanupError = "";
 
-      deletedRegistrationsCount = registrationsSnapshot.size;
-      await Promise.all(
-        registrationsSnapshot.docs.map((registrationDoc) => registrationDoc.ref.delete()),
-      );
-    }
-
-    return {
-      uid,
-      status: nextStatus,
-      deletedRegistrationsCount,
+    const logStageInfo = (stage: string, extra: Record<string, unknown> = {}) => {
+      functionsLogger.info("updateStudentAccountStatus stage", {
+        stage,
+        actorUid,
+        actorRole,
+        actorCourseScope,
+        targetUid,
+        targetRole,
+        targetCourse,
+        targetSchoolId,
+        requestedStatus,
+        ...extra,
+      });
     };
+
+    const logStageWarn = (
+      stage: string,
+      error: unknown,
+      extra: Record<string, unknown> = {},
+    ) => {
+      functionsLogger.warn("updateStudentAccountStatus non-critical stage failed", {
+        stage,
+        actorUid,
+        actorRole,
+        actorCourseScope,
+        targetUid,
+        targetRole,
+        targetCourse,
+        targetSchoolId,
+        requestedStatus,
+        errorCode: error instanceof HttpsError ? error.code : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error ?? ""),
+        errorStack: error instanceof Error ? error.stack : null,
+        ...extra,
+      });
+    };
+
+    const logStageError = (
+      stage: string,
+      error: unknown,
+      extra: Record<string, unknown> = {},
+    ) => {
+      functionsLogger.error("updateStudentAccountStatus failed", {
+        stage,
+        actorUid,
+        actorRole,
+        actorCourseScope,
+        targetUid,
+        targetRole,
+        targetCourse,
+        targetSchoolId,
+        requestedStatus,
+        errorCode: error instanceof HttpsError ? error.code : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error ?? ""),
+        errorStack: error instanceof Error ? error.stack : null,
+        ...extra,
+      });
+    };
+
+    const logQuery = (stage: string, query: {
+      collection: string;
+      whereFilters: Array<Record<string, unknown>>;
+      orderByFields?: string[];
+      limit?: number | null;
+    }) => {
+      functionsLogger.info("updateStudentAccountStatus query", {
+        stage,
+        actorUid,
+        actorRole,
+        actorCourseScope,
+        targetUid,
+        targetRole,
+        targetCourse,
+        targetSchoolId,
+        requestedStatus,
+        collection: query.collection,
+        whereFilters: query.whereFilters,
+        orderByFields: query.orderByFields ?? [],
+        limit: query.limit ?? null,
+      });
+    };
+
+    const markCleanupWarning = (
+      stage: string,
+      error: unknown,
+      extra: Record<string, unknown> = {},
+    ) => {
+      cleanupFailed = true;
+      if (!cleanupError) {
+        cleanupError = `${stage} failed`;
+      }
+      logStageWarn(stage, error, extra);
+    };
+
+    try {
+      currentStage = "callable start";
+      logStageInfo("callable start");
+
+      currentStage = "auth resolved";
+      if (!request.auth) {
+        throw new HttpsError("unauthenticated", "Login required.");
+      }
+      actorUid = normalizeText(request.auth.uid);
+      logStageInfo("auth resolved", {
+        auth: "VALID",
+      });
+
+      currentStage = "actor profile loaded";
+      const actor = await resolveEcActorContext(request);
+      actorRole =
+        normalizeCampusRoleValue(actor.profile.role) ||
+        (actor.isBod ? "bod" : "ecmember");
+      actorCourseScope = actor.courseScope || "";
+      logStageInfo("actor profile loaded", {
+        actorIsBod: actor.isBod,
+      });
+
+      const body = asRecord(request.data);
+      targetUid = normalizeText(body.uid);
+      const statusRaw = normalizeLower(body.status);
+      requestedStatus =
+        statusRaw === "inactive" ? "Inactive" :
+        statusRaw === "active" ? "Active" :
+        "";
+
+      currentStage = "requested status";
+      if (!targetUid) {
+        throw new HttpsError("invalid-argument", "uid is required.");
+      }
+      if (!requestedStatus) {
+        throw new HttpsError("invalid-argument", "status must be Active or Inactive.");
+      }
+      logStageInfo("requested status", {
+        requestedStatusRaw: statusRaw,
+      });
+
+      currentStage = "target profile loaded";
+      const {profileData, studentData, profileExists, studentExists} = await readStudentSources(targetUid);
+      if (!profileExists && !studentExists) {
+        throw new HttpsError("not-found", "Student profile not found.");
+      }
+
+      targetRole = normalizeText(profileData.role || studentData.role || "student");
+      targetCourse = resolveStudentCourse(profileData, studentData);
+      targetSchoolId = resolveStudentSchoolId(targetUid, profileData, studentData);
+      const studentName = resolveStudentName(targetUid, profileData, studentData);
+      const yearLevel = resolveStudentYearLevel(profileData, studentData) || "Unassigned";
+      const currentStatusRaw = normalizeLower(profileData.status || studentData.status);
+      const currentStatus =
+        currentStatusRaw === "inactive" ? "Inactive" :
+        currentStatusRaw === "active" ? "Active" :
+        "";
+
+      logStageInfo("target profile loaded", {
+        profileExists,
+        studentExists,
+        currentStatus,
+      });
+
+      if (!hasStudentIdentityData({...studentData, ...profileData})) {
+        throw new HttpsError(
+          "permission-denied",
+          "Only student and EC-member records can be updated here.",
+        );
+      }
+      if (actor.isBod && !isStudentOnlyRole(targetRole)) {
+        throw new HttpsError(
+          "permission-denied",
+          "B.O.D. members can only update student records from their assigned course.",
+        );
+      }
+      if (actor.isBod && targetCourse !== actor.courseScope) {
+        throw new HttpsError(
+          "permission-denied",
+          "B.O.D. members can only manage students from their assigned course.",
+        );
+      }
+
+      currentStage = "permission check passed";
+      logStageInfo("permission check passed", {
+        actorIsBod: actor.isBod,
+      });
+
+      if (currentStatus === requestedStatus) {
+        currentStage = "final response";
+        const idempotentResponse = {
+          uid: targetUid,
+          status: requestedStatus,
+          updated: true,
+          alreadyInStatus: true,
+          deletedRegistrationsCount: 0,
+          cleanupFailed: false,
+        };
+        logStageInfo("final response", idempotentResponse);
+        return idempotentResponse;
+      }
+
+      const timestamp = serverTimestamp();
+      const updateBatch = db.batch();
+
+      currentStage = "profile status update started";
+      logStageInfo("profile status update started", {
+        profilePath: `profiles/${targetUid}`,
+      });
+      updateBatch.set(
+        db.doc(`profiles/${targetUid}`),
+        {
+          status: requestedStatus,
+          isStudent: true,
+          updatedAt: timestamp,
+        },
+        {merge: true},
+      );
+
+      currentStage = "students projection update started";
+      logStageInfo("students projection update started", {
+        projectionPath: `students/${targetUid}`,
+        projectionExists: studentExists,
+      });
+      updateBatch.set(
+        db.doc(`students/${targetUid}`),
+        {
+          uid: targetUid,
+          studentId: targetUid,
+          schoolId: targetSchoolId,
+          role: targetRole,
+          isStudent: true,
+          studentName,
+          name: studentName,
+          fullName: studentName,
+          course:
+            targetCourse ||
+            normalizeText(profileData.course) ||
+            normalizeText(studentData.course) ||
+            "Unassigned",
+          year: yearLevel,
+          yearLevel,
+          status: requestedStatus,
+          updatedAt: timestamp,
+        },
+        {merge: true},
+      );
+
+      await updateBatch.commit();
+      logStageInfo("profile status update completed", {
+        profilePath: `profiles/${targetUid}`,
+      });
+      logStageInfo("students projection update completed", {
+        projectionPath: `students/${targetUid}`,
+      });
+
+      if (requestedStatus === "Inactive") {
+        currentStage = "inactive cleanup started";
+        logStageInfo("inactive cleanup started");
+
+        try {
+          currentStage = "registration cleanup query started";
+          logQuery("registration cleanup query started", {
+            collection: "events",
+            whereFilters: [],
+            orderByFields: [],
+            limit: null,
+          });
+          const eventsSnapshot = await db.collection("events").get();
+          logStageInfo("registration cleanup query completed", {
+            eventCount: eventsSnapshot.size,
+          });
+
+          const writeLimit = 450;
+          let batch = db.batch();
+          let batchWrites = 0;
+          let batchCount = 0;
+
+          for (const eventDoc of eventsSnapshot.docs) {
+            const registrationRef = eventDoc.ref.collection("registrations").doc(targetUid);
+            const registrationSnapshot = await registrationRef.get();
+            if (!registrationSnapshot.exists) {
+              continue;
+            }
+
+            batch.delete(registrationRef);
+            batchWrites += 1;
+            deletedRegistrationsCount += 1;
+
+            if (batchWrites >= writeLimit) {
+              await batch.commit();
+              batchCount += 1;
+              batch = db.batch();
+              batchWrites = 0;
+            }
+          }
+
+          if (batchWrites > 0) {
+            await batch.commit();
+            batchCount += 1;
+          }
+
+          logStageInfo("inactive cleanup completed", {
+            deletedRegistrationsCount,
+            batchCount,
+          });
+        } catch (error: unknown) {
+          markCleanupWarning("registration cleanup query", error, {
+            collection: "events",
+            registrationPathPattern: `events/{eventId}/registrations/${targetUid}`,
+          });
+          logStageInfo("registration cleanup query completed", {
+            warning: true,
+            deletedRegistrationsCount,
+          });
+          logStageInfo("inactive cleanup completed", {
+            warning: true,
+            deletedRegistrationsCount,
+          });
+        }
+      } else {
+        logStageInfo("inactive cleanup completed", {
+          skipped: true,
+          reason: "Requested status is Active.",
+        });
+      }
+
+      currentStage = "event queue cleanup started";
+      logStageInfo("event queue cleanup started", {
+        skipped: true,
+        reason: "No event queue cleanup is configured for student status changes.",
+      });
+      logStageInfo("event queue cleanup completed", {
+        skipped: true,
+      });
+
+      currentStage = "audit log started";
+      logStageInfo("audit log started");
+      try {
+        await writeStructuredAuditLog({
+          actorUid,
+          action: "student_account_status_updated",
+          targetType: "student_profile",
+          targetId: targetUid,
+          metadata: {
+            status: requestedStatus,
+            deletedRegistrationsCount,
+            cleanupFailed,
+            cleanupError: cleanupError || null,
+            actorRole,
+            actorCourseScope: actorCourseScope || null,
+            targetRole,
+            targetCourse: targetCourse || null,
+            targetSchoolId: targetSchoolId || null,
+          },
+        });
+        logStageInfo("audit log completed");
+      } catch (error: unknown) {
+        markCleanupWarning("audit log", error);
+        logStageInfo("audit log completed", {
+          warning: true,
+        });
+      }
+
+      currentStage = "final response";
+      const response = {
+        uid: targetUid,
+        status: requestedStatus,
+        updated: true,
+        alreadyInStatus: false,
+        deletedRegistrationsCount,
+        cleanupFailed,
+        cleanupError: cleanupFailed ? cleanupError : undefined,
+      };
+      logStageInfo("final response", response);
+      return response;
+    } catch (error: unknown) {
+      logStageError(currentStage, error);
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      const message =
+        error instanceof Error && error.message.trim() ?
+          error.message :
+          "Failed to update student status.";
+      throw new HttpsError("internal", message);
+    }
   });
 
 export const updateStudentClearanceStatus = onCall({region: REGION}, async (request) => {

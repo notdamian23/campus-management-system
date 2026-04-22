@@ -228,7 +228,11 @@ export type UpdateStudentAccountStatusPayload = {
 export type UpdateStudentAccountStatusResult = {
   uid: string;
   status: "Active" | "Inactive";
+  updated?: boolean;
+  alreadyInStatus?: boolean;
   deletedRegistrationsCount?: number;
+  cleanupFailed?: boolean;
+  cleanupError?: string;
 };
 
 export type UpdateStudentClearanceStatusPayload = {
