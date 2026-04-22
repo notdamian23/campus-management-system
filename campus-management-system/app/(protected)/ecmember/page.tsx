@@ -33,13 +33,14 @@ import {
 } from "@/lib/campus-auth";
 import {
   canManageStudent,
-  canViewDocument,
   canViewEvent,
   getCourseScope,
   isBOD,
 } from "@/lib/ec-permissions";
 import {
+  type CampusDocumentListItem,
   getCampusFunctions,
+  listCampusDocuments,
   listCampusPayments,
 } from "@/lib/firebase-functions";
 import {
@@ -90,17 +91,6 @@ type EventDashboardDoc = {
   ownerType?: "ec" | "bod";
   courseScope?: string | null;
   createdByCourseScope?: string | null;
-};
-
-type DocumentDashboardDoc = {
-  id: string;
-  ownerType?: "ec" | "bod";
-  courseScope?: string | null;
-  createdByCourseScope?: string | null;
-  createdBy?: string;
-  createdByUid?: string;
-  ownerUid?: string;
-  uploadedByUid?: string;
 };
 
 const DASHBOARD_SCOPE_MISSING_ERROR = "Course scope missing for B.O.D account";
@@ -365,40 +355,48 @@ export default function ECMemberDashboard() {
       };
 
       const loadDocumentsMetric = async () => {
-        const documentRows: DocumentDashboardDoc[] = [];
+        try {
+          const documentRows = await listCampusDocuments();
+          const dedupedDocuments = new Map<string, CampusDocumentListItem>();
 
-        if (viewerIsBod && viewerCourseScope) {
-          const [createdBySnap, createdByUidSnap] = await Promise.all([
-            getDocs(
-              query(collection(db, "ecDocuments"), where("createdBy", "==", profile.uid)),
-            ),
-            getDocs(
-              query(collection(db, "ecDocuments"), where("createdByUid", "==", profile.uid)),
-            ),
-          ]);
+          documentRows.forEach((documentRow) => {
+            const documentId = String(documentRow.id ?? "").trim();
+            const status = String(documentRow.status ?? "").trim().toLowerCase();
 
-          const mergedDocuments = new Map<string, DocumentDashboardDoc>();
-          [...createdBySnap.docs, ...createdByUidSnap.docs].forEach((snapshot) => {
-            mergedDocuments.set(snapshot.id, {
-              id: snapshot.id,
-              ...(snapshot.data() as Omit<DocumentDashboardDoc, "id">),
-            });
+            if (!documentId || status === "pending-upload") {
+              return;
+            }
+
+            dedupedDocuments.set(documentId, documentRow);
           });
 
-          documentRows.push(...mergedDocuments.values());
-        } else {
-          const allDocumentsSnap = await getDocs(collection(db, "ecDocuments"));
-          allDocumentsSnap.docs.forEach((snapshot) => {
-            documentRows.push({
-              id: snapshot.id,
-              ...(snapshot.data() as Omit<DocumentDashboardDoc, "id">),
-            });
-          });
+          const visibleDocuments = Array.from(dedupedDocuments.values());
+
+          if (!viewerIsBod) {
+            return visibleDocuments.length;
+          }
+
+          return visibleDocuments.filter((documentRow) => {
+            const ownerType = String(documentRow.ownerType ?? "").trim().toLowerCase();
+            if (ownerType !== "bod") {
+              return false;
+            }
+
+            const ownershipValues = [
+              documentRow.createdBy,
+              documentRow.createdByUid,
+              documentRow.uploadedByUid,
+              documentRow.ownerUid,
+              documentRow.uploadedBy,
+            ]
+              .map((value) => String(value ?? "").trim())
+              .filter(Boolean);
+
+            return ownershipValues.some((value) => value === profile.uid);
+          }).length;
+        } catch {
+          throw new Error("Failed to load document count.");
         }
-
-        return documentRows.filter((documentRow) =>
-          canViewDocument(profile, documentRow),
-        ).length;
       };
 
       const [
@@ -476,6 +474,12 @@ export default function ECMemberDashboard() {
     void loadDashboardMetrics(viewerProfile);
   }, [loadDashboardMetrics, viewerProfile, viewerProfileReady]);
 
+  const viewerIsBod = useMemo(() => isBOD(viewerProfile), [viewerProfile]);
+  const viewerCourseScope = useMemo(
+    () => getCourseScope(viewerProfile),
+    [viewerProfile],
+  );
+
   const dashboardMetrics = useMemo<ECStatItem[]>(
     () => [
       {
@@ -539,21 +543,19 @@ export default function ECMemberDashboard() {
               metricStates.documents.value ?? "—",
         description:
           metricStates.documents.loading ?
-            "Loading accessible documents..." :
+            viewerIsBod ?
+              "Loading your uploaded documents..." :
+              "Loading accessible documents..." :
             metricStates.documents.error ?
               metricStates.documents.error :
-              "Documents you can access and download right now",
+              viewerIsBod ?
+                "Documents uploaded by your B.O.D account" :
+                "Documents you can access and download right now",
         tone: "purple",
         icon: FileStack,
       },
     ],
-    [metricStates],
-  );
-
-  const viewerIsBod = useMemo(() => isBOD(viewerProfile), [viewerProfile]);
-  const viewerCourseScope = useMemo(
-    () => getCourseScope(viewerProfile),
-    [viewerProfile],
+    [metricStates, viewerIsBod],
   );
 
   return (

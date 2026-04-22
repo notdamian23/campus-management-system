@@ -11,7 +11,6 @@ import React, {
 import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
-  collectionGroup,
   doc,
   getDoc,
   onSnapshot,
@@ -27,6 +26,7 @@ import {
 import { normalizeCampusRole } from "@/lib/campus-role";
 import { normalizeCourse } from "@/lib/courseOptions";
 import { getCourseScope, isBOD } from "@/lib/ec-permissions";
+import { listStudentPayments } from "@/lib/firebase-functions";
 import { app, auth, db } from "@/lib/firebase";
 import { formatStudentFullName } from "@/lib/student-name";
 
@@ -197,24 +197,6 @@ type RawEventDoc = {
   preRegRemaining: number | null;
 };
 
-type PaymentDocData = {
-  title?: string;
-  ref?: string;
-  amount?: number | string;
-  date?: string;
-  details?: string;
-  linkedEventId?: string;
-  source?: string;
-  status?: string;
-};
-
-type PaymentAssignmentData = {
-  uid?: string;
-  status?: string;
-  createdAt?: { toMillis?: () => number };
-  updatedAt?: { toMillis?: () => number };
-};
-
 type ProfileNotificationDocData = {
   title?: string;
   message?: string;
@@ -298,9 +280,32 @@ type StudentProjectionDocData = {
   readyForClearance?: boolean;
 };
 
+type StudentLoaderName =
+  | "profile listener"
+  | "students/{uid} projection listener"
+  | "events listener"
+  | "event images listener"
+  | "payments loader"
+  | "profile notifications listener"
+  | "attendance loader"
+  | "registrations loader";
+
+type StudentLoaderDebugSource = {
+  uid?: string;
+  role?: string;
+  campusRole?: string;
+  course?: string;
+  year?: string;
+  yearLevel?: string;
+  isStudent?: boolean;
+  viewerIsBod?: boolean;
+};
+
 const StudentPortalContext = createContext<StudentPortalContextValue | null>(
   null,
 );
+
+const STUDENT_LOADER_DEBUG = process.env.NODE_ENV !== "production";
 
 function toErrorMessage(error: unknown, fallback: string) {
   if (typeof error === "object" && error !== null) {
@@ -315,6 +320,72 @@ function toErrorMessage(error: unknown, fallback: string) {
 
   if (error instanceof Error) return error.message;
   return fallback;
+}
+
+function toLoaderErrorCode(error: unknown) {
+  if (typeof error === "object" && error !== null) {
+    const maybe = error as { code?: unknown };
+    if (typeof maybe.code === "string" && maybe.code.trim()) {
+      return maybe.code;
+    }
+  }
+
+  return "";
+}
+
+function toLoaderErrorMessage(error: unknown) {
+  if (typeof error === "object" && error !== null) {
+    const maybe = error as { message?: unknown };
+    if (typeof maybe.message === "string" && maybe.message.trim()) {
+      return maybe.message;
+    }
+  }
+
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  return "";
+}
+
+function logStudentLoaderDebug(
+  loader: StudentLoaderName,
+  source?: StudentLoaderDebugSource | null,
+  options?: {
+    phase?: "start" | "success" | "error";
+    error?: unknown;
+    extra?: Record<string, unknown>;
+  },
+) {
+  if (!STUDENT_LOADER_DEBUG) {
+    return;
+  }
+
+  const phase = options?.phase ?? "start";
+  const role = String(source?.campusRole ?? source?.role ?? "").trim();
+  const course = String(source?.course ?? "").trim();
+  const year = String(source?.year ?? source?.yearLevel ?? "").trim();
+  const payload = {
+    loader,
+    phase,
+    uid: String(source?.uid ?? "").trim(),
+    role,
+    course,
+    year,
+    isStudent:
+      source?.isStudent === true || normalizeCampusRole(role) === "student",
+    isBod: source?.viewerIsBod === true,
+    errorCode: toLoaderErrorCode(options?.error),
+    errorMessage: toLoaderErrorMessage(options?.error),
+    ...(options?.extra ?? {}),
+  };
+
+  if (phase === "error") {
+    console.warn("[STUDENT][LOADER]", payload);
+    return;
+  }
+
+  console.info("[STUDENT][LOADER]", payload);
 }
 
 function normalizeText(value: unknown) {
@@ -582,7 +653,7 @@ export function StudentPortalProvider({
   const [loadingPayments, setLoadingPayments] = useState(true);
   const [loadingProfileNotifications, setLoadingProfileNotifications] =
     useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [portalError, setPortalError] = useState<string | null>(null);
 
   useEffect(() => {
     let unsubscribeProfileDoc: (() => void) | null = null;
@@ -606,13 +677,14 @@ export function StudentPortalProvider({
 
       if (!latestProfileData) {
         setProfile(null);
+        setPortalError("Student profile not found.");
         setLoadingProfile(false);
         return;
       }
 
       if (!canAccessStudentPortal(latestProfileData)) {
         setProfile(null);
-        setError("Student access is not enabled for this account.");
+        setPortalError("Student access is not enabled for this account.");
         setLoadingProfile(false);
         return;
       }
@@ -628,7 +700,7 @@ export function StudentPortalProvider({
       ).trim();
       if (!schoolId) {
         setProfile(null);
-        setError("Student profile not linked");
+        setPortalError("Student profile not linked");
         setLoadingProfile(false);
         return;
       }
@@ -687,19 +759,31 @@ export function StudentPortalProvider({
         viewerIsBod,
         viewerCourseScope,
       });
-      setError(null);
+      setPortalError(null);
       setLoadingProfile(false);
     };
 
     const unsub = onAuthStateChanged(auth, (user) => {
       stopProfileListeners();
       setLoadingProfile(true);
+      setPortalError(null);
 
       if (!user) {
         setProfile(null);
         setLoadingProfile(false);
         return;
       }
+
+      logStudentLoaderDebug(
+        "profile listener",
+        { uid: user.uid },
+        { phase: "start" },
+      );
+      logStudentLoaderDebug(
+        "students/{uid} projection listener",
+        { uid: user.uid },
+        { phase: "start" },
+      );
 
       unsubscribeProfileDoc = onSnapshot(
         doc(db, "profiles", user.uid),
@@ -714,8 +798,13 @@ export function StudentPortalProvider({
           latestProfileData = null;
           hasProfileSnapshot = true;
           setProfile(null);
-          setError(toErrorMessage(e, "Failed to load student profile."));
+          setPortalError(toErrorMessage(e, "Failed to load student profile."));
           setLoadingProfile(false);
+          logStudentLoaderDebug(
+            "profile listener",
+            { uid: user.uid },
+            { phase: "error", error: e },
+          );
         },
       );
 
@@ -730,7 +819,20 @@ export function StudentPortalProvider({
         (e) => {
           latestStudentData = null;
           syncProfileState(user.uid);
-          setError(toErrorMessage(e, "Failed to load student status details."));
+          logStudentLoaderDebug(
+            "students/{uid} projection listener",
+            {
+              uid: user.uid,
+              role: latestProfileData?.role,
+              course: String(latestProfileData?.course ?? "").trim(),
+              year: String(
+                latestProfileData?.year ?? latestProfileData?.yearLevel ?? "",
+              ).trim(),
+              isStudent: latestProfileData?.isStudent === true,
+              viewerIsBod: isBOD(latestProfileData ?? {}),
+            },
+            { phase: "error", error: e },
+          );
         },
       );
     });
@@ -758,6 +860,7 @@ export function StudentPortalProvider({
       return;
     }
 
+    logStudentLoaderDebug("events listener", profile, { phase: "start" });
     setLoadingEvents(true);
 
     const mapEventRows = (
@@ -855,16 +958,16 @@ export function StudentPortalProvider({
       error: unknown,
       queryName: "all" | "ec" | "scoped-course",
     ) => {
-      console.error("[STUDENT][EVENTS]", {
-        queryName,
-        campusRole: profile.campusRole,
-        viewerIsBod,
-        viewerCourseScope,
+      logStudentLoaderDebug("events listener", profile, {
+        phase: "error",
         error,
+        extra: {
+          queryName,
+          viewerCourseScope,
+        },
       });
       setRawEvents([]);
       setLoadingEvents(false);
-      setError(toErrorMessage(error, "Failed to load events."));
     };
 
     if (viewerIsBod && viewerCourseScope) {
@@ -878,7 +981,6 @@ export function StudentPortalProvider({
           merged.set(event.id, event),
         );
         setRawEvents(Array.from(merged.values()));
-        setError(null);
         setLoadingEvents(false);
       };
 
@@ -914,7 +1016,6 @@ export function StudentPortalProvider({
       query(collection(db, "events"), orderBy("createdAt", "desc")),
       (snap) => {
         setRawEvents(mapEventRows(snap.docs));
-        setError(null);
         setLoadingEvents(false);
       },
       (e) => handleEventLoadError(e, "all"),
@@ -937,6 +1038,10 @@ export function StudentPortalProvider({
       return;
     }
 
+    logStudentLoaderDebug("event images listener", profile, {
+      phase: "start",
+      extra: { eventCount: eventIds.length },
+    });
     setLoadingEventImages(true);
     const imageBuckets = new Map<string, StudentEventImageFile[]>();
     const ready = new Set<string>();
@@ -987,7 +1092,11 @@ export function StudentPortalProvider({
           imageBuckets.set(eventId, []);
           ready.add(eventId);
           syncImages();
-          setError(toErrorMessage(e, "Failed to load event images."));
+          logStudentLoaderDebug("event images listener", profile, {
+            phase: "error",
+            error: e,
+            extra: { eventId },
+          });
         },
       ),
     );
@@ -1003,94 +1112,57 @@ export function StudentPortalProvider({
       setLoadingPayments(false);
       return;
     }
-    const uid = profile.uid;
 
+    logStudentLoaderDebug("payments loader", profile, { phase: "start" });
     setLoadingPayments(true);
     let active = true;
 
-    const qy = query(
-      collectionGroup(db, "students"),
-      where("uid", "==", uid),
-    );
+    async function loadPayments() {
+      try {
+        const rows = await listStudentPayments();
+        if (!active) return;
 
-    const unsub = onSnapshot(
-      qy,
-      async (snap) => {
-        try {
-          const rows = await Promise.all(
-            snap.docs.map(async (assignmentDoc) => {
-              const paymentRef = assignmentDoc.ref.parent.parent;
-              if (!paymentRef) {
-                return null;
-              }
-              const paymentSnap = await getDoc(paymentRef);
-              if (!paymentSnap.exists()) {
-                return null;
-              }
-
-              const paymentData = paymentSnap.data() as PaymentDocData;
-              if (normalizeText(paymentData.status) === "archived") {
-                return null;
-              }
-
-              const assignment = assignmentDoc.data() as PaymentAssignmentData;
-              const status =
-                normalizeText(assignment.status) === "paid" ? "PAID" : "UNPAID";
-
-              const createdAtMs = assignment.createdAt?.toMillis
-                ? assignment.createdAt.toMillis()
-                : 0;
-              const updatedAtMs = assignment.updatedAt?.toMillis
-                ? assignment.updatedAt.toMillis()
-                : createdAtMs;
-
-              return {
-                paymentId: paymentRef.id,
-                title: String(paymentData.title ?? "Untitled Payment"),
-                ref: String(paymentData.ref ?? paymentRef.id),
-                amount: Number(paymentData.amount ?? 0),
-                date: String(paymentData.date ?? ""),
-                details: String(paymentData.details ?? ""),
-                status,
-                linkedEventId: String(paymentData.linkedEventId ?? "").trim(),
-                source:
-                  normalizeText(paymentData.source) === "event" ? "event" : "manual",
-                createdAtMs,
-                updatedAtMs,
-              } as StudentPayment;
-            }),
-          );
-
-          if (!active) return;
-
-          const cleaned = rows
-            .filter((item): item is StudentPayment => Boolean(item))
-            .sort((a, b) => {
-              const da = parseDateOnly(a.date)?.getTime() ?? 0;
-              const dbv = parseDateOnly(b.date)?.getTime() ?? 0;
+        const cleaned: StudentPayment[] = rows
+          .map((row) => ({
+            paymentId: row.paymentId,
+            title: row.title,
+            ref: row.ref,
+            amount: Number(row.amount ?? 0),
+            date: String(row.date ?? ""),
+            details: String(row.details ?? ""),
+            status: row.status === "PAID" ? "PAID" : "UNPAID",
+            linkedEventId: String(row.linkedEventId ?? "").trim(),
+            source: row.source === "event" ? "event" : "manual",
+            createdAtMs: Number(row.createdAtMs ?? 0),
+            updatedAtMs: Number(row.updatedAtMs ?? 0),
+          }) satisfies StudentPayment)
+          .sort((a, b) => {
+            const da = parseDateOnly(a.date)?.getTime() ?? 0;
+            const dbv = parseDateOnly(b.date)?.getTime() ?? 0;
+            if (dbv !== da) {
               return dbv - da;
-            });
-          setPayments(cleaned);
-          setError(null);
-        } catch (e: unknown) {
-          if (!active) return;
-          setPayments([]);
-          setError(toErrorMessage(e, "Failed to load student payments."));
-        } finally {
-          if (active) setLoadingPayments(false);
-        }
-      },
-      (e) => {
+            }
+
+            return (b.updatedAtMs || b.createdAtMs) -
+              (a.updatedAtMs || a.createdAtMs);
+          });
+        setPayments(cleaned);
+      } catch (e: unknown) {
         if (!active) return;
         setPayments([]);
-        setLoadingPayments(false);
-        setError(toErrorMessage(e, "Failed to load student payments."));
-      },
-    );
+        logStudentLoaderDebug("payments loader", profile, {
+          phase: "error",
+          error: e,
+        });
+      } finally {
+        if (active) setLoadingPayments(false);
+      }
+    }
+
+    void loadPayments();
 
     return () => {
       active = false;
-      unsub();
     };
   }, [profile]);
 
@@ -1101,6 +1173,9 @@ export function StudentPortalProvider({
       return;
     }
 
+    logStudentLoaderDebug("profile notifications listener", profile, {
+      phase: "start",
+    });
     setLoadingProfileNotifications(true);
     const qy = query(
       collection(db, "profiles", profile.uid, "notifications"),
@@ -1136,13 +1211,15 @@ export function StudentPortalProvider({
         });
 
         setProfileNotifications(rows);
-        setError(null);
         setLoadingProfileNotifications(false);
       },
       (e) => {
         setProfileNotifications([]);
         setLoadingProfileNotifications(false);
-        setError(toErrorMessage(e, "Failed to load notifications."));
+        logStudentLoaderDebug("profile notifications listener", profile, {
+          phase: "error",
+          error: e,
+        });
       },
     );
 
@@ -1161,6 +1238,10 @@ export function StudentPortalProvider({
       return;
     }
 
+    logStudentLoaderDebug("attendance loader", profile, {
+      phase: "start",
+      extra: { eventCount: rawEvents.length },
+    });
     let active = true;
 
     async function loadAttendance() {
@@ -1188,7 +1269,11 @@ export function StudentPortalProvider({
       } catch (e: unknown) {
         if (!active) return;
         setAttendanceByEvent({});
-        setError(toErrorMessage(e, "Failed to load attendance records."));
+        logStudentLoaderDebug("attendance loader", profile, {
+          phase: "error",
+          error: e,
+          extra: { eventCount: rawEvents.length },
+        });
       }
     }
 
@@ -1213,6 +1298,10 @@ export function StudentPortalProvider({
       return;
     }
 
+    logStudentLoaderDebug("registrations loader", profile, {
+      phase: "start",
+      extra: { eventCount: rawEvents.length },
+    });
     let active = true;
 
     async function loadRegistrations() {
@@ -1259,10 +1348,15 @@ export function StudentPortalProvider({
             )
             .map((registration) => registration.eventId),
         );
-      } catch {
+      } catch (e: unknown) {
         if (!active) return;
         setRegisteredEventIds([]);
         setRegistrationsByEvent({});
+        logStudentLoaderDebug("registrations loader", profile, {
+          phase: "error",
+          error: e,
+          extra: { eventCount: rawEvents.length },
+        });
       }
     }
 
@@ -1707,7 +1801,7 @@ export function StudentPortalProvider({
       loadingProfile,
       loadingEvents,
       loadingPayments,
-      error,
+      error: portalError,
       markNotificationRead,
       markAllNotificationsRead,
       registerForEvent,
@@ -1726,7 +1820,7 @@ export function StudentPortalProvider({
       loadingProfile,
       loadingEvents,
       loadingPayments,
-      error,
+      portalError,
       markNotificationRead,
       markAllNotificationsRead,
       registerForEvent,

@@ -66,8 +66,10 @@ import {
   filterRowsByCourseScope,
 } from "@/lib/ec-payment-export";
 import {
+  createCampusPayment,
   deleteCampusPayment,
   listCampusPayments,
+  updateCampusPayment,
   type CampusPaymentListItem,
 } from "@/lib/firebase-functions";
 import {
@@ -1618,6 +1620,108 @@ export default function PaymentDashboard() {
         !canEditPaymentRecord(editingCurrentPayment)
       ) {
         throw new Error("You do not have permission to edit this payment.");
+      }
+
+      if (viewerIsBod) {
+        const selectedStudentIds = selectedPaymentStudents.map((student) => student.uid);
+        const selectedSchoolIds = selectedPaymentStudents
+          .map((student) => student.schoolId)
+          .filter(Boolean);
+        const targetStudent = formatTargetStudentSummary(selectedPaymentStudents);
+        const selectedYearLevel =
+          yearLevel !== "All Years"
+            ? yearLevel
+            : selectedPaymentStudents.length > 0
+              ? ""
+              : "All Years";
+
+        if (isEditing && editingCurrentPayment && editingLinkedPayment) {
+          const result = await updateCampusPayment({
+            paymentId: editingCurrentPayment.id,
+            title: cleanTitle,
+            amount: amountValue,
+            date: paymentDate,
+            yearLevel: editingCurrentPayment.yearLevel || selectedYearLevel,
+            course: viewerCourseScopeValue || editingCurrentPayment.course,
+            details: cleanDetails,
+            targetStudent: editingCurrentPayment.targetStudent || targetStudent,
+            courseScope:
+              viewerCourseScopeValue ||
+              normalizeCourse(editingCurrentPayment.courseScope ?? "") ||
+              null,
+          });
+
+          setPaymentStudents((prev) => {
+            const next = { ...prev };
+            delete next[result.paymentId];
+            return next;
+          });
+          closePaymentEditor();
+          setNotice({
+            type: "ok",
+            msg: "Payment updated successfully.",
+          });
+          campusToast.success({
+            title: "Payment updated successfully.",
+            preventDuplicate: false,
+          });
+          await loadPayments();
+          setExpandedPayment(result.paymentId);
+          return;
+        }
+
+        const payload = {
+          title: cleanTitle,
+          amount: amountValue,
+          date: paymentDate,
+          yearLevel: selectedYearLevel,
+          course: viewerCourseScopeValue || "",
+          details: cleanDetails,
+          selectedStudentIds,
+          selectedSchoolIds,
+          targetStudent,
+          targetCourses:
+            viewerCourseScopeValue ? [viewerCourseScopeValue] : [],
+          targetYearLevels:
+            yearLevel !== "All Years" ? [yearLevel] : [],
+          courseScope: viewerCourseScopeValue || null,
+        };
+
+        const result = isEditing && editingCurrentPayment
+          ? await updateCampusPayment({
+              paymentId: editingCurrentPayment.id,
+              ...payload,
+            })
+          : await createCampusPayment(payload);
+
+        setPaymentStudents((prev) => {
+          const next = { ...prev };
+          delete next[result.paymentId];
+          return next;
+        });
+        closePaymentEditor();
+        setNotice({
+          type: "ok",
+          msg: isEditing
+            ? "Payment updated successfully."
+            : `Payment created and assigned to ${result.totalStudents} ${viewerCourseScopeValue} student(s).`,
+        });
+        if (isEditing) {
+          campusToast.success({
+            title: "Payment updated successfully.",
+            preventDuplicate: false,
+          });
+        } else {
+          campusToast.success({
+            title: "Payment created",
+            description: `Assigned to ${result.totalStudents} ${viewerCourseScopeValue} student(s).`,
+            dedupeKey: `ec-payments:create:${result.paymentId}`,
+            preventDuplicate: false,
+          });
+        }
+        await loadPayments();
+        setExpandedPayment(result.paymentId);
+        return;
       }
 
       const paymentRef = isEditing && editingCurrentPayment

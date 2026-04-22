@@ -138,6 +138,10 @@ export type CreateCampusNotificationResult = {
   courseScope: string | null;
   courseScopeSlug: string | null;
   createdByCourseScope: string | null;
+  resolvedRecipientUids?: string[];
+  resolvedRecipientSchoolIds?: string[];
+  recipientNotificationDocId?: string;
+  legacyRecipientCleanupSkipped?: boolean;
   status: "scheduled" | "sent";
 };
 
@@ -181,6 +185,10 @@ export type UpdateCampusNotificationResult = {
   courseScope: string | null;
   courseScopeSlug: string | null;
   createdByCourseScope: string | null;
+  resolvedRecipientUids?: string[];
+  resolvedRecipientSchoolIds?: string[];
+  recipientNotificationDocId?: string;
+  legacyRecipientCleanupSkipped?: boolean;
   status: "scheduled" | "sent";
 };
 
@@ -267,6 +275,7 @@ export type CampusDocumentListItem = {
   createdBy?: string;
   createdByUid?: string;
   ownerUid?: string;
+  uploadedBy?: string;
   uploadedByUid?: string;
   createdAt?: number;
   uploadedAt?: number;
@@ -359,6 +368,53 @@ export type DeleteCampusPaymentResult = {
   linkedEventUpdated?: boolean;
 };
 
+export type CreateCampusPaymentPayload = {
+  title: string;
+  amount: number | string;
+  date: string;
+  yearLevel?: string;
+  course?: string;
+  details?: string;
+  selectedStudentIds?: string[];
+  selectedSchoolIds?: string[];
+  targetStudent?: string;
+  targetCourses?: string[];
+  targetYearLevels?: string[];
+  courseScope?: string | null;
+};
+
+export type CreateCampusPaymentResult = {
+  paymentId: string;
+  ref: string;
+  totalStudents: number;
+  paidCount: number;
+  unpaidCount: number;
+};
+
+export type UpdateCampusPaymentPayload = {
+  paymentId: string;
+  title: string;
+  amount: number | string;
+  date: string;
+  yearLevel?: string;
+  course?: string;
+  details?: string;
+  selectedStudentIds?: string[];
+  selectedSchoolIds?: string[];
+  targetStudent?: string;
+  targetCourses?: string[];
+  targetYearLevels?: string[];
+  courseScope?: string | null;
+};
+
+export type UpdateCampusPaymentResult = {
+  paymentId: string;
+  updated: true;
+  totalStudents: number;
+  paidCount: number;
+  unpaidCount: number;
+};
+
 export type CampusPaymentListItem = {
   id: string;
   title: string;
@@ -387,6 +443,24 @@ export type CampusPaymentListItem = {
 
 export type ListCampusPaymentsResult = {
   payments?: CampusPaymentListItem[];
+};
+
+export type StudentPaymentListItem = {
+  paymentId: string;
+  title: string;
+  ref: string;
+  amount: number;
+  date: string;
+  details: string;
+  status: "PAID" | "UNPAID";
+  linkedEventId: string;
+  source: "event" | "manual";
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type ListStudentPaymentsResult = {
+  payments?: StudentPaymentListItem[];
 };
 
 export type AdminUpdateUserProfilePayload = {
@@ -829,12 +903,65 @@ export async function deleteCampusPayment(
   return result.data;
 }
 
+export async function createCampusPayment(
+  payload: CreateCampusPaymentPayload,
+): Promise<CreateCampusPaymentResult> {
+  logAuthEvent("info", "Creating CAMPUS payment via callable", {
+    date: payload.date,
+    course: payload.course ?? "",
+    yearLevel: payload.yearLevel ?? "",
+    selectedStudentCount: payload.selectedStudentIds?.length ?? 0,
+    selectedSchoolCount: payload.selectedSchoolIds?.length ?? 0,
+  });
+
+  const callable = httpsCallable<
+    CreateCampusPaymentPayload,
+    CreateCampusPaymentResult
+  >(getCampusFunctions(), "createCampusPayment");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function updateCampusPayment(
+  payload: UpdateCampusPaymentPayload,
+): Promise<UpdateCampusPaymentResult> {
+  logAuthEvent("info", "Updating CAMPUS payment via callable", {
+    paymentId: payload.paymentId,
+    date: payload.date,
+    course: payload.course ?? "",
+    yearLevel: payload.yearLevel ?? "",
+    selectedStudentCount: payload.selectedStudentIds?.length ?? 0,
+    selectedSchoolCount: payload.selectedSchoolIds?.length ?? 0,
+  });
+
+  const callable = httpsCallable<
+    UpdateCampusPaymentPayload,
+    UpdateCampusPaymentResult
+  >(getCampusFunctions(), "updateCampusPayment");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
 export async function listCampusPayments(): Promise<CampusPaymentListItem[]> {
   logAuthEvent("info", "Listing CAMPUS payments via callable");
 
   const callable = httpsCallable<Record<string, never>, ListCampusPaymentsResult>(
     getCampusFunctions(),
     "listCampusPayments",
+  );
+
+  const result = await callable({});
+  return result.data?.payments ?? [];
+}
+
+export async function listStudentPayments(): Promise<StudentPaymentListItem[]> {
+  logAuthEvent("info", "Listing student payments via callable");
+
+  const callable = httpsCallable<Record<string, never>, ListStudentPaymentsResult>(
+    getCampusFunctions(),
+    "listStudentPayments",
   );
 
   const result = await callable({});

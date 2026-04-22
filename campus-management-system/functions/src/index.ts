@@ -4869,6 +4869,7 @@ function toCampusDocumentListItem(
     createdBy: normalizeText(data.createdBy),
     createdByUid: normalizeText(data.createdByUid),
     ownerUid: normalizeText(data.ownerUid),
+    uploadedBy: normalizeText(data.uploadedBy),
     uploadedByUid: normalizeText(data.uploadedByUid),
     createdAt: toMillis(data.createdAt),
     uploadedAt: toMillis(data.uploadedAt),
@@ -4925,6 +4926,578 @@ function paymentCreatedByCourseScope(data: FirebaseFirestore.DocumentData): stri
 
 function paymentCreatedByUid(data: FirebaseFirestore.DocumentData): string {
   return normalizeText(data.createdByUid || data.createdBy);
+}
+
+function hasStudentPortalIdentityFields(
+  data: FirebaseFirestore.DocumentData,
+): boolean {
+  return Boolean(
+    normalizeText(data.schoolId) ||
+      normalizeText(data.schoolIdKey) ||
+      normalizeText(data.studentId),
+  );
+}
+
+type StudentPortalActorContext = {
+  uid: string;
+  profileData: FirebaseFirestore.DocumentData;
+  studentData: FirebaseFirestore.DocumentData;
+  role: string;
+  course: string;
+  yearLevel: string;
+  schoolId: string;
+  schoolIdKey: string;
+  studentName: string;
+  isStudent: boolean;
+  isBod: boolean;
+};
+
+async function resolveStudentPortalActorContext(
+  context: CallableAuthContext,
+): Promise<StudentPortalActorContext> {
+  if (!context.auth) {
+    throw new HttpsError("unauthenticated", "Login required.");
+  }
+
+  const uid = normalizeText(context.auth.uid);
+  const {profileData, studentData, profileExists} = await readStudentSources(uid);
+  if (!profileExists) {
+    throw new HttpsError("not-found", "Student profile not found.");
+  }
+
+  const mergedData = {
+    ...studentData,
+    ...profileData,
+  };
+  const role = normalizeCampusRoleValue(mergedData.role);
+  const isStudent =
+    role === "student" ||
+    mergedData.isStudent === true ||
+    hasStudentPortalIdentityFields(mergedData);
+
+  if (!isStudent) {
+    throw new HttpsError(
+      "permission-denied",
+      "Student access is not enabled for this account.",
+    );
+  }
+
+  return {
+    uid,
+    profileData,
+    studentData,
+    role,
+    course:
+      resolveStudentCourse(profileData, studentData) ||
+      normalizeCourseLabel(mergedData.course) ||
+      normalizeText(mergedData.course),
+    yearLevel:
+      resolveStudentYearLevel(profileData, studentData) ||
+      normalizeYear(mergedData.yearLevel || mergedData.year),
+    schoolId:
+      normalizeText(mergedData.schoolId) ||
+      normalizeText(mergedData.schoolIdKey) ||
+      normalizeText(mergedData.studentId),
+    schoolIdKey: normalizeSchoolIdKey(
+      normalizeText(mergedData.schoolIdKey) ||
+      normalizeText(mergedData.schoolId) ||
+      normalizeText(mergedData.studentId),
+    ),
+    studentName: resolveStudentName(uid, profileData, studentData),
+    isStudent,
+    isBod: role === "bod" || isBodProfileData(mergedData),
+  };
+}
+
+type StudentPaymentAssignmentCandidate = {
+  paymentId: string;
+  docId: string;
+  data: FirebaseFirestore.DocumentData;
+  source: string;
+};
+
+type StudentPaymentListRow = {
+  paymentId: string;
+  title: string;
+  ref: string;
+  amount: number;
+  date: string;
+  details: string;
+  status: "PAID" | "UNPAID";
+  linkedEventId: string;
+  source: "event" | "manual";
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+function assignmentBelongsToCaller(
+  assignment: FirebaseFirestore.DocumentData,
+  docId: string,
+  caller: Pick<StudentPortalActorContext, "uid" | "schoolId" | "schoolIdKey">,
+): boolean {
+  const normalizedUid = normalizeText(caller.uid);
+  const normalizedSchoolId = normalizeText(caller.schoolId);
+  const normalizedSchoolIdKey = normalizeSchoolIdKey(caller.schoolIdKey);
+
+  return (
+    normalizeText(docId) === normalizedUid ||
+    normalizeText(assignment.uid) === normalizedUid ||
+    normalizeText(assignment.studentUid) === normalizedUid ||
+    (Boolean(normalizedSchoolId) &&
+      normalizeText(assignment.schoolId) === normalizedSchoolId) ||
+    (Boolean(normalizedSchoolIdKey) &&
+      normalizeSchoolIdKey(assignment.schoolIdKey) === normalizedSchoolIdKey) ||
+    (Boolean(normalizedSchoolId) &&
+      normalizeText(assignment.studentId) === normalizedSchoolId)
+  );
+}
+
+function assignmentCandidateScore(
+  assignment: FirebaseFirestore.DocumentData,
+  docId: string,
+  caller: Pick<StudentPortalActorContext, "uid" | "schoolId" | "schoolIdKey">,
+): number {
+  const normalizedUid = normalizeText(caller.uid);
+  const normalizedSchoolId = normalizeText(caller.schoolId);
+  const normalizedSchoolIdKey = normalizeSchoolIdKey(caller.schoolIdKey);
+
+  if (normalizeText(docId) === normalizedUid) return 6;
+  if (normalizeText(assignment.uid) === normalizedUid) return 5;
+  if (normalizeText(assignment.studentUid) === normalizedUid) return 4;
+  if (
+    Boolean(normalizedSchoolIdKey) &&
+    normalizeSchoolIdKey(assignment.schoolIdKey) === normalizedSchoolIdKey
+  ) {
+    return 3;
+  }
+  if (
+    Boolean(normalizedSchoolId) &&
+    normalizeText(assignment.schoolId) === normalizedSchoolId
+  ) {
+    return 2;
+  }
+  if (
+    Boolean(normalizedSchoolId) &&
+    normalizeText(assignment.studentId) === normalizedSchoolId
+  ) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function normalizeStudentPaymentStatus(
+  value: unknown,
+): "PAID" | "UNPAID" {
+  return normalizeLower(value) === "paid" ? "PAID" : "UNPAID";
+}
+
+function studentCanViewEventPaymentFallback(
+  actor: StudentPortalActorContext,
+  eventData: FirebaseFirestore.DocumentData,
+): boolean {
+  const matchesExplicitAudience = matchesSelectedAudience(
+    eventData,
+    actor.uid,
+    actor.schoolId,
+  );
+  if (!matchesExplicitAudience) {
+    return false;
+  }
+
+  const studentTargetMatch = matchesSpecificStudentTarget(
+    eventData.targetStudent,
+    actor.schoolId,
+    actor.studentName,
+  );
+  if (!studentTargetMatch) {
+    return false;
+  }
+
+  if (hasExplicitSelectedAudience(eventData)) {
+    return true;
+  }
+
+  const courseTargets = toTargetList(eventData.courses);
+  const yearTargets = toTargetList(eventData.yearLevels);
+
+  return (
+    matchesTargetList(
+      courseTargets.length > 0 ? courseTargets : eventData.course,
+      actor.course,
+      "All Courses",
+    ) &&
+    matchesTargetList(
+      yearTargets.length > 0 ? yearTargets : eventData.yearLevel,
+      actor.yearLevel,
+      "All Years",
+    )
+  );
+}
+
+function paymentTargetYearLevels(data: FirebaseFirestore.DocumentData): string[] {
+  if (!Array.isArray(data.targetYearLevels)) {
+    return [];
+  }
+
+  return data.targetYearLevels
+    .map((value) => normalizeYear(value))
+    .filter(
+      (value) =>
+        Boolean(value) &&
+        value !== "Unassigned" &&
+        normalizeLower(value) !== "all years",
+    );
+}
+
+function paymentLinkedEventId(data: FirebaseFirestore.DocumentData): string {
+  return normalizeText(data.linkedEventId || data.eventId);
+}
+
+type CampusPaymentTarget = {
+  uid: string;
+  schoolId: string;
+  studentName: string;
+  course: string;
+  yearLevel: string;
+};
+
+type CampusPaymentAssignmentRecord = CampusPaymentTarget & {
+  status: "Paid" | "Unpaid";
+};
+
+type CampusPaymentAudienceResolution = {
+  targets: CampusPaymentTarget[];
+  targetStudent: string;
+  course: string;
+  yearLevel: string;
+  targetCourses: string[];
+  targetYearLevels: string[];
+  courseScope: string | null;
+  selectedCourse: string;
+  selectedYear: string;
+  selectedStudentIds: string[];
+  selectedSchoolIds: string[];
+  hasExplicitTargets: boolean;
+};
+
+function buildCampusPaymentExplicitTargetLabel(
+  targets: CampusPaymentTarget[],
+): string {
+  return targets
+    .map((target) => `${target.studentName} (${target.schoolId})`)
+    .join("; ");
+}
+
+async function resolveCampusPaymentAudience(
+  actor: EcActorContext,
+  body: Record<string, unknown>,
+): Promise<CampusPaymentAudienceResolution> {
+  const selectedStudentIds = toUniqueIdentifierList(body.selectedStudentIds);
+  const selectedSchoolIds = toUniqueIdentifierList(body.selectedSchoolIds);
+  const hasExplicitTargets =
+    selectedStudentIds.length > 0 || selectedSchoolIds.length > 0;
+  const requestedTargetStudent = normalizeText(body.targetStudent);
+  const requestedYear = normalizeYear(body.yearLevel);
+  const requestedCourse = normalizeCourseLabel(body.course);
+  const requestedCourseScope = normalizeCourseLabel(body.courseScope);
+  const hasYearFilter =
+    Boolean(requestedYear) &&
+    requestedYear !== "Unassigned" &&
+    normalizeLower(requestedYear) !== "all years";
+  const hasCourseFilter =
+    Boolean(requestedCourse) &&
+    normalizeLower(requestedCourse) !== "all courses";
+
+  if (
+    actor.isBod &&
+    requestedCourseScope &&
+    requestedCourseScope !== actor.courseScope
+  ) {
+    throw new HttpsError(
+      "permission-denied",
+      `B.O.D accounts can only target ${actor.courseScope} students.`,
+    );
+  }
+
+  if (
+    actor.isBod &&
+    requestedCourse &&
+    requestedCourse !== actor.courseScope &&
+    normalizeLower(requestedCourse) !== "all courses"
+  ) {
+    throw new HttpsError(
+      "permission-denied",
+      `B.O.D accounts can only target ${actor.courseScope} students.`,
+    );
+  }
+
+  const candidates = await listCampusNotificationRecipientCandidates(actor);
+  const explicitRecipients = hasExplicitTargets ?
+    candidates.filter((recipient) =>
+      selectedStudentIds.includes(recipient.uid) ||
+      selectedSchoolIds.includes(recipient.schoolId),
+    ) :
+    [];
+
+  if (hasExplicitTargets) {
+    const explicitUidSet = new Set(
+      explicitRecipients.map((recipient) => recipient.uid),
+    );
+    const explicitSchoolIdSet = new Set(
+      explicitRecipients.map((recipient) => recipient.schoolId),
+    );
+    const hasMissingExplicitTargets =
+      selectedStudentIds.some((uid) => !explicitUidSet.has(uid)) ||
+      selectedSchoolIds.some((schoolId) => !explicitSchoolIdSet.has(schoolId));
+
+    if (hasMissingExplicitTargets) {
+      throw new HttpsError(
+        "permission-denied",
+        actor.isBod ?
+          `Selected recipients must be active ${actor.courseScope} students.` :
+          "Selected recipients must be active student accounts.",
+      );
+    }
+  }
+
+  const filteredRecipients = candidates.filter((recipient) => {
+    const matchesYear =
+      !hasYearFilter ||
+      normalizeLower(normalizeYear(recipient.yearLevel)) ===
+        normalizeLower(requestedYear);
+    const matchesCourse =
+      !hasCourseFilter ||
+      normalizeCourseLabel(recipient.course) === requestedCourse;
+
+    return matchesYear && matchesCourse;
+  });
+
+  const eligibleExplicitRecipients = hasExplicitTargets ?
+    explicitRecipients.filter((recipient) =>
+      filteredRecipients.some((filteredRecipient) => filteredRecipient.uid === recipient.uid),
+    ) :
+    [];
+
+  if (
+    hasExplicitTargets &&
+    (hasYearFilter || hasCourseFilter) &&
+    eligibleExplicitRecipients.length !== explicitRecipients.length
+  ) {
+    throw new HttpsError(
+      "permission-denied",
+      actor.isBod ?
+        `Selected recipients must match the chosen ${actor.courseScope} payment audience.` :
+        "Selected recipients must match the chosen payment audience.",
+    );
+  }
+
+  const targets = (hasExplicitTargets ? eligibleExplicitRecipients : filteredRecipients)
+    .map((recipient) => ({
+      uid: recipient.uid,
+      schoolId: recipient.schoolId,
+      studentName: recipient.studentName,
+      course: recipient.course,
+      yearLevel: recipient.yearLevel,
+    }))
+    .sort((left, right) => {
+    const bySchoolId = left.schoolId.localeCompare(right.schoolId);
+    if (bySchoolId !== 0) {
+      return bySchoolId;
+    }
+    return left.studentName.localeCompare(right.studentName);
+    });
+
+  if (targets.length === 0) {
+    throw new HttpsError(
+      "failed-precondition",
+      actor.isBod && actor.courseScope ?
+        `No active ${actor.courseScope} students matched this payment audience.` :
+        "No active students matched this payment audience.",
+    );
+  }
+
+  const targetCourses = actor.isBod ?
+    [actor.courseScope] :
+    Array.from(new Set(
+      targets
+        .map((target) => normalizeCourseLabel(target.course))
+        .filter(Boolean),
+    ));
+  const targetYearLevels = Array.from(new Set(
+    targets
+      .map((target) => normalizeYear(target.yearLevel))
+      .filter(
+        (value) =>
+          Boolean(value) &&
+          value !== "Unassigned" &&
+          normalizeLower(value) !== "all years",
+      ),
+  ));
+  const targetStudent = requestedTargetStudent ||
+    (hasExplicitTargets ? buildCampusPaymentExplicitTargetLabel(explicitRecipients.map((recipient) => ({
+      uid: recipient.uid,
+      schoolId: recipient.schoolId,
+      studentName: recipient.studentName,
+      course: recipient.course,
+      yearLevel: recipient.yearLevel,
+    }))) : "");
+  const course = actor.isBod ?
+    actor.courseScope :
+    hasCourseFilter ?
+      requestedCourse :
+      hasExplicitTargets ?
+        "" :
+        "All Courses";
+  const yearLevel = hasYearFilter ?
+    requestedYear :
+    hasExplicitTargets ?
+      "" :
+      "All Years";
+  const courseScope = actor.isBod ?
+    actor.courseScope :
+    hasCourseFilter ?
+      requestedCourse :
+      null;
+
+  return {
+    targets,
+    targetStudent,
+    course,
+    yearLevel,
+    targetCourses,
+    targetYearLevels,
+    courseScope,
+    selectedCourse: course,
+    selectedYear: yearLevel,
+    selectedStudentIds,
+    selectedSchoolIds,
+    hasExplicitTargets,
+  };
+}
+
+async function loadCampusPaymentAssignments(
+  paymentRef: FirebaseFirestore.DocumentReference,
+): Promise<Map<string, CampusPaymentAssignmentRecord>> {
+  const assignmentSnapshot = await paymentRef.collection("students").get();
+  const assignments = new Map<string, CampusPaymentAssignmentRecord>();
+
+  assignmentSnapshot.docs.forEach((assignmentDoc) => {
+    const assignmentData = assignmentDoc.data() ?? {};
+    const uid = normalizeText(assignmentData.uid) || assignmentDoc.id;
+    const schoolId =
+      normalizeText(assignmentData.schoolId) ||
+      normalizeText(assignmentData.studentId) ||
+      uid;
+    const studentName =
+      normalizeText(
+        assignmentData.name ||
+        assignmentData.studentName ||
+        assignmentData.fullName,
+      ) ||
+      schoolId;
+    const course =
+      normalizeCourseLabel(assignmentData.course) ||
+      normalizeText(assignmentData.course) ||
+      "Unassigned";
+    const yearLevel =
+      normalizeYear(assignmentData.yearLevel || assignmentData.year) ||
+      "Unassigned";
+    const status =
+      normalizeLower(assignmentData.status) === "paid" ? "Paid" : "Unpaid";
+
+    assignments.set(uid, {
+      uid,
+      schoolId,
+      studentName,
+      course,
+      yearLevel,
+      status,
+    });
+  });
+
+  return assignments;
+}
+
+async function syncCampusPaymentAssignments(
+  paymentId: string,
+  targets: CampusPaymentTarget[],
+  existingAssignments: Map<string, CampusPaymentAssignmentRecord>,
+): Promise<{
+  totalStudents: number;
+  paidCount: number;
+  unpaidCount: number;
+  removedAssignmentCount: number;
+  batchCount: number;
+}> {
+  const writesPerBatch = 450;
+  const nextTargetIds = new Set(targets.map((target) => target.uid));
+  let paidCount = 0;
+  let batchCount = 0;
+
+  const upsertRows = targets.map((target) => {
+    const existingStatus = existingAssignments.get(target.uid)?.status ?? "Unpaid";
+    if (existingStatus === "Paid") {
+      paidCount += 1;
+    }
+
+    return {
+      target,
+      status: existingStatus,
+      isExisting: existingAssignments.has(target.uid),
+    };
+  });
+
+  for (let index = 0; index < upsertRows.length; index += writesPerBatch) {
+    const batch = db.batch();
+    const chunk = upsertRows.slice(index, index + writesPerBatch);
+
+    chunk.forEach(({target, status, isExisting}) => {
+      batch.set(
+        db.doc(`payments/${paymentId}/students/${target.uid}`),
+        {
+          uid: target.uid,
+          schoolId: target.schoolId,
+          name: target.studentName,
+          studentName: target.studentName,
+          year: target.yearLevel || "-",
+          yearLevel: target.yearLevel || "-",
+          section: "-",
+          course: target.course || "-",
+          status,
+          updatedAt: serverTimestamp(),
+          ...(isExisting ? {} : {createdAt: serverTimestamp()}),
+        },
+        {merge: true},
+      );
+    });
+
+    await batch.commit();
+    batchCount += 1;
+  }
+
+  const removedAssignmentIds = Array.from(existingAssignments.keys()).filter(
+    (uid) => !nextTargetIds.has(uid),
+  );
+
+  for (let index = 0; index < removedAssignmentIds.length; index += writesPerBatch) {
+    const batch = db.batch();
+    removedAssignmentIds
+      .slice(index, index + writesPerBatch)
+      .forEach((uid) => {
+        batch.delete(db.doc(`payments/${paymentId}/students/${uid}`));
+      });
+    await batch.commit();
+    batchCount += 1;
+  }
+
+  return {
+    totalStudents: targets.length,
+    paidCount,
+    unpaidCount: Math.max(0, targets.length - paidCount),
+    removedAssignmentCount: removedAssignmentIds.length,
+    batchCount,
+  };
 }
 
 function paymentMatchesCourseScope(
@@ -6164,8 +6737,19 @@ function normalizeCampusNotificationDispatchIdValue(value: unknown): string {
     leafValue;
 }
 
-function campusNotificationSummaryDocId(dispatchId: string): string {
+function campusNotificationDocId(dispatchId: string): string {
   return dispatchId.startsWith("dispatch_") ? dispatchId : `dispatch_${dispatchId}`;
+}
+
+function campusNotificationSummaryDocId(dispatchId: string): string {
+  return campusNotificationDocId(dispatchId);
+}
+
+function campusNotificationRecipientDocRef(
+  uid: string,
+  dispatchId: string,
+): FirebaseFirestore.DocumentReference {
+  return db.doc(`profiles/${uid}/notifications/${campusNotificationDocId(dispatchId)}`);
 }
 
 function campusNotificationOwnerType(
@@ -6208,22 +6792,28 @@ function campusNotificationCourseScope(
   );
 }
 
-function campusNotificationRecipientUid(
+function campusNotificationResolvedRecipientUids(
   data: FirebaseFirestore.DocumentData,
-  fallbackUid = "",
-): string {
-  return normalizeText(
-    data.recipientUid ||
-      data.studentUid ||
-      data.targetStudentId ||
-      fallbackUid,
+): string[] {
+  return Array.from(
+    new Set(
+      normalizeIdentifierList(data.resolvedRecipientUids)
+        .map((value) => normalizeText(value))
+        .filter(Boolean),
+    ),
   );
 }
 
-function campusNotificationRecipientSchoolId(
+function campusNotificationResolvedRecipientSchoolIds(
   data: FirebaseFirestore.DocumentData,
-): string {
-  return normalizeText(data.targetSchoolId || data.schoolId);
+): string[] {
+  return Array.from(
+    new Set(
+      normalizeIdentifierList(data.resolvedRecipientSchoolIds)
+        .map((value) => normalizeText(value))
+        .filter(Boolean),
+    ),
+  );
 }
 
 async function loadCampusNotificationSenderSummary(
@@ -6255,30 +6845,7 @@ async function loadCampusNotificationSenderSummary(
     };
   }
 
-  const matchingSnapshot = await notificationCollection
-    .where("dispatchId", "==", dispatchId)
-    .limit(10)
-    .get();
-  if (matchingSnapshot.empty) {
-    throw new HttpsError("not-found", "Notification record not found.");
-  }
-
-  const matchingSummary =
-    matchingSnapshot.docs.find((documentSnapshot) =>
-      documentSnapshot.id === summaryDocId,
-    ) ||
-    matchingSnapshot.docs.find((documentSnapshot) => {
-      const data = documentSnapshot.data() ?? {};
-      return !campusNotificationRecipientUid(data);
-    }) ||
-    matchingSnapshot.docs[0];
-  const summaryData = matchingSummary.data() ?? {};
-
-  return {
-    dispatchId: normalizeText(summaryData.dispatchId) || dispatchId,
-    ref: matchingSummary.ref,
-    data: summaryData,
-  };
+  throw new HttpsError("not-found", "Notification record not found.");
 }
 
 function assertCanUpdateCampusNotification(
@@ -6548,6 +7115,16 @@ export const createCampusNotification = onCall({region: REGION}, async (request)
         audience.courseScope ||
         null;
       const notificationStatus = computeCampusNotificationStatus(date, scheduledTime);
+      const recipientNotificationDocId = campusNotificationDocId(dispatchId);
+      const resolvedRecipientUids = audience.recipients.map((recipient) => recipient.uid);
+      const resolvedRecipientSchoolIds = Array.from(
+        new Set(
+          audience.recipients
+            .map((recipient) => normalizeText(recipient.schoolId))
+            .filter(Boolean),
+        ),
+      );
+      const recipientCount = audience.recipients.length;
       const writesPerBatch = 450;
       let batchCount = 0;
 
@@ -6577,11 +7154,10 @@ export const createCampusNotification = onCall({region: REGION}, async (request)
         const chunk = audience.recipients.slice(index, index + writesPerBatch);
 
         chunk.forEach((recipient) => {
-          const notificationRef = db
-            .collection("profiles")
-            .doc(recipient.uid)
-            .collection("notifications")
-            .doc();
+          const notificationRef = campusNotificationRecipientDocRef(
+            recipient.uid,
+            dispatchId,
+          );
 
           batch.set(notificationRef, {
             title,
@@ -6614,7 +7190,7 @@ export const createCampusNotification = onCall({region: REGION}, async (request)
             courseScope: audience.courseScope,
             courseScopeSlug: audience.courseScopeSlug,
             createdByCourseScope,
-            recipientCount: audience.recipients.length,
+            recipientCount,
             status: notificationStatus,
             read: false,
             createdAt: serverTimestamp(),
@@ -6646,13 +7222,17 @@ export const createCampusNotification = onCall({region: REGION}, async (request)
           courses: audience.storedSelectedCourses,
           yearLevels: audience.selectedYearLevels,
           sendToFilteredAudience: audience.sendToFilteredAudience,
-          recipientCount: audience.recipients.length,
+          recipientCount,
+          resolvedRecipientUids,
+          resolvedRecipientSchoolIds,
+          recipientNotificationDocId,
           createdByUid: actor.uid,
           createdByRole,
           ownerType,
           courseScope: audience.courseScope,
           courseScopeSlug: audience.courseScopeSlug,
           createdByCourseScope,
+          legacyRecipientCleanupSkipped: false,
           status: notificationStatus,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -6667,13 +7247,13 @@ export const createCampusNotification = onCall({region: REGION}, async (request)
         resolvedCourse: actor.courseScope || null,
         selectedYear: audience.yearLevelLabel,
         selectedCourses: audience.selectedCourses,
-        recipientCount: audience.recipients.length,
+        recipientCount,
         batchCount,
       });
 
       return {
         dispatchId,
-        recipientCount: audience.recipients.length,
+        recipientCount,
         batchCount,
         audienceMode: audience.audienceMode,
         recipientType: audience.recipientType,
@@ -6692,6 +7272,10 @@ export const createCampusNotification = onCall({region: REGION}, async (request)
         courseScope: audience.courseScope,
         courseScopeSlug: audience.courseScopeSlug,
         createdByCourseScope,
+        resolvedRecipientUids,
+        resolvedRecipientSchoolIds,
+        recipientNotificationDocId,
+        legacyRecipientCleanupSkipped: false,
         status: notificationStatus,
       };
     } catch (error: unknown) {
@@ -6704,8 +7288,18 @@ export const createCampusNotification = onCall({region: REGION}, async (request)
   });
 
 export const updateCampusNotification = onCall({region: REGION}, async (request) => {
+    let logDispatchId = "";
+    let logSummaryPath = "";
+    let logActorRole = "";
+    let logActorCourseScope: string | null = null;
+
     try {
       const actor = await resolveEcActorContext(request);
+      logActorRole = actor.isBod ?
+        "bod" :
+        normalizeCampusRoleValue(actor.profile.role) || "ecmember";
+      logActorCourseScope = actor.courseScope || null;
+
       const body = asRecord(request.data);
       const title = normalizeText(body.title);
       const message = normalizeText(body.message);
@@ -6732,10 +7326,13 @@ export const updateCampusNotification = onCall({region: REGION}, async (request)
       }
 
       const summary = await loadCampusNotificationSenderSummary(actor, body);
+      logDispatchId = summary.dispatchId;
+      logSummaryPath = summary.ref.path;
       assertCanUpdateCampusNotification(actor, summary.data);
 
       const audience = await resolveCampusNotificationAudience(actor, body);
       const dispatchId = summary.dispatchId;
+      const recipientNotificationDocId = campusNotificationDocId(dispatchId);
       const ownerType = actor.isBod ?
         "bod" :
         campusNotificationOwnerType(summary.data);
@@ -6752,56 +7349,77 @@ export const updateCampusNotification = onCall({region: REGION}, async (request)
           audience.courseScope ||
           null;
       const notificationStatus = computeCampusNotificationStatus(date, scheduledTime);
+      const writesPerBatch = 450;
       const recipientCount = audience.recipients.length;
-
-      const dispatchSnapshot = await db
-        .collectionGroup("notifications")
-        .where("dispatchId", "==", dispatchId)
-        .get();
-      const dispatchDocs = dispatchSnapshot.docs.filter((documentSnapshot) => {
-        if (!documentSnapshot.ref.path.startsWith("profiles/")) {
-          return false;
-        }
-
-        const data = documentSnapshot.data() ?? {};
-        return campusNotificationCreatedByUid(data) === createdByUid;
-      });
-
-      const nextRecipientUidSet = new Set(
-        audience.recipients.map((recipient) => recipient.uid),
+      const nextRecipientUids = Array.from(
+        new Set(audience.recipients.map((recipient) => recipient.uid)),
       );
-      const retainedRecipientRefs = new Map<
-        string,
-        FirebaseFirestore.DocumentReference
-      >();
-      const docsToDelete: FirebaseFirestore.DocumentReference[] = [];
-      const removedRecipientKeys = new Set<string>();
+      const nextRecipientUidSet = new Set(nextRecipientUids);
+      const resolvedRecipientSchoolIds = Array.from(
+        new Set(
+          audience.recipients
+            .map((recipient) => normalizeText(recipient.schoolId))
+            .filter(Boolean),
+        ),
+      );
+      const storedResolvedRecipientUids =
+        campusNotificationResolvedRecipientUids(summary.data);
+      const storedExplicitTargetStudentIds = Array.from(
+        new Set(
+          normalizeIdentifierList(summary.data.targetStudentIds)
+            .map((value) => normalizeText(value))
+            .filter(Boolean),
+        ),
+      );
+      const previousRecipientUids = storedResolvedRecipientUids.length > 0 ?
+        storedResolvedRecipientUids :
+        storedExplicitTargetStudentIds;
+      const removedRecipientUids = previousRecipientUids.filter(
+        (uid) => !nextRecipientUidSet.has(uid),
+      );
+      const storedRecipientNotificationDocId = normalizeText(
+        summary.data.recipientNotificationDocId,
+      );
+      const storedLegacyRecipientCleanupSkipped =
+        summary.data.legacyRecipientCleanupSkipped === true;
+      const hasStoredResolvedRecipients =
+        storedResolvedRecipientUids.length > 0 ||
+        campusNotificationResolvedRecipientSchoolIds(summary.data).length > 0;
+      const legacyRecipientCleanupSkipped =
+        storedLegacyRecipientCleanupSkipped ||
+        storedRecipientNotificationDocId !== recipientNotificationDocId ||
+        !hasStoredResolvedRecipients;
 
-      dispatchDocs.forEach((documentSnapshot) => {
-        if (documentSnapshot.ref.path === summary.ref.path) {
-          return;
-        }
+      const recipientRefs = audience.recipients.map((recipient) =>
+        campusNotificationRecipientDocRef(recipient.uid, dispatchId),
+      );
+      const existingRecipientRefPaths = new Set<string>();
 
-        const data = documentSnapshot.data() ?? {};
-        const fallbackUid = normalizeText(documentSnapshot.ref.parent.parent?.id);
-        const recipientUid = campusNotificationRecipientUid(data, fallbackUid);
-        const recipientSchoolId = campusNotificationRecipientSchoolId(data);
-        const recipientKey =
-          recipientUid ||
-          (recipientSchoolId ? `school:${recipientSchoolId}` : documentSnapshot.ref.path);
+      for (
+        let index = 0;
+        index < recipientRefs.length;
+        index += writesPerBatch
+      ) {
+        const snapshots = await db.getAll(
+          ...recipientRefs.slice(index, index + writesPerBatch),
+        );
+        snapshots.forEach((snapshot) => {
+          if (snapshot.exists) {
+            existingRecipientRefPaths.add(snapshot.ref.path);
+          }
+        });
+      }
 
-        if (!recipientUid || !nextRecipientUidSet.has(recipientUid)) {
-          docsToDelete.push(documentSnapshot.ref);
-          removedRecipientKeys.add(recipientKey);
-          return;
-        }
-
-        if (retainedRecipientRefs.has(recipientUid)) {
-          docsToDelete.push(documentSnapshot.ref);
-          return;
-        }
-
-        retainedRecipientRefs.set(recipientUid, documentSnapshot.ref);
+      functionsLogger.info("updateCampusNotification recipient diff", {
+        uid: actor.uid,
+        dispatchId,
+        summaryPath: summary.ref.path,
+        previousRecipientCount: previousRecipientUids.length,
+        nextRecipientCount: nextRecipientUids.length,
+        removedRecipientCount: removedRecipientUids.length,
+        actorRole: createdByRole,
+        actorCourseScope: actor.courseScope || null,
+        legacyRecipientCleanupSkipped,
       });
 
       const senderPayload = {
@@ -6824,19 +7442,21 @@ export const updateCampusNotification = onCall({region: REGION}, async (request)
         yearLevels: audience.selectedYearLevels,
         sendToFilteredAudience: audience.sendToFilteredAudience,
         recipientCount,
+        resolvedRecipientUids: nextRecipientUids,
+        resolvedRecipientSchoolIds,
+        recipientNotificationDocId,
         createdByUid,
         createdByRole,
         ownerType,
         courseScope: audience.courseScope,
         courseScopeSlug: audience.courseScopeSlug,
         createdByCourseScope,
+        legacyRecipientCleanupSkipped,
         status: notificationStatus,
         read: true,
         updatedAt: serverTimestamp(),
       };
 
-      const writesPerBatch = 450;
-      let batchCount = 0;
       const upsertOperations: Array<{
         ref: FirebaseFirestore.DocumentReference;
         data: FirebaseFirestore.DocumentData;
@@ -6848,13 +7468,10 @@ export const updateCampusNotification = onCall({region: REGION}, async (request)
       ];
 
       audience.recipients.forEach((recipient) => {
-        const existingRecipientRef = retainedRecipientRefs.get(recipient.uid);
-        const recipientRef = existingRecipientRef ||
-          db
-            .collection("profiles")
-            .doc(recipient.uid)
-            .collection("notifications")
-            .doc();
+        const recipientRef = campusNotificationRecipientDocRef(
+          recipient.uid,
+          dispatchId,
+        );
         const recipientPayload: FirebaseFirestore.DocumentData = {
           title,
           message,
@@ -6891,7 +7508,7 @@ export const updateCampusNotification = onCall({region: REGION}, async (request)
           updatedAt: serverTimestamp(),
         };
 
-        if (!existingRecipientRef) {
+        if (!existingRecipientRefPaths.has(recipientRef.path)) {
           recipientPayload.createdAt = serverTimestamp();
           recipientPayload.read = false;
         }
@@ -6901,6 +7518,8 @@ export const updateCampusNotification = onCall({region: REGION}, async (request)
           data: recipientPayload,
         });
       });
+
+      let batchCount = 0;
 
       for (
         let index = 0;
@@ -6917,6 +7536,9 @@ export const updateCampusNotification = onCall({region: REGION}, async (request)
         batchCount += 1;
       }
 
+      const docsToDelete = removedRecipientUids.map((uid) =>
+        campusNotificationRecipientDocRef(uid, dispatchId),
+      );
       for (let index = 0; index < docsToDelete.length; index += writesPerBatch) {
         const batch = db.batch();
         docsToDelete
@@ -6929,21 +7551,25 @@ export const updateCampusNotification = onCall({region: REGION}, async (request)
       functionsLogger.info("updateCampusNotification success", {
         uid: actor.uid,
         dispatchId,
+        summaryPath: summary.ref.path,
         actorRole: createdByRole,
+        actorCourseScope: actor.courseScope || null,
         ownerType,
         audienceMode: audience.audienceMode,
         selectedYear: audience.yearLevelLabel,
         selectedCourses: audience.selectedCourses,
-        updatedRecipientCount: recipientCount,
-        removedRecipientCount: removedRecipientKeys.size,
+        previousRecipientCount: previousRecipientUids.length,
+        nextRecipientCount: nextRecipientUids.length,
+        removedRecipientCount: removedRecipientUids.length,
         batchCount,
+        legacyRecipientCleanupSkipped,
       });
 
       return {
         updated: true,
         dispatchId,
         updatedRecipientCount: recipientCount,
-        removedRecipientCount: removedRecipientKeys.size,
+        removedRecipientCount: removedRecipientUids.length,
         batchCount,
         audienceMode: audience.audienceMode,
         recipientType: audience.recipientType,
@@ -6962,10 +7588,18 @@ export const updateCampusNotification = onCall({region: REGION}, async (request)
         courseScope: audience.courseScope,
         courseScopeSlug: audience.courseScopeSlug,
         createdByCourseScope,
+        resolvedRecipientUids: nextRecipientUids,
+        resolvedRecipientSchoolIds,
+        recipientNotificationDocId,
+        legacyRecipientCleanupSkipped,
         status: notificationStatus,
       };
     } catch (error: unknown) {
       functionsLogger.error("updateCampusNotification failed", {
+        dispatchId: logDispatchId,
+        summaryPath: logSummaryPath,
+        actorRole: logActorRole,
+        actorCourseScope: logActorCourseScope,
         code: error instanceof HttpsError ? error.code : "unknown",
         message: error instanceof Error ? error.message : String(error ?? ""),
       });
@@ -7585,6 +8219,448 @@ export const deleteCampusEvent = onCall({region: REGION}, async (request) => {
     };
   });
 
+export const createCampusPayment = onCall({region: REGION}, async (request) => {
+    let logPaymentId = "";
+    let logActorUid = "";
+    let logActorRole = "";
+    let logResolvedCourse: string | null = null;
+    let logSelectedYear = "";
+    let logSelectedCourse = "";
+    let logTargetCount = 0;
+    let logBatchCount = 0;
+
+    try {
+      const actor = await resolveEcActorContext(request);
+      const body = asRecord(request.data);
+      const title = normalizeText(body.title);
+      const amount = Number(body.amount);
+      const date = normalizeText(body.date);
+      const details = normalizeText(body.details);
+
+      logActorUid = actor.uid;
+      logActorRole = actor.isBod ?
+        "bod" :
+        normalizeCampusRoleValue(actor.profile.role) || "ecmember";
+      logResolvedCourse = actor.courseScope || null;
+
+      if (!title) {
+        throw new HttpsError("invalid-argument", "Payment title is required.");
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new HttpsError("invalid-argument", "Amount must be greater than 0.");
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        throw new HttpsError("invalid-argument", "Payment date is required.");
+      }
+
+      const audience = await resolveCampusPaymentAudience(actor, body);
+      const paymentRef = db.collection("payments").doc();
+      const paymentId = paymentRef.id;
+      const paymentRefCode = makePaymentRef(paymentId);
+      const ownerType = actor.isBod ? "bod" : "ec";
+      const createdByUid = actor.uid;
+      const createdByRole = actor.isBod ?
+        "bod" :
+        normalizeCampusRoleValue(actor.profile.role) || "ecmember";
+      const createdByCourseScope = actor.isBod ?
+        actor.courseScope :
+        audience.courseScope;
+      const course = actor.isBod ? actor.courseScope : audience.course;
+      const courseScope = actor.isBod ? actor.courseScope : audience.courseScope;
+      const targetCourses = actor.isBod ?
+        [actor.courseScope] :
+        audience.targetCourses;
+
+      logPaymentId = paymentId;
+      logSelectedYear = audience.selectedYear;
+      logSelectedCourse = audience.selectedCourse;
+      logTargetCount = audience.targets.length;
+
+      functionsLogger.info("createCampusPayment start", {
+        callerUid: actor.uid,
+        callerRole: createdByRole,
+        resolvedCourse: actor.courseScope || null,
+        paymentId,
+        mode: "create",
+        selectedYear: audience.selectedYear,
+        selectedCourse: audience.selectedCourse,
+        targetCount: audience.targets.length,
+      });
+
+      let assignmentSummary: Awaited<ReturnType<typeof syncCampusPaymentAssignments>>;
+      try {
+        assignmentSummary = await syncCampusPaymentAssignments(
+          paymentId,
+          audience.targets,
+          new Map(),
+        );
+        logBatchCount = assignmentSummary.batchCount;
+
+        await paymentRef.set(
+          {
+            title,
+            ref: paymentRefCode,
+            amount,
+            date,
+            yearLevel: audience.yearLevel,
+            course,
+            targetStudent: audience.targetStudent,
+            targetCourses,
+            targetYearLevels: audience.targetYearLevels,
+            details,
+            linkedEventId: null,
+            linkedEventTitle: "",
+            source: "manual",
+            status: "active",
+            ownerType,
+            createdByUid,
+            createdByRole,
+            createdByPosition: normalizeECPosition(actor.profile.ecPosition) || null,
+            createdByCourseScope,
+            courseScope,
+            totalStudents: assignmentSummary.totalStudents,
+            paidCount: assignmentSummary.paidCount,
+            unpaidCount: assignmentSummary.unpaidCount,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          {merge: true},
+        );
+      } catch (error: unknown) {
+        try {
+          const orphanAssignmentsSnapshot = await paymentRef.collection("students").get();
+          await deleteSnapshotDocumentsInBatches(orphanAssignmentsSnapshot, 450);
+          await paymentRef.delete();
+        } catch (rollbackError: unknown) {
+          functionsLogger.error("createCampusPayment rollback failed", {
+            callerUid: actor.uid,
+            paymentId,
+            rollbackMessage:
+              rollbackError instanceof Error ?
+                rollbackError.message :
+                String(rollbackError ?? ""),
+          });
+        }
+
+        throw error;
+      }
+
+      functionsLogger.info("createCampusPayment success", {
+        callerUid: actor.uid,
+        callerRole: createdByRole,
+        resolvedCourse: actor.courseScope || null,
+        paymentId,
+        mode: "create",
+        selectedYear: audience.selectedYear,
+        selectedCourse: audience.selectedCourse,
+        targetCount: audience.targets.length,
+        batchCount: assignmentSummary.batchCount,
+        removedAssignmentCount: assignmentSummary.removedAssignmentCount,
+      });
+
+      return {
+        paymentId,
+        ref: paymentRefCode,
+        totalStudents: assignmentSummary.totalStudents,
+        paidCount: assignmentSummary.paidCount,
+        unpaidCount: assignmentSummary.unpaidCount,
+      };
+    } catch (error: unknown) {
+      functionsLogger.error("createCampusPayment failed", {
+        callerUid: logActorUid,
+        callerRole: logActorRole,
+        resolvedCourse: logResolvedCourse,
+        paymentId: logPaymentId,
+        mode: "create",
+        selectedYear: logSelectedYear,
+        selectedCourse: logSelectedCourse,
+        targetCount: logTargetCount,
+        batchCount: logBatchCount,
+        removedAssignmentCount: 0,
+        code: error instanceof HttpsError ? error.code : "unknown",
+        message: error instanceof Error ? error.message : String(error ?? ""),
+      });
+      throw error;
+    }
+  });
+
+export const updateCampusPayment = onCall({region: REGION}, async (request) => {
+    let logPaymentId = "";
+    let logActorUid = "";
+    let logActorRole = "";
+    let logResolvedCourse: string | null = null;
+    let logSelectedYear = "";
+    let logSelectedCourse = "";
+    let logTargetCount = 0;
+    let logBatchCount = 0;
+    let logRemovedAssignmentCount = 0;
+
+    try {
+      const actor = await resolveEcActorContext(request);
+      const body = asRecord(request.data);
+      const paymentId = normalizeText(body.paymentId);
+      const title = normalizeText(body.title);
+      const amount = Number(body.amount);
+      const date = normalizeText(body.date);
+      const details = normalizeText(body.details);
+
+      logActorUid = actor.uid;
+      logActorRole = actor.isBod ?
+        "bod" :
+        normalizeCampusRoleValue(actor.profile.role) || "ecmember";
+      logResolvedCourse = actor.courseScope || null;
+      logPaymentId = paymentId;
+
+      if (!paymentId) {
+        throw new HttpsError("invalid-argument", "paymentId is required.");
+      }
+      if (!title) {
+        throw new HttpsError("invalid-argument", "Payment title is required.");
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new HttpsError("invalid-argument", "Amount must be greater than 0.");
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        throw new HttpsError("invalid-argument", "Payment date is required.");
+      }
+
+      const paymentRef = db.doc(`payments/${paymentId}`);
+      const paymentSnapshot = await paymentRef.get();
+      if (!paymentSnapshot.exists) {
+        throw new HttpsError("not-found", "Payment not found.");
+      }
+
+      const paymentData = paymentSnapshot.data() ?? {};
+      if (normalizeLower(paymentData.status) === "archived") {
+        throw new HttpsError(
+          "failed-precondition",
+          "Archived payments can no longer be updated.",
+        );
+      }
+
+      const ownerType = paymentOwnerType(paymentData);
+      const scopedCourse = paymentCourseScope(paymentData);
+      const paymentCourse = paymentCourseValue(paymentData);
+      const createdByScope =
+        paymentCreatedByCourseScope(paymentData) || scopedCourse;
+      const createdByUid = paymentCreatedByUid(paymentData);
+
+      if (actor.isBod) {
+        if (
+          ownerType !== "bod" ||
+          !actor.courseScope ||
+          createdByUid !== actor.uid ||
+          scopedCourse !== actor.courseScope ||
+          createdByScope !== actor.courseScope ||
+          paymentCourse !== actor.courseScope
+        ) {
+          throw new HttpsError(
+            "permission-denied",
+            "B.O.D. members can only update their own course-scoped payments.",
+          );
+        }
+      }
+
+      const existingAssignments = await loadCampusPaymentAssignments(paymentRef);
+      const linkedEventId = paymentLinkedEventId(paymentData);
+      const requestedSelectedStudentIds = toUniqueIdentifierList(body.selectedStudentIds);
+      const requestedSelectedSchoolIds = toUniqueIdentifierList(body.selectedSchoolIds);
+      const preserveExistingAudience =
+        Boolean(linkedEventId) &&
+        requestedSelectedStudentIds.length === 0 &&
+        requestedSelectedSchoolIds.length === 0;
+
+      let audience: CampusPaymentAudienceResolution;
+      if (preserveExistingAudience) {
+        const targets = Array.from(existingAssignments.values())
+          .map((assignment) => ({
+            uid: assignment.uid,
+            schoolId: assignment.schoolId,
+            studentName: assignment.studentName,
+            course: assignment.course,
+            yearLevel: assignment.yearLevel,
+          }))
+          .sort((left, right) => {
+            const bySchoolId = left.schoolId.localeCompare(right.schoolId);
+            if (bySchoolId !== 0) {
+              return bySchoolId;
+            }
+            return left.studentName.localeCompare(right.studentName);
+          });
+
+        if (targets.length === 0) {
+          throw new HttpsError(
+            "failed-precondition",
+            "This linked payment no longer has any assigned students.",
+          );
+        }
+
+        audience = {
+          targets,
+          targetStudent: normalizeText(paymentData.targetStudent),
+          course: actor.isBod ?
+            actor.courseScope :
+            paymentCourseValue(paymentData) ||
+              normalizeText(paymentData.course) ||
+              "All Courses",
+          yearLevel: normalizeText(paymentData.yearLevel) || "All Years",
+          targetCourses: actor.isBod ?
+            [actor.courseScope] :
+            paymentTargetCourses(paymentData).length > 0 ?
+              paymentTargetCourses(paymentData) :
+              Array.from(new Set(
+                targets
+                  .map((target) => normalizeCourseLabel(target.course))
+                  .filter(Boolean),
+              )),
+          targetYearLevels:
+            paymentTargetYearLevels(paymentData).length > 0 ?
+              paymentTargetYearLevels(paymentData) :
+              Array.from(new Set(
+                targets
+                  .map((target) => normalizeYear(target.yearLevel))
+                  .filter(
+                    (value) =>
+                      Boolean(value) &&
+                      value !== "Unassigned" &&
+                      normalizeLower(value) !== "all years",
+                  ),
+              )),
+          courseScope: actor.isBod ?
+            actor.courseScope :
+            paymentCourseScope(paymentData) || null,
+          selectedCourse: actor.isBod ?
+            actor.courseScope :
+            paymentCourseValue(paymentData) ||
+              normalizeText(paymentData.course) ||
+              "All Courses",
+          selectedYear: normalizeText(paymentData.yearLevel) || "All Years",
+          selectedStudentIds: [],
+          selectedSchoolIds: [],
+          hasExplicitTargets: false,
+        };
+      } else {
+        audience = await resolveCampusPaymentAudience(actor, body);
+      }
+
+      const nextOwnerType = actor.isBod ? "bod" : ownerType;
+      const nextCreatedByUid = actor.isBod ? actor.uid : createdByUid || actor.uid;
+      const nextCreatedByRole = actor.isBod ?
+        "bod" :
+        normalizeText(paymentData.createdByRole) ||
+          normalizeCampusRoleValue(actor.profile.role) ||
+          "ecmember";
+      const nextCreatedByCourseScope = actor.isBod ?
+        actor.courseScope :
+        paymentCreatedByCourseScope(paymentData) || audience.courseScope;
+      const nextCourse = actor.isBod ? actor.courseScope : audience.course;
+      const nextCourseScope = actor.isBod ? actor.courseScope : audience.courseScope;
+      const nextTargetCourses = actor.isBod ?
+        [actor.courseScope] :
+        audience.targetCourses;
+
+      logSelectedYear = audience.selectedYear;
+      logSelectedCourse = audience.selectedCourse;
+      logTargetCount = audience.targets.length;
+
+      functionsLogger.info("updateCampusPayment start", {
+        callerUid: actor.uid,
+        callerRole: nextCreatedByRole,
+        resolvedCourse: actor.courseScope || null,
+        paymentId,
+        mode: "update",
+        selectedYear: audience.selectedYear,
+        selectedCourse: audience.selectedCourse,
+        targetCount: audience.targets.length,
+        preserveExistingAudience,
+      });
+
+      const assignmentSummary = await syncCampusPaymentAssignments(
+        paymentId,
+        audience.targets,
+        existingAssignments,
+      );
+      logBatchCount = assignmentSummary.batchCount;
+      logRemovedAssignmentCount = assignmentSummary.removedAssignmentCount;
+
+      await paymentRef.set(
+        {
+          title,
+          ref: normalizeText(paymentData.ref) || makePaymentRef(paymentId),
+          amount,
+          date,
+          yearLevel: preserveExistingAudience ?
+            (normalizeText(paymentData.yearLevel) || audience.yearLevel) :
+            (normalizeText(body.yearLevel) || audience.yearLevel),
+          course: nextCourse,
+          targetStudent: preserveExistingAudience ?
+            normalizeText(paymentData.targetStudent) :
+            audience.targetStudent,
+          targetCourses: nextTargetCourses,
+          targetYearLevels: audience.targetYearLevels,
+          details,
+          linkedEventId: paymentLinkedEventId(paymentData) || null,
+          eventId: normalizeText(paymentData.eventId) || null,
+          linkedEventTitle: normalizeText(paymentData.linkedEventTitle),
+          source: normalizeText(paymentData.source) || "manual",
+          status: normalizeText(paymentData.status) || "active",
+          ownerType: nextOwnerType,
+          createdByUid: nextCreatedByUid,
+          createdByRole: nextCreatedByRole,
+          createdByPosition:
+            normalizeText(paymentData.createdByPosition) ||
+            normalizeECPosition(actor.profile.ecPosition) ||
+            null,
+          createdByCourseScope: nextCreatedByCourseScope,
+          courseScope: nextCourseScope,
+          totalStudents: assignmentSummary.totalStudents,
+          paidCount: assignmentSummary.paidCount,
+          unpaidCount: assignmentSummary.unpaidCount,
+          updatedAt: serverTimestamp(),
+        },
+        {merge: true},
+      );
+
+      functionsLogger.info("updateCampusPayment success", {
+        callerUid: actor.uid,
+        callerRole: nextCreatedByRole,
+        resolvedCourse: actor.courseScope || null,
+        paymentId,
+        mode: "update",
+        selectedYear: audience.selectedYear,
+        selectedCourse: audience.selectedCourse,
+        targetCount: audience.targets.length,
+        batchCount: assignmentSummary.batchCount,
+        removedAssignmentCount: assignmentSummary.removedAssignmentCount,
+        preserveExistingAudience,
+      });
+
+      return {
+        paymentId,
+        updated: true,
+        totalStudents: assignmentSummary.totalStudents,
+        paidCount: assignmentSummary.paidCount,
+        unpaidCount: assignmentSummary.unpaidCount,
+      };
+    } catch (error: unknown) {
+      functionsLogger.error("updateCampusPayment failed", {
+        callerUid: logActorUid,
+        callerRole: logActorRole,
+        resolvedCourse: logResolvedCourse,
+        paymentId: logPaymentId,
+        mode: "update",
+        selectedYear: logSelectedYear,
+        selectedCourse: logSelectedCourse,
+        targetCount: logTargetCount,
+        batchCount: logBatchCount,
+        removedAssignmentCount: logRemovedAssignmentCount,
+        code: error instanceof HttpsError ? error.code : "unknown",
+        message: error instanceof Error ? error.message : String(error ?? ""),
+      });
+      throw error;
+    }
+  });
+
 export const deleteCampusPayment = onCall({region: REGION}, async (request) => {
     const actor = await resolveEcActorContext(request);
     const body = asRecord(request.data);
@@ -7933,6 +9009,370 @@ export const listCampusPayments = onCall({region: REGION}, async (request) => {
         throw new HttpsError("failed-precondition", rawMessage);
       }
 
+      throw new HttpsError("internal", rawMessage);
+    }
+  });
+
+export const listStudentPayments = onCall({region: REGION}, async (request) => {
+    let currentStage = "resolve caller";
+    let callerUid = normalizeText(request.auth?.uid);
+    let callerRole = "";
+    let callerSchoolId = "";
+    let callerSchoolIdKey = "";
+    let collectionGroupCandidateCount = 0;
+    let linkedEventPaymentCount = 0;
+
+    const logStageFailure = (
+      stage: string,
+      error: unknown,
+      extra: Record<string, unknown> = {},
+    ) => {
+      functionsLogger.error("listStudentPayments stage failed", {
+        stage,
+        callerUid,
+        callerSchoolId,
+        callerSchoolIdKey,
+        callerRole,
+        errorMessage: error instanceof Error ? error.message : String(error ?? ""),
+        errorStack: error instanceof Error ? error.stack : null,
+        ...extra,
+      });
+    };
+
+    try {
+      const actor = await resolveStudentPortalActorContext(request);
+      callerUid = actor.uid;
+      callerRole = actor.role;
+      callerSchoolId = actor.schoolId;
+      callerSchoolIdKey = actor.schoolIdKey;
+
+      functionsLogger.info("listStudentPayments resolved actor", {
+        callerUid: actor.uid,
+        callerRole: actor.role,
+        callerCourse: actor.course,
+        callerYearLevel: actor.yearLevel,
+        callerSchoolId: actor.schoolId,
+        callerSchoolIdKey: actor.schoolIdKey,
+        callerIsBod: actor.isBod,
+      });
+
+      const assignmentByPaymentId = new Map<
+        string,
+        StudentPaymentAssignmentCandidate
+      >();
+      const candidatePaymentIds = new Set<string>();
+
+      const registerAssignmentCandidate = (
+        paymentId: string,
+        docId: string,
+        data: FirebaseFirestore.DocumentData,
+        source: string,
+      ) => {
+        const normalizedPaymentId = normalizeText(paymentId);
+        if (!normalizedPaymentId) {
+          return;
+        }
+
+        if (!assignmentBelongsToCaller(data, docId, actor)) {
+          return;
+        }
+
+        const nextCandidate = {
+          paymentId: normalizedPaymentId,
+          docId,
+          data,
+          source,
+        } satisfies StudentPaymentAssignmentCandidate;
+        const existingCandidate = assignmentByPaymentId.get(normalizedPaymentId);
+        if (existingCandidate) {
+          const existingScore = assignmentCandidateScore(
+            existingCandidate.data,
+            existingCandidate.docId,
+            actor,
+          );
+          const nextScore = assignmentCandidateScore(data, docId, actor);
+          if (existingScore >= nextScore) {
+            candidatePaymentIds.add(normalizedPaymentId);
+            return;
+          }
+        }
+
+        assignmentByPaymentId.set(normalizedPaymentId, nextCandidate);
+        candidatePaymentIds.add(normalizedPaymentId);
+      };
+
+      const runAssignmentQuery = async (
+        queryName: string,
+        fieldName: string,
+        fieldValue: string,
+      ) => {
+        if (!fieldValue) {
+          return;
+        }
+
+        try {
+          currentStage = `collectionGroup query ${queryName}`;
+          const assignmentSnapshot = await db
+            .collectionGroup("students")
+            .where(fieldName, "==", fieldValue)
+            .get();
+
+          collectionGroupCandidateCount += assignmentSnapshot.size;
+          assignmentSnapshot.docs.forEach((assignmentDoc) => {
+            const paymentRef = assignmentDoc.ref.parent.parent;
+            if (!paymentRef || paymentRef.parent.id !== "payments") {
+              return;
+            }
+
+            registerAssignmentCandidate(
+              paymentRef.id,
+              assignmentDoc.id,
+              assignmentDoc.data() ?? {},
+              queryName,
+            );
+          });
+        } catch (error: unknown) {
+          logStageFailure(`collectionGroup query ${queryName}`, error, {
+            fieldName,
+          });
+        }
+      };
+
+      currentStage = "collectionGroup assignment queries";
+      await runAssignmentQuery("uid == caller.uid", "uid", actor.uid);
+      await runAssignmentQuery("studentUid == caller.uid", "studentUid", actor.uid);
+      await runAssignmentQuery("schoolId == caller.schoolId", "schoolId", actor.schoolId);
+      await runAssignmentQuery(
+        "schoolIdKey == caller.schoolIdKey",
+        "schoolIdKey",
+        actor.schoolIdKey,
+      );
+      await runAssignmentQuery(
+        "studentId == caller.schoolId",
+        "studentId",
+        actor.schoolId,
+      );
+
+      try {
+        currentStage = "visible linked-payment fallback";
+        const eventSnapshot = await db.collection("events").get();
+        eventSnapshot.docs.forEach((eventDoc) => {
+          const eventData = eventDoc.data() ?? {};
+          if (!studentCanViewEventPaymentFallback(actor, eventData)) {
+            return;
+          }
+
+          const linkedPaymentId =
+            normalizeText(eventData.linkedPaymentId) ||
+            normalizeText(eventData.requiredPaymentId);
+          if (!linkedPaymentId) {
+            return;
+          }
+
+          linkedEventPaymentCount += 1;
+          candidatePaymentIds.add(linkedPaymentId);
+        });
+      } catch (error: unknown) {
+        logStageFailure("visible linked-payment fallback", error);
+      }
+
+      const toPaymentDateMs = (date: string, fallbackMs: number) => {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+          const parsed = Date.parse(`${date}T00:00:00+08:00`);
+          if (!Number.isNaN(parsed)) {
+            return parsed;
+          }
+        }
+
+        const parsed = Date.parse(date);
+        return Number.isNaN(parsed) ? fallbackMs : parsed;
+      };
+
+      const loadAssignmentForPayment = async (
+        paymentId: string,
+      ): Promise<StudentPaymentAssignmentCandidate | null> => {
+        const existingCandidate = assignmentByPaymentId.get(paymentId);
+        if (existingCandidate) {
+          return existingCandidate;
+        }
+
+        const paymentRef = db.doc(`payments/${paymentId}`);
+
+        try {
+          currentStage = `direct assignment doc ${paymentId}`;
+          const directAssignmentSnapshot = await paymentRef
+            .collection("students")
+            .doc(actor.uid)
+            .get();
+          if (directAssignmentSnapshot.exists) {
+            registerAssignmentCandidate(
+              paymentId,
+              directAssignmentSnapshot.id,
+              directAssignmentSnapshot.data() ?? {},
+              "payments/{paymentId}/students/{caller.uid}",
+            );
+          }
+        } catch (error: unknown) {
+          logStageFailure(`direct assignment doc ${paymentId}`, error, {
+            paymentId,
+          });
+        }
+
+        if (assignmentByPaymentId.has(paymentId)) {
+          return assignmentByPaymentId.get(paymentId) ?? null;
+        }
+
+        const fallbackFieldQueries = [
+          {
+            queryName: "payment student schoolId == caller.schoolId",
+            fieldName: "schoolId",
+            fieldValue: actor.schoolId,
+          },
+          {
+            queryName: "payment student schoolIdKey == caller.schoolIdKey",
+            fieldName: "schoolIdKey",
+            fieldValue: actor.schoolIdKey,
+          },
+          {
+            queryName: "payment student studentId == caller.schoolId",
+            fieldName: "studentId",
+            fieldValue: actor.schoolId,
+          },
+        ];
+
+        for (const fallbackQuery of fallbackFieldQueries) {
+          if (!fallbackQuery.fieldValue) {
+            continue;
+          }
+
+          try {
+            currentStage = `${fallbackQuery.queryName} (${paymentId})`;
+            const assignmentSnapshot = await paymentRef
+              .collection("students")
+              .where(fallbackQuery.fieldName, "==", fallbackQuery.fieldValue)
+              .limit(5)
+              .get();
+
+            assignmentSnapshot.docs.forEach((assignmentDoc) => {
+              registerAssignmentCandidate(
+                paymentId,
+                assignmentDoc.id,
+                assignmentDoc.data() ?? {},
+                fallbackQuery.queryName,
+              );
+            });
+          } catch (error: unknown) {
+            logStageFailure(`${fallbackQuery.queryName} (${paymentId})`, error, {
+              paymentId,
+              fieldName: fallbackQuery.fieldName,
+            });
+          }
+
+          if (assignmentByPaymentId.has(paymentId)) {
+            return assignmentByPaymentId.get(paymentId) ?? null;
+          }
+        }
+
+        return assignmentByPaymentId.get(paymentId) ?? null;
+      };
+
+      if (candidatePaymentIds.size === 0) {
+        functionsLogger.info("listStudentPayments completed", {
+          callerUid: actor.uid,
+          callerRole: actor.role,
+          callerSchoolId: actor.schoolId,
+          callerSchoolIdKey: actor.schoolIdKey,
+          collectionGroupCandidateCount,
+          linkedEventPaymentCount,
+          matchedPaymentCount: 0,
+        });
+        return {payments: []};
+      }
+
+      currentStage = "build payment rows";
+      const payments: StudentPaymentListRow[] = [];
+      for (const paymentId of candidatePaymentIds) {
+        try {
+          const paymentSnapshot = await db.doc(`payments/${paymentId}`).get();
+          if (!paymentSnapshot.exists) {
+            continue;
+          }
+
+          const paymentData = paymentSnapshot.data() ?? {};
+          if (normalizeLower(paymentData.status) === "archived") {
+            continue;
+          }
+
+          const assignmentCandidate = await loadAssignmentForPayment(paymentId);
+          if (!assignmentCandidate) {
+            continue;
+          }
+
+          const assignmentData = assignmentCandidate.data ?? {};
+          const createdAtMs =
+            toMillis(assignmentData.createdAt) || toMillis(paymentData.createdAt);
+          const updatedAtMs =
+            toMillis(assignmentData.updatedAt) ||
+            toMillis(paymentData.updatedAt) ||
+            createdAtMs;
+
+          payments.push({
+            paymentId,
+            title: normalizeText(paymentData.title) || "Untitled Payment",
+            ref: normalizeText(paymentData.ref) || makePaymentRef(paymentId),
+            amount: Number(paymentData.amount ?? 0),
+            date: normalizeText(paymentData.date),
+            details: normalizeText(paymentData.details),
+            status: normalizeStudentPaymentStatus(assignmentData.status),
+            linkedEventId: paymentLinkedEventId(paymentData),
+            source:
+              normalizeLower(paymentData.source) === "event" ? "event" : "manual",
+            createdAtMs,
+            updatedAtMs,
+          });
+        } catch (error: unknown) {
+          logStageFailure(`build payment row ${paymentId}`, error, {paymentId});
+        }
+      }
+
+      payments.sort((left, right) => {
+        const leftDateMs = toPaymentDateMs(
+          left.date,
+          left.updatedAtMs || left.createdAtMs,
+        );
+        const rightDateMs = toPaymentDateMs(
+          right.date,
+          right.updatedAtMs || right.createdAtMs,
+        );
+        if (rightDateMs !== leftDateMs) {
+          return rightDateMs - leftDateMs;
+        }
+
+        return (right.updatedAtMs || right.createdAtMs) -
+          (left.updatedAtMs || left.createdAtMs);
+      });
+
+      functionsLogger.info("listStudentPayments completed", {
+        callerUid: actor.uid,
+        callerRole: actor.role,
+        callerSchoolId: actor.schoolId,
+        callerSchoolIdKey: actor.schoolIdKey,
+        collectionGroupCandidateCount,
+        linkedEventPaymentCount,
+        matchedPaymentCount: payments.length,
+      });
+
+      return {payments};
+    } catch (error: unknown) {
+      logStageFailure(currentStage, error);
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      const rawMessage =
+        error instanceof Error && error.message.trim() ?
+          error.message :
+          "Failed to list student payments.";
       throw new HttpsError("internal", rawMessage);
     }
   });
