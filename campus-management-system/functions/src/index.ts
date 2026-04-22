@@ -5166,6 +5166,37 @@ type CampusPaymentAssignmentRecord = CampusPaymentTarget & {
   status: "Paid" | "Unpaid";
 };
 
+type CampusPaymentStudentListRow = {
+  uid: string;
+  schoolId: string;
+  studentId: string;
+  schoolIdKey: string;
+  name: string;
+  studentName: string;
+  course: string;
+  year: string;
+  yearLevel: string;
+  section: string;
+  status: "Paid" | "Unpaid";
+  paidDate: number | null;
+  referenceNumber: string;
+  remarks: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+type CampusPaymentAccessEvaluation = {
+  allowed: boolean;
+  reason: string;
+  matchedBy: string;
+  ownerType: "ec" | "bod";
+  createdByUid: string;
+  paymentCourse: string;
+  paymentCourseScope: string;
+  createdByCourseScope: string;
+  targetCourses: string[];
+};
+
 type CampusPaymentAudienceResolution = {
   targets: CampusPaymentTarget[];
   targetStudent: string;
@@ -5500,6 +5531,99 @@ async function syncCampusPaymentAssignments(
   };
 }
 
+function normalizeCampusPaymentAssignmentStatus(
+  value: unknown,
+): "Paid" | "Unpaid" {
+  return normalizeLower(value) === "paid" ? "Paid" : "Unpaid";
+}
+
+function normalizeCampusPaymentStudentRow(
+  docId: string,
+  data: FirebaseFirestore.DocumentData,
+): CampusPaymentStudentListRow {
+  const uid = normalizeText(data.uid) || normalizeText(docId);
+  const schoolId =
+    normalizeText(data.schoolId) ||
+    normalizeText(data.studentId) ||
+    uid;
+  const studentId = normalizeText(data.studentId) || schoolId;
+  const schoolIdKey = normalizeSchoolIdKey(
+    normalizeText(data.schoolIdKey) || schoolId || studentId,
+  );
+  const studentName =
+    normalizeText(data.studentName || data.name || data.fullName) ||
+    schoolId ||
+    uid;
+  const name =
+    normalizeText(data.name || data.studentName || data.fullName) ||
+    studentName;
+  const course =
+    normalizeCourseLabel(data.course) ||
+    normalizeText(data.course) ||
+    "Unassigned";
+  const yearLevel =
+    normalizeYear(data.yearLevel || data.year) ||
+    "Unassigned";
+  const status = normalizeCampusPaymentAssignmentStatus(data.status);
+  const createdAtMs = toMillis(data.createdAt);
+  const updatedAtMs = toMillis(data.updatedAt) || createdAtMs;
+  const paidDate =
+    toMillis(
+      data.paidDate ||
+      data.paidAt ||
+      data.paidOn ||
+      (status === "Paid" ? data.updatedAt : null),
+    ) || null;
+
+  return {
+    uid,
+    schoolId,
+    studentId,
+    schoolIdKey,
+    name,
+    studentName,
+    course,
+    year: yearLevel,
+    yearLevel,
+    section: normalizeText(data.section) || "-",
+    status,
+    paidDate,
+    referenceNumber: normalizeText(
+      data.referenceNumber ||
+      data.referenceNo ||
+      data.refNumber ||
+      data.reference,
+    ),
+    remarks: normalizeText(data.remarks || data.note || data.notes),
+    createdAtMs,
+    updatedAtMs,
+  };
+}
+
+function sortCampusPaymentStudentRows(
+  left: CampusPaymentStudentListRow,
+  right: CampusPaymentStudentListRow,
+): number {
+  return (
+    left.name.localeCompare(right.name) ||
+    left.studentName.localeCompare(right.studentName) ||
+    left.schoolId.localeCompare(right.schoolId) ||
+    left.uid.localeCompare(right.uid)
+  );
+}
+
+function campusPaymentStudentMatchesCourseScope(
+  row: CampusPaymentStudentListRow,
+  courseScope: string,
+): boolean {
+  const normalizedCourseScope = normalizeCourseLabel(courseScope);
+  if (!normalizedCourseScope) {
+    return false;
+  }
+
+  return normalizeCourseLabel(row.course) === normalizedCourseScope;
+}
+
 function paymentMatchesCourseScope(
   data: FirebaseFirestore.DocumentData,
   courseScope: string,
@@ -5512,6 +5636,168 @@ function paymentMatchesCourseScope(
     paymentCreatedByCourseScope(data) === courseScope ||
     paymentCourseValue(data) === courseScope ||
     paymentTargetCourses(data).includes(courseScope);
+}
+
+async function evaluateCampusPaymentStudentReadAccess(
+  actor: EcActorContext,
+  paymentId: string,
+  paymentData: FirebaseFirestore.DocumentData,
+): Promise<CampusPaymentAccessEvaluation> {
+  const ownerType = paymentOwnerType(paymentData);
+  const paymentCourse = paymentCourseValue(paymentData);
+  const paymentScope = paymentCourseScope(paymentData);
+  const createdByScope =
+    paymentCreatedByCourseScope(paymentData) || paymentScope;
+  const createdByUid = paymentCreatedByUid(paymentData);
+  const targetCourses = paymentTargetCourses(paymentData);
+
+  const buildResult = (
+    allowed: boolean,
+    reason: string,
+    matchedBy: string,
+  ): CampusPaymentAccessEvaluation => ({
+    allowed,
+    reason,
+    matchedBy,
+    ownerType,
+    createdByUid,
+    paymentCourse,
+    paymentCourseScope: paymentScope,
+    createdByCourseScope: createdByScope,
+    targetCourses,
+  });
+
+  if (actor.isAdmin) {
+    return buildResult(true, "Admin access granted.", "admin");
+  }
+  if (actor.isRegularEc) {
+    return buildResult(true, "Regular EC access granted.", "regular-ec");
+  }
+  if (!actor.isBod || !actor.courseScope) {
+    return buildResult(
+      false,
+      "B.O.D. profile is missing a valid course scope.",
+      "missing-course-scope",
+    );
+  }
+
+  const isOwnBodPayment =
+    ownerType === "bod" &&
+    createdByUid === actor.uid &&
+    paymentScope === actor.courseScope &&
+    createdByScope === actor.courseScope &&
+    paymentCourse === actor.courseScope;
+
+  if (isOwnBodPayment) {
+    return buildResult(
+      true,
+      "B.O.D. can view their own course-scoped payment students.",
+      "own-bod-payment",
+    );
+  }
+
+  if (ownerType === "bod") {
+    return buildResult(
+      false,
+      "B.O.D. members can only view their own course-scoped B.O.D. payments.",
+      "other-bod-payment",
+    );
+  }
+
+  if (paymentMatchesCourseScope(paymentData, actor.courseScope)) {
+    return buildResult(
+      true,
+      "Payment scope matched the caller's assigned course.",
+      "payment-scope",
+    );
+  }
+
+  const actorCourseScopeValues = courseScopeQueryValues(actor.courseScope);
+  if (
+    actorCourseScopeValues.length > 0 &&
+    await paymentStudentCourseMatchExists(paymentId, actorCourseScopeValues)
+  ) {
+    return buildResult(
+      true,
+      "Payment student rows matched the caller's assigned course.",
+      "student-course",
+    );
+  }
+
+  return buildResult(
+    false,
+    "Payment is outside the caller's assigned course scope.",
+    "course-scope-mismatch",
+  );
+}
+
+function evaluateCampusPaymentStudentManageAccess(
+  actor: EcActorContext,
+  paymentData: FirebaseFirestore.DocumentData,
+): CampusPaymentAccessEvaluation {
+  const ownerType = paymentOwnerType(paymentData);
+  const paymentCourse = paymentCourseValue(paymentData);
+  const paymentScope = paymentCourseScope(paymentData);
+  const createdByScope =
+    paymentCreatedByCourseScope(paymentData) || paymentScope;
+  const createdByUid = paymentCreatedByUid(paymentData);
+  const targetCourses = paymentTargetCourses(paymentData);
+
+  const buildResult = (
+    allowed: boolean,
+    reason: string,
+    matchedBy: string,
+  ): CampusPaymentAccessEvaluation => ({
+    allowed,
+    reason,
+    matchedBy,
+    ownerType,
+    createdByUid,
+    paymentCourse,
+    paymentCourseScope: paymentScope,
+    createdByCourseScope: createdByScope,
+    targetCourses,
+  });
+
+  if (actor.isAdmin) {
+    return buildResult(true, "Admin access granted.", "admin");
+  }
+  if (actor.isRegularEc) {
+    return buildResult(true, "Regular EC access granted.", "regular-ec");
+  }
+  if (!actor.isBod || !actor.courseScope) {
+    return buildResult(
+      false,
+      "B.O.D. profile is missing a valid course scope.",
+      "missing-course-scope",
+    );
+  }
+
+  const isLegacyBodPayment =
+    createdByUid === actor.uid &&
+    paymentScope === actor.courseScope &&
+    createdByScope === actor.courseScope &&
+    paymentCourse === actor.courseScope;
+
+  if (
+    createdByUid === actor.uid &&
+    paymentScope === actor.courseScope &&
+    createdByScope === actor.courseScope &&
+    paymentCourse === actor.courseScope &&
+    (ownerType === "bod" || isLegacyBodPayment)
+  ) {
+    return buildResult(
+      true,
+      "B.O.D. can manage their own course-scoped payment students.",
+      ownerType === "bod" ? "own-bod-payment" : "legacy-bod-payment",
+    );
+  }
+
+  return buildResult(
+    false,
+    "B.O.D. members can only manage their own course-scoped payments.",
+    "manage-scope-mismatch",
+  );
 }
 
 function courseScopeQueryValues(courseScope: string): string[] {
@@ -9309,6 +9595,377 @@ export const listCampusPayments = onCall({region: REGION}, async (request) => {
       }
 
       throw new HttpsError("internal", rawMessage);
+    }
+  });
+
+export const listCampusPaymentStudents = onCall({region: REGION}, async (request) => {
+    let callerUid = normalizeText(request.auth?.uid);
+    let callerRole = "";
+    let callerCourseScope = "";
+    let paymentId = "";
+    let paymentOwner: "ec" | "bod" = "ec";
+    let paymentCourse = "";
+    let paymentScope = "";
+    let paymentTargetCourses: string[] = [];
+    let rawStudentRowCount = 0;
+    let returnedStudentRowCount = 0;
+
+    try {
+      const actor = await resolveEcActorContext(request);
+      callerUid = actor.uid;
+      callerRole =
+        normalizeCampusRoleValue(actor.profile.role) ||
+        (actor.isBod ? "bod" : "ecmember");
+      callerCourseScope = actor.courseScope || "";
+
+      const body = asRecord(request.data);
+      paymentId = normalizeText(body.paymentId);
+      if (!paymentId) {
+        throw new HttpsError("invalid-argument", "paymentId is required.");
+      }
+
+      const paymentRef = db.doc(`payments/${paymentId}`);
+      const paymentSnapshot = await paymentRef.get();
+      if (!paymentSnapshot.exists) {
+        throw new HttpsError("not-found", "Payment not found.");
+      }
+
+      const paymentData = paymentSnapshot.data() ?? {};
+      const access = await evaluateCampusPaymentStudentReadAccess(
+        actor,
+        paymentId,
+        paymentData,
+      );
+      paymentOwner = access.ownerType;
+      paymentCourse = access.paymentCourse;
+      paymentScope = access.paymentCourseScope;
+      paymentTargetCourses = access.targetCourses;
+
+      functionsLogger.info("listCampusPaymentStudents start", {
+        callerUid,
+        callerRole,
+        callerCourseScope,
+        paymentId,
+        paymentOwnerType: paymentOwner,
+        paymentCourse,
+        paymentCourseScope: paymentScope,
+        paymentTargetCourses,
+        matchedBy: access.matchedBy,
+      });
+
+      if (!access.allowed) {
+        functionsLogger.warn("listCampusPaymentStudents denied", {
+          callerUid,
+          callerRole,
+          callerCourseScope,
+          paymentId,
+          paymentOwnerType: paymentOwner,
+          paymentCourse,
+          paymentCourseScope: paymentScope,
+          paymentTargetCourses,
+          deniedReason: access.reason,
+          matchedBy: access.matchedBy,
+        });
+        throw new HttpsError("permission-denied", access.reason);
+      }
+
+      const studentSnapshot = await paymentRef.collection("students").get();
+      rawStudentRowCount = studentSnapshot.size;
+
+      const students = studentSnapshot.docs
+        .map((studentDoc) =>
+          normalizeCampusPaymentStudentRow(studentDoc.id, studentDoc.data() ?? {}),
+        )
+        .filter((row) =>
+          actor.isBod && actor.courseScope ?
+            campusPaymentStudentMatchesCourseScope(row, actor.courseScope) :
+            true,
+        )
+        .sort(sortCampusPaymentStudentRows);
+
+      returnedStudentRowCount = students.length;
+
+      functionsLogger.info("listCampusPaymentStudents success", {
+        callerUid,
+        callerRole,
+        callerCourseScope,
+        paymentId,
+        paymentOwnerType: paymentOwner,
+        paymentCourse,
+        paymentCourseScope: paymentScope,
+        paymentTargetCourses,
+        rawStudentRowCount,
+        returnedStudentRowCount,
+      });
+
+      return {students};
+    } catch (error: unknown) {
+      functionsLogger.error("listCampusPaymentStudents failed", {
+        callerUid,
+        callerRole,
+        callerCourseScope,
+        paymentId,
+        paymentOwnerType: paymentOwner,
+        paymentCourse,
+        paymentCourseScope: paymentScope,
+        paymentTargetCourses,
+        rawStudentRowCount,
+        returnedStudentRowCount,
+        errorMessage: error instanceof Error ? error.message : String(error ?? ""),
+        errorCode:
+          error instanceof HttpsError ?
+            error.code :
+            normalizeText((error as {code?: unknown})?.code),
+        errorStack: error instanceof Error ? error.stack : null,
+      });
+
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      throw new HttpsError(
+        "internal",
+        error instanceof Error && error.message.trim() ?
+          error.message :
+          "Failed to list payment students.",
+      );
+    }
+  });
+
+export const updateCampusPaymentStudentStatus = onCall({region: REGION}, async (request) => {
+    let callerUid = normalizeText(request.auth?.uid);
+    let callerRole = "";
+    let callerCourseScope = "";
+    let paymentId = "";
+    let studentUid = "";
+    let requestedStatus: "Paid" | "Unpaid" | "" = "";
+    let paymentOwner: "ec" | "bod" = "ec";
+    let paymentCourse = "";
+    let paymentScope = "";
+    let paymentTargetCourses: string[] = [];
+
+    try {
+      const actor = await resolveEcActorContext(request);
+      callerUid = actor.uid;
+      callerRole =
+        normalizeCampusRoleValue(actor.profile.role) ||
+        (actor.isBod ? "bod" : "ecmember");
+      callerCourseScope = actor.courseScope || "";
+
+      const body = asRecord(request.data);
+      paymentId = normalizeText(body.paymentId);
+      studentUid = normalizeText(body.studentUid);
+      requestedStatus =
+        normalizeLower(body.status) === "paid" ? "Paid" :
+        normalizeLower(body.status) === "unpaid" ? "Unpaid" :
+        "";
+
+      if (!paymentId) {
+        throw new HttpsError("invalid-argument", "paymentId is required.");
+      }
+      if (!studentUid) {
+        throw new HttpsError("invalid-argument", "studentUid is required.");
+      }
+      if (!requestedStatus) {
+        throw new HttpsError("invalid-argument", "status must be Paid or Unpaid.");
+      }
+
+      const paymentRef = db.doc(`payments/${paymentId}`);
+      const paymentSnapshot = await paymentRef.get();
+      if (!paymentSnapshot.exists) {
+        throw new HttpsError("not-found", "Payment not found.");
+      }
+
+      const paymentData = paymentSnapshot.data() ?? {};
+      if (normalizeLower(paymentData.status) === "archived") {
+        throw new HttpsError(
+          "failed-precondition",
+          "Archived payments can no longer be updated.",
+        );
+      }
+
+      const access = evaluateCampusPaymentStudentManageAccess(actor, paymentData);
+      paymentOwner = access.ownerType;
+      paymentCourse = access.paymentCourse;
+      paymentScope = access.paymentCourseScope;
+      paymentTargetCourses = access.targetCourses;
+
+      functionsLogger.info("updateCampusPaymentStudentStatus start", {
+        callerUid,
+        callerRole,
+        callerCourseScope,
+        paymentId,
+        studentUid,
+        requestedStatus,
+        paymentOwnerType: paymentOwner,
+        paymentCourse,
+        paymentCourseScope: paymentScope,
+        paymentTargetCourses,
+        matchedBy: access.matchedBy,
+      });
+
+      if (!access.allowed) {
+        functionsLogger.warn("updateCampusPaymentStudentStatus denied", {
+          callerUid,
+          callerRole,
+          callerCourseScope,
+          paymentId,
+          studentUid,
+          requestedStatus,
+          paymentOwnerType: paymentOwner,
+          paymentCourse,
+          paymentCourseScope: paymentScope,
+          paymentTargetCourses,
+          deniedReason: access.reason,
+          matchedBy: access.matchedBy,
+        });
+        throw new HttpsError("permission-denied", access.reason);
+      }
+
+      const nowMs = Date.now();
+      const nowTimestamp = admin.firestore.Timestamp.fromMillis(nowMs);
+      const result = await db.runTransaction(async (transaction) => {
+        const paymentTxnSnapshot = await transaction.get(paymentRef);
+        if (!paymentTxnSnapshot.exists) {
+          throw new HttpsError("not-found", "Payment not found.");
+        }
+
+        const paymentTxnData = paymentTxnSnapshot.data() ?? {};
+        const txnAccess = evaluateCampusPaymentStudentManageAccess(
+          actor,
+          paymentTxnData,
+        );
+        if (!txnAccess.allowed) {
+          throw new HttpsError("permission-denied", txnAccess.reason);
+        }
+
+        const assignmentsSnapshot = await transaction.get(
+          paymentRef.collection("students"),
+        );
+        const studentSnapshot = assignmentsSnapshot.docs.find(
+          (assignmentDoc) => assignmentDoc.id === studentUid,
+        );
+        if (!studentSnapshot) {
+          throw new HttpsError("not-found", "Payment student not found.");
+        }
+
+        const studentRow = normalizeCampusPaymentStudentRow(
+          studentSnapshot.id,
+          studentSnapshot.data() ?? {},
+        );
+        if (
+          actor.isBod &&
+          (!actor.courseScope ||
+            !campusPaymentStudentMatchesCourseScope(studentRow, actor.courseScope))
+        ) {
+          throw new HttpsError(
+            "permission-denied",
+            "B.O.D. members can only manage students from their assigned course.",
+          );
+        }
+
+        const currentStatus = normalizeCampusPaymentAssignmentStatus(
+          studentSnapshot.data()?.status,
+        );
+
+        let paidCount = 0;
+        assignmentsSnapshot.docs.forEach((assignmentDoc) => {
+          const status =
+            assignmentDoc.id === studentUid ?
+              requestedStatus :
+              normalizeCampusPaymentAssignmentStatus(assignmentDoc.data()?.status);
+          if (status === "Paid") {
+            paidCount += 1;
+          }
+        });
+        const totalStudents = assignmentsSnapshot.size;
+        const unpaidCount = Math.max(0, totalStudents - paidCount);
+
+        if (currentStatus !== requestedStatus) {
+          transaction.set(
+            studentSnapshot.ref,
+            {
+              status: requestedStatus,
+              updatedAt: nowTimestamp,
+              paidDate: requestedStatus === "Paid" ? nowTimestamp : null,
+              paidAt: requestedStatus === "Paid" ? nowTimestamp : null,
+              paidOn: requestedStatus === "Paid" ? nowTimestamp : null,
+            },
+            {merge: true},
+          );
+        }
+
+        transaction.set(
+          paymentRef,
+          {
+            totalStudents,
+            paidCount,
+            unpaidCount,
+            updatedAt: nowTimestamp,
+          },
+          {merge: true},
+        );
+
+        return {
+          paymentId,
+          studentUid,
+          status: requestedStatus,
+          paidCount,
+          unpaidCount,
+          paidDateMs:
+            requestedStatus === "Paid" ?
+              nowMs :
+              null,
+          updatedAtMs: nowMs,
+        };
+      });
+
+      functionsLogger.info("updateCampusPaymentStudentStatus success", {
+        callerUid,
+        callerRole,
+        callerCourseScope,
+        paymentId,
+        studentUid,
+        requestedStatus,
+        paymentOwnerType: paymentOwner,
+        paymentCourse,
+        paymentCourseScope: paymentScope,
+        paymentTargetCourses,
+        paidCount: result.paidCount,
+        unpaidCount: result.unpaidCount,
+      });
+
+      return result;
+    } catch (error: unknown) {
+      functionsLogger.error("updateCampusPaymentStudentStatus failed", {
+        callerUid,
+        callerRole,
+        callerCourseScope,
+        paymentId,
+        studentUid,
+        requestedStatus,
+        paymentOwnerType: paymentOwner,
+        paymentCourse,
+        paymentCourseScope: paymentScope,
+        paymentTargetCourses,
+        errorMessage: error instanceof Error ? error.message : String(error ?? ""),
+        errorCode:
+          error instanceof HttpsError ?
+            error.code :
+            normalizeText((error as {code?: unknown})?.code),
+        errorStack: error instanceof Error ? error.stack : null,
+      });
+
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      throw new HttpsError(
+        "internal",
+        error instanceof Error && error.message.trim() ?
+          error.message :
+          "Failed to update payment student status.",
+      );
     }
   });
 

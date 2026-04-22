@@ -10,13 +10,11 @@ import {
   doc,
   getDoc,
   getDocs,
-  increment,
   orderBy,
   type QueryDocumentSnapshot,
   query,
   serverTimestamp,
   setDoc,
-  where,
   writeBatch,
 } from "firebase/firestore";
 import { app, auth, db } from "@/lib/firebase";
@@ -68,9 +66,12 @@ import {
 import {
   createCampusPayment,
   deleteCampusPayment,
+  listCampusPaymentStudents,
   listCampusPayments,
   updateCampusPayment,
+  updateCampusPaymentStudentStatus,
   type CampusPaymentListItem,
+  type CampusPaymentStudentListItem,
 } from "@/lib/firebase-functions";
 import {
   canEditPayment,
@@ -118,6 +119,8 @@ type StudentProfile = {
 };
 
 interface PaymentStudent extends StudentProfile {
+  studentId?: string;
+  schoolIdKey?: string;
   status: PaymentStudentStatus;
   paidDate?: unknown;
   referenceNumber?: string;
@@ -176,6 +179,8 @@ type PaymentEditorMode = "create" | "edit";
 type PaymentStudentDocData = {
   uid?: unknown;
   schoolId?: unknown;
+  studentId?: unknown;
+  schoolIdKey?: unknown;
   name?: unknown;
   studentName?: unknown;
   fullName?: unknown;
@@ -327,11 +332,14 @@ function mapPaymentStudentRecord(
 ): PaymentStudent {
   const uid = getFirstFilledText(data.uid, studentId) || studentId;
   const schoolId = getFirstFilledText(data.schoolId, uid) || uid;
+  const normalizedStudentId = getFirstFilledText(data.studentId, schoolId) || schoolId;
   const status = normalizePaymentStudentStatus(data.status);
 
   return {
     uid,
     schoolId,
+    studentId: normalizedStudentId,
+    schoolIdKey: getFirstFilledText(data.schoolIdKey),
     name:
       getFirstFilledText(data.name, data.studentName, data.fullName, schoolId) ||
       schoolId,
@@ -356,6 +364,37 @@ function mapPaymentStudentRecord(
     remarks: getFirstFilledText(data.remarks, data.note, data.notes),
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,
+  };
+}
+
+function mapListedPaymentStudentRecord(
+  row: CampusPaymentStudentListItem,
+): PaymentStudent {
+  const uid = String(row.uid ?? "").trim();
+  const schoolId =
+    String(row.schoolId ?? "").trim() ||
+    String(row.studentId ?? "").trim() ||
+    uid;
+
+  return {
+    uid,
+    schoolId,
+    studentId: String(row.studentId ?? "").trim() || schoolId,
+    schoolIdKey: String(row.schoolIdKey ?? "").trim(),
+    name:
+      getFirstFilledText(row.name, row.studentName, schoolId) || schoolId,
+    year: normalizeYear(row.year || row.yearLevel),
+    section: getFirstFilledText(row.section, "-") || "-",
+    course:
+      normalizeCourse(getFirstFilledText(row.course)) ||
+      getFirstFilledText(row.course, "Unassigned") ||
+      "Unassigned",
+    status: normalizePaymentStudentStatus(row.status),
+    paidDate: row.paidDate ?? null,
+    referenceNumber: getFirstFilledText(row.referenceNumber),
+    remarks: getFirstFilledText(row.remarks),
+    createdAt: row.createdAtMs ?? 0,
+    updatedAt: row.updatedAtMs ?? 0,
   };
 }
 
@@ -685,6 +724,20 @@ export default function PaymentDashboard() {
   const selectedPaymentCourse =
     viewerIsBod && viewerCourseScopeValue ? viewerCourseScopeValue : course;
 
+  const fetchPaymentStudentsFromCallable = useCallback(
+    async (paymentId: string) => {
+      const rows = (await listCampusPaymentStudents({ paymentId }))
+        .map(mapListedPaymentStudentRecord)
+        .sort(sortStudentsByNameAndId);
+
+      return filterRowsByCourseScope(
+        rows,
+        viewerIsBod ? viewerCourseScopeValue || viewerCourseScope : null,
+      );
+    },
+    [viewerCourseScope, viewerCourseScopeValue, viewerIsBod],
+  );
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
@@ -843,42 +896,32 @@ export default function PaymentDashboard() {
 
     async function loadExpandedStudents() {
       setExpandedStudentsLoading(true);
-      const qy =
-        viewerIsBod && viewerCourseScopeValue ?
-          query(
-            collection(db, "payments", currentExpandedPayment, "students"),
-            where("course", "==", viewerCourseScopeValue),
-          ) :
-          query(
-            collection(db, "payments", currentExpandedPayment, "students"),
-            orderBy("name", "asc"),
-          );
 
       try {
-        const snap = await getDocs(qy);
+        const list = await fetchPaymentStudentsFromCallable(currentExpandedPayment);
         if (!active) {
           return;
         }
-
-        const list: PaymentStudent[] = snap.docs
-          .map((d) =>
-            mapPaymentStudentRecord(d.id, d.data() as PaymentStudentDocData),
-          )
-          .sort(sortStudentsByNameAndId);
 
         setPaymentStudents((prev) => ({
           ...prev,
           [currentExpandedPayment]: list,
         }));
+        setNotice(null);
         setExpandedStudentsLoading(false);
-      } catch (error) {
+      } catch (error: unknown) {
         if (!active) {
           return;
         }
         setExpandedStudentsLoading(false);
         setNotice({
           type: "err",
-          msg: toErrorMessage(error, "Failed to load payment students."),
+          msg: toScopedPaymentErrorMessage(
+            error,
+            "Failed to load payment students.",
+            viewerCourseScope,
+            viewerIsBod,
+          ),
         });
       }
     }
@@ -888,7 +931,7 @@ export default function PaymentDashboard() {
     return () => {
       active = false;
     };
-  }, [expandedPayment, viewerCourseScopeValue, viewerIsBod]);
+  }, [expandedPayment, fetchPaymentStudentsFromCallable, viewerCourseScope, viewerIsBod]);
 
   useEffect(() => {
     setStudentSearchText("");
@@ -1459,40 +1502,28 @@ export default function PaymentDashboard() {
     });
   }
 
-  async function loadPaymentStudentsForExport(paymentId: string) {
+  async function loadPaymentStudentsForExport(
+    paymentId: string,
+    force = false,
+  ) {
     const hasCachedRows = Object.prototype.hasOwnProperty.call(
       paymentStudents,
       paymentId,
     );
 
-    if (hasCachedRows) {
+    if (!force && hasCachedRows) {
       return filterRowsByCourseScope(
         [...(paymentStudents[paymentId] ?? [])].sort(sortStudentsByNameAndId),
-        viewerIsBod ? viewerCourseScopeValue : null,
+        viewerIsBod ? viewerCourseScopeValue || viewerCourseScope : null,
       );
     }
 
-    const studentQuery =
-      viewerIsBod && viewerCourseScopeValue ?
-        query(
-          collection(db, "payments", paymentId, "students"),
-          where("course", "==", viewerCourseScopeValue),
-        ) :
-        collection(db, "payments", paymentId, "students");
-    const studentSnap = await getDocs(studentQuery);
-    const rows = studentSnap.docs
-      .map((studentDoc) =>
-        mapPaymentStudentRecord(
-          studentDoc.id,
-          studentDoc.data() as PaymentStudentDocData,
-        ),
-      )
-      .sort(sortStudentsByNameAndId);
-
-    return filterRowsByCourseScope(
-      rows,
-      viewerIsBod ? viewerCourseScopeValue : null,
-    );
+    const rows = await fetchPaymentStudentsFromCallable(paymentId);
+    setPaymentStudents((prev) => ({
+      ...prev,
+      [paymentId]: rows,
+    }));
+    return rows;
   }
 
   async function handleExportAllPaymentReport() {
@@ -1527,7 +1558,7 @@ export default function PaymentDashboard() {
     try {
       const workbookPayments = await Promise.all(
         exportablePayments.map(async (payment) => {
-          const rows = await loadPaymentStudentsForExport(payment.id);
+          const rows = await loadPaymentStudentsForExport(payment.id, true);
 
           return {
             id: payment.id,
@@ -1557,7 +1588,12 @@ export default function PaymentDashboard() {
         preventDuplicate: false,
       });
     } catch (error: unknown) {
-      const message = toErrorMessage(error, "Failed to export payment report.");
+      const message = toScopedPaymentErrorMessage(
+        error,
+        "Failed to export payment report.",
+        viewerCourseScope,
+        viewerIsBod,
+      );
 
       campusToast.error({
         title: "Failed to export payment report.",
@@ -2078,36 +2114,18 @@ export default function PaymentDashboard() {
   ) {
     const nextStatus: PaymentStudentStatus =
       student.status === "Paid" ? "Unpaid" : "Paid";
-    const paidDelta = nextStatus === "Paid" ? 1 : -1;
-    const unpaidDelta = nextStatus === "Unpaid" ? 1 : -1;
     const key = `${paymentId}:${student.uid}`;
 
     setUpdatingStatusKey(key);
     setNotice(null);
 
     try {
-      const batch = writeBatch(db);
+      const result = await updateCampusPaymentStudentStatus({
+        paymentId,
+        studentUid: student.uid,
+        status: nextStatus,
+      });
 
-      batch.set(
-        doc(db, "payments", paymentId, "students", student.uid),
-        {
-          status: nextStatus,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true },
-      );
-
-      batch.set(
-        doc(db, "payments", paymentId),
-        {
-          paidCount: increment(paidDelta),
-          unpaidCount: increment(unpaidDelta),
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true },
-      );
-
-      await batch.commit();
       setPaymentStudents((prev) => {
         const paymentRows = prev[paymentId] ?? [];
         return {
@@ -2116,7 +2134,12 @@ export default function PaymentDashboard() {
             row.uid === student.uid ?
               {
                 ...row,
-                status: nextStatus,
+                status: result.status,
+                paidDate:
+                  result.status === "Paid" ?
+                    result.paidDateMs ?? Date.now() :
+                    null,
+                updatedAt: result.updatedAtMs,
               } :
               row,
           ),
@@ -2127,19 +2150,24 @@ export default function PaymentDashboard() {
           payment.id === paymentId ?
             {
               ...payment,
-              paidCount: Math.max(0, Number(payment.paidCount ?? 0) + paidDelta),
-              unpaidCount: Math.max(0, Number(payment.unpaidCount ?? 0) + unpaidDelta),
+              paidCount: Number(result.paidCount ?? payment.paidCount ?? 0),
+              unpaidCount: Number(result.unpaidCount ?? payment.unpaidCount ?? 0),
             } :
             payment,
         ),
       );
       campusToast.success({
         title: "Payment status updated",
-        description: `${student.name} marked ${nextStatus}.`,
-        dedupeKey: `ec-payments:status:${paymentId}:${student.uid}:${nextStatus}`,
+        description: `${student.name} marked ${result.status}.`,
+        dedupeKey: `ec-payments:status:${paymentId}:${student.uid}:${result.status}`,
       });
     } catch (error: unknown) {
-      const message = toErrorMessage(error, "Failed to update payment status.");
+      const message = toScopedPaymentErrorMessage(
+        error,
+        "Failed to update payment status.",
+        viewerCourseScope,
+        viewerIsBod,
+      );
       setNotice({
         type: "err",
         msg: message,
@@ -2154,56 +2182,71 @@ export default function PaymentDashboard() {
     }
   }
 
-  function exportCsv(payment: Payment) {
-    const rows = filterRowsByCourseScope(
-      paymentStudents[payment.id] ?? [],
-      viewerIsBod ? viewerCourseScopeValue || viewerCourseScope : null,
-    );
-    if (!rows.length) {
-      setNotice({ type: "err", msg: "No student rows loaded to export." });
-      campusToast.warning({
-        title: "Nothing to export",
-        description: "No student rows are loaded for this payment yet.",
-        dedupeKey: `ec-payments:export-empty:${payment.id}`,
+  async function exportCsv(payment: Payment) {
+    try {
+      const rows = await loadPaymentStudentsForExport(payment.id, true);
+      if (!rows.length) {
+        setNotice({ type: "err", msg: "No student rows loaded to export." });
+        campusToast.warning({
+          title: "Nothing to export",
+          description: "No student rows are loaded for this payment yet.",
+          dedupeKey: `ec-payments:export-empty:${payment.id}`,
+        });
+        return;
+      }
+
+      const csvRows = [
+        toCsvLine(["Reference", payment.ref]),
+        toCsvLine(["Title", payment.title]),
+        toCsvLine(["Date", payment.date]),
+        toCsvLine(["Amount", formatCurrency(payment.amount)]),
+        "",
+        toCsvLine(["Student ID", "Name", "Course", "Year", "Section", "Status"]),
+        ...rows.map((item) =>
+          toCsvLine([
+            item.schoolId || item.uid,
+            item.name,
+            item.course,
+            item.year,
+            item.section,
+            item.status,
+          ]),
+        ),
+      ];
+
+      const blob = new Blob([csvRows.join("\n")], {
+        type: "text/csv;charset=utf-8;",
       });
-      return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${payment.ref || payment.id}-report.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      campusToast.success({
+        title: "Export started",
+        description: `${payment.ref || payment.id}-report.csv is being downloaded.`,
+        dedupeKey: `ec-payments:export:${payment.id}`,
+      });
+    } catch (error: unknown) {
+      const message = toScopedPaymentErrorMessage(
+        error,
+        "Failed to export payment report.",
+        viewerCourseScope,
+        viewerIsBod,
+      );
+      setNotice({
+        type: "err",
+        msg: message,
+      });
+      campusToast.error({
+        title: "Failed to export payment report.",
+        description: message,
+        dedupeKey: `ec-payments:export-error:${payment.id}`,
+      });
     }
-
-    const csvRows = [
-      toCsvLine(["Reference", payment.ref]),
-      toCsvLine(["Title", payment.title]),
-      toCsvLine(["Date", payment.date]),
-      toCsvLine(["Amount", formatCurrency(payment.amount)]),
-      "",
-      toCsvLine(["Student ID", "Name", "Course", "Year", "Section", "Status"]),
-      ...rows.map((item) =>
-        toCsvLine([
-          item.schoolId || item.uid,
-          item.name,
-          item.course,
-          item.year,
-          item.section,
-          item.status,
-        ]),
-      ),
-    ];
-
-    const blob = new Blob([csvRows.join("\n")], {
-      type: "text/csv;charset=utf-8;",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${payment.ref || payment.id}-report.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    campusToast.success({
-      title: "Export started",
-      description: `${payment.ref || payment.id}-report.csv is being downloaded.`,
-      dedupeKey: `ec-payments:export:${payment.id}`,
-    });
   }
 
   return (
@@ -2812,7 +2855,7 @@ export default function PaymentDashboard() {
                           <Button
                             variant="flat"
                             color="primary"
-                            onPress={() => exportCsv(p)}
+                            onPress={() => void exportCsv(p)}
                             className="px-4 font-semibold"
                           >
                             Export Report

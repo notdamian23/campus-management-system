@@ -419,6 +419,49 @@ export type UpdateCampusPaymentResult = {
   unpaidCount: number;
 };
 
+export type ListCampusPaymentStudentsPayload = {
+  paymentId: string;
+};
+
+export type CampusPaymentStudentListItem = {
+  uid: string;
+  schoolId: string;
+  studentId: string;
+  schoolIdKey: string;
+  name: string;
+  studentName: string;
+  course: string;
+  year: string;
+  yearLevel: string;
+  section: string;
+  status: "Paid" | "Unpaid";
+  paidDate?: number | null;
+  referenceNumber?: string;
+  remarks?: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type ListCampusPaymentStudentsResult = {
+  students?: CampusPaymentStudentListItem[];
+};
+
+export type UpdateCampusPaymentStudentStatusPayload = {
+  paymentId: string;
+  studentUid: string;
+  status: "Paid" | "Unpaid";
+};
+
+export type UpdateCampusPaymentStudentStatusResult = {
+  paymentId: string;
+  studentUid: string;
+  status: "Paid" | "Unpaid";
+  paidCount: number;
+  unpaidCount: number;
+  paidDateMs?: number | null;
+  updatedAtMs: number;
+};
+
 export type CampusPaymentListItem = {
   id: string;
   title: string;
@@ -958,6 +1001,40 @@ export async function listCampusPayments(): Promise<CampusPaymentListItem[]> {
 
   const result = await callable({});
   return result.data?.payments ?? [];
+}
+
+export async function listCampusPaymentStudents(
+  payload: ListCampusPaymentStudentsPayload,
+): Promise<CampusPaymentStudentListItem[]> {
+  logAuthEvent("info", "Listing CAMPUS payment students via callable", {
+    paymentId: payload.paymentId,
+  });
+
+  const callable = httpsCallable<
+    ListCampusPaymentStudentsPayload,
+    ListCampusPaymentStudentsResult
+  >(getCampusFunctions(), "listCampusPaymentStudents");
+
+  const result = await callable(payload);
+  return result.data?.students ?? [];
+}
+
+export async function updateCampusPaymentStudentStatus(
+  payload: UpdateCampusPaymentStudentStatusPayload,
+): Promise<UpdateCampusPaymentStudentStatusResult> {
+  logAuthEvent("info", "Updating CAMPUS payment student status via callable", {
+    paymentId: payload.paymentId,
+    studentUid: payload.studentUid,
+    status: payload.status,
+  });
+
+  const callable = httpsCallable<
+    UpdateCampusPaymentStudentStatusPayload,
+    UpdateCampusPaymentStudentStatusResult
+  >(getCampusFunctions(), "updateCampusPaymentStudentStatus");
+
+  const result = await callable(payload);
+  return result.data;
 }
 
 export async function listStudentPayments(): Promise<StudentPaymentListItem[]> {
