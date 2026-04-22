@@ -295,10 +295,6 @@ function isEcRole(role?: unknown): boolean {
   return normalized === "ec" || normalized === "ecmember";
 }
 
-function isStudentOnlyRole(value: unknown): boolean {
-  return normalizeCampusRoleValue(value) === "student";
-}
-
 function isBodRole(value: unknown): boolean {
   return normalizeCampusRoleValue(value) === "bod";
 }
@@ -4146,13 +4142,30 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
       [...STUDENT_AUDIENCE_LOOKUP_PROFILE_ROLES] :
       [...STUDENT_ONLY_LOOKUP_PROFILE_ROLES];
 
-    const profileSnapshot = await db
-      .collection("profiles")
-      .where("role", "in", lookupRoles)
-      .limit(limit)
-      .get();
+    const profileSnapshots = await Promise.all([
+      db
+        .collection("profiles")
+        .where("role", "in", lookupRoles)
+        .limit(limit)
+        .get(),
+      includeEcMembers ?
+        db
+          .collection("profiles")
+          .where("isStudent", "==", true)
+          .limit(limit)
+          .get() :
+        Promise.resolve(null),
+    ]);
+    const profileDocByUid = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
 
-    const studentRefs = profileSnapshot.docs.map((profileDoc) =>
+    profileSnapshots.forEach((snapshot) => {
+      snapshot?.docs.forEach((profileDoc) => {
+        profileDocByUid.set(profileDoc.id, profileDoc);
+      });
+    });
+
+    const profileDocs = Array.from(profileDocByUid.values());
+    const studentRefs = profileDocs.map((profileDoc) =>
       db.doc(`students/${profileDoc.id}`)
     );
     const studentSnapshots = studentRefs.length > 0 ?
@@ -4165,7 +4178,7 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
       studentByUid.set(studentSnap.id, studentSnap.data() ?? {});
     });
 
-    const students = profileSnapshot.docs
+    const studentIdentityRows = profileDocs
       .map((profileDoc) => {
         const profileData = profileDoc.data() ?? {};
         const studentData = studentByUid.get(profileDoc.id) ?? {};
@@ -4198,6 +4211,11 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
         return {
           uid: profileDoc.id,
           role: normalizeText(profileData.role || studentData.role),
+          isStudent:
+            profileData.isStudent === true ||
+            studentData.isStudent === true ||
+            normalizeCampusRoleValue(profileData.role || studentData.role) === "student",
+          isBod: isBodProfileData(profileData),
           schoolId,
           studentId,
           firstName,
@@ -4233,22 +4251,61 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
           email: normalizeText(profileData.email),
           createdAtMs: toMillis(profileData.createdAt ?? studentData.createdAt),
           ecPosition: normalizeECPosition(profileData.ecPosition),
+          assignedCourse: resolveAssignedCourseCode(profileData) || null,
           courseScope: resolveProfileCourseScope(profileData) || null,
-          isBod: isBodProfileData(profileData),
+          fingerprintStatus:
+            normalizeText(studentData.fingerprintStatus) ||
+            normalizeText(profileData.fingerprintStatus) ||
+            "inactive",
+          fingerprintTemplateId:
+            toPositiveNumber(
+              studentData.fingerprintTemplateId ??
+              studentData.templateId ??
+              profileData.fingerprintTemplateId ??
+              profileData.templateId,
+            ) || null,
         };
       })
-      .filter((student): student is NonNullable<typeof student> => Boolean(student))
+      .filter((student): student is NonNullable<typeof student> => Boolean(student));
+
+    const students = studentIdentityRows
       .filter((student) => {
         if (!actorIsBod) {
           return true;
         }
 
-        return Boolean(
-          actorCourseScope &&
-          isStudentOnlyRole(student.role) &&
-          normalizeCourseLabel(student.course) === actorCourseScope,
+        return canBodViewStudentIdentityRecord(
+          actorCourseScope,
+          student,
         );
-      });
+      })
+      .slice(0, limit);
+
+    functionsLogger.info("ecListStudents roster", {
+      actorUid: normalizeText(request.auth?.uid),
+      actorRole: normalizeCampusRoleValue(actorProfile.role),
+      actorIsBod,
+      actorCourseScope: actorCourseScope || null,
+      includeEcMembers,
+      requestedLimit: limit,
+      rawProfileCount: profileDocs.length,
+      studentIdentityRowCount: studentIdentityRows.length,
+      excludedByCourseScopeCount: studentIdentityRows.length - students.length,
+      returnedCount: students.length,
+      includedRoles: Array.from(new Set(students.map((student) => student.role || "unknown"))),
+      sampleEcBodStudentIdentityRows: students
+        .filter((student) => isBodRole(student.role) || isEcRole(student.role))
+        .slice(0, 5)
+        .map((student) => ({
+          uid: student.uid,
+          role: student.role,
+          isStudent: student.isStudent === true,
+          isBod: student.isBod === true,
+          course: student.course,
+          yearLevel: student.yearLevel,
+          ecPosition: student.ecPosition,
+        })),
+    });
 
     return {students};
   });
@@ -6671,6 +6728,38 @@ function isStudentAudienceProfile(
   );
 }
 
+function canBodViewStudentIdentityRecord(
+  actorCourseScope: string,
+  profileData: FirebaseFirestore.DocumentData,
+  studentData: FirebaseFirestore.DocumentData = {},
+): boolean {
+  if (!actorCourseScope) {
+    return false;
+  }
+
+  if (!isStudentAudienceLookupProfile(profileData, studentData)) {
+    return false;
+  }
+
+  return resolveStudentCourse(profileData, studentData) === actorCourseScope;
+}
+
+function canBodManageStudentIdentityRecord(
+  actorCourseScope: string,
+  profileData: FirebaseFirestore.DocumentData,
+  studentData: FirebaseFirestore.DocumentData = {},
+): boolean {
+  if (!canBodViewStudentIdentityRecord(actorCourseScope, profileData, studentData)) {
+    return false;
+  }
+
+  const targetRole = normalizeCampusRoleValue(
+    profileData.role || studentData.role,
+  );
+
+  return targetRole !== "admin" && targetRole !== "teacher";
+}
+
 async function findStudentAudienceProfilesByIdentifier(
   identifier: unknown,
   limit = 25,
@@ -7299,17 +7388,24 @@ export const updateCampusStudentProfile = onCall({region: REGION}, async (reques
       }
 
       const targetRole = normalizeText(profileData.role || studentData.role || "student");
-      const targetHasStudentIdentity = hasStudentIdentityData({
-        ...studentData,
-        ...profileData,
-      });
+      const targetHasStudentIdentity = isStudentAudienceLookupProfile(
+        profileData,
+        studentData,
+      );
       if (!targetHasStudentIdentity) {
         throw new HttpsError(
           "permission-denied",
-          "Only student and EC-member records can be updated here.",
+          "Only student-identity records can be updated here.",
         );
       }
-      if (actor.isBod && !isStudentOnlyRole(targetRole)) {
+      if (
+        actor.isBod &&
+        !canBodManageStudentIdentityRecord(
+          actor.courseScope,
+          profileData,
+          studentData,
+        )
+      ) {
         throw new HttpsError(
           "permission-denied",
           "B.O.D. members can only update student records from their assigned course.",
@@ -7654,13 +7750,20 @@ export const updateStudentAccountStatus = onCall({region: REGION}, async (reques
         currentStatus,
       });
 
-      if (!hasStudentIdentityData({...studentData, ...profileData})) {
+      if (!isStudentAudienceLookupProfile(profileData, studentData)) {
         throw new HttpsError(
           "permission-denied",
-          "Only student and EC-member records can be updated here.",
+          "Only student-identity records can be updated here.",
         );
       }
-      if (actor.isBod && !isStudentOnlyRole(targetRole)) {
+      if (
+        actor.isBod &&
+        !canBodManageStudentIdentityRecord(
+          actor.courseScope,
+          profileData,
+          studentData,
+        )
+      ) {
         throw new HttpsError(
           "permission-denied",
           "B.O.D. members can only update student records from their assigned course.",
@@ -7896,13 +7999,20 @@ export const updateStudentClearanceStatus = onCall({region: REGION}, async (requ
     }
 
     const targetRole = normalizeText(profileData.role || studentData.role || "student");
-    if (!hasStudentIdentityData({...studentData, ...profileData})) {
+    if (!isStudentAudienceLookupProfile(profileData, studentData)) {
       throw new HttpsError(
         "permission-denied",
-        "Only student and EC-member records can be updated here.",
+        "Only student-identity records can be updated here.",
       );
     }
-    if (actor.isBod && !isStudentOnlyRole(targetRole)) {
+    if (
+      actor.isBod &&
+      !canBodManageStudentIdentityRecord(
+        actor.courseScope,
+        profileData,
+        studentData,
+      )
+    ) {
       throw new HttpsError(
         "permission-denied",
         "B.O.D. members can only update student records from their assigned course.",

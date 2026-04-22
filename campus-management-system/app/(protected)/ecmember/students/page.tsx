@@ -36,7 +36,6 @@ import {
   CampusCardListSkeleton,
   type CampusTableColumn,
 } from "@/components/ui";
-import { getFunctions, httpsCallable } from "firebase/functions";
 import {
   collection,
   doc,
@@ -57,7 +56,7 @@ import {
   useECPageErrorToast,
   useIsBelowBreakpoint,
 } from "@/components/ecmember";
-import { app, auth, db } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
 import type { CampusProfileDoc } from "@/lib/campus-auth";
 import {
   type CampusNormalizedRole,
@@ -66,20 +65,26 @@ import {
   type CampusUserProjectionSource,
 } from "@/lib/campus-user-rows";
 import {
-  canManageStudent,
+  canManageStudentActions,
+  canViewStudentLookupRow,
   getCourseScope,
   isBOD,
 } from "@/lib/ec-permissions";
 import { normalizeCourse } from "@/lib/courseOptions";
 import {
   createCampusStudent,
+  ecListStudents,
+  type EcListStudentItem,
   listCampusPayments,
   logPermissionDeniedAttemptForCurrentUser,
   updateCampusStudentProfile,
   updateStudentAccountStatus,
   updateStudentClearanceStatus,
 } from "@/lib/firebase-functions";
-import { isStudentAudienceProfile } from "@/lib/student-audience";
+import {
+  hasStudentIdentityProfile,
+  isStudentAudienceProfile,
+} from "@/lib/student-audience";
 import { campusToast } from "@/lib/toast";
 import { formatStudentFullName } from "@/lib/student-name";
 
@@ -89,12 +94,21 @@ type StudentFingerprintStatus = "Active" | "Inactive";
 type Student = {
   uid: string;
   role: CampusNormalizedRole;
+  rawRole: string;
+  isStudent: boolean;
+  isBod: boolean;
+  ecPosition: string;
+  assignedCourse: string | null;
+  courseScope: string | null;
   id: string;
   studentId: string;
   name: string;
   rawName: string;
+  fullName: string;
+  studentName: string;
   course: string;
   year: string;
+  yearLevel: string;
   status: StudentAccountStatus;
   fingerprintStatus: StudentFingerprintStatus;
   readyForClearance: boolean;
@@ -174,27 +188,13 @@ type SelectOption = {
   label: string;
 };
 
-type RemoteStudent = {
-  uid?: string;
-  role?: string;
-  studentId?: string;
-  schoolId?: string;
-  firstName?: string;
-  lastName?: string;
-  fullName?: string;
-  studentName?: string;
-  name?: string;
-  course?: string;
-  year?: string;
-  yearLevel?: string;
-  status?: string;
-  readyForClearance?: boolean;
-  email?: string;
-  createdAtMs?: number | null;
-};
+type RemoteStudent = EcListStudentItem;
 
 type StudentDirectoryProjection = {
   uid?: string;
+  role?: string;
+  isStudent?: boolean;
+  isBod?: boolean;
   studentId?: string;
   schoolId?: string;
   firstName?: string;
@@ -202,6 +202,9 @@ type StudentDirectoryProjection = {
   fullName?: string;
   name?: string;
   studentName?: string;
+  ecPosition?: string | null;
+  assignedCourse?: string | null;
+  courseScope?: string | null;
   course?: string;
   year?: string;
   yearLevel?: string;
@@ -212,22 +215,7 @@ type StudentDirectoryProjection = {
   templateId?: number | string;
 };
 
-type StudentPatch = Partial<
-  Pick<
-    Student,
-    | "id"
-    | "studentId"
-    | "name"
-    | "rawName"
-    | "course"
-    | "year"
-    | "status"
-    | "fingerprintStatus"
-    | "readyForClearance"
-    | "email"
-    | "role"
-  >
->;
+type StudentPatch = Partial<Omit<Student, "uid">>;
 
 const DEFAULT_COURSES = [
   "Computer Engineering",
@@ -490,6 +478,10 @@ function normalizeReadyForClearance(raw: unknown) {
   return raw === true;
 }
 
+function trimValue(value: unknown) {
+  return String(value ?? "").trim();
+}
+
 function toPositiveNumber(raw: unknown) {
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? value : 0;
@@ -512,16 +504,39 @@ function getFingerprintStatus(
 
 function mapNormalizedRowToStudent(
   row: ReturnType<typeof normalizeCampusUserRow>,
+  data: RemoteStudent,
+  projection?: StudentDirectoryProjection,
 ): Student {
+  const rawRole = trimValue(data.role) || row.rawRole;
+  const fullName =
+    trimValue(data.fullName) ||
+    trimValue(projection?.fullName) ||
+    row.fullName;
+  const studentName =
+    trimValue(data.studentName) ||
+    trimValue(projection?.studentName) ||
+    trimValue(data.name) ||
+    trimValue(projection?.name) ||
+    fullName;
+
   return {
     uid: row.uid,
     role: row.role,
+    rawRole,
+    isStudent: row.isStudent,
+    isBod: row.isBod,
+    ecPosition: row.ecPosition,
+    assignedCourse: row.assignedCourse,
+    courseScope: row.courseScope,
     id: row.schoolId,
     studentId: row.studentId,
     name: row.fullName,
     rawName: row.rawFullName,
+    fullName,
+    studentName,
     course: row.course,
     year: row.yearLevel,
+    yearLevel: row.yearLevel,
     status: row.accountStatus,
     fingerprintStatus: row.fingerprintStatus,
     readyForClearance: row.clearanceReady,
@@ -535,11 +550,44 @@ function mapRemoteStudent(
   projection?: StudentDirectoryProjection,
 ): Student {
   const uid = String(data.uid ?? "").trim();
+  const normalizedProjection = {
+    uid,
+    role: projection?.role,
+    isStudent: projection?.isStudent ?? data.isStudent,
+    isBod: projection?.isBod ?? data.isBod,
+    studentId: projection?.studentId ?? data.studentId,
+    schoolId: projection?.schoolId ?? data.schoolId,
+    firstName: projection?.firstName ?? data.firstName,
+    lastName: projection?.lastName ?? data.lastName,
+    fullName: projection?.fullName ?? data.fullName,
+    name: projection?.name ?? data.name,
+    studentName: projection?.studentName ?? data.studentName,
+    ecPosition: projection?.ecPosition ?? data.ecPosition,
+    assignedCourse: projection?.assignedCourse ?? data.assignedCourse,
+    courseScope: projection?.courseScope ?? data.courseScope,
+    course: projection?.course ?? data.course,
+    year: projection?.year ?? data.year,
+    yearLevel: projection?.yearLevel ?? data.yearLevel,
+    status: projection?.status ?? data.status,
+    readyForClearance:
+      projection?.readyForClearance ?? data.readyForClearance,
+    fingerprintStatus:
+      projection?.fingerprintStatus ?? data.fingerprintStatus,
+    fingerprintTemplateId:
+      projection?.fingerprintTemplateId ??
+      data.fingerprintTemplateId ??
+      undefined,
+    templateId:
+      projection?.templateId ??
+      data.fingerprintTemplateId ??
+      undefined,
+  } satisfies CampusUserProjectionSource;
   const normalizedRow = normalizeCampusUserRow(
     uid,
     {
       uid,
       role: data.role,
+      isStudent: data.isStudent,
       schoolId: data.schoolId,
       studentId: data.studentId,
       email: data.email,
@@ -548,6 +596,10 @@ function mapRemoteStudent(
       fullName: data.fullName,
       name: data.name,
       studentName: data.studentName,
+      ecPosition: data.ecPosition,
+      assignedCourse: data.assignedCourse,
+      courseScope: data.courseScope,
+      isBod: data.isBod,
       course: data.course,
       year: data.year,
       yearLevel: data.yearLevel,
@@ -556,14 +608,72 @@ function mapRemoteStudent(
       createdAt:
         typeof data.createdAtMs === "number" ? data.createdAtMs : undefined,
     } satisfies CampusUserProfileSource,
-    projection satisfies CampusUserProjectionSource | undefined,
+    normalizedProjection,
     {
       missingCourseLabel: "Unassigned",
       missingYearLevelLabel: "Unassigned",
     },
   );
 
-  return mapNormalizedRowToStudent(normalizedRow);
+  return mapNormalizedRowToStudent(normalizedRow, data, projection);
+}
+
+function applyStudentPatch(student: Student, patch: StudentPatch) {
+  const patchKeys = Object.keys(patch) as Array<keyof StudentPatch>;
+  if (patchKeys.length === 0) {
+    return student;
+  }
+
+  const changed = patchKeys.some((key) => !Object.is(student[key], patch[key]));
+  return changed ? { ...student, ...patch } : student;
+}
+
+function countStudentsByCourse(rows: Student[]) {
+  return rows.reduce<Record<string, number>>((counts, row) => {
+    const normalizedCourse = normalizeCourse(row.course);
+    if (!normalizedCourse) {
+      return counts;
+    }
+
+    counts[normalizedCourse] = (counts[normalizedCourse] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function getIncludedRoles(rows: Student[]) {
+  return Array.from(
+    new Set(
+      rows.map((row) => row.role || row.rawRole || "unknown"),
+    ),
+  ).sort();
+}
+
+function buildStudentSearchHaystack(student: Student) {
+  return [
+    student.name,
+    student.rawName,
+    student.fullName,
+    student.studentName,
+    student.id,
+    student.studentId,
+    student.email,
+    student.course,
+    student.year,
+    student.yearLevel,
+    student.role,
+    student.rawRole,
+    student.ecPosition,
+  ]
+    .map((value) => trimValue(value).toLowerCase())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function logStudentLookupDebug(
+  event: string,
+  payload: Record<string, unknown>,
+) {
+  console.info(`[ecmember/students] ${event}`, payload);
 }
 
 function toErrorMessage(error: unknown, fallback: string) {
@@ -600,7 +710,7 @@ function toScopedStudentErrorMessage(
     lowered.includes("permission-denied") ||
     lowered.includes("missing or insufficient permissions")
   ) {
-    return `This B.O.D account can only manage students under ${viewerCourseScope}.`;
+    return `This B.O.D account can only manage student-identity rows under ${viewerCourseScope}.`;
   }
 
   return message;
@@ -648,7 +758,6 @@ function formatEventDate(date: Date | null, fallback: string) {
 }
 
 export default function ECStudentLookup() {
-  const functions = useMemo(() => getFunctions(app, "asia-southeast1"), []);
   const isCompactViewport = useIsBelowBreakpoint(1024);
   const [viewerProfile, setViewerProfile] = useState<ViewerProfile | null>(null);
   const [viewerProfileReady, setViewerProfileReady] = useState(false);
@@ -758,11 +867,10 @@ export default function ECStudentLookup() {
     setLoadError(null);
 
     try {
-      const fn = httpsCallable<
-        { limit: number; includeEcMembers: boolean },
-        { students?: RemoteStudent[] }
-      >(functions, "ecListStudents");
-      const res = await fn({ limit: 2000, includeEcMembers: true });
+      const rawCallableRows = await ecListStudents({
+        limit: 2000,
+        includeEcMembers: true,
+      });
 
       const projectionByUid = new Map<string, StudentDirectoryProjection>();
       try {
@@ -784,27 +892,68 @@ export default function ECStudentLookup() {
         // Student status controls should still load even if the portable projection is unavailable.
       }
 
-      const rows = (res.data?.students ?? [])
-        .filter((remoteStudent) => isStudentAudienceProfile(remoteStudent))
+      const studentIdentityRows = rawCallableRows.filter(
+        (remoteStudent) =>
+          isStudentAudienceProfile(remoteStudent) &&
+          hasStudentIdentityProfile(remoteStudent),
+      );
+      const mappedStudentRows = studentIdentityRows
         .map((remoteStudent) =>
           mapRemoteStudent(
             remoteStudent,
             projectionByUid.get(String(remoteStudent.uid ?? "").trim()),
           ),
-        )
-        .filter((student) => canManageStudent(viewerProfile, student));
+        );
+      const visibleRows = mappedStudentRows.filter((student) =>
+        canViewStudentLookupRow(viewerProfile, student),
+      );
+      const excludedByCourseScopeCount =
+        mappedStudentRows.length - visibleRows.length;
 
-      rows.sort(
+      visibleRows.sort(
         (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
       );
-      setStudents(rows);
+      logStudentLookupDebug("loadStudents", {
+        rawCallableRowsCount: rawCallableRows.length,
+        studentIdentityRowsCount: studentIdentityRows.length,
+        excludedByMissingStudentIdentityCount:
+          rawCallableRows.length - studentIdentityRows.length,
+        excludedByCourseScopeCount,
+        visibleStudentRowsCount: visibleRows.length,
+        includedRoles: getIncludedRoles(visibleRows),
+        courseCounts: countStudentsByCourse(visibleRows),
+        sampleEcBodStudentIdentityRows: visibleRows
+          .filter(
+            (student) =>
+              student.role === "bod" ||
+              student.role === "ecmember" ||
+              student.isBod,
+          )
+          .slice(0, 5)
+          .map((student) => ({
+            uid: student.uid,
+            role: student.role,
+            rawRole: student.rawRole,
+            isStudent: student.isStudent,
+            isBod: student.isBod,
+            name: student.name,
+            studentId: student.studentId,
+            schoolId: student.id,
+            course: student.course,
+            yearLevel: student.yearLevel,
+            ecPosition: student.ecPosition,
+            assignedCourse: student.assignedCourse,
+            courseScope: student.courseScope,
+          })),
+      });
+      setStudents(visibleRows);
     } catch (error: unknown) {
       setLoadError(toErrorMessage(error, "Failed to load students."));
       setStudents([]);
     } finally {
       setLoading(false);
     }
-  }, [functions, viewerCourseScope, viewerIsBod, viewerProfile, viewerProfileReady]);
+  }, [viewerCourseScope, viewerIsBod, viewerProfile, viewerProfileReady]);
 
   useEffect(() => {
     void loadStudents();
@@ -833,25 +982,27 @@ export default function ECStudentLookup() {
     return () => window.removeEventListener("resize", syncStudentsPerPage);
   }, []);
 
+  const visibleStudentRows = students;
+
   const courseOptions = useMemo(() => {
     if (viewerIsBod && viewerCourseScope) {
       return [viewerCourseScope];
     }
 
     const set = new Set(DEFAULT_COURSES);
-    students.forEach((s) => {
+    visibleStudentRows.forEach((s) => {
       if (s.course && s.course !== "Unassigned") set.add(s.course);
     });
     return Array.from(set);
-  }, [students, viewerCourseScope, viewerIsBod]);
+  }, [viewerCourseScope, viewerIsBod, visibleStudentRows]);
 
   const yearOptions = useMemo(() => {
     const set = new Set(DEFAULT_YEARS);
-    students.forEach((s) => {
+    visibleStudentRows.forEach((s) => {
       if (s.year && s.year !== "Unassigned") set.add(s.year);
     });
     return Array.from(set);
-  }, [students]);
+  }, [visibleStudentRows]);
 
   const courseFilterItems = useMemo<SelectOption[]>(
     () =>
@@ -897,33 +1048,41 @@ export default function ECStudentLookup() {
     [],
   );
 
-  const filtered = useMemo(() => {
+  const filteredRows = useMemo(() => {
     const search = queryText.trim().toLowerCase();
 
-    return students.filter((s) => {
+    return visibleStudentRows.filter((s) => {
       const matchQuery =
-        !search ||
-        s.name.toLowerCase().includes(search) ||
-        s.id.toLowerCase().includes(search) ||
-        s.studentId.toLowerCase().includes(search) ||
-        (s.email ?? "").toLowerCase().includes(search);
+        !search || buildStudentSearchHaystack(s).includes(search);
 
-      const matchCourse = courseFilter ? s.course === courseFilter : true;
-      const matchYear = yearFilter ? s.year === yearFilter : true;
+      const matchCourse = courseFilter
+        ? normalizeCourse(s.course) === normalizeCourse(courseFilter)
+        : true;
+      const matchYear = yearFilter ? s.yearLevel === yearFilter : true;
 
       return matchQuery && matchCourse && matchYear;
     });
-  }, [students, queryText, courseFilter, yearFilter]);
+  }, [courseFilter, queryText, visibleStudentRows, yearFilter]);
 
   const studentTotalPages = useMemo(
-    () => Math.max(1, Math.ceil(filtered.length / studentsPerPage)),
-    [filtered.length, studentsPerPage],
+    () => Math.max(1, Math.ceil(filteredRows.length / studentsPerPage)),
+    [filteredRows.length, studentsPerPage],
   );
 
   const paginatedStudents = useMemo(() => {
     const start = (studentPage - 1) * studentsPerPage;
-    return filtered.slice(start, start + studentsPerPage);
-  }, [filtered, studentPage, studentsPerPage]);
+    return filteredRows.slice(start, start + studentsPerPage);
+  }, [filteredRows, studentPage, studentsPerPage]);
+
+  useEffect(() => {
+    logStudentLookupDebug("filterStudents", {
+      visibleStudentRowsCount: visibleStudentRows.length,
+      filteredRowsCount: filteredRows.length,
+      queryText: queryText.trim(),
+      courseFilter: normalizeCourse(courseFilter) || "",
+      yearFilter,
+    });
+  }, [courseFilter, filteredRows.length, queryText, visibleStudentRows.length, yearFilter]);
 
   const attendedEvents = useMemo(
     () =>
@@ -1054,9 +1213,17 @@ export default function ECStudentLookup() {
   const selectedStudentStatus = selectedStudent?.status ?? "Active";
   const selectedStudentReadyForClearance =
     selectedStudent?.readyForClearance ?? false;
-  const bodStudentOnlyError = viewerCourseScope
-    ? `This B.O.D account can only manage students under ${viewerCourseScope}.`
-    : "B.O.D course scope is missing. Ask admin to update your account.";
+  const selectedStudentHasStudentIdentity = selectedStudent
+    ? hasStudentIdentityProfile(selectedStudent)
+    : false;
+  const selectedStudentCanManageActions = selectedStudent
+    ? canManageStudentActions(viewerProfile, selectedStudent)
+    : false;
+  const studentActionBlockedError = viewerIsBod
+    ? viewerCourseScope
+      ? `This B.O.D account can only manage student-identity rows under ${viewerCourseScope}. Admin, teacher, and cross-course accounts stay read-only.`
+      : "B.O.D course scope is missing. Ask admin to update your account."
+    : "This student record is read-only for the current account.";
 
   const updateStudentState = useCallback(
     (studentUid: string, patch: StudentPatch) => {
@@ -1065,50 +1232,12 @@ export default function ECStudentLookup() {
         const next = prev.map((student) => {
           if (student.uid !== studentUid) return student;
 
-          const nextId = patch.id ?? student.id;
-          const nextStudentId = patch.studentId ?? student.studentId;
-          const nextName = patch.name ?? student.name;
-          const nextRawName = patch.rawName ?? student.rawName;
-          const nextCourse = patch.course ?? student.course;
-          const nextYear = patch.year ?? student.year;
-          const nextStatus = patch.status ?? student.status;
-          const nextFingerprintStatus =
-            patch.fingerprintStatus ?? student.fingerprintStatus;
-          const nextReadyForClearance =
-            patch.readyForClearance ?? student.readyForClearance;
-          const nextEmail = patch.email ?? student.email;
-          const nextRole = patch.role ?? student.role;
-          if (
-            nextId === student.id &&
-            nextStudentId === student.studentId &&
-            nextName === student.name &&
-            nextRawName === student.rawName &&
-            nextCourse === student.course &&
-            nextYear === student.year &&
-            nextStatus === student.status &&
-            nextFingerprintStatus === student.fingerprintStatus &&
-            nextReadyForClearance === student.readyForClearance &&
-            nextEmail === student.email &&
-            nextRole === student.role
-          ) {
-            return student;
+          const patchedStudent = applyStudentPatch(student, patch);
+          if (patchedStudent !== student) {
+            changed = true;
           }
 
-          changed = true;
-          return {
-            ...student,
-            id: nextId,
-            studentId: nextStudentId,
-            name: nextName,
-            rawName: nextRawName,
-            course: nextCourse,
-            year: nextYear,
-            status: nextStatus,
-            fingerprintStatus: nextFingerprintStatus,
-            readyForClearance: nextReadyForClearance,
-            email: nextEmail,
-            role: nextRole,
-          };
+          return patchedStudent;
         });
 
         return changed ? next : prev;
@@ -1116,50 +1245,7 @@ export default function ECStudentLookup() {
 
       setSelectedStudent((prev) => {
         if (!prev || prev.uid !== studentUid) return prev;
-
-        const nextId = patch.id ?? prev.id;
-        const nextStudentId = patch.studentId ?? prev.studentId;
-        const nextName = patch.name ?? prev.name;
-        const nextRawName = patch.rawName ?? prev.rawName;
-        const nextCourse = patch.course ?? prev.course;
-        const nextYear = patch.year ?? prev.year;
-        const nextStatus = patch.status ?? prev.status;
-        const nextFingerprintStatus =
-          patch.fingerprintStatus ?? prev.fingerprintStatus;
-        const nextReadyForClearance =
-          patch.readyForClearance ?? prev.readyForClearance;
-        const nextEmail = patch.email ?? prev.email;
-        const nextRole = patch.role ?? prev.role;
-        if (
-          nextId === prev.id &&
-          nextStudentId === prev.studentId &&
-          nextName === prev.name &&
-          nextRawName === prev.rawName &&
-          nextCourse === prev.course &&
-          nextYear === prev.year &&
-          nextStatus === prev.status &&
-          nextFingerprintStatus === prev.fingerprintStatus &&
-          nextReadyForClearance === prev.readyForClearance &&
-          nextEmail === prev.email &&
-          nextRole === prev.role
-        ) {
-          return prev;
-        }
-
-        return {
-          ...prev,
-          id: nextId,
-          studentId: nextStudentId,
-          name: nextName,
-          rawName: nextRawName,
-          course: nextCourse,
-          year: nextYear,
-          status: nextStatus,
-          fingerprintStatus: nextFingerprintStatus,
-          readyForClearance: nextReadyForClearance,
-          email: nextEmail,
-          role: nextRole,
-        };
+        return applyStudentPatch(prev, patch);
       });
     },
     [],
@@ -1495,7 +1581,7 @@ export default function ECStudentLookup() {
       return [
         {
           label: "Total Students",
-          value: students.length,
+          value: visibleStudentRows.length,
           description:
             viewerIsBod && !viewerCourseScope ?
               BOD_SCOPE_MISSING_ERROR :
@@ -1505,7 +1591,7 @@ export default function ECStudentLookup() {
         },
         ...scopedSummaryCards.map((item) => ({
           label: item.label,
-          value: students.filter(
+          value: visibleStudentRows.filter(
             (student) =>
               normalizeCourse(student.course) === normalizeCourse(item.course),
           ).length,
@@ -1515,7 +1601,7 @@ export default function ECStudentLookup() {
         })),
       ];
     },
-    [students, viewerCourseScope, viewerIsBod],
+    [viewerCourseScope, viewerIsBod, visibleStudentRows],
   );
 
   const clearFilters = () => {
@@ -1540,10 +1626,10 @@ export default function ECStudentLookup() {
   };
 
   const openEditProfileModal = (student: Student) => {
-    if (viewerIsBod && student.role !== "student") {
+    if (!canManageStudentActions(viewerProfile, student)) {
       setStatusNotice({
         type: "err",
-        msg: bodStudentOnlyError,
+        msg: studentActionBlockedError,
       });
       return;
     }
@@ -1574,14 +1660,14 @@ export default function ECStudentLookup() {
       return;
     }
 
-    if (viewerIsBod && student.role !== "student") {
+    if (!canManageStudentActions(viewerProfile, student)) {
       setStatusNotice({
         type: "err",
-        msg: bodStudentOnlyError,
+        msg: studentActionBlockedError,
       });
       campusToast.error({
         title: "Status update unavailable",
-        description: bodStudentOnlyError,
+        description: studentActionBlockedError,
         dedupeKey: `ec-students:status-role-blocked:${student.uid}`,
       });
       return;
@@ -1664,14 +1750,14 @@ export default function ECStudentLookup() {
       return;
     }
 
-    if (viewerIsBod && student.role !== "student") {
+    if (!canManageStudentActions(viewerProfile, student)) {
       setStatusNotice({
         type: "err",
-        msg: bodStudentOnlyError,
+        msg: studentActionBlockedError,
       });
       campusToast.error({
         title: "Clearance update unavailable",
-        description: bodStudentOnlyError,
+        description: studentActionBlockedError,
         dedupeKey: `ec-students:clearance-role-blocked:${student.uid}`,
       });
       return;
@@ -1761,10 +1847,10 @@ export default function ECStudentLookup() {
       return;
     }
 
-    if (viewerIsBod && selectedStudentRole !== "student") {
+    if (!selectedStudentCanManageActions) {
       campusToast.error({
         title: "Profile update unavailable",
-        description: bodStudentOnlyError,
+        description: studentActionBlockedError,
         dedupeKey: "ec-students:edit-profile:role-blocked",
       });
       return;
@@ -1776,7 +1862,9 @@ export default function ECStudentLookup() {
       ? viewerCourseScope
       : editProfileCourse.trim();
     const yearLevel = editProfileYearLevel.trim();
-    const allowsBlankAcademicFields = selectedStudentRole === "teacher";
+    const allowsBlankAcademicFields =
+      selectedStudentRole === "teacher" &&
+      !selectedStudentHasStudentIdentity;
     const originalRawName = String(selectedStudent.rawName ?? "").trim();
     const originalDisplayName = formatStudentFullName(
       {
@@ -1842,15 +1930,24 @@ export default function ECStudentLookup() {
         {
           uid: result.uid,
           role: selectedStudentRole,
+          isStudent: selectedStudent.isStudent,
+          isBod: selectedStudent.isBod,
           schoolId: result.schoolId,
           studentId: selectedStudent.studentId,
           fullName: result.name,
           name: result.name,
           studentName: result.name,
+          ecPosition: selectedStudent.ecPosition,
+          assignedCourse: selectedStudent.assignedCourse,
+          courseScope: selectedStudent.courseScope,
           course: result.course,
           yearLevel: result.yearLevel,
           status: selectedStudent.status,
           readyForClearance: selectedStudent.readyForClearance,
+          fingerprintStatus:
+            selectedStudent.fingerprintStatus === "Active"
+              ? "active"
+              : "inactive",
           email: selectedStudent.email,
           createdAtMs:
             typeof selectedStudent.createdAt === "number"
@@ -1858,11 +1955,17 @@ export default function ECStudentLookup() {
               : null,
         },
         {
+          role: selectedStudent.rawRole,
+          isStudent: selectedStudent.isStudent,
+          isBod: selectedStudent.isBod,
           studentId: selectedStudent.studentId,
           schoolId: result.schoolId,
           fullName: result.name,
           name: result.name,
           studentName: result.name,
+          ecPosition: selectedStudent.ecPosition,
+          assignedCourse: selectedStudent.assignedCourse,
+          courseScope: selectedStudent.courseScope,
           course: result.course,
           yearLevel: result.yearLevel,
           status: selectedStudent.status,
@@ -1875,12 +1978,21 @@ export default function ECStudentLookup() {
       );
 
       updateStudentState(selectedStudent.uid, {
+        rawRole: updatedStudent.rawRole,
+        isStudent: updatedStudent.isStudent,
+        isBod: updatedStudent.isBod,
+        ecPosition: updatedStudent.ecPosition,
+        assignedCourse: updatedStudent.assignedCourse,
+        courseScope: updatedStudent.courseScope,
         id: updatedStudent.id,
         studentId: updatedStudent.studentId,
         name: updatedStudent.name,
         rawName: updatedStudent.rawName,
+        fullName: updatedStudent.fullName,
+        studentName: updatedStudent.studentName,
         course: updatedStudent.course,
         year: updatedStudent.year,
+        yearLevel: updatedStudent.yearLevel,
         email: updatedStudent.email,
         role: updatedStudent.role,
       });
@@ -1996,10 +2108,10 @@ export default function ECStudentLookup() {
         meta={
           <>
             <Chip variant="flat" className="bg-white/15 text-white">
-              {students.length} students loaded
+              {visibleStudentRows.length} students loaded
             </Chip>
             <Chip variant="flat" className="bg-white/15 text-white">
-              {filtered.length} matching filters
+              {filteredRows.length} matching filters
             </Chip>
             {viewerIsBod && viewerCourseScope && (
               <Chip variant="flat" className="bg-white/15 text-white">
@@ -2036,7 +2148,7 @@ export default function ECStudentLookup() {
               aria-label="Search students"
               type="text"
               label="Search"
-              placeholder="Search student name, school ID, or email"
+              placeholder="Search name, ID, course, role, EC position, or email"
               value={queryText}
               onValueChange={setQueryText}
               className="w-full"
@@ -2096,7 +2208,7 @@ export default function ECStudentLookup() {
             </Button>
 
             <FingerprintEnrollmentManager
-              students={filtered}
+              students={filteredRows}
               buttonClassName="w-full"
             />
 
@@ -2348,7 +2460,7 @@ export default function ECStudentLookup() {
             </Card>
           ))}
 
-        {!loading && !loadError && filtered.length === 0 && (
+        {!loading && !loadError && filteredRows.length === 0 && (
           <Card shadow="none" className="border border-border/70 bg-white/95">
             <CardBody className="p-4">
               <ECEmptyState
@@ -2448,7 +2560,7 @@ export default function ECStudentLookup() {
         />
       </div>
 
-      {!loading && !loadError && filtered.length > studentsPerPage && (
+      {!loading && !loadError && filteredRows.length > studentsPerPage && (
         <div className="flex justify-center">
           <Pagination
             showControls
@@ -2556,7 +2668,7 @@ export default function ECStudentLookup() {
                           }
                           isLoading={updatingStudentUid === selectedStudent.uid}
                           isDisabled={
-                            (viewerIsBod && selectedStudent.role !== "student") ||
+                            !selectedStudentCanManageActions ||
                             markingClearanceStudentUid === selectedStudent.uid ||
                             savingProfileUid === selectedStudent.uid
                           }
@@ -2588,7 +2700,7 @@ export default function ECStudentLookup() {
                             markingClearanceStudentUid === selectedStudent.uid
                           }
                           isDisabled={
-                            (viewerIsBod && selectedStudent.role !== "student") ||
+                            !selectedStudentCanManageActions ||
                             updatingStudentUid === selectedStudent.uid ||
                             savingProfileUid === selectedStudent.uid
                           }
@@ -2602,7 +2714,7 @@ export default function ECStudentLookup() {
                           variant="bordered"
                           onPress={() => openEditProfileModal(selectedStudent)}
                           isDisabled={
-                            (viewerIsBod && selectedStudent.role !== "student") ||
+                            !selectedStudentCanManageActions ||
                             updatingStudentUid === selectedStudent.uid ||
                             markingClearanceStudentUid === selectedStudent.uid
                           }
@@ -2613,9 +2725,9 @@ export default function ECStudentLookup() {
                     )}
                     {selectedStudent &&
                       viewerIsBod &&
-                      selectedStudent.role !== "student" && (
+                      !selectedStudentCanManageActions && (
                         <p className="mt-2 text-xs text-amber-700">
-                          B.O.D actions stay limited to student records within
+                          B.O.D actions stay limited to student-identity rows within
                           {` ${viewerCourseScope ?? "your assigned course"}.`}
                         </p>
                       )}
@@ -2930,7 +3042,10 @@ export default function ECStudentLookup() {
                     }
                   }}
                   placeholder="Select course"
-                  isRequired={selectedStudentRole !== "teacher"}
+                  isRequired={
+                    selectedStudentHasStudentIdentity ||
+                    selectedStudentRole !== "teacher"
+                  }
                   isDisabled={viewerIsBod}
                 >
                   {courseOptions.map((course) => (
@@ -2949,7 +3064,10 @@ export default function ECStudentLookup() {
                     }
                   }}
                   placeholder="Select year level"
-                  isRequired={selectedStudentRole !== "teacher"}
+                  isRequired={
+                    selectedStudentHasStudentIdentity ||
+                    selectedStudentRole !== "teacher"
+                  }
                 >
                   {yearOptions.map((yearLevel) => (
                     <SelectItem key={yearLevel}>{yearLevel}</SelectItem>

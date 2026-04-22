@@ -105,6 +105,17 @@ function isEcStudentLikeRole(
   );
 }
 
+function hasStudentIdentityEligibility(
+  profile?: StudentAudienceProfileLike | null,
+) {
+  const normalizedRole = normalizeCampusRole(profile?.role);
+  return (
+    normalizedRole === "student" ||
+    profile?.isStudent === true ||
+    isEcStudentLikeRole(profile)
+  );
+}
+
 export function resolveStudentAudienceName(
   profile?: StudentAudienceProfileLike | null,
 ) {
@@ -121,24 +132,14 @@ export function resolveStudentAudienceName(
 export function hasStudentIdentityProfile(
   profile?: StudentAudienceProfileLike | null,
 ) {
-  const normalizedRole = normalizeCampusRole(profile?.role);
-  if (normalizedRole === "student") {
-    return true;
-  }
-
-  return isEcStudentLikeRole(profile) && hasCompleteStudentIdentity(profile);
+  return (
+    hasStudentIdentityEligibility(profile) &&
+    hasCompleteStudentIdentity(profile)
+  );
 }
 
 export function isStudentAudienceProfile(
   profile?: StudentAudienceProfileLike | null,
 ) {
-  const normalizedRole = normalizeCampusRole(profile?.role);
-  if (
-    normalizedRole !== "student" &&
-    !isEcStudentLikeRole(profile)
-  ) {
-    return false;
-  }
-
-  return hasCompleteStudentIdentity(profile);
+  return hasStudentIdentityProfile(profile);
 }

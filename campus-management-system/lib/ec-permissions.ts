@@ -10,6 +10,7 @@ import {
   isEcWorkspaceRole as isEcWorkspaceRoleValue,
   normalizeCampusRole,
 } from "@/lib/campus-role";
+import { hasStudentIdentityProfile } from "@/lib/student-audience";
 
 export const EC_POSITION_OPTIONS = [
   "President",
@@ -61,7 +62,21 @@ type ECProfileLike = {
 type StudentLike = {
   role?: unknown;
   isStudent?: unknown;
+  isBod?: unknown;
+  ecPosition?: unknown;
+  assignedCourse?: unknown;
+  schoolId?: unknown;
+  studentId?: unknown;
+  year?: unknown;
+  yearLevel?: unknown;
+  name?: unknown;
+  fullName?: unknown;
+  studentName?: unknown;
+  displayName?: unknown;
+  firstName?: unknown;
+  lastName?: unknown;
   course?: unknown;
+  courseScope?: unknown;
 } | null | undefined;
 
 type EventLike = {
@@ -306,6 +321,43 @@ export function canManageStudent(profile: ECProfileLike, student: StudentLike) {
   const courseScope = getCourseScope(profile);
   const studentCourse = normalizeMaybeCourse(student?.course);
   return Boolean(courseScope && studentCourse && courseScope === studentCourse);
+}
+
+export function canViewStudentLookupRow(
+  profile: ECProfileLike,
+  student: StudentLike,
+) {
+  if (!hasStudentIdentityProfile(student)) {
+    return false;
+  }
+
+  if (normalizeLower(profile?.role) === "admin") return true;
+  if (isRegularEC(profile)) return true;
+  if (!isBOD(profile)) return false;
+
+  const courseScope = getCourseScope(profile);
+  const studentCourse = normalizeMaybeCourse(student?.course);
+  return Boolean(courseScope && studentCourse && courseScope === studentCourse);
+}
+
+export function canManageStudentActions(
+  profile: ECProfileLike,
+  student: StudentLike,
+) {
+  if (!canViewStudentLookupRow(profile, student)) {
+    return false;
+  }
+
+  if (normalizeLower(profile?.role) === "admin") return true;
+  if (isRegularEC(profile)) return true;
+  if (!isBOD(profile)) return false;
+
+  const studentRole = normalizeCampusRole(student?.role);
+  if (studentRole === "admin" || studentRole === "teacher") {
+    return false;
+  }
+
+  return true;
 }
 
 export function canManagePayment(

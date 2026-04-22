@@ -50,6 +50,7 @@ export type CampusUserProfileSource = {
 
 export type CampusUserProjectionSource = {
   uid?: string;
+  role?: string;
   isStudent?: boolean;
   studentId?: string;
   schoolId?: string;
@@ -205,7 +206,7 @@ export function normalizeCampusUserRow(
   const missingStudentIdLabel = options?.missingStudentIdLabel ?? "-";
   const fallbackSchoolIdToStudentId =
     options?.fallbackSchoolIdToStudentId !== false;
-  const role = normalizeRole(profile?.role);
+  const role = normalizeRole(profile?.role ?? projection?.role);
   const schoolId =
     trimValue(profile?.schoolId) ||
     trimValue(projection?.schoolId) ||
@@ -262,7 +263,7 @@ export function normalizeCampusUserRow(
   return {
     uid,
     role,
-    rawRole: trimValue(profile?.role),
+    rawRole: trimValue(profile?.role) || trimValue(projection?.role),
     schoolId,
     studentId,
     firstName,

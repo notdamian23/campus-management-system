@@ -204,6 +204,41 @@ export type CreateCampusStudentResult = {
   uid?: string;
 };
 
+export type EcListStudentsPayload = {
+  limit?: number;
+  includeEcMembers?: boolean;
+};
+
+export type EcListStudentItem = {
+  uid?: string;
+  role?: string;
+  isStudent?: boolean;
+  isBod?: boolean;
+  schoolId?: string;
+  studentId?: string;
+  firstName?: string;
+  lastName?: string;
+  fullName?: string;
+  studentName?: string;
+  name?: string;
+  course?: string;
+  year?: string;
+  yearLevel?: string;
+  ecPosition?: string | null;
+  assignedCourse?: string | null;
+  courseScope?: string | null;
+  status?: string;
+  readyForClearance?: boolean;
+  fingerprintStatus?: string;
+  fingerprintTemplateId?: number | string | null;
+  email?: string;
+  createdAtMs?: number | null;
+};
+
+export type EcListStudentsResult = {
+  students?: EcListStudentItem[];
+};
+
 export type UpdateCampusStudentProfilePayload = {
   uid: string;
   name: string;
@@ -897,6 +932,23 @@ export async function updateCampusStudentProfile(
 
   const result = await callable(payload);
   return result.data;
+}
+
+export async function ecListStudents(
+  payload: EcListStudentsPayload = {},
+): Promise<EcListStudentItem[]> {
+  logAuthEvent("info", "Listing CAMPUS students via callable", {
+    limit: payload.limit ?? null,
+    includeEcMembers: payload.includeEcMembers === true,
+  });
+
+  const callable = httpsCallable<EcListStudentsPayload, EcListStudentsResult>(
+    getCampusFunctions(),
+    "ecListStudents",
+  );
+
+  const result = await callable(payload);
+  return result.data?.students ?? [];
 }
 
 export async function updateStudentAccountStatus(
