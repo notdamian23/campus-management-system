@@ -1,4 +1,5 @@
 import * as admin from "firebase-admin";
+import * as functionsLogger from "firebase-functions/logger";
 import {HttpsError, onCall, onRequest, type CallableRequest} from "firebase-functions/v2/https";
 import {
   onDocumentCreatedWithAuthContext,
@@ -4450,6 +4451,60 @@ type EcActorContext = {
   courseScope: string;
 };
 
+type CampusNotificationAudienceMode = "filtered" | "course" | "explicit";
+type CampusNotificationRecipientType = "all" | "course" | "year" | "student";
+type CampusNotificationStatus = "scheduled" | "sent";
+type CampusNotificationRecipient = {
+  uid: string;
+  schoolId: string;
+  studentName: string;
+  course: string;
+  yearLevel: string;
+  status: string;
+  role: "student";
+};
+
+type CampusDocumentType = "PDF" | "Images" | "Word Files" | "Spreadsheets";
+type CampusDocumentCategory = "Events" | "Payments" | "Clearance" | "General";
+type CampusDocumentStatus = "pending-upload" | "active";
+type CampusDocumentUploadMethod = "firebase-storage-sdk" | "PUT";
+
+const CAMPUS_DOCUMENT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const CAMPUS_DOCUMENT_ALLOWED_TYPES = new Set<CampusDocumentType>([
+  "PDF",
+  "Images",
+  "Word Files",
+  "Spreadsheets",
+]);
+const CAMPUS_DOCUMENT_ALLOWED_CATEGORIES = new Set<CampusDocumentCategory>([
+  "Events",
+  "Payments",
+  "Clearance",
+  "General",
+]);
+const CAMPUS_DOCUMENT_IMAGE_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "svg",
+]);
+const CAMPUS_DOCUMENT_PDF_EXTENSIONS = new Set(["pdf"]);
+const CAMPUS_DOCUMENT_WORD_EXTENSIONS = new Set(["doc", "docx"]);
+const CAMPUS_DOCUMENT_SPREADSHEET_EXTENSIONS = new Set(["xls", "xlsx", "csv"]);
+const CAMPUS_DOCUMENT_WORD_CONTENT_TYPES = new Set([
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+const CAMPUS_DOCUMENT_SPREADSHEET_CONTENT_TYPES = new Set([
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "text/csv",
+  "application/csv",
+]);
+const CAMPUS_DOCUMENT_SIGNED_UPLOAD_TTL_MS = 10 * 60 * 1000;
+
 function normalizeEnrollmentSessionStatus(value: unknown): EnrollmentSessionStatus {
   const normalized = normalizeLower(value);
   if (normalized === "paired") return "paired";
@@ -4509,6 +4564,197 @@ function allowedDocumentStoragePrefixesForActor(
   ];
 }
 
+function sanitizeCampusDocumentFileName(value: unknown): string {
+  return normalizeText(value)
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/[\\/]+/g, "-")
+    .replace(/[<>:"|?*]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+/, "")
+    .trim()
+    .slice(0, 180);
+}
+
+function getCampusDocumentExtension(fileName: string): string {
+  const lastDot = fileName.lastIndexOf(".");
+  return lastDot >= 0 ? normalizeLower(fileName.slice(lastDot + 1)) : "";
+}
+
+function inferCampusDocumentTypeFromFileName(fileName: string): CampusDocumentType | "" {
+  const extension = getCampusDocumentExtension(fileName);
+  if (CAMPUS_DOCUMENT_IMAGE_EXTENSIONS.has(extension)) return "Images";
+  if (CAMPUS_DOCUMENT_PDF_EXTENSIONS.has(extension)) return "PDF";
+  if (CAMPUS_DOCUMENT_WORD_EXTENSIONS.has(extension)) return "Word Files";
+  if (CAMPUS_DOCUMENT_SPREADSHEET_EXTENSIONS.has(extension)) return "Spreadsheets";
+  return "";
+}
+
+function normalizeCampusDocumentType(
+  value: unknown,
+  fileName?: string,
+): CampusDocumentType | "" {
+  const normalized = normalizeText(value) as CampusDocumentType;
+  if (CAMPUS_DOCUMENT_ALLOWED_TYPES.has(normalized)) {
+    return normalized;
+  }
+
+  return fileName ? inferCampusDocumentTypeFromFileName(fileName) : "";
+}
+
+function normalizeCampusDocumentCategory(value: unknown): CampusDocumentCategory | "" {
+  const normalized = normalizeText(value) as CampusDocumentCategory;
+  return CAMPUS_DOCUMENT_ALLOWED_CATEGORIES.has(normalized) ? normalized : "";
+}
+
+function normalizeCampusDocumentStatus(value: unknown): CampusDocumentStatus {
+  return normalizeLower(value) === "pending-upload" ? "pending-upload" : "active";
+}
+
+function inferCampusDocumentContentTypeFromFileName(fileName: string): string {
+  const extension = getCampusDocumentExtension(fileName);
+  if (extension === "png") return "image/png";
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "gif") return "image/gif";
+  if (extension === "webp") return "image/webp";
+  if (extension === "svg") return "image/svg+xml";
+  if (extension === "pdf") return "application/pdf";
+  if (extension === "doc") return "application/msword";
+  if (extension === "docx") {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (extension === "xls") return "application/vnd.ms-excel";
+  if (extension === "xlsx") {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
+  if (extension === "csv") return "text/csv";
+  return "";
+}
+
+function isAllowedCampusDocumentContentType(
+  contentType: string,
+  type: CampusDocumentType,
+): boolean {
+  if (!contentType) {
+    return false;
+  }
+
+  if (type === "Images") {
+    return contentType.startsWith("image/");
+  }
+  if (type === "PDF") {
+    return contentType === "application/pdf";
+  }
+  if (type === "Word Files") {
+    return CAMPUS_DOCUMENT_WORD_CONTENT_TYPES.has(contentType);
+  }
+  return CAMPUS_DOCUMENT_SPREADSHEET_CONTENT_TYPES.has(contentType);
+}
+
+function normalizeCampusDocumentContentType(
+  value: unknown,
+  fileName: string,
+  type: CampusDocumentType,
+): string {
+  const normalized = normalizeLower(value);
+  if (isAllowedCampusDocumentContentType(normalized, type)) {
+    return normalized;
+  }
+
+  return inferCampusDocumentContentTypeFromFileName(fileName) || "application/octet-stream";
+}
+
+function validateCampusDocumentUploadInput(body: Record<string, unknown>): {
+  displayName: string;
+  fileName: string;
+  type: CampusDocumentType;
+  category: CampusDocumentCategory;
+  sizeBytes: number;
+  contentType: string;
+} {
+  const displayName = normalizeText(body.name);
+  const fileName = sanitizeCampusDocumentFileName(displayName);
+  const category = normalizeCampusDocumentCategory(body.category) || "General";
+  const sizeBytes = Number(body.sizeBytes);
+  const type =
+    normalizeCampusDocumentType(body.type, fileName) ||
+    inferCampusDocumentTypeFromFileName(fileName);
+  const contentType = type ?
+    normalizeCampusDocumentContentType(body.contentType, fileName, type) :
+    "";
+
+  if (!displayName || !fileName) {
+    throw new HttpsError("invalid-argument", "A valid file name is required.");
+  }
+  if (!type) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Only image, PDF, Excel, and Word documents are allowed.",
+    );
+  }
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    throw new HttpsError("invalid-argument", "sizeBytes must be a positive number.");
+  }
+  if (sizeBytes > CAMPUS_DOCUMENT_MAX_FILE_SIZE_BYTES) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Files larger than 10 MB are not allowed.",
+    );
+  }
+
+  return {
+    displayName,
+    fileName,
+    type,
+    category,
+    sizeBytes,
+    contentType,
+  };
+}
+
+function campusDocumentStoragePathForActor(
+  actor: EcActorContext,
+  docId: string,
+  fileName: string,
+): {
+  ownerType: "ec" | "bod";
+  storagePath: string;
+  courseScope: string | null;
+  courseScopeSlug: string | null;
+  createdByCourseScope: string | null;
+  course: string | null;
+  courses: string[];
+} {
+  if (actor.isBod) {
+    const courseScopeSlug = courseScopeSlugFromValue(actor.courseScope);
+    if (!courseScopeSlug) {
+      throw new HttpsError(
+        "failed-precondition",
+        "B.O.D. profile is missing a valid course scope slug.",
+      );
+    }
+
+    return {
+      ownerType: "bod",
+      storagePath: `documents/course/${courseScopeSlug}/${docId}/${fileName}`,
+      courseScope: actor.courseScope,
+      courseScopeSlug,
+      createdByCourseScope: actor.courseScope,
+      course: actor.courseScope,
+      courses: [actor.courseScope],
+    };
+  }
+
+  return {
+    ownerType: "ec",
+    storagePath: `ec-documents/shared/${docId}/${fileName}`,
+    courseScope: null,
+    courseScopeSlug: null,
+    createdByCourseScope: null,
+    course: null,
+    courses: [],
+  };
+}
+
 function enrollmentSessionCourseScope(data: FirebaseFirestore.DocumentData): string {
   return (
     normalizeCourseLabel(data.courseScope) ||
@@ -4523,6 +4769,7 @@ function ecDocumentOwnerType(data: FirebaseFirestore.DocumentData): "ec" | "bod"
 function ecDocumentCourseScope(data: FirebaseFirestore.DocumentData): string {
   return (
     normalizeCourseLabel(data.courseScope) ||
+    normalizeCourseLabel(data.courseScopeSlug) ||
     normalizeCourseLabel(data.createdByCourseScope) ||
     normalizeCourseLabel(data.course)
   );
@@ -4532,10 +4779,37 @@ function ecDocumentStrictCourseScope(data: FirebaseFirestore.DocumentData): stri
   return ecDocumentCourseScope(data);
 }
 
-function ecDocumentCreatedByUid(data: FirebaseFirestore.DocumentData): string {
-  return normalizeText(
-    data.createdBy || data.createdByUid || data.uploadedByUid || data.ownerUid,
-  );
+function ecDocumentOwnedByUid(
+  data: FirebaseFirestore.DocumentData,
+  uid: string,
+): boolean {
+  const normalizedUid = normalizeText(uid);
+  if (!normalizedUid) {
+    return false;
+  }
+
+  return [
+    data.createdBy,
+    data.createdByUid,
+    data.uploadedByUid,
+    data.ownerUid,
+    data.uploadedBy,
+  ].some((value) => normalizeText(value) === normalizedUid);
+}
+
+function ecDocumentStoragePath(data: FirebaseFirestore.DocumentData): string {
+  return normalizeText(data.storagePath);
+}
+
+function ecDocumentMatchesStoragePath(
+  data: FirebaseFirestore.DocumentData,
+  storagePath: string,
+): boolean {
+  return ecDocumentStoragePath(data) === normalizeText(storagePath);
+}
+
+function isPendingCampusDocument(data: FirebaseFirestore.DocumentData): boolean {
+  return normalizeCampusDocumentStatus(data.status) === "pending-upload";
 }
 
 function canEcActorAccessDocument(
@@ -4553,8 +4827,54 @@ function canEcActorAccessDocument(
   return (
     ecDocumentOwnerType(data) === "bod" &&
     ecDocumentStrictCourseScope(data) === actor.courseScope &&
-    ecDocumentCreatedByUid(data) === actor.uid
+    ecDocumentOwnedByUid(data, actor.uid)
   );
+}
+
+function canEcActorViewActiveDocument(
+  actor: EcActorContext,
+  data: FirebaseFirestore.DocumentData,
+): boolean {
+  return !isPendingCampusDocument(data) && canEcActorAccessDocument(actor, data);
+}
+
+function toCampusDocumentListItem(
+  documentId: string,
+  data: FirebaseFirestore.DocumentData,
+) {
+  const fileName = normalizeText(data.fileName);
+  const displayName = normalizeText(data.name) || fileName || "Untitled";
+  const type =
+    normalizeCampusDocumentType(data.type, fileName || displayName) || "PDF";
+  const category = normalizeCampusDocumentCategory(data.category) || "General";
+
+  return {
+    id: documentId,
+    name: displayName,
+    fileName: fileName || displayName,
+    type,
+    category,
+    sizeBytes: Number(data.sizeBytes ?? 0),
+    downloadURL: normalizeText(data.downloadURL),
+    storagePath: ecDocumentStoragePath(data),
+    ownerType: ecDocumentOwnerType(data),
+    course: ecDocumentCourseScope(data) || null,
+    courseScope: ecDocumentCourseScope(data) || null,
+    courseScopeSlug:
+      courseScopeSlugFromValue(ecDocumentCourseScope(data)) ||
+      normalizeText(data.courseScopeSlug) ||
+      null,
+    createdByCourseScope:
+      normalizeCourseLabel(data.createdByCourseScope) || null,
+    createdBy: normalizeText(data.createdBy),
+    createdByUid: normalizeText(data.createdByUid),
+    ownerUid: normalizeText(data.ownerUid),
+    uploadedByUid: normalizeText(data.uploadedByUid),
+    createdAt: toMillis(data.createdAt),
+    uploadedAt: toMillis(data.uploadedAt),
+    updatedAt: toMillis(data.updatedAt),
+    status: normalizeCampusDocumentStatus(data.status),
+  };
 }
 
 function eventOwnerType(data: FirebaseFirestore.DocumentData): "ec" | "bod" {
@@ -4894,6 +5214,192 @@ async function findStudentAudienceProfilesByIdentifier(
   });
 
   return Array.from(matches.values());
+}
+
+function isActiveCampusStudentStatus(value: unknown): boolean {
+  const normalizedStatus = normalizeLower(value);
+  return normalizedStatus === "" || normalizedStatus === "active";
+}
+
+function normalizeNotificationYearSelections(
+  body: Record<string, unknown>,
+): string[] {
+  const yearLevelsFromArray = normalizeIdentifierList(body.selectedYearLevels)
+    .map((value) => normalizeYear(value))
+    .filter((value) => normalizeLower(value) !== "all years");
+
+  if (yearLevelsFromArray.length > 0) {
+    return Array.from(new Set(yearLevelsFromArray));
+  }
+
+  const selectedYear = normalizeText(body.selectedYear);
+  if (!selectedYear || normalizeLower(selectedYear) === "all years") {
+    return [];
+  }
+
+  const normalizedYear = normalizeYear(selectedYear);
+  return normalizedYear && normalizeLower(normalizedYear) !== "all years" ?
+    [normalizedYear] :
+    [];
+}
+
+function normalizeNotificationCourseSelections(
+  body: Record<string, unknown>,
+): string[] {
+  return Array.from(
+    new Set(
+      normalizeIdentifierList(body.selectedCourses)
+        .map((value) => normalizeCourseLabel(value))
+        .filter(Boolean),
+    ),
+  );
+}
+
+function normalizeNotificationAudienceMode(
+  value: unknown,
+  actor: Pick<EcActorContext, "isBod">,
+  hasExplicitTargets: boolean,
+): CampusNotificationAudienceMode {
+  const normalizedValue = normalizeLower(value);
+  if (normalizedValue === "explicit") {
+    return "explicit";
+  }
+  if (normalizedValue === "course") {
+    return actor.isBod ? "course" : "filtered";
+  }
+  if (normalizedValue === "filtered") {
+    return actor.isBod ? "course" : "filtered";
+  }
+
+  return hasExplicitTargets ? "explicit" : actor.isBod ? "course" : "filtered";
+}
+
+function computeCampusNotificationStatus(
+  date: string,
+  scheduledTime: string,
+): CampusNotificationStatus {
+  const startsAtMs = parseEventStartMs(date, scheduledTime);
+  if (
+    !Number.isFinite(startsAtMs) ||
+    startsAtMs <= 0 ||
+    startsAtMs === Number.MAX_SAFE_INTEGER
+  ) {
+    return "sent";
+  }
+
+  return startsAtMs > Date.now() ? "scheduled" : "sent";
+}
+
+function buildCampusNotificationTargetLabel(
+  recipients: CampusNotificationRecipient[],
+  hasExplicitTargets: boolean,
+  courseLabel: string,
+  yearLevelLabel: string,
+): string {
+  if (recipients.length === 0) {
+    return "";
+  }
+
+  if (hasExplicitTargets) {
+    return recipients
+      .map((recipient) => `${recipient.studentName} (${recipient.schoolId})`)
+      .join("; ");
+  }
+
+  if (courseLabel && courseLabel !== "All Courses") {
+    if (!yearLevelLabel || yearLevelLabel === "All Years") {
+      return `All ${courseLabel} students`;
+    }
+
+    return `${recipients.length} ${courseLabel} students selected`;
+  }
+
+  if (yearLevelLabel && yearLevelLabel !== "All Years") {
+    return `${recipients.length} ${yearLevelLabel} students selected`;
+  }
+
+  return `All active students`;
+}
+
+async function listCampusNotificationRecipientCandidates(
+  actor: EcActorContext,
+): Promise<CampusNotificationRecipient[]> {
+  const profileSnapshot = await db
+    .collection("profiles")
+    .where("role", "==", "student")
+    .get();
+
+  const studentRefs = profileSnapshot.docs.map((profileDoc) =>
+    db.doc(`students/${profileDoc.id}`)
+  );
+  const studentSnapshots = studentRefs.length > 0 ?
+    await db.getAll(...studentRefs) :
+    [];
+  const studentByUid = new Map<string, FirebaseFirestore.DocumentData>();
+
+  studentSnapshots.forEach((studentSnap) => {
+    if (!studentSnap.exists) {
+      return;
+    }
+
+    studentByUid.set(studentSnap.id, studentSnap.data() ?? {});
+  });
+
+  return profileSnapshot.docs
+    .map((profileDoc) => {
+      const profileData = profileDoc.data() ?? {};
+      const studentData = studentByUid.get(profileDoc.id) ?? {};
+      if (!isStudentAudienceProfile(profileData, studentData)) {
+        return null;
+      }
+
+      const role = normalizeCampusRoleValue(profileData.role || studentData.role);
+      if (role !== "student") {
+        return null;
+      }
+
+      const course = resolveStudentCourse(profileData, studentData);
+      const yearLevel = resolveStudentYearLevel(profileData, studentData);
+      const schoolId = resolveStudentSchoolId(profileDoc.id, profileData, studentData);
+      const studentName = resolveStudentName(profileDoc.id, profileData, studentData);
+      const status =
+        normalizeText(studentData.status) ||
+        normalizeText(profileData.status) ||
+        "Active";
+
+      if (
+        !course ||
+        !yearLevel ||
+        !schoolId ||
+        !studentName ||
+        !isActiveCampusStudentStatus(status)
+      ) {
+        return null;
+      }
+
+      return {
+        uid: profileDoc.id,
+        schoolId,
+        studentName,
+        course,
+        yearLevel,
+        status,
+        role,
+      } satisfies CampusNotificationRecipient;
+    })
+    .filter(
+      (recipient): recipient is CampusNotificationRecipient => Boolean(recipient),
+    )
+    .filter((recipient) => {
+      if (!actor.isBod) {
+        return true;
+      }
+
+      return Boolean(
+        actor.courseScope &&
+        normalizeCourseLabel(recipient.course) === actor.courseScope,
+      );
+    });
 }
 
 function resolveStudentSchoolId(
@@ -5617,6 +6123,1107 @@ export const updateStudentClearanceStatus = onCall({region: REGION}, async (requ
     };
   });
 
+type CampusNotificationSummaryRecord = {
+  dispatchId: string;
+  ref: FirebaseFirestore.DocumentReference;
+  data: FirebaseFirestore.DocumentData;
+};
+
+type CampusNotificationAudienceResolution = {
+  audienceMode: CampusNotificationAudienceMode;
+  sendToFilteredAudience: boolean;
+  selectedYearLevels: string[];
+  selectedYear: string;
+  yearLevelLabel: string;
+  selectedCourses: string[];
+  targetStudentIds: string[];
+  targetSchoolIds: string[];
+  hasExplicitTargets: boolean;
+  recipients: CampusNotificationRecipient[];
+  recipientType: CampusNotificationRecipientType;
+  courseValue: string;
+  courseScope: string | null;
+  courseScopeSlug: string | null;
+  storedSelectedCourses: string[];
+  storedTargetStudentIds: string[];
+  storedTargetSchoolIds: string[];
+  targetStudent: string;
+};
+
+function normalizeCampusNotificationDispatchIdValue(value: unknown): string {
+  const rawValue = normalizeText(value);
+  if (!rawValue) {
+    return "";
+  }
+
+  const leafValue = rawValue.includes("/") ?
+    rawValue.slice(rawValue.lastIndexOf("/") + 1) :
+    rawValue;
+  return leafValue.startsWith("dispatch_") ?
+    normalizeText(leafValue.slice("dispatch_".length)) :
+    leafValue;
+}
+
+function campusNotificationSummaryDocId(dispatchId: string): string {
+  return dispatchId.startsWith("dispatch_") ? dispatchId : `dispatch_${dispatchId}`;
+}
+
+function campusNotificationOwnerType(
+  data: FirebaseFirestore.DocumentData,
+): "ec" | "bod" {
+  return normalizeLower(data.ownerType) === "bod" ? "bod" : "ec";
+}
+
+function campusNotificationCreatedByUid(
+  data: FirebaseFirestore.DocumentData,
+): string {
+  return normalizeText(data.createdByUid || data.createdBy);
+}
+
+function campusNotificationCreatedByCourseScope(
+  data: FirebaseFirestore.DocumentData,
+): string {
+  return (
+    normalizeCourseLabel(data.createdByCourseScope) ||
+    normalizeCourseLabel(data.courseScope) ||
+    ""
+  );
+}
+
+function campusNotificationCourseScope(
+  data: FirebaseFirestore.DocumentData,
+): string {
+  const selectedCourses = normalizeIdentifierList(data.selectedCourses)
+    .map((value) => normalizeCourseLabel(value))
+    .filter(Boolean);
+  const courses = normalizeIdentifierList(data.courses)
+    .map((value) => normalizeCourseLabel(value))
+    .filter(Boolean);
+  return (
+    normalizeCourseLabel(data.courseScope) ||
+    normalizeCourseLabel(data.course) ||
+    selectedCourses[0] ||
+    courses[0] ||
+    ""
+  );
+}
+
+function campusNotificationRecipientUid(
+  data: FirebaseFirestore.DocumentData,
+  fallbackUid = "",
+): string {
+  return normalizeText(
+    data.recipientUid ||
+      data.studentUid ||
+      data.targetStudentId ||
+      fallbackUid,
+  );
+}
+
+function campusNotificationRecipientSchoolId(
+  data: FirebaseFirestore.DocumentData,
+): string {
+  return normalizeText(data.targetSchoolId || data.schoolId);
+}
+
+async function loadCampusNotificationSenderSummary(
+  actor: EcActorContext,
+  body: Record<string, unknown>,
+): Promise<CampusNotificationSummaryRecord> {
+  const dispatchId = normalizeCampusNotificationDispatchIdValue(
+    body.scheduledNotificationId || body.notificationId,
+  );
+  if (!dispatchId) {
+    throw new HttpsError(
+      "invalid-argument",
+      "notificationId or scheduledNotificationId is required.",
+    );
+  }
+
+  const notificationCollection = db
+    .collection("profiles")
+    .doc(actor.uid)
+    .collection("notifications");
+  const summaryDocId = campusNotificationSummaryDocId(dispatchId);
+  const directSummaryRef = notificationCollection.doc(summaryDocId);
+  const directSummarySnap = await directSummaryRef.get();
+  if (directSummarySnap.exists) {
+    return {
+      dispatchId: normalizeText(directSummarySnap.data()?.dispatchId) || dispatchId,
+      ref: directSummaryRef,
+      data: directSummarySnap.data() ?? {},
+    };
+  }
+
+  const matchingSnapshot = await notificationCollection
+    .where("dispatchId", "==", dispatchId)
+    .limit(10)
+    .get();
+  if (matchingSnapshot.empty) {
+    throw new HttpsError("not-found", "Notification record not found.");
+  }
+
+  const matchingSummary =
+    matchingSnapshot.docs.find((documentSnapshot) =>
+      documentSnapshot.id === summaryDocId,
+    ) ||
+    matchingSnapshot.docs.find((documentSnapshot) => {
+      const data = documentSnapshot.data() ?? {};
+      return !campusNotificationRecipientUid(data);
+    }) ||
+    matchingSnapshot.docs[0];
+  const summaryData = matchingSummary.data() ?? {};
+
+  return {
+    dispatchId: normalizeText(summaryData.dispatchId) || dispatchId,
+    ref: matchingSummary.ref,
+    data: summaryData,
+  };
+}
+
+function assertCanUpdateCampusNotification(
+  actor: EcActorContext,
+  summaryData: FirebaseFirestore.DocumentData,
+): void {
+  const ownerType = campusNotificationOwnerType(summaryData);
+  const createdByUid = campusNotificationCreatedByUid(summaryData);
+  const scopedCourse = campusNotificationCourseScope(summaryData);
+  const createdByScope =
+    campusNotificationCreatedByCourseScope(summaryData) || scopedCourse;
+
+  if (actor.isBod) {
+    if (
+      !actor.courseScope ||
+      ownerType !== "bod" ||
+      createdByUid !== actor.uid ||
+      scopedCourse !== actor.courseScope ||
+      createdByScope !== actor.courseScope
+    ) {
+      throw new HttpsError(
+        "permission-denied",
+        "B.O.D. members can only update their own course-scoped notifications.",
+      );
+    }
+    return;
+  }
+
+  if (!actor.isAdmin && createdByUid && createdByUid !== actor.uid) {
+    throw new HttpsError(
+      "permission-denied",
+      "You can only update notifications that you created.",
+    );
+  }
+}
+
+async function resolveCampusNotificationAudience(
+  actor: EcActorContext,
+  body: Record<string, unknown>,
+): Promise<CampusNotificationAudienceResolution> {
+  const selectedYearLevels = normalizeNotificationYearSelections(body);
+  const requestedSelectedCourses = normalizeNotificationCourseSelections(body);
+  const targetStudentIds = Array.from(
+    new Set(
+      normalizeIdentifierList(body.targetStudentIds)
+        .map((value) => normalizeText(value))
+        .filter(Boolean),
+    ),
+  );
+  const targetSchoolIds = Array.from(
+    new Set(
+      normalizeIdentifierList(body.targetSchoolIds)
+        .map((value) => normalizeText(value))
+        .filter(Boolean),
+    ),
+  );
+  const hasExplicitTargets =
+    targetStudentIds.length > 0 || targetSchoolIds.length > 0;
+  const audienceMode = normalizeNotificationAudienceMode(
+    body.audienceMode,
+    actor,
+    hasExplicitTargets,
+  );
+  const sendToFilteredAudience =
+    body.sendToFilteredAudience === true || audienceMode !== "explicit";
+  const selectedCourses = actor.isBod ?
+    [actor.courseScope] :
+    requestedSelectedCourses;
+  const requestedCourseScope =
+    normalizeCourseLabel(body.courseScopeLabel) ||
+    normalizeCourseLabel(body.courseScope) ||
+    null;
+
+  if (actor.isBod && requestedSelectedCourses.some((value) => value !== actor.courseScope)) {
+    throw new HttpsError(
+      "permission-denied",
+      `B.O.D accounts can only target ${actor.courseScope} students.`,
+    );
+  }
+  if (
+    actor.isBod &&
+    requestedCourseScope &&
+    requestedCourseScope !== actor.courseScope
+  ) {
+    throw new HttpsError(
+      "permission-denied",
+      `B.O.D accounts can only target ${actor.courseScope} students.`,
+    );
+  }
+  if (!hasExplicitTargets && !sendToFilteredAudience) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Choose at least one notification recipient.",
+    );
+  }
+
+  const candidates = await listCampusNotificationRecipientCandidates(actor);
+  const yearLevelLabel =
+    selectedYearLevels.length > 0 ? selectedYearLevels.join(", ") : "All Years";
+  const selectedYearSet = new Set(
+    selectedYearLevels
+      .map((value) => normalizeLower(normalizeYear(value)))
+      .filter(Boolean),
+  );
+  const selectedCourseSet = new Set(
+    selectedCourses
+      .map((value) => normalizeCourseLabel(value))
+      .filter(Boolean),
+  );
+  const eligibleAudience = candidates.filter((recipient) => {
+    const yearMatches =
+      selectedYearSet.size === 0 ||
+      selectedYearSet.has(normalizeLower(normalizeYear(recipient.yearLevel)));
+    const courseMatches =
+      selectedCourseSet.size === 0 ||
+      selectedCourseSet.has(normalizeCourseLabel(recipient.course));
+
+    return yearMatches && courseMatches;
+  });
+
+  const explicitRecipients = hasExplicitTargets ?
+    candidates.filter((recipient) =>
+      targetStudentIds.includes(recipient.uid) ||
+        targetSchoolIds.includes(recipient.schoolId),
+    ) :
+    [];
+
+  if (hasExplicitTargets) {
+    const explicitUidSet = new Set(
+      explicitRecipients.map((recipient) => recipient.uid),
+    );
+    const explicitSchoolIdSet = new Set(
+      explicitRecipients.map((recipient) => recipient.schoolId),
+    );
+    const hasMissingExplicitTargets =
+      targetStudentIds.some((targetUid) => !explicitUidSet.has(targetUid)) ||
+      targetSchoolIds.some((schoolId) => !explicitSchoolIdSet.has(schoolId));
+
+    if (hasMissingExplicitTargets) {
+      throw new HttpsError(
+        "permission-denied",
+        actor.isBod ?
+          `Selected recipients must be active ${actor.courseScope} students.` :
+          "Selected recipients must be active student accounts.",
+      );
+    }
+  }
+
+  const eligibleRecipientUidSet = new Set(
+    eligibleAudience.map((recipient) => recipient.uid),
+  );
+  const recipients = hasExplicitTargets ?
+    explicitRecipients.filter((recipient) =>
+      eligibleRecipientUidSet.has(recipient.uid),
+    ) :
+    eligibleAudience;
+
+  if (hasExplicitTargets && recipients.length !== explicitRecipients.length) {
+    throw new HttpsError(
+      "permission-denied",
+      actor.isBod ?
+        `Selected recipients must be active ${actor.courseScope} students that match the chosen year filter.` :
+        "Selected recipients must match the chosen notification audience.",
+    );
+  }
+
+  if (recipients.length === 0) {
+    throw new HttpsError(
+      "failed-precondition",
+      actor.isBod && actor.courseScope ?
+        `No active ${actor.courseScope} students matched this notification audience.` :
+        "No active students matched this notification audience.",
+    );
+  }
+
+  const recipientType: CampusNotificationRecipientType =
+    hasExplicitTargets ?
+      "student" :
+      selectedCourseSet.size > 0 ?
+        "course" :
+        selectedYearSet.size > 0 ?
+          "year" :
+          "all";
+  const courseValue = actor.isBod ?
+    actor.courseScope :
+    selectedCourses.length > 0 ?
+      selectedCourses.join(", ") :
+      "All Courses";
+  const courseScope = actor.isBod ?
+    actor.courseScope :
+    selectedCourses.length === 1 ?
+      selectedCourses[0] :
+      null;
+  const courseScopeSlug = courseScope ?
+    courseScopeSlugFromValue(courseScope) :
+    null;
+  const storedSelectedCourses = actor.isBod ? [actor.courseScope] : selectedCourses;
+  const storedTargetStudentIds = hasExplicitTargets ?
+    recipients.map((recipient) => recipient.uid) :
+    [];
+  const storedTargetSchoolIds = hasExplicitTargets ?
+    recipients.map((recipient) => recipient.schoolId).filter(Boolean) :
+    [];
+  const selectedYear = yearLevelLabel;
+  const targetStudent = buildCampusNotificationTargetLabel(
+    recipients,
+    hasExplicitTargets,
+    courseValue,
+    yearLevelLabel,
+  );
+
+  return {
+    audienceMode,
+    sendToFilteredAudience,
+    selectedYearLevels,
+    selectedYear,
+    yearLevelLabel,
+    selectedCourses,
+    targetStudentIds,
+    targetSchoolIds,
+    hasExplicitTargets,
+    recipients,
+    recipientType,
+    courseValue,
+    courseScope,
+    courseScopeSlug,
+    storedSelectedCourses,
+    storedTargetStudentIds,
+    storedTargetSchoolIds,
+    targetStudent,
+  };
+}
+
+export const createCampusNotification = onCall({region: REGION}, async (request) => {
+    try {
+      const actor = await resolveEcActorContext(request);
+      const body = asRecord(request.data);
+      const title = normalizeText(body.title);
+      const message = normalizeText(body.message);
+      const date = normalizeText(body.date);
+      const scheduledTime = normalizeText(body.scheduledTime);
+
+      if (!title) {
+        throw new HttpsError("invalid-argument", "Notification title is required.");
+      }
+      if (!message) {
+        throw new HttpsError("invalid-argument", "Notification message is required.");
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        throw new HttpsError("invalid-argument", "Notification date is required.");
+      }
+      if (!scheduledTime || parseEventStartMs(date, scheduledTime) === Number.MAX_SAFE_INTEGER) {
+        throw new HttpsError(
+          "invalid-argument",
+          "A valid notification scheduled time is required.",
+        );
+      }
+      const audience = await resolveCampusNotificationAudience(actor, body);
+
+      const dispatchId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const createdByRole = actor.isBod ?
+        "bod" :
+        normalizeCampusRoleValue(actor.profile.role) || "ecmember";
+      const ownerType = actor.isBod ? "bod" : "ec";
+      const createdByCourseScope =
+        actor.courseScope ||
+        audience.courseScope ||
+        null;
+      const notificationStatus = computeCampusNotificationStatus(date, scheduledTime);
+      const writesPerBatch = 450;
+      let batchCount = 0;
+
+      functionsLogger.info("createCampusNotification resolved audience", {
+        uid: actor.uid,
+        actorRole: createdByRole,
+        resolvedCourse: actor.courseScope || null,
+        audienceMode: audience.audienceMode,
+        selectedYear: audience.yearLevelLabel,
+        selectedCourses: audience.selectedCourses,
+        sendToFilteredAudience: audience.sendToFilteredAudience,
+        explicitTargetStudentCount: audience.targetStudentIds.length,
+        explicitTargetSchoolCount: audience.targetSchoolIds.length,
+        recipientCount: audience.recipients.length,
+        sampleRecipientRoles:
+          audience.recipients.slice(0, 5).map((recipient) => recipient.role),
+        sampleRecipientCourses:
+          audience.recipients.slice(0, 5).map((recipient) => recipient.course),
+      });
+
+      for (
+        let index = 0;
+        index < audience.recipients.length;
+        index += writesPerBatch
+      ) {
+        const batch = db.batch();
+        const chunk = audience.recipients.slice(index, index + writesPerBatch);
+
+        chunk.forEach((recipient) => {
+          const notificationRef = db
+            .collection("profiles")
+            .doc(recipient.uid)
+            .collection("notifications")
+            .doc();
+
+          batch.set(notificationRef, {
+            title,
+            message,
+            date,
+            scheduledTime,
+            type: "announcement",
+            dispatchId,
+            audienceMode: audience.audienceMode,
+            recipientType: audience.recipientType,
+            selectedYear: audience.selectedYear,
+            course: audience.courseValue,
+            yearLevel: audience.yearLevelLabel,
+            targetStudent: audience.targetStudent,
+            targetStudentId: audience.hasExplicitTargets ? recipient.uid : null,
+            targetStudentIds: audience.storedTargetStudentIds,
+            targetSchoolId: audience.hasExplicitTargets ? recipient.schoolId : null,
+            targetSchoolIds: audience.storedTargetSchoolIds,
+            selectedCourses: audience.storedSelectedCourses,
+            courses: audience.storedSelectedCourses,
+            yearLevels: audience.selectedYearLevels,
+            sendToFilteredAudience: audience.sendToFilteredAudience,
+            recipientUid: recipient.uid,
+            studentUid: recipient.uid,
+            studentName: recipient.studentName,
+            schoolId: recipient.schoolId,
+            createdByUid: actor.uid,
+            createdByRole,
+            ownerType,
+            courseScope: audience.courseScope,
+            courseScopeSlug: audience.courseScopeSlug,
+            createdByCourseScope,
+            recipientCount: audience.recipients.length,
+            status: notificationStatus,
+            read: false,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        });
+
+        await batch.commit();
+        batchCount += 1;
+      }
+
+      await db.doc(`profiles/${actor.uid}/notifications/dispatch_${dispatchId}`).set(
+        {
+          title,
+          message,
+          date,
+          scheduledTime,
+          type: "announcement",
+          dispatchId,
+          audienceMode: audience.audienceMode,
+          recipientType: audience.recipientType,
+          selectedYear: audience.selectedYear,
+          course: audience.courseValue,
+          yearLevel: audience.yearLevelLabel,
+          targetStudent: audience.targetStudent,
+          targetStudentIds: audience.storedTargetStudentIds,
+          targetSchoolIds: audience.storedTargetSchoolIds,
+          selectedCourses: audience.storedSelectedCourses,
+          courses: audience.storedSelectedCourses,
+          yearLevels: audience.selectedYearLevels,
+          sendToFilteredAudience: audience.sendToFilteredAudience,
+          recipientCount: audience.recipients.length,
+          createdByUid: actor.uid,
+          createdByRole,
+          ownerType,
+          courseScope: audience.courseScope,
+          courseScopeSlug: audience.courseScopeSlug,
+          createdByCourseScope,
+          status: notificationStatus,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+          read: true,
+        },
+        {merge: true},
+      );
+
+      functionsLogger.info("createCampusNotification success", {
+        uid: actor.uid,
+        actorRole: createdByRole,
+        resolvedCourse: actor.courseScope || null,
+        selectedYear: audience.yearLevelLabel,
+        selectedCourses: audience.selectedCourses,
+        recipientCount: audience.recipients.length,
+        batchCount,
+      });
+
+      return {
+        dispatchId,
+        recipientCount: audience.recipients.length,
+        batchCount,
+        audienceMode: audience.audienceMode,
+        recipientType: audience.recipientType,
+        selectedYear: audience.selectedYear,
+        course: audience.courseValue,
+        yearLevel: audience.yearLevelLabel,
+        targetStudent: audience.targetStudent,
+        selectedCourses: audience.storedSelectedCourses,
+        courses: audience.storedSelectedCourses,
+        yearLevels: audience.selectedYearLevels,
+        targetStudentIds: audience.storedTargetStudentIds,
+        targetSchoolIds: audience.storedTargetSchoolIds,
+        sendToFilteredAudience: audience.sendToFilteredAudience,
+        createdByRole,
+        ownerType,
+        courseScope: audience.courseScope,
+        courseScopeSlug: audience.courseScopeSlug,
+        createdByCourseScope,
+        status: notificationStatus,
+      };
+    } catch (error: unknown) {
+      functionsLogger.error("createCampusNotification failed", {
+        code: error instanceof HttpsError ? error.code : "unknown",
+        message: error instanceof Error ? error.message : String(error ?? ""),
+      });
+      throw error;
+    }
+  });
+
+export const updateCampusNotification = onCall({region: REGION}, async (request) => {
+    try {
+      const actor = await resolveEcActorContext(request);
+      const body = asRecord(request.data);
+      const title = normalizeText(body.title);
+      const message = normalizeText(body.message);
+      const date = normalizeText(body.date);
+      const scheduledTime = normalizeText(body.scheduledTime);
+
+      if (!title) {
+        throw new HttpsError("invalid-argument", "Notification title is required.");
+      }
+      if (!message) {
+        throw new HttpsError("invalid-argument", "Notification message is required.");
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        throw new HttpsError("invalid-argument", "Notification date is required.");
+      }
+      if (
+        !scheduledTime ||
+        parseEventStartMs(date, scheduledTime) === Number.MAX_SAFE_INTEGER
+      ) {
+        throw new HttpsError(
+          "invalid-argument",
+          "A valid notification scheduled time is required.",
+        );
+      }
+
+      const summary = await loadCampusNotificationSenderSummary(actor, body);
+      assertCanUpdateCampusNotification(actor, summary.data);
+
+      const audience = await resolveCampusNotificationAudience(actor, body);
+      const dispatchId = summary.dispatchId;
+      const ownerType = actor.isBod ?
+        "bod" :
+        campusNotificationOwnerType(summary.data);
+      const createdByUid =
+        campusNotificationCreatedByUid(summary.data) || actor.uid;
+      const createdByRole = actor.isBod ?
+        "bod" :
+        normalizeCampusRoleValue(summary.data.createdByRole) ||
+          normalizeCampusRoleValue(actor.profile.role) ||
+          "ecmember";
+      const createdByCourseScope = actor.isBod ?
+        actor.courseScope :
+        campusNotificationCreatedByCourseScope(summary.data) ||
+          audience.courseScope ||
+          null;
+      const notificationStatus = computeCampusNotificationStatus(date, scheduledTime);
+      const recipientCount = audience.recipients.length;
+
+      const dispatchSnapshot = await db
+        .collectionGroup("notifications")
+        .where("dispatchId", "==", dispatchId)
+        .get();
+      const dispatchDocs = dispatchSnapshot.docs.filter((documentSnapshot) => {
+        if (!documentSnapshot.ref.path.startsWith("profiles/")) {
+          return false;
+        }
+
+        const data = documentSnapshot.data() ?? {};
+        return campusNotificationCreatedByUid(data) === createdByUid;
+      });
+
+      const nextRecipientUidSet = new Set(
+        audience.recipients.map((recipient) => recipient.uid),
+      );
+      const retainedRecipientRefs = new Map<
+        string,
+        FirebaseFirestore.DocumentReference
+      >();
+      const docsToDelete: FirebaseFirestore.DocumentReference[] = [];
+      const removedRecipientKeys = new Set<string>();
+
+      dispatchDocs.forEach((documentSnapshot) => {
+        if (documentSnapshot.ref.path === summary.ref.path) {
+          return;
+        }
+
+        const data = documentSnapshot.data() ?? {};
+        const fallbackUid = normalizeText(documentSnapshot.ref.parent.parent?.id);
+        const recipientUid = campusNotificationRecipientUid(data, fallbackUid);
+        const recipientSchoolId = campusNotificationRecipientSchoolId(data);
+        const recipientKey =
+          recipientUid ||
+          (recipientSchoolId ? `school:${recipientSchoolId}` : documentSnapshot.ref.path);
+
+        if (!recipientUid || !nextRecipientUidSet.has(recipientUid)) {
+          docsToDelete.push(documentSnapshot.ref);
+          removedRecipientKeys.add(recipientKey);
+          return;
+        }
+
+        if (retainedRecipientRefs.has(recipientUid)) {
+          docsToDelete.push(documentSnapshot.ref);
+          return;
+        }
+
+        retainedRecipientRefs.set(recipientUid, documentSnapshot.ref);
+      });
+
+      const senderPayload = {
+        title,
+        message,
+        date,
+        scheduledTime,
+        type: "announcement",
+        dispatchId,
+        audienceMode: audience.audienceMode,
+        recipientType: audience.recipientType,
+        selectedYear: audience.selectedYear,
+        course: audience.courseValue,
+        yearLevel: audience.yearLevelLabel,
+        targetStudent: audience.targetStudent,
+        targetStudentIds: audience.storedTargetStudentIds,
+        targetSchoolIds: audience.storedTargetSchoolIds,
+        selectedCourses: audience.storedSelectedCourses,
+        courses: audience.storedSelectedCourses,
+        yearLevels: audience.selectedYearLevels,
+        sendToFilteredAudience: audience.sendToFilteredAudience,
+        recipientCount,
+        createdByUid,
+        createdByRole,
+        ownerType,
+        courseScope: audience.courseScope,
+        courseScopeSlug: audience.courseScopeSlug,
+        createdByCourseScope,
+        status: notificationStatus,
+        read: true,
+        updatedAt: serverTimestamp(),
+      };
+
+      const writesPerBatch = 450;
+      let batchCount = 0;
+      const upsertOperations: Array<{
+        ref: FirebaseFirestore.DocumentReference;
+        data: FirebaseFirestore.DocumentData;
+      }> = [
+        {
+          ref: summary.ref,
+          data: senderPayload,
+        },
+      ];
+
+      audience.recipients.forEach((recipient) => {
+        const existingRecipientRef = retainedRecipientRefs.get(recipient.uid);
+        const recipientRef = existingRecipientRef ||
+          db
+            .collection("profiles")
+            .doc(recipient.uid)
+            .collection("notifications")
+            .doc();
+        const recipientPayload: FirebaseFirestore.DocumentData = {
+          title,
+          message,
+          date,
+          scheduledTime,
+          type: "announcement",
+          dispatchId,
+          audienceMode: audience.audienceMode,
+          recipientType: audience.recipientType,
+          selectedYear: audience.selectedYear,
+          course: audience.courseValue,
+          yearLevel: audience.yearLevelLabel,
+          targetStudent: audience.targetStudent,
+          targetStudentId: audience.hasExplicitTargets ? recipient.uid : null,
+          targetStudentIds: audience.storedTargetStudentIds,
+          targetSchoolId: audience.hasExplicitTargets ? recipient.schoolId : null,
+          targetSchoolIds: audience.storedTargetSchoolIds,
+          selectedCourses: audience.storedSelectedCourses,
+          courses: audience.storedSelectedCourses,
+          yearLevels: audience.selectedYearLevels,
+          sendToFilteredAudience: audience.sendToFilteredAudience,
+          recipientUid: recipient.uid,
+          studentUid: recipient.uid,
+          studentName: recipient.studentName,
+          schoolId: recipient.schoolId,
+          createdByUid,
+          createdByRole,
+          ownerType,
+          courseScope: audience.courseScope,
+          courseScopeSlug: audience.courseScopeSlug,
+          createdByCourseScope,
+          recipientCount,
+          status: notificationStatus,
+          updatedAt: serverTimestamp(),
+        };
+
+        if (!existingRecipientRef) {
+          recipientPayload.createdAt = serverTimestamp();
+          recipientPayload.read = false;
+        }
+
+        upsertOperations.push({
+          ref: recipientRef,
+          data: recipientPayload,
+        });
+      });
+
+      for (
+        let index = 0;
+        index < upsertOperations.length;
+        index += writesPerBatch
+      ) {
+        const batch = db.batch();
+        upsertOperations
+          .slice(index, index + writesPerBatch)
+          .forEach((operation) => {
+            batch.set(operation.ref, operation.data, {merge: true});
+          });
+        await batch.commit();
+        batchCount += 1;
+      }
+
+      for (let index = 0; index < docsToDelete.length; index += writesPerBatch) {
+        const batch = db.batch();
+        docsToDelete
+          .slice(index, index + writesPerBatch)
+          .forEach((documentRef) => batch.delete(documentRef));
+        await batch.commit();
+        batchCount += 1;
+      }
+
+      functionsLogger.info("updateCampusNotification success", {
+        uid: actor.uid,
+        dispatchId,
+        actorRole: createdByRole,
+        ownerType,
+        audienceMode: audience.audienceMode,
+        selectedYear: audience.yearLevelLabel,
+        selectedCourses: audience.selectedCourses,
+        updatedRecipientCount: recipientCount,
+        removedRecipientCount: removedRecipientKeys.size,
+        batchCount,
+      });
+
+      return {
+        updated: true,
+        dispatchId,
+        updatedRecipientCount: recipientCount,
+        removedRecipientCount: removedRecipientKeys.size,
+        batchCount,
+        audienceMode: audience.audienceMode,
+        recipientType: audience.recipientType,
+        selectedYear: audience.selectedYear,
+        course: audience.courseValue,
+        yearLevel: audience.yearLevelLabel,
+        targetStudent: audience.targetStudent,
+        selectedCourses: audience.storedSelectedCourses,
+        courses: audience.storedSelectedCourses,
+        yearLevels: audience.selectedYearLevels,
+        targetStudentIds: audience.storedTargetStudentIds,
+        targetSchoolIds: audience.storedTargetSchoolIds,
+        sendToFilteredAudience: audience.sendToFilteredAudience,
+        createdByRole,
+        ownerType,
+        courseScope: audience.courseScope,
+        courseScopeSlug: audience.courseScopeSlug,
+        createdByCourseScope,
+        status: notificationStatus,
+      };
+    } catch (error: unknown) {
+      functionsLogger.error("updateCampusNotification failed", {
+        code: error instanceof HttpsError ? error.code : "unknown",
+        message: error instanceof Error ? error.message : String(error ?? ""),
+      });
+      throw error;
+    }
+  });
+
+export const listCampusDocuments = onCall({region: REGION}, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const documentSnapshot = await db
+      .collection("ecDocuments")
+      .orderBy("createdAt", "desc")
+      .get();
+
+    return {
+      documents: documentSnapshot.docs
+        .map((documentDoc) => ({id: documentDoc.id, data: documentDoc.data() ?? {}}))
+        .filter(({data}) => canEcActorViewActiveDocument(actor, data))
+        .map(({id, data}) => toCampusDocumentListItem(id, data)),
+    };
+  });
+
+export const createCampusDocumentUploadTarget = onCall({region: REGION}, async (request) => {
+    try {
+      const actor = await resolveEcActorContext(request);
+      const body = asRecord(request.data);
+      const uploadInput = validateCampusDocumentUploadInput(body);
+      const docId = db.collection("ecDocuments").doc().id;
+      const uploadTarget = campusDocumentStoragePathForActor(
+        actor,
+        docId,
+        uploadInput.fileName,
+      );
+      const timestamp = serverTimestamp();
+      const documentRef = db.doc(`ecDocuments/${docId}`);
+      const pendingMetadata = {
+        name: uploadInput.fileName,
+        originalName: uploadInput.displayName,
+        fileName: uploadInput.fileName,
+        type: uploadInput.type,
+        category: uploadInput.category,
+        contentType: uploadInput.contentType,
+        sizeBytes: uploadInput.sizeBytes,
+        downloadURL: "",
+        status: "pending-upload",
+        storagePath: uploadTarget.storagePath,
+        uploadedBy: actor.uid,
+        uploadedByUid: actor.uid,
+        ownerUid: actor.uid,
+        createdBy: actor.uid,
+        createdByUid: actor.uid,
+        createdByRole: normalizeCampusRoleValue(actor.profile.role) || null,
+        createdByPosition: normalizeECPosition(actor.profile.ecPosition) || null,
+        ecScope: resolveProfileEcScope(actor.profile) || null,
+        ownerType: uploadTarget.ownerType,
+        course: uploadTarget.course,
+        courseScope: uploadTarget.courseScope,
+        courseScopeSlug: uploadTarget.courseScopeSlug,
+        createdByCourseScope: uploadTarget.createdByCourseScope,
+        courses: uploadTarget.courses,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+
+      functionsLogger.info("createCampusDocumentUploadTarget resolved actor", {
+        callerUid: actor.uid,
+        actorRole: normalizeCampusRoleValue(actor.profile.role),
+        actorAssignedCourse: normalizeText(actor.profile.assignedCourse),
+        actorCourse: normalizeText(actor.profile.course),
+        actorCourseScope: normalizeText(actor.profile.courseScope),
+        actorCourseScopeLabel: normalizeText(actor.profile.courseScopeLabel),
+        resolvedCourseScope: actor.courseScope,
+        resolvedCourseScopeSlug: uploadTarget.courseScopeSlug,
+        generatedDocId: docId,
+        generatedStoragePath: uploadTarget.storagePath,
+      });
+
+      functionsLogger.info("createCampusDocumentUploadTarget pending metadata payload", {
+        callerUid: actor.uid,
+        docId,
+        pendingMetadata,
+      });
+
+      await documentRef.set(pendingMetadata);
+
+      const verificationSnapshot = await documentRef.get();
+      if (!verificationSnapshot.exists) {
+        functionsLogger.error("createCampusDocumentUploadTarget pending metadata missing after write", {
+          callerUid: actor.uid,
+          docId,
+          storagePath: uploadTarget.storagePath,
+        });
+        throw new HttpsError(
+          "internal",
+          "Upload target metadata was not created. Please try again.",
+        );
+      }
+
+      functionsLogger.info("createCampusDocumentUploadTarget pending metadata write success", {
+        callerUid: actor.uid,
+        docId,
+        storagePath: uploadTarget.storagePath,
+        verifiedData: verificationSnapshot.data() ?? {},
+      });
+
+      let uploadUrl: string | null = null;
+      let uploadMethod: CampusDocumentUploadMethod = "firebase-storage-sdk";
+      let verification = "server-verified-pending-metadata";
+
+      if (actor.isBod) {
+        uploadMethod = "PUT";
+        verification = "server-signed-upload-url";
+        uploadUrl = (
+          await admin
+            .storage()
+            .bucket()
+            .file(uploadTarget.storagePath)
+            .getSignedUrl({
+              action: "write",
+              contentType: uploadInput.contentType,
+              expires: Date.now() + CAMPUS_DOCUMENT_SIGNED_UPLOAD_TTL_MS,
+              version: "v4",
+            })
+        )[0];
+
+        functionsLogger.info("createCampusDocumentUploadTarget signed upload URL created", {
+          callerUid: actor.uid,
+          docId,
+          storagePath: uploadTarget.storagePath,
+          contentType: uploadInput.contentType,
+          uploadMethod,
+          verification,
+        });
+      }
+
+      return {
+        docId,
+        fileName: uploadInput.fileName,
+        storagePath: uploadTarget.storagePath,
+        ownerType: uploadTarget.ownerType,
+        courseScope: uploadTarget.courseScope,
+        courseScopeSlug: uploadTarget.courseScopeSlug,
+        uploadUrl,
+        uploadMethod,
+        contentType: uploadInput.contentType,
+        verification,
+        status: "pending-upload",
+      };
+    } catch (error) {
+      functionsLogger.error("createCampusDocumentUploadTarget failed", {
+        error,
+      });
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+      throw new HttpsError(
+        "internal",
+        error instanceof Error ?
+          error.message :
+          "Failed to create a document upload target.",
+      );
+    }
+  });
+
+export const finalizeCampusDocumentUpload = onCall({region: REGION}, async (request) => {
+    const actor = await resolveEcActorContext(request);
+    const body = asRecord(request.data);
+    const docId = normalizeText(body.docId);
+    const storagePath = normalizeText(body.storagePath);
+    const uploadInput = validateCampusDocumentUploadInput(body);
+
+    if (!docId) {
+      throw new HttpsError("invalid-argument", "docId is required.");
+    }
+    if (!storagePath) {
+      throw new HttpsError("invalid-argument", "storagePath is required.");
+    }
+
+    const documentRef = db.doc(`ecDocuments/${docId}`);
+    const documentSnapshot = await documentRef.get();
+    if (!documentSnapshot.exists) {
+      throw new HttpsError("not-found", "Pending document metadata not found.");
+    }
+
+    const documentData = documentSnapshot.data() ?? {};
+    if (!ecDocumentMatchesStoragePath(documentData, storagePath)) {
+      throw new HttpsError(
+        "permission-denied",
+        "The upload target does not match this document metadata.",
+      );
+    }
+    if (!ecDocumentOwnedByUid(documentData, actor.uid)) {
+      throw new HttpsError(
+        "permission-denied",
+        "You can only finalize document uploads that you created.",
+      );
+    }
+    if (actor.isBod && !canEcActorAccessDocument(actor, documentData)) {
+      throw new HttpsError(
+        "permission-denied",
+        "B.O.D. members can only finalize their own course documents.",
+      );
+    }
+    if (!isPendingCampusDocument(documentData)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This document upload is no longer pending.",
+      );
+    }
+
+    const storageFile = admin.storage().bucket().file(storagePath);
+    let storageMetadata: {size?: string | number; contentType?: string};
+    try {
+      [storageMetadata] = await storageFile.getMetadata();
+    } catch (error) {
+      authLogger.warn("finalizeCampusDocumentUpload storage lookup failed", {
+        actorUid: actor.uid,
+        docId,
+        storagePath,
+        error,
+      });
+      throw new HttpsError(
+        "failed-precondition",
+        "The uploaded file could not be found in Storage.",
+      );
+    }
+
+    await documentRef.set(
+      {
+        name: uploadInput.displayName,
+        fileName: uploadInput.fileName,
+        type: uploadInput.type,
+        category: uploadInput.category,
+        contentType:
+          normalizeText(storageMetadata.contentType) ||
+          uploadInput.contentType,
+        sizeBytes: Number(storageMetadata.size ?? uploadInput.sizeBytes),
+        downloadURL: normalizeText(body.downloadURL),
+        status: "active",
+        storagePath,
+        updatedAt: serverTimestamp(),
+        uploadedAt: serverTimestamp(),
+      },
+      {merge: true},
+    );
+
+    const updatedSnapshot = await documentRef.get();
+    const updatedData = updatedSnapshot.data() ?? {};
+
+    return {
+      docId,
+      ownerType: ecDocumentOwnerType(updatedData),
+      courseScope: ecDocumentCourseScope(updatedData) || null,
+      storagePath: ecDocumentStoragePath(updatedData),
+      status: normalizeCampusDocumentStatus(updatedData.status),
+    };
+  });
+
 export const createCampusDocumentMetadata = onCall({region: REGION}, async (request) => {
     const actor = await resolveEcActorContext(request);
     const body = asRecord(request.data);
@@ -5767,7 +7374,7 @@ export const getCampusDocumentDownloadUrl = onCall({region: REGION}, async (requ
     }
 
     const documentData = documentSnapshot.data() ?? {};
-    if (!canEcActorAccessDocument(actor, documentData)) {
+    if (!canEcActorViewActiveDocument(actor, documentData)) {
       throw new HttpsError(
         "permission-denied",
         actor.isBod ?

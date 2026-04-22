@@ -3,18 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiChevronDown } from "react-icons/fi";
 import { onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
 import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  orderBy,
-  query,
-  where,
-} from "firebase/firestore";
-import {
-  deleteObject,
-  getDownloadURL,
   ref,
   type StorageReference,
   type UploadTaskSnapshot,
@@ -64,9 +54,11 @@ import {
   isBOD,
 } from "@/lib/ec-permissions";
 import {
-  createCampusDocumentMetadata,
+  createCampusDocumentUploadTarget,
   deleteCampusDocument,
+  finalizeCampusDocumentUpload,
   getCampusDocumentDownloadUrl,
+  listCampusDocuments,
 } from "@/lib/firebase-functions";
 import { auth, db, storage } from "@/lib/firebase";
 import { normalizeCourse, normalizeCourseSlug } from "@/lib/courseOptions";
@@ -208,15 +200,15 @@ const normalizeDocCategory = (rawCategory: string | undefined): DocCategory => {
   return "General";
 };
 
-const mapFirestoreDocumentItem = (
-  snapshot: { id: string; data: () => FirestoreDocumentRecord },
+const mapDocumentRecordToItem = (
+  id: string,
+  data: FirestoreDocumentRecord,
 ): DocumentItem => {
-  const data = snapshot.data() as FirestoreDocumentRecord;
   const name = String(data.name ?? "Untitled");
   const createdAtMs = toMillis(data.createdAt);
 
   return {
-    id: snapshot.id,
+    id,
     name,
     type: normalizeDocType(data.type, name),
     category: normalizeDocCategory(data.category),
@@ -356,6 +348,14 @@ const toScopedUploadErrorMessage = (
   return message;
 };
 
+const isNonFatalUploadCleanupError = (error: unknown): boolean => {
+  const code = toErrorCode(error).toLowerCase();
+  return code.includes("storage/unauthorized") ||
+    code.includes("storage/object-not-found") ||
+    code.includes("functions/not-found") ||
+    code.includes("not-found");
+};
+
 const withTimeout = async <T,>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -410,6 +410,46 @@ const uploadWithTimeout = async (
       },
     );
   });
+};
+
+const uploadWithSignedUrl = async (
+  uploadUrl: string,
+  file: File,
+  contentType: string,
+  timeoutMs: number,
+): Promise<void> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": contentType || "application/octet-stream",
+      },
+      body: file,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const responseText = await response.text();
+      const error = new Error(`Signed upload failed with status ${response.status}.`);
+      Object.assign(error, {
+        code: `signed-upload/${response.status}`,
+        serverResponse: responseText,
+      });
+      throw error;
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`Upload timed out after ${Math.floor(timeoutMs / 1000)}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 export default function DocumentsPage() {
@@ -498,37 +538,17 @@ export default function DocumentsPage() {
     };
 
     try {
-      if (viewerIsBod && viewerCourseScopeValue) {
-        const [createdBySnap, createdByUidSnap] = await Promise.all([
-          getDocs(
-            query(collection(db, "ecDocuments"), where("createdBy", "==", activeUid)),
+      const listedDocuments = await listCampusDocuments();
+      setDocuments(
+        sortDocumentItems(
+          listedDocuments.map((item) =>
+            mapDocumentRecordToItem(item.id, item as FirestoreDocumentRecord),
           ),
-          getDocs(
-            query(collection(db, "ecDocuments"), where("createdByUid", "==", activeUid)),
-          ),
-        ]);
-
-        const mergedDocuments = new Map<string, DocumentItem>();
-        [...createdBySnap.docs, ...createdByUidSnap.docs].forEach((snapshot) => {
-          const item = mapFirestoreDocumentItem(snapshot);
-          mergedDocuments.set(snapshot.id, item);
-        });
-
-        setDocuments(sortDocumentItems(Array.from(mergedDocuments.values())));
-        setDocumentsLoading(false);
-        return;
-      }
-
-      const allDocumentsSnap = await getDocs(
-        query(collection(db, "ecDocuments"), orderBy("createdAt", "desc")),
+        ),
       );
-      setDocuments(sortDocumentItems(allDocumentsSnap.docs.map(mapFirestoreDocumentItem)));
       setDocumentsLoading(false);
     } catch (error) {
-      handleLoadError(
-        error,
-        viewerIsBod && viewerCourseScopeValue ? "scopedDocuments" : "allDocuments",
-      );
+      handleLoadError(error, "listCampusDocuments");
     }
   }, [
     activeUid,
@@ -839,44 +859,94 @@ export default function DocumentsPage() {
           continue;
         }
 
-        const docRef = doc(collection(db, "ecDocuments"));
-        const storagePath = viewerIsBod && bodStoragePrefix
-          ? `${bodStoragePrefix}/${docRef.id}/${file.name}`
-          : `ec-documents/shared/${docRef.id}/${file.name}`;
-        const storageRef = ref(storage, storagePath);
+        let uploadTarget:
+          | Awaited<ReturnType<typeof createCampusDocumentUploadTarget>>
+          | null = null;
+        let storagePath = "";
 
         try {
+          uploadTarget = await withTimeout(
+            createCampusDocumentUploadTarget({
+              name: file.name,
+              type: docType,
+              category: uploadCategory,
+              sizeBytes: file.size,
+              contentType: file.type || undefined,
+            }),
+            WRITE_DOC_TIMEOUT_MS,
+            "Create upload target",
+          );
+          storagePath = uploadTarget.storagePath;
+
+          console.info("[DOCUMENT][UPLOAD_TARGET_METADATA]", {
+            docId: uploadTarget.docId,
+            verification: uploadTarget.verification,
+            storagePath,
+            ownerType: uploadTarget.ownerType,
+            courseScope: uploadTarget.courseScope ?? "",
+            courseScopeSlug: uploadTarget.courseScopeSlug ?? "",
+            uploadMethod: uploadTarget.uploadMethod,
+            contentType: uploadTarget.contentType,
+            status: uploadTarget.status,
+          });
+
+          if (viewerIsBod) {
+            console.info("[DOCUMENT][UPLOAD_TARGET]", {
+              authUid: auth.currentUser?.uid ?? "",
+              docId: uploadTarget.docId,
+              storagePath,
+              uploadMethod: uploadTarget.uploadMethod,
+              verification: uploadTarget.verification,
+              viewerRole: String(viewerProfile?.role ?? "").trim(),
+              viewerCourseScope: String(viewerCourseScope ?? "").trim(),
+              viewerCourseScopeValue,
+              generatedSlug: viewerCourseScopeSlug,
+              viewerIsBod,
+            });
+          }
+
           ecDocumentsLogger.info("Uploading file.", {
             uploadSessionId,
             uid: activeUid,
             name: file.name,
             sizeBytes: file.size,
             storagePath,
+            docId: uploadTarget.docId,
+            uploadMethod: uploadTarget.uploadMethod,
           });
 
-          const uploaded = await uploadWithTimeout(
-            storageRef,
-            file,
-            UPLOAD_TIMEOUT_MS,
-          );
-          const downloadURL = await withTimeout(
-            getDownloadURL(uploaded.ref),
-            FETCH_URL_TIMEOUT_MS,
-            "Get download URL",
-          );
+          if (uploadTarget.uploadMethod === "PUT") {
+            if (!uploadTarget.uploadUrl) {
+              throw new Error("Upload target is missing a signed upload URL.");
+            }
+
+            await uploadWithSignedUrl(
+              uploadTarget.uploadUrl,
+              file,
+              uploadTarget.contentType || file.type || "application/octet-stream",
+              UPLOAD_TIMEOUT_MS,
+            );
+          } else {
+            const storageRef = ref(storage, storagePath);
+            await uploadWithTimeout(
+              storageRef,
+              file,
+              UPLOAD_TIMEOUT_MS,
+            );
+          }
 
           await withTimeout(
-            createCampusDocumentMetadata({
-              docId: docRef.id,
+            finalizeCampusDocumentUpload({
+              docId: uploadTarget.docId,
               name: file.name,
               type: docType,
               category: uploadCategory,
               sizeBytes: file.size,
-              downloadURL,
               storagePath,
+              contentType: uploadTarget.contentType || file.type || undefined,
             }),
             WRITE_DOC_TIMEOUT_MS,
-            "Write Firestore metadata",
+            "Finalize document upload",
           );
 
           nextTotalBytes += file.size;
@@ -887,7 +957,7 @@ export default function DocumentsPage() {
             uid: activeUid,
             name: file.name,
             storagePath,
-            docId: docRef.id,
+            docId: uploadTarget.docId,
           });
         } catch (error) {
           const code = toErrorCode(error);
@@ -910,20 +980,42 @@ export default function DocumentsPage() {
 
           rejectedMessages.push(`${file.name}: ${message}`);
 
+          if (!uploadTarget?.docId) {
+            continue;
+          }
+
           try {
             await withTimeout(
-              deleteObject(storageRef),
+              deleteCampusDocument({ docId: uploadTarget.docId }),
               CLEANUP_TIMEOUT_MS,
-              "Cleanup storage object",
+              "Cleanup pending document",
             );
           } catch (cleanupError) {
+            const cleanupCode = toErrorCode(cleanupError);
+            const cleanupMessage = toErrorMessage(cleanupError);
+
+            if (isNonFatalUploadCleanupError(cleanupError)) {
+              ecDocumentsLogger.info("Ignored non-fatal upload cleanup error.", {
+                uploadSessionId,
+                uid: activeUid,
+                name: file.name,
+                storagePath,
+                docId: uploadTarget.docId,
+                code: cleanupCode,
+                message: cleanupMessage,
+                raw: cleanupError,
+              });
+              continue;
+            }
+
             ecDocumentsLogger.warn("Failed to cleanup orphaned storage object.", {
               uploadSessionId,
               uid: activeUid,
               name: file.name,
               storagePath,
-              code: toErrorCode(cleanupError),
-              message: toErrorMessage(cleanupError),
+              docId: uploadTarget.docId,
+              code: cleanupCode,
+              message: cleanupMessage,
               raw: cleanupError,
             });
           }

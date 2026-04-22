@@ -113,10 +113,12 @@ import {
   isBOD,
   isRegularEC,
 } from "@/lib/ec-permissions";
-import { normalizeCourse } from "@/lib/courseOptions";
+import { normalizeCourse, normalizeCourseSlug } from "@/lib/courseOptions";
 import {
+  createCampusNotification,
   createCampusEvent,
   deleteCampusEvent,
+  updateCampusNotification,
   updateCampusEvent,
   logPermissionDeniedAttemptForCurrentUser,
 } from "@/lib/firebase-functions";
@@ -381,6 +383,7 @@ type StudentLookup = {
   role: string;
 };
 
+type NotificationAudienceMode = "filtered" | "course" | "explicit";
 type NotificationListStatus = "scheduled" | "sent";
 type EventFilesTab = "images" | "docs";
 type EventSortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
@@ -407,6 +410,17 @@ type NotificationSummary = {
   course: string;
   yearLevel: string;
   targetStudent: string;
+  selectedYear?: string;
+  selectedCourses?: string[];
+  yearLevels?: string[];
+  courses?: string[];
+  targetStudentIds?: string[];
+  targetSchoolIds?: string[];
+  audienceMode?: NotificationAudienceMode;
+  sendToFilteredAudience?: boolean;
+  courseScope?: string | null;
+  courseScopeSlug?: string | null;
+  createdByCourseScope?: string | null;
   createdAt?: any;
   recipientCount: number;
   status: NotificationListStatus;
@@ -668,6 +682,175 @@ function normalizeEventIdentifierList(value: unknown) {
   return toEventTargetList(value).map((item) => normalizeLookupText(item)).filter(Boolean);
 }
 
+function normalizeNotificationAudienceModeValue(
+  value: unknown,
+): NotificationAudienceMode | null {
+  const normalizedValue = String(value ?? "").trim().toLowerCase();
+  if (
+    normalizedValue === "filtered" ||
+    normalizedValue === "course" ||
+    normalizedValue === "explicit"
+  ) {
+    return normalizedValue as NotificationAudienceMode;
+  }
+
+  return null;
+}
+
+function notificationSummarySelectedYearLevels(
+  notification: Pick<NotificationSummary, "selectedYear" | "yearLevels" | "yearLevel">,
+) {
+  const selectedYearsFromArray = normalizeEventIdentifierList(notification.yearLevels)
+    .filter((item) => EVENT_YEAR_LEVEL_CHOICES.includes(item));
+  if (selectedYearsFromArray.length > 0) {
+    return selectedYearsFromArray;
+  }
+
+  const selectedYear = String(notification.selectedYear ?? "").trim();
+  if (selectedYear && selectedYear.toLowerCase() !== "all years") {
+    const normalizedSelectedYear = splitCommaValues(selectedYear).filter((item) =>
+      EVENT_YEAR_LEVEL_CHOICES.includes(item),
+    );
+    if (normalizedSelectedYear.length > 0) {
+      return normalizedSelectedYear;
+    }
+  }
+
+  return splitCommaValues(notification.yearLevel).filter((item) =>
+    EVENT_YEAR_LEVEL_CHOICES.includes(item),
+  );
+}
+
+function notificationSummarySelectedCourses(
+  notification: Pick<NotificationSummary, "selectedCourses" | "courses" | "course">,
+) {
+  const selectedCoursesFromArray = normalizeEventIdentifierList(
+    notification.selectedCourses ?? notification.courses,
+  ).filter((item) => EVENT_COURSE_CHOICES.includes(item));
+  if (selectedCoursesFromArray.length > 0) {
+    return selectedCoursesFromArray;
+  }
+
+  return splitCommaValues(notification.course).filter((item) =>
+    EVENT_COURSE_CHOICES.includes(item),
+  );
+}
+
+function notificationSummaryHasExplicitTargets(
+  notification: Pick<NotificationSummary, "targetStudentIds" | "targetSchoolIds">,
+) {
+  return (
+    normalizeEventIdentifierList(notification.targetStudentIds).length > 0 ||
+    normalizeEventIdentifierList(notification.targetSchoolIds).length > 0
+  );
+}
+
+function escapeRegExpLiteral(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function notificationSummaryRepresentsBodCourseAudience(
+  notification: Pick<
+    NotificationSummary,
+    | "audienceMode"
+    | "course"
+    | "selectedCourses"
+    | "courses"
+    | "courseScope"
+    | "createdByCourseScope"
+    | "recipientType"
+    | "sendToFilteredAudience"
+    | "targetStudent"
+    | "targetStudentIds"
+    | "targetSchoolIds"
+  >,
+  viewerCourseScopeValue: string,
+) {
+  const normalizedViewerCourseScope = normalizeCourse(viewerCourseScopeValue);
+  if (!normalizedViewerCourseScope) {
+    return false;
+  }
+
+  const normalizedStoredMode = normalizeNotificationAudienceModeValue(
+    notification.audienceMode,
+  );
+  if (normalizedStoredMode === "explicit") {
+    return false;
+  }
+
+  const normalizedCourseScope = normalizeCourse(
+    String(notification.courseScope ?? notification.createdByCourseScope ?? ""),
+  );
+  const normalizedSelectedCourses = notificationSummarySelectedCourses(notification)
+    .map((item) => normalizeCourse(item))
+    .filter(Boolean);
+  const normalizedLegacyCourse = normalizeCourse(notification.course);
+  const matchesScope = normalizedCourseScope
+    ? normalizedCourseScope === normalizedViewerCourseScope
+    : normalizedSelectedCourses.length > 0
+      ? normalizedSelectedCourses.every(
+          (item) => item === normalizedViewerCourseScope,
+        )
+      : normalizedLegacyCourse === normalizedViewerCourseScope;
+
+  if (!matchesScope) {
+    return false;
+  }
+  if (normalizedStoredMode === "course") {
+    return true;
+  }
+  if (notification.sendToFilteredAudience === true) {
+    return true;
+  }
+  if (notification.recipientType !== "student") {
+    return true;
+  }
+
+  if (notificationSummaryHasExplicitTargets(notification)) {
+    return false;
+  }
+
+  const courseAudiencePattern = new RegExp(
+    `^(all\\s+${escapeRegExpLiteral(viewerCourseScopeValue)}\\s+students|\\d+\\s+${escapeRegExpLiteral(viewerCourseScopeValue)}\\s+students\\s+selected)$`,
+    "i",
+  );
+  return courseAudiencePattern.test(String(notification.targetStudent ?? "").trim());
+}
+
+function resolveNotificationSummaryAudienceMode(
+  notification: NotificationSummary,
+  viewerIsBod: boolean,
+  viewerCourseScopeValue: string,
+): NotificationAudienceMode {
+  const storedMode = normalizeNotificationAudienceModeValue(
+    notification.audienceMode,
+  );
+  if (storedMode === "explicit") {
+    return "explicit";
+  }
+  if (
+    viewerIsBod &&
+    viewerCourseScopeValue &&
+    notificationSummaryRepresentsBodCourseAudience(
+      notification,
+      viewerCourseScopeValue,
+    )
+  ) {
+    return "course";
+  }
+  if (storedMode) {
+    return storedMode;
+  }
+  if (
+    notificationSummaryHasExplicitTargets(notification) ||
+    notification.recipientType === "student"
+  ) {
+    return "explicit";
+  }
+
+  return "filtered";
+}
+
 function countSpecificEventAudienceSelections(
   event: Pick<EventDoc, "targetStudent" | "selectedStudentIds" | "selectedSchoolIds">,
 ) {
@@ -846,6 +1029,76 @@ function filterStudentsForCourseScope(
   }
 
   return students.filter((student) => isStudentInCourseScope(student, courseScope));
+}
+
+function isActiveStudentStatus(status: string) {
+  const normalizedStatus = String(status ?? "").trim().toLowerCase();
+  return normalizedStatus === "" || normalizedStatus === "active";
+}
+
+function isNotificationEligibleStudent(student: StudentLookup) {
+  return (
+    normalizeCampusRole(student.role) === "student" &&
+    isActiveStudentStatus(student.status)
+  );
+}
+
+function notificationStudentMatchesYears(
+  student: StudentLookup,
+  selectedYearLevels: string[],
+) {
+  return (
+    selectedYearLevels.length === 0 ||
+    selectedYearLevels.includes(String(student.year ?? "").trim())
+  );
+}
+
+function notificationStudentMatchesCourses(
+  student: StudentLookup,
+  selectedCourses: string[],
+) {
+  if (selectedCourses.length === 0) {
+    return true;
+  }
+
+  const normalizedStudentCourse = normalizeCourse(String(student.course ?? "").trim());
+  if (!normalizedStudentCourse) {
+    return false;
+  }
+
+  const normalizedSelectedCourseSet = new Set(
+    selectedCourses.map((courseName) => normalizeCourse(courseName)).filter(Boolean),
+  );
+  return normalizedSelectedCourseSet.has(normalizedStudentCourse);
+}
+
+function filterNotificationAudienceStudents(
+  students: StudentLookup[],
+  selectedYearLevels: string[],
+  selectedCourses: string[],
+) {
+  return students.filter(
+    (student) =>
+      isNotificationEligibleStudent(student) &&
+      notificationStudentMatchesYears(student, selectedYearLevels) &&
+      notificationStudentMatchesCourses(student, selectedCourses),
+  );
+}
+
+function resolveNotificationRecipients(
+  students: StudentLookup[],
+  selectedYearLevels: string[],
+  selectedCourses: string[],
+  selectedStudentIds: Set<string>,
+) {
+  return filterNotificationAudienceStudents(
+    students,
+    selectedYearLevels,
+    selectedCourses,
+  ).filter(
+    (student) =>
+      selectedStudentIds.size === 0 || selectedStudentIds.has(student.uid),
+  );
 }
 
 function resolveRequiredEventAudience(
@@ -1788,6 +2041,8 @@ export default function EventDashboard() {
   const [showNotifCourseDropdown, setShowNotifCourseDropdown] = useState(false);
   const [isAllNotifCoursesExplicit, setIsAllNotifCoursesExplicit] =
     useState(false);
+  const [notifAudienceMode, setNotifAudienceMode] =
+    useState<NotificationAudienceMode>("filtered");
   const [notifRegistrantsModalOpen, setNotifRegistrantsModalOpen] =
     useState(false);
   const [notifScheduled24, setNotifScheduled24] = useState<string>(() =>
@@ -1982,6 +2237,9 @@ export default function EventDashboard() {
     () => normalizeCourse(viewerCourseScope ?? ""),
     [viewerCourseScope],
   );
+  const defaultNotifAudienceMode: NotificationAudienceMode = viewerIsBod ?
+    "course" :
+    "filtered";
   const canManageNotifications =
     viewerIsRegularEc || (viewerIsBod && Boolean(viewerCourseScopeValue));
   const canCreateEvents = isECUser;
@@ -2050,7 +2308,7 @@ export default function EventDashboard() {
         { limit: number; includeEcMembers?: boolean },
         { students?: RemoteStudent[] }
       >(functions, "ecListStudents");
-      const res = await fn({ limit: 2000, includeEcMembers: true });
+      const res = await fn({ limit: 2000, includeEcMembers: false });
       const rows = (res.data?.students ?? [])
         .filter(
           (student) =>
@@ -2165,21 +2423,32 @@ export default function EventDashboard() {
 
       const grouped = new Map<string, NotificationSummary>();
 
-      docs.forEach((d) => {
-        const data = d.data() as {
-          dispatchId?: string;
-          title?: string;
-          message?: string;
-          date?: string;
-          scheduledTime?: string;
-          recipientType?: string;
-          course?: string;
-          yearLevel?: string;
-          targetStudent?: string;
-          recipientCount?: number;
-          createdAt?: any;
-          createdByUid?: string;
-        };
+        docs.forEach((d) => {
+          const data = d.data() as {
+            dispatchId?: string;
+            title?: string;
+            message?: string;
+            date?: string;
+            scheduledTime?: string;
+            recipientType?: string;
+            course?: string;
+            yearLevel?: string;
+            targetStudent?: string;
+            selectedYear?: string;
+            selectedCourses?: unknown;
+            yearLevels?: unknown;
+            courses?: unknown;
+            targetStudentIds?: unknown;
+            targetSchoolIds?: unknown;
+            audienceMode?: unknown;
+            sendToFilteredAudience?: boolean;
+            courseScope?: string | null;
+            courseScopeSlug?: string | null;
+            createdByCourseScope?: string | null;
+            recipientCount?: number;
+            createdAt?: any;
+            createdByUid?: string;
+          };
 
         const createdByUid = String(data.createdByUid ?? "");
         if (createdByUid && createdByUid !== currentUser.uid) return;
@@ -2190,15 +2459,38 @@ export default function EventDashboard() {
         const scheduledTime = String(data.scheduledTime ?? "");
         const createdAtMs = toMillis(data.createdAt);
         const recipientTypeRaw = String(data.recipientType ?? "all");
-        const recipientType: NotificationSummary["recipientType"] =
-          recipientTypeRaw === "course" ||
-          recipientTypeRaw === "year" ||
-          recipientTypeRaw === "student"
-            ? recipientTypeRaw
-            : "all";
-        const explicitRecipientCount = Number(data.recipientCount ?? 0);
+          const recipientType: NotificationSummary["recipientType"] =
+            recipientTypeRaw === "course" ||
+            recipientTypeRaw === "year" ||
+            recipientTypeRaw === "student"
+              ? recipientTypeRaw
+              : "all";
+          const selectedYear = String(data.selectedYear ?? "").trim();
+          const selectedCourses = notificationSummarySelectedCourses({
+            selectedCourses: Array.isArray(data.selectedCourses) ?
+              data.selectedCourses.map((item) => String(item).trim()) :
+              undefined,
+            courses: Array.isArray(data.courses) ?
+              data.courses.map((item) => String(item).trim()) :
+              undefined,
+            course: String(data.course ?? ""),
+          });
+          const yearLevels = notificationSummarySelectedYearLevels({
+            selectedYear,
+            yearLevels: Array.isArray(data.yearLevels) ?
+              data.yearLevels.map((item) => String(item).trim()) :
+              undefined,
+            yearLevel: String(data.yearLevel ?? ""),
+          });
+          const targetStudentIds = normalizeEventIdentifierList(data.targetStudentIds);
+          const targetSchoolIds = normalizeEventIdentifierList(data.targetSchoolIds);
+          const audienceMode = normalizeNotificationAudienceModeValue(
+            data.audienceMode,
+          );
+          const sendToFilteredAudience = data.sendToFilteredAudience === true;
+          const explicitRecipientCount = Number(data.recipientCount ?? 0);
 
-        const dispatchId = String(data.dispatchId ?? "").trim();
+          const dispatchId = String(data.dispatchId ?? "").trim();
         const fallbackGroupKey = [
           createdByUid || currentUser.uid,
           title,
@@ -2217,15 +2509,33 @@ export default function EventDashboard() {
             message,
             date,
             scheduledTime,
-            recipientType,
-            course: String(data.course ?? ""),
-            yearLevel: String(data.yearLevel ?? ""),
-            targetStudent: String(data.targetStudent ?? ""),
-            createdAt: data.createdAt,
-            recipientCount:
-              explicitRecipientCount > 0 ? explicitRecipientCount : 0,
-            status: computeNotificationStatus(date, scheduledTime),
-          });
+              recipientType,
+              course: String(data.course ?? ""),
+              yearLevel: String(data.yearLevel ?? ""),
+              targetStudent: String(data.targetStudent ?? ""),
+              selectedYear,
+              selectedCourses,
+              yearLevels,
+              courses: selectedCourses,
+              targetStudentIds,
+              targetSchoolIds,
+              audienceMode: audienceMode ?? undefined,
+              sendToFilteredAudience,
+              courseScope:
+                typeof data.courseScope === "string" ? data.courseScope : null,
+              courseScopeSlug:
+                typeof data.courseScopeSlug === "string" ?
+                  data.courseScopeSlug :
+                  null,
+              createdByCourseScope:
+                typeof data.createdByCourseScope === "string" ?
+                  data.createdByCourseScope :
+                  null,
+              createdAt: data.createdAt,
+              recipientCount:
+                explicitRecipientCount > 0 ? explicitRecipientCount : 0,
+              status: computeNotificationStatus(date, scheduledTime),
+            });
         }
 
         const current = grouped.get(groupKey)!;
@@ -2239,6 +2549,46 @@ export default function EventDashboard() {
         }
         if (toMillis(data.createdAt) > toMillis(current.createdAt)) {
           current.createdAt = data.createdAt;
+        }
+        if ((!current.selectedYear || current.selectedYear.length === 0) && selectedYear) {
+          current.selectedYear = selectedYear;
+        }
+        if ((current.selectedCourses?.length ?? 0) === 0 && selectedCourses.length > 0) {
+          current.selectedCourses = selectedCourses;
+          current.courses = selectedCourses;
+        }
+        if ((current.yearLevels?.length ?? 0) === 0 && yearLevels.length > 0) {
+          current.yearLevels = yearLevels;
+        }
+        if (
+          (current.targetStudentIds?.length ?? 0) === 0 &&
+          targetStudentIds.length > 0
+        ) {
+          current.targetStudentIds = targetStudentIds;
+        }
+        if (
+          (current.targetSchoolIds?.length ?? 0) === 0 &&
+          targetSchoolIds.length > 0
+        ) {
+          current.targetSchoolIds = targetSchoolIds;
+        }
+        if (!current.audienceMode && audienceMode) {
+          current.audienceMode = audienceMode;
+        }
+        if (!current.sendToFilteredAudience && sendToFilteredAudience) {
+          current.sendToFilteredAudience = true;
+        }
+        if (!current.courseScope && typeof data.courseScope === "string") {
+          current.courseScope = data.courseScope;
+        }
+        if (!current.courseScopeSlug && typeof data.courseScopeSlug === "string") {
+          current.courseScopeSlug = data.courseScopeSlug;
+        }
+        if (
+          !current.createdByCourseScope &&
+          typeof data.createdByCourseScope === "string"
+        ) {
+          current.createdByCourseScope = data.createdByCourseScope;
         }
       });
 
@@ -2552,6 +2902,8 @@ export default function EventDashboard() {
     () => new Set(selectedNotifStudents.map((student) => student.uid)),
     [selectedNotifStudents],
   );
+  const effectiveNotifAudienceMode: NotificationAudienceMode =
+    selectedNotifStudents.length > 0 ? "explicit" : notifAudienceMode;
   const selectedNotifYearLevelsSet = useMemo(
     () => new Set(selectedNotifYearLevels),
     [selectedNotifYearLevels],
@@ -2572,12 +2924,113 @@ export default function EventDashboard() {
     () => new Set(selectedEventCourses),
     [selectedEventCourses],
   );
+  const effectiveNotifCourseFilters = useMemo(
+    () =>
+      viewerIsBod && viewerCourseScopeValue
+        ? [viewerCourseScopeValue]
+        : selectedNotifCourses
+            .map((courseName) => normalizeCourse(courseName) || courseName)
+            .filter(Boolean),
+    [selectedNotifCourses, viewerCourseScopeValue, viewerIsBod],
+  );
+  const notificationAudienceStudents = useMemo(
+    () =>
+      filterNotificationAudienceStudents(
+        studentOptions,
+        selectedNotifYearLevels,
+        effectiveNotifCourseFilters,
+      ),
+    [effectiveNotifCourseFilters, selectedNotifYearLevels, studentOptions],
+  );
+  const notifResolvedRecipients = useMemo(
+    () =>
+      resolveNotificationRecipients(
+        studentOptions,
+        selectedNotifYearLevels,
+        effectiveNotifCourseFilters,
+        selectedNotifStudentIds,
+      ),
+    [
+      effectiveNotifCourseFilters,
+      selectedNotifStudentIds,
+      selectedNotifYearLevels,
+      studentOptions,
+    ],
+  );
+  const invalidNotifSelectedStudents = useMemo(
+    () =>
+      effectiveNotifAudienceMode !== "explicit" ?
+        [] :
+      selectedNotifStudents.filter((student) => {
+        if (!isNotificationEligibleStudent(student)) {
+          return true;
+        }
+
+        return viewerIsBod && viewerCourseScopeValue ?
+            !isStudentInCourseScope(student, viewerCourseScopeValue) :
+            false;
+      }),
+    [
+      effectiveNotifAudienceMode,
+      selectedNotifStudents,
+      viewerCourseScopeValue,
+      viewerIsBod,
+    ],
+  );
+  const notifAudienceSummaryLabel = useMemo(() => {
+    if (
+      effectiveNotifAudienceMode === "explicit" &&
+      selectedNotifStudents.length > 0
+    ) {
+      if (selectedNotifStudents.length === 1) {
+        const student = selectedNotifStudents[0];
+        return `${student.studentName} (${student.schoolId})`;
+      }
+
+      return `${selectedNotifStudents.length} students selected`;
+    }
+
+    if (notifResolvedRecipients.length === 0) {
+      return "";
+    }
+
+    if (
+      effectiveNotifAudienceMode === "course" &&
+      viewerIsBod &&
+      viewerCourseScopeValue
+    ) {
+      if (selectedNotifYearLevels.length === 0 || isAllNotifYearsExplicit) {
+        return `All ${viewerCourseScopeValue} students`;
+      }
+
+      return `${notifResolvedRecipients.length} ${viewerCourseScopeValue} students selected`;
+    }
+
+    if (effectiveNotifCourseFilters.length === 1) {
+      if (selectedNotifYearLevels.length === 0 || isAllNotifYearsExplicit) {
+        return `All ${effectiveNotifCourseFilters[0]} students`;
+      }
+
+      return `${notifResolvedRecipients.length} ${effectiveNotifCourseFilters[0]} students selected`;
+    }
+
+    return `${notifResolvedRecipients.length} matching students selected`;
+  }, [
+    effectiveNotifCourseFilters,
+    effectiveNotifAudienceMode,
+    isAllNotifYearsExplicit,
+    notifResolvedRecipients.length,
+    selectedNotifStudents,
+    selectedNotifYearLevels.length,
+    viewerCourseScopeValue,
+    viewerIsBod,
+  ]);
 
   const filteredStudentOptions = useMemo(() => {
     const nameQuery = notifSearchName.trim().toLowerCase();
     const idQuery = notifSearchId.trim().toLowerCase();
 
-    return studentOptions
+    return notificationAudienceStudents
       .filter((student) => {
         if (selectedNotifStudentIds.has(student.uid)) return false;
         const matchesName =
@@ -2587,7 +3040,12 @@ export default function EventDashboard() {
         return matchesName && matchesId;
       })
       .slice(0, 20);
-  }, [notifSearchName, notifSearchId, studentOptions, selectedNotifStudentIds]);
+  }, [
+    notifSearchName,
+    notifSearchId,
+    notificationAudienceStudents,
+    selectedNotifStudentIds,
+  ]);
 
   const filteredNotifYearOptions = useMemo(() => {
     const query = notifYearSearch.trim().toLowerCase();
@@ -3155,11 +3613,6 @@ export default function EventDashboard() {
     selectedEventCourses.length > 0;
   const hasEventRegistrantSelection =
     hasSpecificTarget || hasEventYearFilter || hasEventCourseFilter;
-  const hasNotifYearFilter =
-    isAllNotifYearsExplicit || selectedNotifYearLevels.length > 0;
-  const hasNotifCourseFilter =
-    (viewerIsBod && Boolean(viewerCourseScopeValue)) ||
-    isAllNotifCoursesExplicit || selectedNotifCourses.length > 0;
   const eventYearLevelLabel = isAllYearsExplicit
     ? "All Years"
     : selectedEventYearLevels.length > 0
@@ -3174,21 +3627,22 @@ export default function EventDashboard() {
       : "";
   const registrantsRequiredMissing =
     !isPreReg && !hasEventRegistrantSelection && !isEditingEvent;
-  const notifHasSpecificTarget = selectedNotifStudents.length > 0;
-  const notifYearLevelLabel = isAllNotifYearsExplicit
-    ? "All Years"
-    : selectedNotifYearLevels.length > 0
-      ? selectedNotifYearLevels.join(", ")
-      : "";
-  const notifCourseLabel = isAllNotifCoursesExplicit
-    ? "All Courses"
-    : viewerIsBod && viewerCourseScopeValue
-      ? viewerCourseScopeValue
-    : selectedNotifCourses.length > 0
-      ? selectedNotifCourses.join(", ")
-      : "";
-  const hasNotifRecipientSelection =
-    notifHasSpecificTarget || hasNotifYearFilter || hasNotifCourseFilter;
+  const notifHasSpecificTarget = effectiveNotifAudienceMode === "explicit";
+  const notifYearLevelLabel =
+    isAllNotifYearsExplicit || selectedNotifYearLevels.length === 0 ?
+      "All Years" :
+      selectedNotifYearLevels.join(", ");
+  const notifCourseLabel =
+    viewerIsBod && viewerCourseScopeValue ?
+      viewerCourseScopeValue :
+    isAllNotifCoursesExplicit || selectedNotifCourses.length === 0 ?
+      "All Courses" :
+      selectedNotifCourses.join(", ");
+  const hasNotifRecipientSelection = notifResolvedRecipients.length > 0;
+  const notifRecipientRequiredMessage =
+    viewerIsBod && viewerCourseScopeValue ?
+      `Choose at least one ${viewerCourseScopeValue} student to send this notification.` :
+      "Choose at least one recipient to send this notification.";
   const notifRecipientsRequiredMissing =
     !isEditingNotification && !hasNotifRecipientSelection;
   const viewAllModalImages = useMemo(() => {
@@ -3760,12 +4214,13 @@ export default function EventDashboard() {
     );
     setShowNotifCourseDropdown(false);
     setIsAllNotifCoursesExplicit(false);
+    setNotifAudienceMode(defaultNotifAudienceMode);
     setNotifRegistrantsModalOpen(false);
     setShowStudentDropdown(false);
     setNotifScheduled24(nextNotifTime);
     setNotifScheduledValue(toTimeValue(nextNotifTime));
     setEditingNotificationDispatchId(null);
-  }, [viewerCourseScopeValue, viewerIsBod]);
+  }, [defaultNotifAudienceMode, viewerCourseScopeValue, viewerIsBod]);
 
   const handleStartEditScheduledNotification = async (
     item: NotificationSummary,
@@ -3797,24 +4252,43 @@ export default function EventDashboard() {
       studentOptions.length > 0
         ? studentOptions
         : await loadStudentsForNotifications();
-    const parsedSelectedStudents = parseTargetStudents(
-      item.targetStudent,
-      allStudents,
+    const resolvedAudienceMode = resolveNotificationSummaryAudienceMode(
+      item,
+      viewerIsBod,
+      viewerCourseScopeValue,
     );
     const legacyYears = splitCommaValues(item.yearLevel);
     const legacyCourses = splitCommaValues(item.course);
-    const parsedYears = legacyYears.filter((entry) =>
-      EVENT_YEAR_LEVEL_CHOICES.includes(entry),
-    );
-    const parsedCourses = legacyCourses.filter((entry) =>
-      EVENT_COURSE_CHOICES.includes(entry),
-    );
+    const parsedYears = notificationSummarySelectedYearLevels(item);
+    const parsedCourses = notificationSummarySelectedCourses(item);
     const allYearsExplicit =
       parsedYears.length === 0 &&
-      legacyYears.some((entry) => entry.toLowerCase() === "all years");
+      (
+        String(item.selectedYear ?? "").trim().toLowerCase() === "all years" ||
+        legacyYears.some((entry) => entry.toLowerCase() === "all years")
+      );
     const allCoursesExplicit =
       parsedCourses.length === 0 &&
       legacyCourses.some((entry) => entry.toLowerCase() === "all courses");
+    const explicitSelectedStudentIds = normalizeEventIdentifierList(
+      item.targetStudentIds,
+    );
+    const explicitSelectedSchoolIds = normalizeEventIdentifierList(
+      item.targetSchoolIds,
+    );
+    const parsedSelectedStudents =
+      resolvedAudienceMode === "explicit" ?
+        explicitSelectedStudentIds.length > 0 ||
+        explicitSelectedSchoolIds.length > 0 ?
+          sortStudentLookups(
+            allStudents.filter(
+              (student) =>
+                explicitSelectedStudentIds.includes(student.uid) ||
+                explicitSelectedSchoolIds.includes(student.schoolId),
+            ),
+          ) :
+          parseTargetStudents(item.targetStudent, allStudents) :
+        [];
     const effectiveNotifCourses =
       viewerIsBod && viewerCourseScopeValue ? [viewerCourseScopeValue] : parsedCourses;
     const effectiveAllCoursesExplicit = viewerIsBod ? false : allCoursesExplicit;
@@ -3833,6 +4307,7 @@ export default function EventDashboard() {
     setNotifMessage(String(item.message ?? ""));
     setNotifScheduled24(nextScheduled24);
     setNotifScheduledValue(toTimeValue(nextScheduled24));
+    setNotifAudienceMode(resolvedAudienceMode);
     setSelectedNotifStudents(parsedSelectedStudents);
     setSelectedNotifYearLevels(parsedYears);
     setIsAllNotifYearsExplicit(allYearsExplicit);
@@ -3873,41 +4348,51 @@ export default function EventDashboard() {
         "B.O.D course scope is missing. Ask admin to update your account.",
       );
     }
-    const effectiveSelectedNotifCourses =
-      viewerIsBod && viewerCourseScopeValue ?
-        [viewerCourseScopeValue] :
-        selectedNotifCourses
-          .map((courseName) => normalizeCourse(courseName) || courseName)
-          .filter(Boolean);
-    const effectiveSelectedNotifCourseSet = new Set(
-      effectiveSelectedNotifCourses
-        .map((courseName) => normalizeCourse(courseName))
-        .filter(Boolean),
-    );
+    const effectiveSelectedNotifCourses = effectiveNotifCourseFilters;
     const title = notifTitle.trim();
     const message = notifMessage.trim();
     const scheduledTime = format12h(notifScheduled24);
-    const selectedLabel = selectedNotifStudents
-      .map((student) => `${student.studentName} (${student.schoolId})`)
-      .join("; ");
-    const hasSpecificRecipients = selectedNotifStudents.length > 0;
+    const hasSpecificRecipients =
+      effectiveNotifAudienceMode === "explicit" &&
+      selectedNotifStudents.length > 0;
+    const targetStudentIds = hasSpecificRecipients ?
+        selectedNotifStudents
+          .map((student) => student.uid.trim())
+          .filter((value) => value.length > 0 && !value.startsWith("manual-")) :
+        [];
+    const targetSchoolIds = hasSpecificRecipients ?
+        Array.from(
+          new Set(
+            selectedNotifStudents
+              .map((student) => student.schoolId.trim())
+              .filter(
+                (value) => value.length > 0 && value !== "Unknown ID",
+              ),
+          ),
+        ) :
+        [];
     const yearLevelValue = isAllNotifYearsExplicit
       ? "All Years"
-      : selectedNotifYearLevels.join(", ");
-    const courseValue =
+      : selectedNotifYearLevels.join(", ") || "All Years";
+    const courseScopeValue =
       viewerIsBod && viewerCourseScopeValue ?
         viewerCourseScopeValue :
-        isAllNotifCoursesExplicit ?
-          "All Courses" :
-          effectiveSelectedNotifCourses.join(", ");
-    const derivedRecipientType: NotificationSummary["recipientType"] =
-      hasSpecificRecipients
-        ? "student"
-        : hasNotifCourseFilter && !isAllNotifCoursesExplicit
-          ? "course"
-          : hasNotifYearFilter && !isAllNotifYearsExplicit
-            ? "year"
-            : "all";
+        effectiveSelectedNotifCourses.length === 1 ?
+          effectiveSelectedNotifCourses[0] :
+          "";
+    const courseScopeSlugValue = courseScopeValue ?
+        normalizeCourseSlug(courseScopeValue) :
+        "";
+    const notificationAudiencePayload = {
+      audienceMode: effectiveNotifAudienceMode,
+      selectedYear: yearLevelValue || "All Years",
+      selectedCourses: effectiveSelectedNotifCourses,
+      targetStudentIds,
+      targetSchoolIds,
+      sendToFilteredAudience: effectiveNotifAudienceMode !== "explicit",
+      courseScope: courseScopeValue || null,
+      courseScopeSlug: courseScopeSlugValue || null,
+    };
 
     if (viewerIsBod) {
       console.info("[NOTIF][BOD]", {
@@ -3925,130 +4410,59 @@ export default function EventDashboard() {
         selectedCourseCanonical: effectiveSelectedNotifCourses,
         selectedYear: isAllNotifYearsExplicit ? "All Years" : selectedNotifYearLevels,
         specificRecipientsCount: selectedNotifStudents.length,
+        resolvedRecipientsCount: notifResolvedRecipients.length,
       });
     }
 
-    if (!editingNotificationDispatchId && !hasNotifRecipientSelection) {
+    if (
+      viewerIsBod &&
+      effectiveNotifAudienceMode === "course" &&
+      courseScopeValue !== viewerCourseScopeValue
+    ) {
       return setNotifError(
-        "Choose at least one registrant before sending a notification.",
+        `B.O.D notifications stay scoped to ${viewerCourseScopeValue}.`,
       );
     }
 
-    if (editingNotificationDispatchId) {
-      if (!currentUser?.uid)
-        return setNotifError("Session not ready. Please sign in again.");
+    if (
+      effectiveNotifAudienceMode === "explicit" &&
+      invalidNotifSelectedStudents.length > 0
+    ) {
+      return setNotifError(
+        viewerIsBod && viewerCourseScopeValue ?
+          `Choose only active ${viewerCourseScopeValue} student recipients.` :
+          "Choose only active student recipients.",
+      );
+    }
 
+    if (!editingNotificationDispatchId && !hasNotifRecipientSelection) {
+      return setNotifError(notifRecipientRequiredMessage);
+    }
+
+    if (editingNotificationDispatchId) {
       const existing =
         notifications.find(
           (item) => item.dispatchId === editingNotificationDispatchId,
         ) ?? null;
       if (!existing) return setNotifError("Notification record not found.");
-      const payloadTargetStudent =
-        selectedNotifStudents.length > 0
-          ? selectedLabel
-          : String(existing.targetStudent ?? "");
-      const payloadCourse =
-        viewerIsBod && viewerCourseScopeValue ?
-          viewerCourseScopeValue :
-          courseValue || String(existing.course ?? "");
-      const payloadYearLevel =
-        yearLevelValue || String(existing.yearLevel ?? "");
-      const payloadRecipientType: NotificationSummary["recipientType"] =
-        payloadTargetStudent
-          ? "student"
-          : payloadCourse === "All Courses" || payloadYearLevel === "All Years"
-            ? "all"
-            : payloadCourse && payloadCourse !== "All Courses"
-            ? "course"
-            : payloadYearLevel && payloadYearLevel !== "All Years"
-              ? "year"
-              : existing.recipientType;
-
-      const payload = {
-        title,
-        message,
-        date: notifDate,
-        scheduledTime,
-        recipientType: payloadRecipientType,
-        course: payloadCourse,
-        yearLevel: payloadYearLevel,
-        targetStudent: payloadTargetStudent,
-        courses: effectiveSelectedNotifCourses,
-        yearLevels: selectedNotifYearLevels,
-        status: computeNotificationStatus(notifDate, scheduledTime),
-        updatedAt: serverTimestamp(),
-      };
 
       try {
         setSendingNotif(true);
-        // Always update the EC sender summary document first.
-        await setDoc(
-          doc(
-            db,
-            "profiles",
-            currentUser.uid,
-            "notifications",
-            `dispatch_${editingNotificationDispatchId}`,
-          ),
-          {
-            ...payload,
-            dispatchId: editingNotificationDispatchId,
-            recipientCount: existing.recipientCount,
-            createdByUid: currentUser.uid,
-            read: true,
-            type: "announcement",
-          },
-          { merge: true },
-        );
-
-        let bulkUpdateBlockedByPermissions = false;
-
-        try {
-          const dispatchQ = query(
-            collectionGroup(db, "notifications"),
-            where("dispatchId", "==", editingNotificationDispatchId),
-            limit(2000),
-          );
-          const dispatchSnap = await getDocs(dispatchQ);
-          const docsToUpdate = dispatchSnap.docs.filter(
-            (d) => String(d.data()?.createdByUid ?? "") === currentUser.uid,
-          );
-
-          if (docsToUpdate.length > 0) {
-            const chunkSize = 400;
-            for (let i = 0; i < docsToUpdate.length; i += chunkSize) {
-              const chunk = docsToUpdate.slice(i, i + chunkSize);
-              const batch = writeBatch(db);
-              chunk.forEach((d) => {
-                batch.set(d.ref, payload, { merge: true });
-              });
-              await batch.commit();
-            }
-          }
-        } catch (bulkError: any) {
-          const code = String(bulkError?.code ?? "");
-          const message = String(bulkError?.message ?? "");
-          const permissionDenied =
-            code === "permission-denied" ||
-            message.toLowerCase().includes("insufficient permissions") ||
-            message
-              .toLowerCase()
-              .includes("missing or insufficient permissions");
-
-          if (!permissionDenied) {
-            throw bulkError;
-          }
-
-          bulkUpdateBlockedByPermissions = true;
-          ecEventsLogger.warn(
-            "Bulk recipient update skipped due to Firestore permissions.",
-            {
-              dispatchId: editingNotificationDispatchId,
-              code,
-              message,
-            },
-          );
-        }
+        const result = await updateCampusNotification({
+          scheduledNotificationId: editingNotificationDispatchId,
+          title,
+          message,
+          date: notifDate,
+          scheduledTime,
+          audienceMode: notificationAudiencePayload.audienceMode,
+          selectedYear: notificationAudiencePayload.selectedYear,
+          selectedCourses: notificationAudiencePayload.selectedCourses,
+          targetStudentIds: notificationAudiencePayload.targetStudentIds,
+          targetSchoolIds: notificationAudiencePayload.targetSchoolIds,
+          sendToFilteredAudience: notificationAudiencePayload.sendToFilteredAudience,
+          courseScope: notificationAudiencePayload.courseScope,
+          courseScopeSlug: notificationAudiencePayload.courseScopeSlug,
+        });
 
         setNotifications((prev) =>
           prev
@@ -4060,11 +4474,27 @@ export default function EventDashboard() {
                     message,
                     date: notifDate,
                     scheduledTime,
-                    recipientType: payloadRecipientType,
-                    course: payloadCourse,
-                    yearLevel: payloadYearLevel,
-                    targetStudent: payloadTargetStudent,
-                    status: computeNotificationStatus(notifDate, scheduledTime),
+                    audienceMode: result.audienceMode,
+                    recipientType: result.recipientType,
+                    selectedYear: result.selectedYear,
+                    course: result.course,
+                    yearLevel: result.yearLevel,
+                    targetStudent: result.targetStudent,
+                    selectedCourses: result.selectedCourses,
+                    courses: result.selectedCourses,
+                    yearLevels: result.yearLevels,
+                    targetStudentIds: result.targetStudentIds,
+                    targetSchoolIds: result.targetSchoolIds,
+                    sendToFilteredAudience: result.sendToFilteredAudience,
+                    courseScope: result.courseScope,
+                    courseScopeSlug: result.courseScopeSlug,
+                    createdByCourseScope:
+                      result.createdByCourseScope ??
+                      viewerCourseScopeValue ??
+                      viewerCourseScope ??
+                      null,
+                    recipientCount: result.updatedRecipientCount,
+                    status: result.status,
                   }
                 : item,
             )
@@ -4072,20 +4502,11 @@ export default function EventDashboard() {
         );
 
         resetNotificationComposer();
-        if (bulkUpdateBlockedByPermissions) {
-          setNotifMsg(
-            "Notification updated in EC list. Recipient records were not updated due to Firestore permissions.",
-          );
-          addToast({
-            title: "Updated with limits",
-            description:
-              "EC notification copy was updated, but recipient copies require broader Firestore update permissions.",
-            color: "warning",
-            timeout: 6500,
-          });
-        } else {
-          setNotifMsg("Notification updated.");
-        }
+        setNotifMsg(
+          viewerIsBod && result.courseScope ?
+            `Notification updated for ${result.updatedRecipientCount} ${result.courseScope} students.` :
+            `Notification updated for ${result.updatedRecipientCount} student(s).`,
+        );
         setNotificationPage(1);
         setExpandedNotificationId(editingNotificationDispatchId);
         void refreshSentNotificationsOnce();
@@ -4109,150 +4530,56 @@ export default function EventDashboard() {
       }
     }
 
-    let students = studentOptions;
-    if (studentsLoading && students.length === 0) {
-      return setNotifError("Students are still loading. Please wait.");
-    }
-    if (students.length === 0) {
-      students = await loadStudentsForNotifications();
-    }
-    if (students.length === 0)
-      return setNotifError("No student records found.");
-
-    const selectedStudentIdSet = new Set(
-      selectedNotifStudents.map((student) => student.uid),
-    );
-    const recipients = students.filter((student) => {
-      const yearMatch =
-        selectedNotifYearLevels.length === 0 ||
-        selectedNotifYearLevels.includes(String(student.year ?? "").trim());
-      const normalizedStudentCourse = normalizeCourse(String(student.course ?? "").trim());
-      const courseMatch =
-        effectiveSelectedNotifCourseSet.size === 0 ||
-        (
-          Boolean(normalizedStudentCourse) &&
-          effectiveSelectedNotifCourseSet.has(normalizedStudentCourse)
-        ) ||
-        effectiveSelectedNotifCourses.includes(String(student.course ?? "").trim());
-      const studentMatch =
-        selectedStudentIdSet.size === 0 ||
-        selectedStudentIdSet.has(student.uid);
-      return yearMatch && courseMatch && studentMatch;
-    });
-
-    if (viewerIsBod) {
-      console.info("[NOTIF][BOD]", {
-        bodScopeCanonical: viewerCourseScopeValue,
-        selectedCourseCanonical: effectiveSelectedNotifCourses,
-        selectedYear: isAllNotifYearsExplicit ? "All Years" : selectedNotifYearLevels,
-        recipientCount: recipients.length,
-        sampleRecipientCourses: recipients
-          .slice(0, 5)
-          .map((student) => String(student.course ?? "").trim()),
-        sampleRecipientRoles: recipients
-          .slice(0, 5)
-          .map((student) => String(student.role ?? "").trim()),
-        payloadCourse: courseValue,
-        payloadCourses: effectiveSelectedNotifCourses,
-      });
-    }
-
-    if (recipients.length === 0) {
-      return setNotifError(
-        "No recipients found for the selected registrant filters.",
-      );
-    }
-
-    const dispatchId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
     try {
       setSendingNotif(true);
-      const chunkSize = 400;
-
-      for (let i = 0; i < recipients.length; i += chunkSize) {
-        const chunk = recipients.slice(i, i + chunkSize);
-        const batch = writeBatch(db);
-
-        chunk.forEach((student) => {
-          const notifRef = doc(
-            collection(db, "profiles", student.uid, "notifications"),
-          );
-          batch.set(notifRef, {
-            title,
-            message,
-            date: notifDate,
-            scheduledTime,
-            type: "announcement",
-            dispatchId,
-            recipientType: derivedRecipientType,
-            course: courseValue,
-            yearLevel: yearLevelValue,
-            targetStudent: selectedLabel,
-            courses: effectiveSelectedNotifCourses,
-            yearLevels: selectedNotifYearLevels,
-            studentUid: student.uid,
-            studentName: student.studentName,
-            schoolId: student.schoolId,
-            createdByUid: currentUser ? currentUser.uid : null,
-            createdAt: serverTimestamp(),
-            read: false,
-          });
-        });
-
-        await batch.commit();
-      }
-
-      if (currentUser?.uid) {
-        await setDoc(
-          doc(
-            db,
-            "profiles",
-            currentUser.uid,
-            "notifications",
-            `dispatch_${dispatchId}`,
-          ),
-          {
-            title,
-            message,
-            date: notifDate,
-            scheduledTime,
-            type: "announcement",
-            dispatchId,
-            recipientType: derivedRecipientType,
-            course: courseValue,
-            yearLevel: yearLevelValue,
-            targetStudent: selectedLabel,
-            courses: effectiveSelectedNotifCourses,
-            yearLevels: selectedNotifYearLevels,
-            recipientCount: recipients.length,
-            createdByUid: currentUser.uid,
-            createdAt: serverTimestamp(),
-            read: true,
-          },
-        );
-      }
-
-      const optimisticCreatedAt = new Date();
-      const optimisticRow: NotificationSummary = {
-        id: dispatchId,
-        dispatchId,
+      const result = await createCampusNotification({
         title,
         message,
         date: notifDate,
         scheduledTime,
-        recipientType: derivedRecipientType,
-        course: courseValue,
-        yearLevel: yearLevelValue,
-        targetStudent: selectedLabel,
+        audienceMode: notificationAudiencePayload.audienceMode,
+        selectedYear: notificationAudiencePayload.selectedYear,
+        selectedYearLevels: selectedNotifYearLevels,
+        selectedCourses: notificationAudiencePayload.selectedCourses,
+        targetStudentIds: notificationAudiencePayload.targetStudentIds,
+        targetSchoolIds: notificationAudiencePayload.targetSchoolIds,
+        sendToFilteredAudience: notificationAudiencePayload.sendToFilteredAudience,
+        courseScope: notificationAudiencePayload.courseScope,
+        courseScopeSlug: notificationAudiencePayload.courseScopeSlug,
+      });
+
+      const optimisticCreatedAt = new Date();
+      const optimisticRow: NotificationSummary = {
+        id: result.dispatchId,
+        dispatchId: result.dispatchId,
+        title,
+        message,
+        date: notifDate,
+        scheduledTime,
+        audienceMode: result.audienceMode,
+        recipientType: result.recipientType,
+        selectedYear: result.selectedYear,
+        course: result.course,
+        yearLevel: result.yearLevel,
+        targetStudent: result.targetStudent,
+        selectedCourses: result.selectedCourses,
+        courses: result.selectedCourses,
+        yearLevels: result.yearLevels,
+        targetStudentIds: result.targetStudentIds,
+        targetSchoolIds: result.targetSchoolIds,
+        sendToFilteredAudience: result.sendToFilteredAudience,
+        courseScope: result.courseScope,
+        courseScopeSlug: result.courseScopeSlug,
+        createdByCourseScope: result.createdByCourseScope,
         createdAt: optimisticCreatedAt,
-        recipientCount: recipients.length,
-        status: computeNotificationStatus(notifDate, scheduledTime),
+        recipientCount: result.recipientCount,
+        status: result.status,
       };
 
       setNotifications((prev) => {
         const next = [
           optimisticRow,
-          ...prev.filter((item) => item.dispatchId !== dispatchId),
+          ...prev.filter((item) => item.dispatchId !== result.dispatchId),
         ];
         return next.sort(
           (a, b) => toMillis(b.createdAt) - toMillis(a.createdAt),
@@ -4261,12 +4588,16 @@ export default function EventDashboard() {
       setNotificationPage(1);
       void refreshSentNotificationsOnce();
 
-      setNotifMsg(`Notification sent to ${recipients.length} student(s).`);
+      setNotifMsg(
+        viewerIsBod && result.courseScope ?
+          `Notification sent to ${result.recipientCount} ${result.courseScope} students.` :
+          `Notification sent to ${result.recipientCount} student(s).`,
+      );
       resetNotificationComposer();
     } catch (error: unknown) {
       await logEventPermissionDeniedAttempt(
         "send_notification",
-        dispatchId,
+        title || "notification",
         error,
       );
       const message = describeScopedNotificationError(
@@ -6432,7 +6763,7 @@ export default function EventDashboard() {
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Registrants</label>
+            <label className="text-sm font-medium">Recipients</label>
             <Button
               variant="bordered"
               className="w-full justify-between"
@@ -6443,7 +6774,7 @@ export default function EventDashboard() {
                 setNotifRegistrantsModalOpen(true);
               }}
             >
-              Registrants
+              Recipients
             </Button>
             <Modal
               isOpen={notifRegistrantsModalOpen}
@@ -6461,7 +6792,7 @@ export default function EventDashboard() {
               <ModalContent>
                 {(onClose) => (
                   <>
-                    <ModalHeader>Registrants</ModalHeader>
+                    <ModalHeader>Recipients</ModalHeader>
                     <ModalBody>
                       <div className="space-y-3">
                         <div>
@@ -6769,42 +7100,57 @@ export default function EventDashboard() {
                             To *
                           </label>
 
-                          {selectedNotifStudents.length > 0 && (
+                          {(notifHasSpecificTarget ||
+                            Boolean(notifAudienceSummaryLabel)) && (
                             <div
                               className={`mt-1 rounded-lg border px-3 py-2 min-h-[52px] ${isEditingNotification ? "bg-gray-100" : "bg-white"}`}
                             >
                               <div className="flex flex-wrap gap-2">
-                                {selectedNotifStudents.map((student) => (
-                                  <span
-                                    key={student.uid}
-                                    className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white"
-                                  >
-                                    <span className="font-medium">
-                                      {student.studentName}
-                                    </span>
-                                    <span className="text-campus-text-secondary">
-                                      ({student.schoolId})
-                                    </span>
-                                    <Button
-                                      isIconOnly
-                                      size="sm"
-                                      variant="light"
-                                      className="h-5 min-w-5 text-campus-text-secondary"
-                                      isDisabled={isEditingNotification}
-                                      onPress={() => {
-                                        setSelectedNotifStudents((prev) =>
-                                          prev.filter(
-                                            (entry) =>
-                                              entry.uid !== student.uid,
-                                          ),
-                                        );
-                                      }}
-                                      aria-label={`Remove ${student.studentName}`}
+                                {notifHasSpecificTarget ?
+                                  selectedNotifStudents.map((student) => (
+                                    <span
+                                      key={student.uid}
+                                      className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-white"
                                     >
-                                      x
-                                    </Button>
-                                  </span>
-                                ))}
+                                      <span className="font-medium">
+                                        {student.studentName}
+                                      </span>
+                                      <span className="text-campus-text-secondary">
+                                        ({student.schoolId})
+                                      </span>
+                                      <Button
+                                        isIconOnly
+                                        size="sm"
+                                        variant="light"
+                                        className="h-5 min-w-5 text-campus-text-secondary"
+                                        isDisabled={isEditingNotification}
+                                        onPress={() => {
+                                          setSelectedNotifStudents((prev) =>
+                                            prev.filter(
+                                              (entry) =>
+                                                entry.uid !== student.uid,
+                                            ),
+                                          );
+                                          if (selectedNotifStudents.length === 1) {
+                                            setNotifAudienceMode(
+                                              defaultNotifAudienceMode,
+                                            );
+                                          }
+                                        }}
+                                        aria-label={`Remove ${student.studentName}`}
+                                      >
+                                        x
+                                      </Button>
+                                    </span>
+                                  )) :
+                                  (
+                                    <span className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm bg-slate-50">
+                                      <Users className="h-4 w-4 text-campus-text-secondary" />
+                                      <span className="font-medium">
+                                        {notifAudienceSummaryLabel}
+                                      </span>
+                                    </span>
+                                  )}
                               </div>
                             </div>
                           )}
@@ -6821,7 +7167,7 @@ export default function EventDashboard() {
                               }}
                               onFocus={() => setShowStudentDropdown(true)}
                               isDisabled={isEditingNotification}
-                              placeholder="Search by name"
+                              placeholder="Search students by name"
                               size="sm"
                               className="w-full"
                             />
@@ -6844,6 +7190,7 @@ export default function EventDashboard() {
                                       variant="light"
                                       className="w-full justify-start rounded-none px-4 py-2 data-[hover=true]:bg-gray-100"
                                       onPress={() => {
+                                        setNotifAudienceMode("explicit");
                                         setSelectedNotifStudents((prev) =>
                                           prev.some(
                                             (entry) =>
@@ -6894,22 +7241,28 @@ export default function EventDashboard() {
 
             {notifHasSpecificTarget && (
               <p className="text-xs text-campus-text-secondary">
-                Year Level and Course are optional when targeting specific
-                students.
+                Year Level and Course filters still apply to specifically
+                selected students.
               </p>
             )}
             <p className="text-xs text-campus-text-secondary">
-              Current filters: Year Level - {notifYearLevelLabel}; Course -{" "}
+              Current audience: Year Level - {notifYearLevelLabel}; Course -{" "}
               {notifCourseLabel}.
             </p>
-            {!isEditingNotification && !notifHasSpecificTarget && (
+            {!isEditingNotification && !notifHasSpecificTarget &&
+              Boolean(notifAudienceSummaryLabel) && (
+              <p className="text-xs text-campus-text-secondary">
+                Using current filters to notify {notifAudienceSummaryLabel}.
+              </p>
+            )}
+            {!isEditingNotification && notifRecipientsRequiredMissing && (
               <p className="text-xs text-red-600">
-                Choose at least one registrant to send this notification.
+                {notifRecipientRequiredMessage}
               </p>
             )}
             <p className="text-xs text-campus-text-secondary">
-              Choose one or more specific students. You can still set Year Level
-              and Course filters.
+              Search results only include active student recipients within your
+              allowed course scope.
             </p>
           </div>
 

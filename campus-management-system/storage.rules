@@ -49,6 +49,7 @@ service firebase.storage {
       return signedIn() && isECMemberRole(role());
     }
 
+    // Accept both human-readable labels and historical slug/code variants.
     function normalizeCourseScopeValue(value) {
       return !(value is string) || value == "" ? null :
         value.matches("^([Mm]echanical([ -]?[Ee]ngineering)?|[Mm][.]?[Ee][.]?|[Bb][Ss][Mm][Ee])$") ? "Mechanical Engineering" :
@@ -101,12 +102,32 @@ service firebase.storage {
         );
     }
 
-    function courseScopeSlug(courseScope) {
-      return courseScope == "Mechanical Engineering" ? "mechanical-engineering" :
-        courseScope == "Electrical Engineering" ? "electrical-engineering" :
-        courseScope == "Industrial Engineering" ? "industrial-engineering" :
-        courseScope == "Computer Engineering" ? "computer-engineering" :
-        courseScope == "Electronics Engineering" ? "electronics-engineering" :
+    function courseScopeSlugFromValue(courseScope) {
+      return courseScope == "Mechanical Engineering" ||
+        courseScope == "mechanical-engineering" ||
+        courseScope == "ME" ||
+        courseScope == "BSME" ?
+        "mechanical-engineering" :
+        courseScope == "Electrical Engineering" ||
+          courseScope == "electrical-engineering" ||
+          courseScope == "EE" ||
+          courseScope == "BSEE" ?
+          "electrical-engineering" :
+          courseScope == "Industrial Engineering" ||
+            courseScope == "industrial-engineering" ||
+            courseScope == "IE" ||
+            courseScope == "BSIE" ?
+            "industrial-engineering" :
+            courseScope == "Computer Engineering" ||
+              courseScope == "computer-engineering" ||
+              courseScope == "CPE" ||
+              courseScope == "BSCpE" ?
+              "computer-engineering" :
+              courseScope == "Electronics Engineering" ||
+                courseScope == "electronics-engineering" ||
+                courseScope == "ECE" ||
+                courseScope == "BSECE" ?
+                "electronics-engineering" :
         "";
     }
 
@@ -124,7 +145,7 @@ service firebase.storage {
     }
 
     function currentCourseScopeSlug() {
-      return currentCourseScope() != null ? courseScopeSlug(currentCourseScope()) : "";
+      return currentCourseScope() != null ? courseScopeSlugFromValue(currentCourseScope()) : "";
     }
 
     function isBOD() {
@@ -185,22 +206,15 @@ service firebase.storage {
       return data != null && data.ownerType == "bod" ? "bod" : "ec";
     }
 
-    function ecDocumentCreatedByUid(data) {
-      return data == null ? "" :
-        data.createdBy != null && data.createdBy != "" ? data.createdBy :
+    function ecDocumentOwnerMatchesCurrentUser(data) {
+      return data != null &&
         (
-          data.createdByUid != null &&
-          data.createdByUid != ""
-        ) ? data.createdByUid :
-        (
-          data.uploadedByUid != null &&
-          data.uploadedByUid != ""
-        ) ? data.uploadedByUid :
-        (
-          data.ownerUid != null &&
-          data.ownerUid != ""
-        ) ? data.ownerUid :
-        "";
+          data.createdBy == request.auth.uid ||
+          data.createdByUid == request.auth.uid ||
+          data.uploadedByUid == request.auth.uid ||
+          data.ownerUid == request.auth.uid ||
+          data.uploadedBy == request.auth.uid
+        );
     }
 
     function ecDocumentCourseScope(data) {
@@ -208,6 +222,9 @@ service firebase.storage {
         normalizeCourseScopeValue(data.courseScope) != null ?
         normalizeCourseScopeValue(data.courseScope) :
         data != null &&
+          normalizeCourseScopeValue(data.courseScopeSlug) != null ?
+          normalizeCourseScopeValue(data.courseScopeSlug) :
+          data != null &&
           normalizeCourseScopeValue(data.createdByCourseScope) != null ?
           normalizeCourseScopeValue(data.createdByCourseScope) :
           (
@@ -217,29 +234,81 @@ service firebase.storage {
           );
     }
 
+    function bodCoursePathMatchesCurrentScope(pathCourseScopeSlug) {
+      return isBOD() &&
+        currentCourseScope() != null &&
+        currentCourseScopeSlug() != "" &&
+        pathCourseScopeSlug == currentCourseScopeSlug();
+    }
+
+    function ecDocumentStoredCourseScopeSlug(data) {
+      return data != null &&
+        data.courseScopeSlug is string ?
+        data.courseScopeSlug :
+        "";
+    }
+
+    function ecDocumentStatus(data) {
+      return data != null &&
+        data.status is string &&
+        data.status == "pending-upload" ?
+        "pending-upload" :
+        "active";
+    }
+
+    function ecDocumentStoragePathMatchesCoursePath(data, pathCourseScopeSlug, docId, fileName) {
+      return data != null &&
+        data.storagePath is string &&
+        (
+          data.storagePath == "documents/course/" + pathCourseScopeSlug + "/" + docId + "/" + fileName ||
+          data.storagePath == "ec-documents/course/" + pathCourseScopeSlug + "/" + docId + "/" + fileName
+        );
+    }
+
     function ecDocumentCourseScopeSlugMatchesScope(data) {
       return data == null ||
-        !(data.courseScopeSlug is string) ||
-        data.courseScopeSlug == "" ||
-        data.courseScopeSlug == currentCourseScopeSlug();
+        ecDocumentStoredCourseScopeSlug(data) == "" ||
+        ecDocumentStoredCourseScopeSlug(data) == currentCourseScopeSlug();
     }
 
-    function canReadOwnBodEcDocument(docId) {
-      return isBOD() &&
-        currentCourseScope() != null &&
+    function ecDocumentCourseScopeSlugMatchesPath(data, pathCourseScopeSlug) {
+      return data == null ||
+        ecDocumentStoredCourseScopeSlug(data) == "" ||
+        ecDocumentStoredCourseScopeSlug(data) == pathCourseScopeSlug;
+    }
+
+    function bodEcDocumentMatchesCurrentOwnerAndScope(data, pathCourseScopeSlug, docId, fileName) {
+      return bodCoursePathMatchesCurrentScope(pathCourseScopeSlug) &&
+        data != null &&
+        ecDocumentOwnerType(data) == "bod" &&
+        ecDocumentOwnerMatchesCurrentUser(data) &&
+        ecDocumentCourseScopeSlugMatchesScope(data) &&
+        ecDocumentCourseScopeSlugMatchesPath(data, pathCourseScopeSlug) &&
+        ecDocumentStoragePathMatchesCoursePath(data, pathCourseScopeSlug, docId, fileName) &&
+        ecDocumentCourseScope(data) == currentCourseScope();
+    }
+
+    function canReadOwnBodEcDocumentAtPath(docId, pathCourseScopeSlug, fileName) {
+      return signedIn() &&
         ecDocumentExists(docId) &&
-        ecDocumentOwnerType(ecDocumentData(docId)) == "bod" &&
-        ecDocumentCreatedByUid(ecDocumentData(docId)) == request.auth.uid &&
-        ecDocumentCourseScopeSlugMatchesScope(ecDocumentData(docId)) &&
-        ecDocumentCourseScope(ecDocumentData(docId)) == currentCourseScope();
+        ecDocumentStatus(ecDocumentData(docId)) != "pending-upload" &&
+        bodEcDocumentMatchesCurrentOwnerAndScope(
+          ecDocumentData(docId),
+          pathCourseScopeSlug,
+          docId,
+          fileName
+        );
     }
 
-    function canWriteOwnOrPendingBodEcDocument(docId) {
-      return isBOD() &&
-        currentCourseScope() != null &&
-        (
-          !ecDocumentExists(docId) ||
-          canReadOwnBodEcDocument(docId)
+    function canCreatePendingBodEcDocumentAtPath(docId, pathCourseScopeSlug, fileName) {
+      return signedIn() &&
+        ecDocumentExists(docId) &&
+        ecDocumentStatus(ecDocumentData(docId)) == "pending-upload" &&
+        bodEcDocumentMatchesCurrentOwnerAndScope(
+          ecDocumentData(docId),
+          pathCourseScopeSlug,
+          docId,
+          fileName
         );
     }
 
@@ -255,22 +324,15 @@ service firebase.storage {
         normalizeCourseScopeValue(data.course);
     }
 
-    function canReadCourseDocumentAtSlug(docId, courseScopeSlug) {
+    function canReadCourseDocumentAtPath(docId, pathCourseScopeSlug, fileName) {
       return isAdmin() || isRegularEC() ||
-        (
-          canReadOwnBodEcDocument(docId) &&
-          currentCourseScopeSlug() != "" &&
-          courseScopeSlug == currentCourseScopeSlug()
-        );
+        canReadOwnBodEcDocumentAtPath(docId, pathCourseScopeSlug, fileName);
     }
 
-    function canWriteCourseDocumentAtSlug(docId, courseScopeSlug) {
+    function canWriteCourseDocumentAtPath(docId, pathCourseScopeSlug, fileName) {
       return isAdmin() || isRegularEC() ||
-        (
-          canWriteOwnOrPendingBodEcDocument(docId) &&
-          currentCourseScopeSlug() != "" &&
-          courseScopeSlug == currentCourseScopeSlug()
-        );
+        canCreatePendingBodEcDocumentAtPath(docId, pathCourseScopeSlug, fileName) ||
+        canReadOwnBodEcDocumentAtPath(docId, pathCourseScopeSlug, fileName);
     }
 
     function canViewEventData(data) {
@@ -308,9 +370,9 @@ service firebase.storage {
       allow write: if isAdmin() || isRegularEC();
     }
 
-    match /ec-documents/course/{courseScopeSlug}/{docId}/{fileName} {
-      allow read: if canReadCourseDocumentAtSlug(docId, courseScopeSlug);
-      allow write: if canWriteCourseDocumentAtSlug(docId, courseScopeSlug);
+    match /ec-documents/course/{pathCourseScopeSlug}/{docId}/{fileName} {
+      allow read: if canReadCourseDocumentAtPath(docId, pathCourseScopeSlug, fileName);
+      allow write: if canWriteCourseDocumentAtPath(docId, pathCourseScopeSlug, fileName);
     }
 
     match /documents/shared/{docId}/{fileName} {
@@ -318,9 +380,9 @@ service firebase.storage {
       allow write: if isAdmin() || isRegularEC();
     }
 
-    match /documents/course/{courseScopeSlug}/{docId}/{fileName} {
-      allow read: if canReadCourseDocumentAtSlug(docId, courseScopeSlug);
-      allow write: if canWriteCourseDocumentAtSlug(docId, courseScopeSlug);
+    match /documents/course/{pathCourseScopeSlug}/{docId}/{fileName} {
+      allow read: if canReadCourseDocumentAtPath(docId, pathCourseScopeSlug, fileName);
+      allow write: if canWriteCourseDocumentAtPath(docId, pathCourseScopeSlug, fileName);
     }
 
     match /events/{eventId}/images/{fileId} {

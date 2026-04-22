@@ -1,0 +1,18 @@
+[
+  {
+    "origin": [
+      "http://localhost:3000",
+      "https://campusportal.site",
+      "https://campus-27dd9.web.app",
+      "https://campus-27dd9.firebaseapp.com"
+    ],
+    "method": ["GET", "HEAD", "PUT", "POST", "DELETE"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Length",
+      "Content-Disposition",
+      "x-goog-resumable"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]

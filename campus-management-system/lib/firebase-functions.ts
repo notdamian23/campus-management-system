@@ -101,6 +101,89 @@ export type UpdateCampusEventResult = {
   linkedPaymentId?: string | null;
 };
 
+export type CreateCampusNotificationPayload = {
+  title: string;
+  message: string;
+  date: string;
+  scheduledTime: string;
+  audienceMode?: "filtered" | "course" | "explicit";
+  selectedYear?: string;
+  selectedYearLevels?: string[];
+  selectedCourses?: string[];
+  targetStudentIds?: string[];
+  targetSchoolIds?: string[];
+  sendToFilteredAudience?: boolean;
+  courseScope?: string | null;
+  courseScopeSlug?: string | null;
+};
+
+export type CreateCampusNotificationResult = {
+  dispatchId: string;
+  recipientCount: number;
+  batchCount: number;
+  audienceMode: "filtered" | "course" | "explicit";
+  recipientType: "all" | "course" | "year" | "student";
+  selectedYear: string;
+  course: string;
+  yearLevel: string;
+  targetStudent: string;
+  selectedCourses: string[];
+  courses: string[];
+  yearLevels: string[];
+  targetStudentIds: string[];
+  targetSchoolIds: string[];
+  sendToFilteredAudience: boolean;
+  createdByRole: string;
+  ownerType: "ec" | "bod";
+  courseScope: string | null;
+  courseScopeSlug: string | null;
+  createdByCourseScope: string | null;
+  status: "scheduled" | "sent";
+};
+
+export type UpdateCampusNotificationPayload = {
+  notificationId?: string;
+  scheduledNotificationId?: string;
+  title: string;
+  message: string;
+  date: string;
+  scheduledTime: string;
+  audienceMode?: "filtered" | "course" | "explicit";
+  selectedYear?: string;
+  selectedCourses?: string[];
+  targetStudentIds?: string[];
+  targetSchoolIds?: string[];
+  sendToFilteredAudience?: boolean;
+  courseScope?: string | null;
+  courseScopeSlug?: string | null;
+};
+
+export type UpdateCampusNotificationResult = {
+  updated: true;
+  dispatchId: string;
+  updatedRecipientCount: number;
+  removedRecipientCount: number;
+  batchCount: number;
+  audienceMode: "filtered" | "course" | "explicit";
+  recipientType: "all" | "course" | "year" | "student";
+  selectedYear: string;
+  course: string;
+  yearLevel: string;
+  targetStudent: string;
+  selectedCourses: string[];
+  courses: string[];
+  yearLevels: string[];
+  targetStudentIds: string[];
+  targetSchoolIds: string[];
+  sendToFilteredAudience: boolean;
+  createdByRole: string;
+  ownerType: "ec" | "bod";
+  courseScope: string | null;
+  courseScopeSlug: string | null;
+  createdByCourseScope: string | null;
+  status: "scheduled" | "sent";
+};
+
 export type CreateCampusStudentPayload = {
   schoolId: string;
   studentName: string;
@@ -165,6 +248,76 @@ export type CreateCampusDocumentMetadataResult = {
   docId: string;
   ownerType: "ec" | "bod";
   courseScope: string | null;
+};
+
+export type CampusDocumentListItem = {
+  id: string;
+  name: string;
+  fileName?: string;
+  type: string;
+  category: string;
+  sizeBytes: number;
+  downloadURL?: string;
+  storagePath: string;
+  ownerType: "ec" | "bod";
+  course?: string | null;
+  courseScope?: string | null;
+  courseScopeSlug?: string | null;
+  createdByCourseScope?: string | null;
+  createdBy?: string;
+  createdByUid?: string;
+  ownerUid?: string;
+  uploadedByUid?: string;
+  createdAt?: number;
+  uploadedAt?: number;
+  updatedAt?: number;
+  status?: "pending-upload" | "active";
+};
+
+export type ListCampusDocumentsResult = {
+  documents?: CampusDocumentListItem[];
+};
+
+export type CreateCampusDocumentUploadTargetPayload = {
+  name: string;
+  type: string;
+  category: string;
+  sizeBytes: number;
+  contentType?: string;
+};
+
+export type CreateCampusDocumentUploadTargetResult = {
+  docId: string;
+  fileName: string;
+  storagePath: string;
+  ownerType: "ec" | "bod";
+  courseScope: string | null;
+  courseScopeSlug: string | null;
+  uploadUrl?: string | null;
+  uploadMethod: "firebase-storage-sdk" | "PUT";
+  contentType: string;
+  verification: string;
+  status: "pending-upload";
+};
+
+export type FinalizeCampusDocumentUploadPayload = {
+  docId: string;
+  name: string;
+  type: string;
+  category: string;
+  sizeBytes: number;
+  storagePath: string;
+  contentType?: string;
+  downloadURL?: string;
+};
+
+export type FinalizeCampusDocumentUploadResult = {
+  docId: string;
+  ownerType: "ec" | "bod";
+  courseScope: string | null;
+  storagePath: string;
+  contentType?: string;
+  status: "active";
 };
 
 export type DeleteCampusDocumentPayload = {
@@ -441,6 +594,48 @@ export async function updateCampusEvent(
   return result.data;
 }
 
+export async function createCampusNotification(
+  payload: CreateCampusNotificationPayload,
+): Promise<CreateCampusNotificationResult> {
+  logAuthEvent("info", "Creating campus notification via callable", {
+    audienceMode: payload.audienceMode ?? "",
+    selectedYear: payload.selectedYear ?? "",
+    selectedCourses: payload.selectedCourses ?? [],
+    explicitTargetCount: payload.targetStudentIds?.length ?? 0,
+    sendToFilteredAudience: payload.sendToFilteredAudience === true,
+  });
+
+  const callable = httpsCallable<
+    CreateCampusNotificationPayload,
+    CreateCampusNotificationResult
+  >(getCampusFunctions(), "createCampusNotification");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function updateCampusNotification(
+  payload: UpdateCampusNotificationPayload,
+): Promise<UpdateCampusNotificationResult> {
+  logAuthEvent("info", "Updating campus notification via callable", {
+    notificationId: payload.notificationId ?? "",
+    scheduledNotificationId: payload.scheduledNotificationId ?? "",
+    audienceMode: payload.audienceMode ?? "",
+    selectedYear: payload.selectedYear ?? "",
+    selectedCourses: payload.selectedCourses ?? [],
+    explicitTargetCount: payload.targetStudentIds?.length ?? 0,
+    sendToFilteredAudience: payload.sendToFilteredAudience === true,
+  });
+
+  const callable = httpsCallable<
+    UpdateCampusNotificationPayload,
+    UpdateCampusNotificationResult
+  >(getCampusFunctions(), "updateCampusNotification");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
 export async function createCampusStudent(
   payload: CreateCampusStudentPayload,
 ): Promise<CreateCampusStudentResult> {
@@ -519,6 +714,52 @@ export async function createCampusDocumentMetadata(
     CreateCampusDocumentMetadataPayload,
     CreateCampusDocumentMetadataResult
   >(getCampusFunctions(), "createCampusDocumentMetadata");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function listCampusDocuments(): Promise<CampusDocumentListItem[]> {
+  logAuthEvent("info", "Listing campus documents via callable");
+
+  const callable = httpsCallable<Record<string, never>, ListCampusDocumentsResult>(
+    getCampusFunctions(),
+    "listCampusDocuments",
+  );
+
+  const result = await callable({});
+  return result.data?.documents ?? [];
+}
+
+export async function createCampusDocumentUploadTarget(
+  payload: CreateCampusDocumentUploadTargetPayload,
+): Promise<CreateCampusDocumentUploadTargetResult> {
+  logAuthEvent("info", "Creating document upload target via callable", {
+    category: payload.category,
+    sizeBytes: payload.sizeBytes,
+  });
+
+  const callable = httpsCallable<
+    CreateCampusDocumentUploadTargetPayload,
+    CreateCampusDocumentUploadTargetResult
+  >(getCampusFunctions(), "createCampusDocumentUploadTarget");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function finalizeCampusDocumentUpload(
+  payload: FinalizeCampusDocumentUploadPayload,
+): Promise<FinalizeCampusDocumentUploadResult> {
+  logAuthEvent("info", "Finalizing campus document upload via callable", {
+    docId: payload.docId,
+    category: payload.category,
+  });
+
+  const callable = httpsCallable<
+    FinalizeCampusDocumentUploadPayload,
+    FinalizeCampusDocumentUploadResult
+  >(getCampusFunctions(), "finalizeCampusDocumentUpload");
 
   const result = await callable(payload);
   return result.data;
