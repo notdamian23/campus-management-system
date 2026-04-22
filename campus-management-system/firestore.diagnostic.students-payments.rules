@@ -37,50 +37,32 @@ service cloud.firestore {
       return get(paymentPath(paymentId)).data;
     }
 
-    function currentProfileData() {
-      return signedIn() && userProfileExists(request.auth.uid) ?
-        userProfileDoc(request.auth.uid) :
-        null;
-    }
-
     function hasProfile() {
-      return currentProfileData() != null;
+      return signedIn() && userProfileExists(request.auth.uid);
     }
 
     function profile() {
-      return currentProfileData();
+      return hasProfile() ? userProfileDoc(request.auth.uid) : null;
     }
 
     function profileRole(data) {
       return data != null && data.role is string ? data.role : "";
     }
 
-    function currentRole() {
-      return profileRole(currentProfileData());
-    }
-
     function role() {
-      return currentRole();
+      return profileRole(profile());
     }
 
     function isSelf(uid) {
       return signedIn() && request.auth.uid == uid;
     }
 
-    function currentIsAdmin() {
-      return currentRole() == "admin";
-    }
-
     function isAdmin() {
-      return currentIsAdmin();
-    }
-
-    function currentIsTeacher() {
-      return currentRole() == "teacher";
+      return signedIn() && role() == "admin";
     }
 
     function isTeacher() {
-      return currentIsTeacher();
+      return signedIn() && role() == "teacher";
     }
 
     function isRegularECMemberRole(value) {
@@ -108,33 +90,18 @@ service cloud.firestore {
         );
     }
 
-    function dataHasStudentIdentityWithRole(data, roleValue) {
-      return data != null &&
-        hasStudentIdentityFields(data) &&
-        (
-          roleValue == "student" ||
-          data.isStudent == true ||
-          isECMemberRole(roleValue)
-        );
-    }
-
-    function dataHasStudentIdentity(data) {
-      return dataHasStudentIdentityWithRole(data, profileRole(data));
-    }
-
-    function currentHasStudentIdentity() {
-      let data = currentProfileData();
-      let roleValue = profileRole(data);
-
-      return dataHasStudentIdentityWithRole(data, roleValue);
-    }
-
     function hasStudentSelfIdentity() {
-      return currentHasStudentIdentity();
+      return hasProfile() && studentProfileHasIdentity(profile());
     }
 
     function studentProfileHasIdentity(data) {
-      return dataHasStudentIdentity(data);
+      return data != null &&
+        (
+          data.role == "student" ||
+          data.isStudent == true ||
+          isECMemberRole(data.role)
+        ) &&
+        hasStudentIdentityFields(data);
     }
 
     function normalizeCourseScopeValue(value) {
@@ -235,12 +202,57 @@ service cloud.firestore {
       return data != null && courseScopeFromProfileData(data) != "";
     }
 
-    function isBODProfileDataWithRole(data, roleValue) {
+    function currentCourseScope() {
+      let data = profile();
+      return data != null && isBODProfileData(data) ?
+        courseScopeFromProfileData(data) :
+        "";
+    }
+
+    function hasCurrentCourseScope() {
+      return currentCourseScope() != "";
+    }
+
+    function currentCourseScopeSlug() {
+      let courseScope = currentCourseScope();
+      return courseScope != "" ? courseScopeSlug(courseScope) : "";
+    }
+
+    function courseMatchesCurrentScope(value) {
+      let courseScope = currentCourseScope();
+      return courseScope != "" && normalizeCourseScopeValue(value) == courseScope;
+    }
+
+    function studentRecordMatchesCurrentScope(data) {
+      return data != null && courseMatchesCurrentScope(data.course);
+    }
+
+    function bodManageableStudentData(data) {
       return data != null &&
         (
-          roleValue == "bod" ||
+          !("role" in data) ||
+          isStudentOnlyRole(data.role)
+        ) &&
+        studentRecordMatchesCurrentScope(data);
+    }
+
+    function studentOnlyProfileMatchesCurrentScope(data) {
+      return data != null &&
+        isStudentOnlyRole(profileRole(data)) &&
+        studentRecordMatchesCurrentScope(data);
+    }
+
+    function studentProfileHasIdentityAndMatchesCurrentScope(data) {
+      return studentProfileHasIdentity(data) &&
+        studentRecordMatchesCurrentScope(data);
+    }
+
+    function isBODProfileData(data) {
+      return data != null &&
+        (
+          profileRole(data) == "bod" ||
           (
-            isECMemberRole(roleValue) &&
+            isECMemberRole(profileRole(data)) &&
             (
               data.ecScope == "course" ||
               (
@@ -259,149 +271,49 @@ service cloud.firestore {
         );
     }
 
-    function currentCourseScopeFromData(data, roleValue) {
-      return isBODProfileDataWithRole(data, roleValue) ?
-        courseScopeFromProfileData(data) :
-        "";
-    }
-
-    function currentCourseScope() {
-      let data = currentProfileData();
-      let roleValue = profileRole(data);
-
-      return currentCourseScopeFromData(data, roleValue);
-    }
-
-    function hasCurrentCourseScope() {
-      return currentCourseScope() != "";
-    }
-
-    function currentCourseScopeSlug() {
-      let courseScope = currentCourseScope();
-      return courseScope != "" ? courseScopeSlug(courseScope) : "";
-    }
-
-    function valueMatchesCourseScope(value, courseScope) {
-      return courseScope != "" &&
-        normalizeCourseScopeValue(value) == courseScope;
-    }
-
-    function dataCourseMatchesScope(data, courseScope) {
-      return data != null &&
-        valueMatchesCourseScope(data.course, courseScope);
-    }
-
-    function courseMatchesCurrentScope(value) {
-      let courseScope = currentCourseScope();
-      return valueMatchesCourseScope(value, courseScope);
-    }
-
-    function studentRecordMatchesCurrentScope(data) {
-      return dataCourseMatchesScope(data, currentCourseScope());
-    }
-
-    function bodManageableStudentData(data, courseScope) {
-      return data != null &&
-        (
-          !("role" in data) ||
-          isStudentOnlyRole(profileRole(data))
-        ) &&
-        dataCourseMatchesScope(data, courseScope);
-    }
-
-    function studentOnlyProfileMatchesScope(data, courseScope) {
-      return data != null &&
-        isStudentOnlyRole(profileRole(data)) &&
-        dataCourseMatchesScope(data, courseScope);
-    }
-
-    function studentOnlyProfileMatchesCurrentScope(data) {
-      return studentOnlyProfileMatchesScope(data, currentCourseScope());
-    }
-
-    function studentProfileHasIdentityAndMatchesScope(data, courseScope) {
-      return dataHasStudentIdentity(data) &&
-        dataCourseMatchesScope(data, courseScope);
-    }
-
-    function studentProfileHasIdentityAndMatchesCurrentScope(data) {
-      return studentProfileHasIdentityAndMatchesScope(data, currentCourseScope());
-    }
-
-    function isBODProfileData(data) {
-      return isBODProfileDataWithRole(data, profileRole(data));
-    }
-
-    function isRegularECProfileDataWithRole(data, roleValue) {
-      return data != null &&
-        isRegularECMemberRole(roleValue) &&
-        (data.ecScope == "all" || !isBODProfileDataWithRole(data, roleValue));
-    }
-
     function isRegularECProfileData(data) {
-      return isRegularECProfileDataWithRole(data, profileRole(data));
-    }
-
-    function currentIsBod() {
-      let data = currentProfileData();
-      let roleValue = profileRole(data);
-
-      return isBODProfileDataWithRole(data, roleValue);
+      return data != null &&
+        isRegularECMemberRole(profileRole(data)) &&
+        (data.ecScope == "all" || !isBODProfileData(data));
     }
 
     function isBOD() {
-      return currentIsBod();
-    }
-
-    function currentIsRegularEC() {
-      let data = currentProfileData();
-      let roleValue = profileRole(data);
-
-      return isRegularECProfileDataWithRole(data, roleValue);
+      return isBODProfileData(profile());
     }
 
     function isRegularEC() {
-      return currentIsRegularEC();
+      return isRegularECProfileData(profile());
     }
 
     function isAdminOrEC() {
       return isAdmin() || isEC();
     }
 
-    function currentIsAdminOrRegularEC() {
-      return currentIsAdmin() || currentIsRegularEC();
-    }
-
     function isAdminOrRegularEC() {
-      return currentIsAdminOrRegularEC();
+      return isAdmin() || isRegularEC();
     }
 
     function canManageStudentData(data) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
-        bodManageableStudentData(data, courseScope);
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          bodManageableStudentData(data)
+        );
     }
 
     function canManageStudentProfileUpdateData(oldData, newData) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
       return oldData != null &&
         newData != null &&
         profileRole(oldData) == "student" &&
         profileRole(newData) == profileRole(oldData) &&
         (
-          currentRoleValue == "admin" ||
-          isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
+          isAdminOrRegularEC() ||
           (
-            courseScope != "" &&
-            dataCourseMatchesScope(oldData, courseScope) &&
-            dataCourseMatchesScope(newData, courseScope)
+            isBOD() &&
+            hasCurrentCourseScope() &&
+            studentRecordMatchesCurrentScope(oldData) &&
+            studentRecordMatchesCurrentScope(newData)
           )
         ) &&
         newData.diff(oldData).affectedKeys().hasOnly([
@@ -420,13 +332,12 @@ service cloud.firestore {
     }
 
     function canReadStudentProfileData(data) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
-        studentOnlyProfileMatchesScope(data, courseScope);
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          studentOnlyProfileMatchesCurrentScope(data)
+        );
     }
 
     function notificationCourseScope(data) {
@@ -438,70 +349,56 @@ service cloud.firestore {
       return directCourseScope != "" ? directCourseScope : listCourseScope;
     }
 
-    function notificationCoursesStayInScope(data, courseScope) {
+    function notificationCoursesStayInScope(data) {
       let courses = data.courses is list ? data.courses : [];
 
       return courses.size() == 0 ||
         (
           courses.size() == 1 &&
-          valueMatchesCourseScope(courses[0], courseScope)
+          courseMatchesCurrentScope(courses[0])
         );
     }
 
-    function bodNotificationTargetProfileMatchesScope(uid, courseScope) {
-      return courseScope != "" &&
-        userProfileExists(uid) &&
-        studentOnlyProfileMatchesScope(userProfileDoc(uid), courseScope);
+    function bodNotificationTargetProfileMatchesScope(uid) {
+      return userProfileExists(uid) &&
+        studentOnlyProfileMatchesCurrentScope(userProfileDoc(uid));
     }
 
     function canReadBodNotification(uid) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return bodNotificationTargetProfileMatchesScope(uid, courseScope);
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        bodNotificationTargetProfileMatchesScope(uid);
     }
 
-    function canManageBodNotificationTarget(uid, courseScope) {
-      return courseScope != "" &&
+    function canManageBodNotificationTarget(uid) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
         (
           isSelf(uid) ||
-          bodNotificationTargetProfileMatchesScope(uid, courseScope)
+          bodNotificationTargetProfileMatchesScope(uid)
         );
     }
 
-    function bodNotificationDataIsScoped(data, courseScope) {
+    function bodNotificationDataIsScoped(data) {
       return data != null &&
         data.createdByUid == request.auth.uid &&
-        valueMatchesCourseScope(notificationCourseScope(data), courseScope) &&
-        notificationCoursesStayInScope(data, courseScope);
+        notificationCourseScope(data) == currentCourseScope() &&
+        notificationCoursesStayInScope(data);
     }
 
     function canCreateBodNotification(uid, newData) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return canManageBodNotificationTarget(uid, courseScope) &&
-        bodNotificationDataIsScoped(newData, courseScope);
+      return canManageBodNotificationTarget(uid) &&
+        bodNotificationDataIsScoped(newData);
     }
 
     function canUpdateBodNotification(uid, oldData, newData) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return canManageBodNotificationTarget(uid, courseScope) &&
+      return canManageBodNotificationTarget(uid) &&
         oldData.createdByUid == request.auth.uid &&
-        bodNotificationDataIsScoped(newData, courseScope);
+        bodNotificationDataIsScoped(newData);
     }
 
     function canDeleteBodNotification(uid, oldData) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return canManageBodNotificationTarget(uid, courseScope) &&
+      return canManageBodNotificationTarget(uid) &&
         oldData.createdByUid == request.auth.uid;
     }
 
@@ -627,30 +524,19 @@ service cloud.firestore {
         );
     }
 
-    function eventVisibleToBodScope(data, courseScope) {
-      return courseScope != "" &&
-        (
-          eventOwnerType(data) == "ec" ||
-          eventCourseScope(data) == courseScope
-        );
-    }
-
-    function eventManagedByBodScope(data, courseScope) {
-      return courseScope != "" &&
-        eventOwnerType(data) == "bod" &&
-        eventCourseScope(data) == courseScope &&
-        data.createdBy == request.auth.uid;
-    }
-
     function canViewEventData(data) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return !isECMemberRole(currentRoleValue) ? signedIn() :
-        currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
-        eventVisibleToBodScope(data, courseScope);
+      return !isEC() ? signedIn() :
+        isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          (
+            eventOwnerType(data) == "ec" ||
+            (
+              hasCurrentCourseScope() &&
+              eventCourseScope(data) == currentCourseScope()
+            )
+          )
+        );
     }
 
     function canCreateEventData(data) {
@@ -693,72 +579,50 @@ service cloud.firestore {
       return exists(eventPath(eventId));
     }
 
-    function canManageOwnBodEventSubcollectionData(data, courseScope) {
-      return eventManagedByBodScope(data, courseScope);
+    function canManageOwnBodEventSubcollectionData(data) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        eventOwnerType(data) == "bod" &&
+        eventCourseScope(data) == currentCourseScope() &&
+        data.createdBy == request.auth.uid;
     }
 
     function canReadEventSubcollection(eventId) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
       return signedIn() &&
         eventExists(eventId) &&
-        (
-          !isECMemberRole(currentRoleValue) ||
-          currentRoleValue == "admin" ||
-          isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
-          eventVisibleToBodScope(eventDoc(eventId), courseScope)
-        );
+        canViewEventData(eventDoc(eventId));
     }
 
     function canManageEventSubcollection(eventId) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
+      return isAdminOrRegularEC() ||
         (
           eventExists(eventId) &&
-          canManageOwnBodEventSubcollectionData(eventDoc(eventId), courseScope)
+          canManageOwnBodEventSubcollectionData(eventDoc(eventId))
         );
     }
 
-    function eventTargetProfileMatchesScope(uid, courseScope) {
-      return courseScope != "" &&
-        userProfileExists(uid) &&
-        studentProfileHasIdentityAndMatchesScope(userProfileDoc(uid), courseScope);
-    }
-
-    function eventParticipantMatchesCurrentScope(uid, data, courseScope) {
-      return dataCourseMatchesScope(data, courseScope) ||
-        eventTargetProfileMatchesScope(uid, courseScope);
+    function eventParticipantMatchesCurrentScope(uid, data) {
+      return courseMatchesCurrentScope(data.course) ||
+        targetProfileCourseMatchesScope(uid);
     }
 
     function canReadScopedEventParticipant(eventId, uid, data) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return eventExists(eventId) &&
-        eventVisibleToBodScope(eventDoc(eventId), courseScope) &&
-        eventParticipantMatchesCurrentScope(uid, data, courseScope);
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        eventParticipantMatchesCurrentScope(uid, data) &&
+        canReadEventSubcollection(eventId);
     }
 
     function canWriteScopedEventParticipant(eventId, currentExists, currentData, nextData) {
-      let currentProfile = currentProfileData();
-      let currentRoleValue = profileRole(currentProfile);
-      let courseScope = currentCourseScopeFromData(currentProfile, currentRoleValue);
-
-      return eventExists(eventId) &&
+      return isBOD() &&
+        hasCurrentCourseScope() &&
         nextData != null &&
-        dataCourseMatchesScope(nextData, courseScope) &&
+        courseMatchesCurrentScope(nextData.course) &&
         (
           !currentExists ||
-          dataCourseMatchesScope(currentData, courseScope)
+          courseMatchesCurrentScope(currentData.course)
         ) &&
-        eventManagedByBodScope(eventDoc(eventId), courseScope);
+        canManageEventSubcollection(eventId);
     }
 
     function paymentOwnerType(data) {
@@ -826,8 +690,11 @@ service cloud.firestore {
       return normalizeCourseScopeValue(data.courseScope) == courseScope;
     }
 
-    function bodPaymentCreateIsScoped(data, courseScope) {
-      return courseScope != "" &&
+    function bodPaymentCreateIsScoped(data) {
+      let courseScope = currentCourseScope();
+
+      return isBOD() &&
+        courseScope != "" &&
         paymentOwnerType(data) == "bod" &&
         paymentOwnerCourseMatchesScope(data, courseScope) &&
         data.createdByUid == request.auth.uid &&
@@ -836,8 +703,11 @@ service cloud.firestore {
         paymentTargetCoursesStayInScope(data, courseScope);
     }
 
-    function bodManageablePaymentData(data, courseScope) {
-      return courseScope != "" &&
+    function bodManageablePaymentData(data) {
+      let courseScope = currentCourseScope();
+
+      return isBOD() &&
+        courseScope != "" &&
         paymentOwnerType(data) == "bod" &&
         paymentCourseScope(data) == courseScope &&
         data.createdByUid == request.auth.uid &&
@@ -846,8 +716,11 @@ service cloud.firestore {
         paymentTargetCoursesStayInScope(data, courseScope);
     }
 
-    function canViewEcPaymentDataForBod(data, courseScope) {
-      return courseScope != "" &&
+    function canViewEcPaymentDataForBod(data) {
+      let courseScope = currentCourseScope();
+
+      return isBOD() &&
+        courseScope != "" &&
         paymentOwnerType(data) == "ec" &&
         (
           paymentOwnerCourseMatchesScope(data, courseScope) ||
@@ -858,49 +731,39 @@ service cloud.firestore {
     }
 
     function canViewPaymentData(data) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
+      return isAdminOrRegularEC() ||
         (
-          bodManageablePaymentData(data, courseScope) ||
-          canViewEcPaymentDataForBod(data, courseScope)
+          bodManageablePaymentData(data) ||
+          canViewEcPaymentDataForBod(data)
         );
     }
 
     function canCreatePaymentData(data) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
-        bodPaymentCreateIsScoped(data, courseScope);
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          bodPaymentCreateIsScoped(data)
+        );
     }
 
     function canUpdatePaymentData(oldData, newData) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
+      return isAdminOrRegularEC() ||
         (
-          bodManageablePaymentData(oldData, courseScope) &&
-          bodPaymentCreateIsScoped(newData, courseScope)
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          bodManageablePaymentData(oldData) &&
+          bodPaymentCreateIsScoped(newData)
         );
     }
 
     function canDeletePaymentData(data) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
-        bodManageablePaymentData(data, courseScope);
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          bodManageablePaymentData(data)
+        );
     }
 
     function selfPaymentAssignmentPath(paymentId) {
@@ -912,96 +775,61 @@ service cloud.firestore {
     }
 
     function targetProfileCourseMatchesScope(uid) {
-      let courseScope = currentCourseScope();
-      return courseScope != "" &&
-        userProfileExists(uid) &&
-        studentProfileHasIdentityAndMatchesScope(
-          userProfileDoc(uid),
-          courseScope
+      return userProfileExists(uid) &&
+        studentProfileHasIdentityAndMatchesCurrentScope(
+          userProfileDoc(uid)
         );
     }
 
-    function paymentStudentTargetProfileMatchesScope(uid, courseScope) {
-      return courseScope != "" &&
-        userProfileExists(uid) &&
-        studentProfileHasIdentityAndMatchesScope(
-          userProfileDoc(uid),
-          courseScope
-        );
-    }
-
-    function paymentStudentMatchesCurrentScope(uid, data, courseScope) {
-      return dataCourseMatchesScope(data, courseScope) ||
-        paymentStudentTargetProfileMatchesScope(uid, courseScope);
+    function paymentStudentMatchesCurrentScope(uid, data) {
+      return studentRecordMatchesCurrentScope(data) ||
+        targetProfileCourseMatchesScope(uid);
     }
 
     function canReadPaymentStudentDataForBod(paymentData, studentUid, studentData) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return courseScope != "" &&
-        (
-          bodManageablePaymentData(paymentData, courseScope) ||
-          canViewEcPaymentDataForBod(paymentData, courseScope)
-        ) &&
-        paymentStudentMatchesCurrentScope(studentUid, studentData, courseScope);
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        canViewPaymentData(paymentData) &&
+        paymentStudentMatchesCurrentScope(studentUid, studentData);
     }
 
-    function canWritePaymentStudentDataForBod(paymentData, currentExists, currentData, nextData, courseScope) {
-      return courseScope != "" &&
+    function canWritePaymentStudentDataForBod(paymentData, currentExists, currentData, nextData) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
         nextData != null &&
-        dataCourseMatchesScope(nextData, courseScope) &&
+        studentRecordMatchesCurrentScope(nextData) &&
         (
           !currentExists ||
-          dataCourseMatchesScope(currentData, courseScope)
+          studentRecordMatchesCurrentScope(currentData)
         ) &&
-        bodManageablePaymentData(paymentData, courseScope);
+        bodManageablePaymentData(paymentData);
     }
 
     function canWritePaymentStudentData(paymentId, currentExists, currentData, nextData) {
-      let currentProfile = currentProfileData();
-      let currentRoleValue = profileRole(currentProfile);
-      let courseScope = currentCourseScopeFromData(currentProfile, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentProfile, currentRoleValue) ||
+      return isAdminOrRegularEC() ||
         (
           paymentExists(paymentId) &&
           canWritePaymentStudentDataForBod(
             paymentDoc(paymentId),
             currentExists,
             currentData,
-            nextData,
-            courseScope
+            nextData
           )
         );
     }
 
-    function canDeletePaymentStudentDataForBod(paymentData, studentData, courseScope) {
-      return dataCourseMatchesScope(studentData, courseScope) &&
-        bodManageablePaymentData(paymentData, courseScope);
+    function canDeletePaymentStudentDataForBod(paymentData, studentData) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        studentRecordMatchesCurrentScope(studentData) &&
+        bodManageablePaymentData(paymentData);
     }
 
     function canDeletePaymentStudentData(paymentId, data) {
-      let currentProfile = currentProfileData();
-      let currentRoleValue = profileRole(currentProfile);
-      let courseScope = currentCourseScopeFromData(currentProfile, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentProfile, currentRoleValue) ||
+      return isAdminOrRegularEC() ||
         (
           paymentExists(paymentId) &&
-          canDeletePaymentStudentDataForBod(paymentDoc(paymentId), data, courseScope)
-        );
-    }
-
-    function canReadOwnPaymentStudentAssignment(studentUid, studentData) {
-      return signedIn() &&
-        currentHasStudentIdentity() &&
-        (
-          isSelf(studentUid) ||
-          studentData.uid == request.auth.uid
+          canDeletePaymentStudentDataForBod(paymentDoc(paymentId), data)
         );
     }
 
@@ -1084,88 +912,14 @@ service cloud.firestore {
         );
     }
 
-    match /profiles/{uid} {
-      allow read: if isSelf(uid) || canReadStudentProfileData(resource.data);
-      allow create: if currentIsAdmin();
-      allow update: if currentIsAdmin() ||
-        canManageStudentProfileUpdateData(resource.data, request.resource.data) ||
-        (
-          isSelf(uid) &&
-          selfProfileUpdateKeepsAccessAssignments(resource.data, request.resource.data)
-        );
-      allow delete: if currentIsAdmin();
-
-      match /documents/{docId} {
-        allow read: if isSelf(uid) || currentIsAdmin();
-        allow create, update, delete: if (isSelf(uid) && isEC()) || currentIsAdmin();
-      }
-
-      match /notifications/{notificationId} {
-        allow read: if (isSelf(uid) && currentHasStudentIdentity()) || currentIsAdminOrRegularEC() ||
-          canReadBodNotification(uid);
-        allow create: if currentIsAdminOrRegularEC() ||
-          canCreateBodNotification(uid, request.resource.data);
-        allow update: if currentIsAdminOrRegularEC() ||
-          canUpdateBodNotification(uid, resource.data, request.resource.data);
-        allow delete: if currentIsAdminOrRegularEC() ||
-          canDeleteBodNotification(uid, resource.data);
-      }
-    }
-
-    match /logs/{logId} {
-      allow read: if isAdmin();
-      allow write: if false;
-    }
-
-    match /events/{eventId} {
-      allow read: if signedIn() && canViewEventData(resource.data);
-      allow create: if signedIn() && canCreateEventData(request.resource.data);
-      allow update: if signedIn() && canUpdateEventData();
-      allow delete: if signedIn() && canDeleteEventData();
-
-      match /images/{imageId} {
-        allow read: if canReadEventSubcollection(eventId);
-        allow create, update, delete: if signedIn() &&
-          canManageEventSubcollection(eventId);
-      }
-
-      match /docs/{docId} {
-        allow read: if currentIsTeacher() || (
-          canReadEventSubcollection(eventId)
-        );
-        allow create, update, delete: if signedIn() &&
-          canManageEventSubcollection(eventId);
-      }
-
-      match /attendance/{uid} {
-        allow read: if currentIsAdminOrRegularEC() || currentIsTeacher() ||
-          (isSelf(uid) && currentHasStudentIdentity()) ||
-          canReadScopedEventParticipant(eventId, uid, resource.data);
-        allow create, update, delete: if currentIsAdminOrRegularEC() ||
-          canWriteScopedEventParticipant(
-            eventId,
-            exists(/databases/$(database)/documents/events/$(eventId)/attendance/$(uid)),
-            resource.data,
-            request.resource.data
-          );
-      }
-
-      match /registrations/{uid} {
-        allow read: if currentIsAdminOrRegularEC() ||
-          (isSelf(uid) && currentHasStudentIdentity()) ||
-          canReadScopedEventParticipant(eventId, uid, resource.data);
-        allow create, update, delete: if currentIsAdminOrRegularEC() ||
-          canWriteScopedEventParticipant(
-            eventId,
-            exists(/databases/$(database)/documents/events/$(eventId)/registrations/$(uid)),
-            resource.data,
-            request.resource.data
-          );
-      }
-
-      match /{subcollection}/{docId} {
-        allow read, create, update, delete: if currentIsAdminOrRegularEC();
-      }
+    match /students/{studentId} {
+      allow read: if isTeacher() ||
+        (isSelf(studentId) && hasStudentSelfIdentity()) ||
+        canManageStudentData(resource.data);
+      allow create: if canManageStudentData(request.resource.data);
+      allow update: if canManageStudentData(resource.data) &&
+        canManageStudentData(request.resource.data);
+      allow delete: if canManageStudentData(resource.data);
     }
 
     match /payments/{paymentId} {
@@ -1180,8 +934,13 @@ service cloud.firestore {
       allow delete: if signedIn() && canDeletePaymentData(resource.data);
 
       match /students/{studentUid} {
-        allow read: if currentIsAdminOrRegularEC() ||
-          canReadOwnPaymentStudentAssignment(studentUid, resource.data) ||
+        allow read: if isAdminOrRegularEC() ||
+          (isSelf(studentUid) && hasStudentSelfIdentity()) ||
+          (
+            signedIn() &&
+            resource.data.uid == request.auth.uid &&
+            hasStudentSelfIdentity()
+          ) ||
           (
             paymentExists(paymentId) &&
             canReadPaymentStudentDataForBod(
@@ -1204,72 +963,6 @@ service cloud.firestore {
         );
         allow delete: if canDeletePaymentStudentData(paymentId, resource.data);
       }
-    }
-
-    match /ecDocuments/{docId} {
-      allow read: if signedIn() && canViewEcDocumentData(resource.data);
-      allow create: if isAdminOrRegularEC() ||
-        canManageOwnBodEcDocumentData(request.resource.data);
-      allow update: if isAdminOrRegularEC() ||
-        (
-          canManageOwnBodEcDocumentData(resource.data) &&
-          canManageOwnBodEcDocumentData(request.resource.data)
-        );
-      allow delete: if isAdminOrRegularEC() ||
-        canManageOwnBodEcDocumentData(resource.data);
-    }
-
-    match /students/{studentId} {
-      allow read: if currentIsTeacher() ||
-        (isSelf(studentId) && currentHasStudentIdentity()) ||
-        canManageStudentData(resource.data);
-      allow create: if canManageStudentData(request.resource.data);
-      allow update: if canManageStudentData(resource.data) &&
-        canManageStudentData(request.resource.data);
-      allow delete: if canManageStudentData(resource.data);
-    }
-
-    match /devices/{deviceId} {
-      allow read, write: if isAdmin();
-
-      match /syncLogs/{logId} {
-        allow read: if isAdminOrEC();
-        allow write: if false;
-      }
-    }
-
-    match /devicePairings/{deviceId} {
-      allow read: if isAdminOrEC();
-      allow create, update, delete: if isAdminOrEC();
-    }
-
-    match /enrollmentSessions/{sessionId} {
-      allow read: if canViewEnrollmentSessionData(resource.data);
-      allow create, update, delete: if isAdminOrRegularEC();
-
-      match /students/{studentId} {
-        allow read: if canViewEnrollmentSessionData(
-          get(/databases/$(database)/documents/enrollmentSessions/$(sessionId)).data
-        );
-        allow create, update, delete: if isAdminOrRegularEC();
-      }
-    }
-
-    match /enrollmentQueue/{queueId} {
-      allow read, create, update, delete: if isAdminOrRegularEC();
-    }
-
-    match /fingerprintTemplates/{templateId} {
-      allow read, create, update, delete: if isAdmin();
-    }
-
-    match /moduleCleanupQueue/{cleanupId} {
-      allow read, create, update, delete: if isAdmin();
-    }
-
-    match /syncLogs/{logId} {
-      allow read: if isAdminOrEC();
-      allow write: if false;
     }
 
     match /{document=**} {

@@ -1,0 +1,1033 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profilePath() {
+      return /databases/$(database)/documents/profiles/$(request.auth.uid);
+    }
+
+    function userProfilePath(uid) {
+      return /databases/$(database)/documents/profiles/$(uid);
+    }
+
+    function eventPath(eventId) {
+      return /databases/$(database)/documents/events/$(eventId);
+    }
+
+    function paymentPath(paymentId) {
+      return /databases/$(database)/documents/payments/$(paymentId);
+    }
+
+    function hasProfile() {
+      return signedIn() && exists(profilePath());
+    }
+
+    function profile() {
+      return hasProfile() ? get(profilePath()).data : null;
+    }
+
+    function role() {
+      return hasProfile() ? profile().role : "";
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return signedIn() && role() == "admin";
+    }
+
+    function isTeacher() {
+      return signedIn() && role() == "teacher";
+    }
+
+    function isRegularECMemberRole(value) {
+      return value == "ec" || value == "ecmember";
+    }
+
+    function isBodRole(value) {
+      return value == "bod";
+    }
+
+    function isECMemberRole(value) {
+      return isRegularECMemberRole(value) || isBodRole(value);
+    }
+
+    function isStudentOnlyRole(value) {
+      return value == "student";
+    }
+
+    function hasStudentIdentityFields(data) {
+      return data != null &&
+        (
+          (data.schoolId is string && data.schoolId != "") ||
+          (data.schoolIdKey is string && data.schoolIdKey != "") ||
+          (data.studentId is string && data.studentId != "")
+        );
+    }
+
+    function hasStudentSelfIdentity() {
+      return hasProfile() && studentProfileHasIdentity(profile());
+    }
+
+    function studentProfileHasIdentity(data) {
+      return data != null &&
+        (
+          data.role == "student" ||
+          data.isStudent == true ||
+          isECMemberRole(data.role)
+        ) &&
+        hasStudentIdentityFields(data);
+    }
+
+    function normalizeCourseScopeValue(value) {
+      return value == "ME" ||
+        value == "BSME" ||
+        value == "Mechanical Engineering" ||
+        value == "mechanical-engineering" ? "Mechanical Engineering" :
+        value == "EE" ||
+        value == "BSEE" ||
+        value == "Electrical Engineering" ||
+        value == "electrical-engineering" ? "Electrical Engineering" :
+        value == "IE" ||
+        value == "BSIE" ||
+        value == "Industrial Engineering" ||
+        value == "industrial-engineering" ? "Industrial Engineering" :
+        value == "CPE" ||
+        value == "BSCpE" ||
+        value == "BSCPE" ||
+        value == "Computer Engineering" ||
+        value == "computer-engineering" ? "Computer Engineering" :
+        value == "ECE" ||
+        value == "BSECE" ||
+        value == "Electronics Engineering" ||
+        value == "electronics-engineering" ? "Electronics Engineering" :
+        "";
+    }
+
+    function firstCourseScopeValue(primary, secondary, tertiary) {
+      let primaryScope = normalizeCourseScopeValue(primary);
+      let secondaryScope = normalizeCourseScopeValue(secondary);
+      let tertiaryScope = normalizeCourseScopeValue(tertiary);
+
+      return primaryScope != "" ? primaryScope :
+        secondaryScope != "" ? secondaryScope :
+        tertiaryScope;
+    }
+
+    function isEC() {
+      return signedIn() && isECMemberRole(role());
+    }
+
+    function inferCourseScopeFromPosition(position) {
+      return position == "B.O.D. (ME)" ? "Mechanical Engineering" :
+        position == "B.O.D. (EE)" ? "Electrical Engineering" :
+        position == "B.O.D. (IE)" ? "Industrial Engineering" :
+        position == "B.O.D. (CPE)" ? "Computer Engineering" :
+        position == "B.O.D. (ECE)" ? "Electronics Engineering" :
+        "";
+    }
+
+    function courseScopeFromAssignedCourse(courseCode) {
+      return normalizeCourseScopeValue(courseCode);
+    }
+
+    function courseScopeFromProfileData(data) {
+      let labelScope = normalizeCourseScopeValue(data.courseScopeLabel);
+      let courseScope = normalizeCourseScopeValue(data.course);
+      let assignedScope = courseScopeFromAssignedCourse(data.assignedCourse);
+      let positionScope = inferCourseScopeFromPosition(data.ecPosition);
+      let slugScope = normalizeCourseScopeValue(data.courseScope);
+
+      return labelScope != "" ? labelScope :
+        courseScope != "" ? courseScope :
+        assignedScope != "" ? assignedScope :
+        positionScope != "" ? positionScope :
+        slugScope;
+    }
+
+    function courseScopeSlug(courseScope) {
+      return courseScope == "Mechanical Engineering" ? "mechanical-engineering" :
+        courseScope == "Electrical Engineering" ? "electrical-engineering" :
+        courseScope == "Industrial Engineering" ? "industrial-engineering" :
+        courseScope == "Computer Engineering" ? "computer-engineering" :
+        courseScope == "Electronics Engineering" ? "electronics-engineering" :
+        "";
+    }
+
+    function isAllScopeECPosition(position) {
+      return position == "President" ||
+        position == "Vice President" ||
+        position == "Secretary" ||
+        position == "Treasurer" ||
+        position == "Auditor" ||
+        position == "P.I.O." ||
+        position == "H.A.S.";
+    }
+
+    function isBODPosition(position) {
+      return position == "B.O.D." ||
+        position == "B.O.D. (ME)" ||
+        position == "B.O.D. (EE)" ||
+        position == "B.O.D. (IE)" ||
+        position == "B.O.D. (CPE)" ||
+        position == "B.O.D. (ECE)";
+    }
+
+    function hasBodCourseMarkers(data) {
+      return data != null && courseScopeFromProfileData(data) != "";
+    }
+
+    function currentCourseScope() {
+      return !hasProfile() || !isBOD() ? "" :
+        courseScopeFromProfileData(profile());
+    }
+
+    function hasCurrentCourseScope() {
+      return currentCourseScope() != "";
+    }
+
+    function currentCourseScopeSlug() {
+      let courseScope = currentCourseScope();
+      return courseScope != "" ? courseScopeSlug(courseScope) : "";
+    }
+
+    function courseMatchesCurrentScope(value) {
+      let courseScope = currentCourseScope();
+      return courseScope != "" && normalizeCourseScopeValue(value) == courseScope;
+    }
+
+    function studentOnlyProfileMatchesCurrentScope(data) {
+      return data != null &&
+        isStudentOnlyRole(data.role) &&
+        courseMatchesCurrentScope(data.course);
+    }
+
+    function studentProfileHasIdentityAndMatchesCurrentScope(data) {
+      return studentProfileHasIdentity(data) &&
+        courseMatchesCurrentScope(data.course);
+    }
+
+    function isBOD() {
+      return hasProfile() &&
+        (
+          role() == "bod" ||
+          (
+            isECMemberRole(role()) &&
+            (
+              profile().ecScope == "course" ||
+              (
+                profile().ecScope != "all" &&
+                (
+                  profile().isBod == true ||
+                  isBODPosition(profile().ecPosition) ||
+                  (
+                    !isAllScopeECPosition(profile().ecPosition) &&
+                    hasBodCourseMarkers(profile())
+                  )
+                )
+              )
+            )
+          )
+        );
+    }
+
+    function isRegularEC() {
+      return hasProfile() &&
+        isRegularECMemberRole(role()) &&
+        (profile().ecScope == "all" || !isBOD());
+    }
+
+    function isAdminOrEC() {
+      return isAdmin() || isEC();
+    }
+
+    function isAdminOrRegularEC() {
+      return isAdmin() || isRegularEC();
+    }
+
+    function canManageStudentData(data) {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          (
+            !("role" in data) ||
+            isStudentOnlyRole(data.role)
+          ) &&
+          courseMatchesCurrentScope(data.course)
+        );
+    }
+
+    function canManageStudentProfileUpdate() {
+      return resource.data.role == "student" &&
+        request.resource.data.role == resource.data.role &&
+        (
+          isAdminOrRegularEC() ||
+          (
+            isBOD() &&
+            courseMatchesCurrentScope(resource.data.course) &&
+            courseMatchesCurrentScope(request.resource.data.course)
+          )
+        ) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "schoolId",
+          "schoolIdKey",
+          "name",
+          "fullName",
+          "studentName",
+          "course",
+          "year",
+          "yearLevel",
+          "status",
+          "readyForClearance",
+          "updatedAt",
+        ]);
+    }
+
+    function canReadStudentProfile(uid, data) {
+      return exists(userProfilePath(uid)) &&
+        (
+          isAdminOrRegularEC() ||
+          (
+            isBOD() &&
+            studentOnlyProfileMatchesCurrentScope(data)
+          )
+        );
+    }
+
+    function canManageStudentNotification(targetUid) {
+      return exists(userProfilePath(targetUid)) &&
+        canManageStudentNotificationData(get(userProfilePath(targetUid)).data);
+    }
+
+    function canManageStudentNotificationData(data) {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          studentOnlyProfileMatchesCurrentScope(data)
+        );
+    }
+
+    function notificationCourseScope(data) {
+      let directCourseScope = normalizeCourseScopeValue(data.course);
+      let listCourseScope = data.courses is list && data.courses.size() == 1 ?
+        normalizeCourseScopeValue(data.courses[0]) :
+        "";
+
+      return directCourseScope != "" ? directCourseScope : listCourseScope;
+    }
+
+    function notificationCoursesStayInScope(data) {
+      let courses = data.courses is list ? data.courses : [];
+
+      return courses.size() == 0 ||
+        (
+          courses.size() == 1 &&
+          courseMatchesCurrentScope(courses[0])
+        );
+    }
+
+    function canTargetBodNotificationPath(uid) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        (
+          isSelf(uid) ||
+          canManageStudentNotification(uid)
+        );
+    }
+
+    function bodNotificationWriteIsScoped(uid, data) {
+      return canTargetBodNotificationPath(uid) &&
+        data.createdByUid == request.auth.uid &&
+        notificationCourseScope(data) == currentCourseScope() &&
+        notificationCoursesStayInScope(data);
+    }
+
+    function canManageExistingBodNotification(uid, data) {
+      return canTargetBodNotificationPath(uid) &&
+        data.createdByUid == request.auth.uid;
+    }
+
+    function selfProfileUpdateKeepsAccessAssignments() {
+      return request.resource.data.role == resource.data.role &&
+        request.resource.data.ecPosition == resource.data.ecPosition &&
+        request.resource.data.ecScope == resource.data.ecScope &&
+        request.resource.data.assignedCourse == resource.data.assignedCourse &&
+        request.resource.data.courseScope == resource.data.courseScope &&
+        request.resource.data.courseScopeLabel == resource.data.courseScopeLabel &&
+        request.resource.data.isBod == resource.data.isBod &&
+        request.resource.data.isStudent == resource.data.isStudent;
+    }
+
+    function eventOwnerType(data) {
+      return data.ownerType == "bod" ? "bod" : "ec";
+    }
+
+    function eventCourseScope(data) {
+      return firstCourseScopeValue(
+        data.courseScope,
+        data.createdByCourseScope,
+        data.course
+      );
+    }
+
+    function eventSelectedStudentIds(data) {
+      return data.selectedStudentIds is list ? data.selectedStudentIds : [];
+    }
+
+    function eventSelectedSchoolIds(data) {
+      return data.selectedSchoolIds is list ? data.selectedSchoolIds : [];
+    }
+
+    function bodCreateBaseIsScoped(data) {
+      let courseScope = currentCourseScope();
+      let course = normalizeCourseScopeValue(data.course);
+      let ownerCourseScope = normalizeCourseScopeValue(data.courseScope);
+      let creatorCourseScope = normalizeCourseScopeValue(data.createdByCourseScope);
+
+      return isBOD() &&
+        courseScope != "" &&
+        data.ownerType == "bod" &&
+        data.createdBy == request.auth.uid &&
+        course == courseScope &&
+        ownerCourseScope == courseScope &&
+        creatorCourseScope == courseScope &&
+        data.courses is list &&
+        data.courses.size() == 1 &&
+        data.courses[0] == courseScope;
+    }
+
+    function bodNoSelectedAudienceCreateIsScoped(data) {
+      return (
+        !("selectedStudentIds" in data) ||
+        (data.selectedStudentIds is list && data.selectedStudentIds.size() == 0)
+      ) &&
+        (
+          !("selectedSchoolIds" in data) ||
+          (data.selectedSchoolIds is list && data.selectedSchoolIds.size() == 0)
+        ) &&
+        (
+          !("targetStudent" in data) ||
+          data.targetStudent == ""
+        );
+    }
+
+    function bodSelectedStudentProfileMatchesScope(data, expectedSchoolId) {
+      return studentOnlyProfileMatchesCurrentScope(data) &&
+        (
+          expectedSchoolId == "" ||
+          data.schoolId == expectedSchoolId
+        );
+    }
+
+    function bodSelectedStudentAtMatchesScope(studentIds, schoolIds, index) {
+      return studentIds.size() <= index ||
+        (
+          exists(userProfilePath(studentIds[index])) &&
+          bodSelectedStudentProfileMatchesScope(
+            get(userProfilePath(studentIds[index])).data,
+            schoolIds.size() > index ? schoolIds[index] : ""
+          )
+        );
+    }
+
+    function bodSelectedAudienceIdsAreScoped(studentIds, schoolIds) {
+      return bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 0) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 1) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 2) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 3) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 4) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 5) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 6) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 7) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 8);
+    }
+
+    function bodSelectedAudienceCreateIsScoped(data) {
+      let studentIds = eventSelectedStudentIds(data);
+      let schoolIds = eventSelectedSchoolIds(data);
+
+      return "selectedStudentIds" in data &&
+        data.selectedStudentIds is list &&
+        studentIds.size() >= 1 &&
+        studentIds.size() <= 9 &&
+        (schoolIds.size() == 0 || schoolIds.size() == studentIds.size()) &&
+        bodSelectedAudienceIdsAreScoped(studentIds, schoolIds) &&
+        (
+          !("targetStudent" in data) ||
+          data.targetStudent == "" ||
+          data.targetStudent.matches("^Specific students selected \\([1-9][0-9]*\\)$")
+        );
+    }
+
+    function bodEventAudienceIsScoped(data) {
+      return bodCreateBaseIsScoped(data) &&
+        (
+          bodNoSelectedAudienceCreateIsScoped(data) ||
+          bodSelectedAudienceCreateIsScoped(data)
+        );
+    }
+
+    function canViewEventData(data) {
+      return !isEC() ? signedIn() :
+        isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          (
+            eventOwnerType(data) == "ec" ||
+            (
+              hasCurrentCourseScope() &&
+              eventCourseScope(data) == currentCourseScope()
+            )
+          )
+        );
+    }
+
+    function canCreateEventData(data) {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          bodEventAudienceIsScoped(data)
+        );
+    }
+
+    function canUpdateEventData() {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          eventOwnerType(resource.data) == "bod" &&
+          eventCourseScope(resource.data) == currentCourseScope() &&
+          resource.data.createdBy == request.auth.uid &&
+          bodEventAudienceIsScoped(request.resource.data)
+        );
+    }
+
+    function canDeleteEventData() {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          eventOwnerType(resource.data) == "bod" &&
+          eventCourseScope(resource.data) == currentCourseScope() &&
+          resource.data.createdBy == request.auth.uid
+        );
+    }
+
+    function eventDoc(eventId) {
+      return get(eventPath(eventId)).data;
+    }
+
+    function eventExists(eventId) {
+      return exists(eventPath(eventId));
+    }
+
+    function canManageOwnBodEventSubcollectionData(data) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        eventOwnerType(data) == "bod" &&
+        eventCourseScope(data) == currentCourseScope() &&
+        data.createdBy == request.auth.uid;
+    }
+
+    function canReadEventSubcollection(eventId) {
+      return signedIn() &&
+        eventExists(eventId) &&
+        canViewEventData(eventDoc(eventId));
+    }
+
+    function canManageEventSubcollection(eventId) {
+      return isAdminOrRegularEC() ||
+        (
+          eventExists(eventId) &&
+          canManageOwnBodEventSubcollectionData(eventDoc(eventId))
+        );
+    }
+
+    function eventParticipantMatchesCurrentScope(uid, data) {
+      return courseMatchesCurrentScope(data.course) ||
+        targetProfileCourseMatchesScope(uid);
+    }
+
+    function canReadScopedEventParticipant(eventId, uid, data) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        eventParticipantMatchesCurrentScope(uid, data) &&
+        canReadEventSubcollection(eventId);
+    }
+
+    function canWriteScopedEventParticipant(eventId, currentExists, currentData, nextData) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        nextData != null &&
+        courseMatchesCurrentScope(nextData.course) &&
+        (
+          !currentExists ||
+          courseMatchesCurrentScope(currentData.course)
+        ) &&
+        canManageEventSubcollection(eventId);
+    }
+
+    function paymentOwnerType(data) {
+      return data.ownerType == "bod" ? "bod" : "ec";
+    }
+
+    function paymentCourseScope(data) {
+      return firstCourseScopeValue(
+        data.courseScope,
+        data.createdByCourseScope,
+        data.course
+      );
+    }
+
+    function paymentTargetCourseAtMatchesScope(targetCourses, courseScope, index) {
+      return targetCourses.size() <= index ||
+        normalizeCourseScopeValue(targetCourses[index]) == courseScope;
+    }
+
+    function paymentTargetCoursesContainScope(data, courseScope) {
+      let targetCourses = data.targetCourses is list ? data.targetCourses : [];
+
+      return courseScope != "" &&
+        (
+          (targetCourses.size() > 0 &&
+            normalizeCourseScopeValue(targetCourses[0]) == courseScope) ||
+          (targetCourses.size() > 1 &&
+            normalizeCourseScopeValue(targetCourses[1]) == courseScope) ||
+          (targetCourses.size() > 2 &&
+            normalizeCourseScopeValue(targetCourses[2]) == courseScope) ||
+          (targetCourses.size() > 3 &&
+            normalizeCourseScopeValue(targetCourses[3]) == courseScope) ||
+          (targetCourses.size() > 4 &&
+            normalizeCourseScopeValue(targetCourses[4]) == courseScope)
+        );
+    }
+
+    function paymentTargetCoursesStayInScope(data) {
+      let courseScope = currentCourseScope();
+      let targetCourses = data.targetCourses is list ? data.targetCourses : [];
+
+      return targetCourses.size() == 0 ||
+        (
+          courseScope != "" &&
+          targetCourses.size() <= 5 &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 0) &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 1) &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 2) &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 3) &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 4)
+        );
+    }
+
+    function bodPaymentWriteIsScoped(data) {
+      let courseScope = currentCourseScope();
+      let paymentScope = normalizeCourseScopeValue(data.courseScope);
+      let creatorCourseScope = normalizeCourseScopeValue(data.createdByCourseScope);
+      let course = normalizeCourseScopeValue(data.course);
+
+      return courseScope != "" &&
+        paymentOwnerType(data) == "bod" &&
+        paymentScope == courseScope &&
+        data.createdByUid == request.auth.uid &&
+        creatorCourseScope == courseScope &&
+        course == courseScope &&
+        paymentTargetCoursesStayInScope(data);
+    }
+
+    function bodExistingPaymentIsScoped(data) {
+      let courseScope = currentCourseScope();
+      let creatorCourseScope = normalizeCourseScopeValue(data.createdByCourseScope);
+      let course = normalizeCourseScopeValue(data.course);
+
+      return courseScope != "" &&
+        paymentOwnerType(data) == "bod" &&
+        paymentCourseScope(data) == courseScope &&
+        data.createdByUid == request.auth.uid &&
+        creatorCourseScope == courseScope &&
+        course == courseScope &&
+        paymentTargetCoursesStayInScope(data);
+    }
+
+    function canViewPaymentData(data) {
+      let courseScope = currentCourseScope();
+      let ownerCourseScope = normalizeCourseScopeValue(data.courseScope);
+      let creatorCourseScope = normalizeCourseScopeValue(data.createdByCourseScope);
+      let course = normalizeCourseScopeValue(data.course);
+
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          courseScope != "" &&
+          (
+            (
+              paymentOwnerType(data) == "bod" &&
+              bodExistingPaymentIsScoped(data)
+            ) ||
+            (
+              paymentOwnerType(data) == "ec" &&
+              (
+                ownerCourseScope == courseScope ||
+                creatorCourseScope == courseScope ||
+                course == courseScope ||
+                paymentTargetCoursesContainScope(data, courseScope)
+              )
+            )
+          )
+        );
+    }
+
+    function canCreatePaymentData(data) {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          bodPaymentWriteIsScoped(data)
+        );
+    }
+
+    function canUpdatePaymentData() {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          bodExistingPaymentIsScoped(resource.data) &&
+          bodPaymentWriteIsScoped(request.resource.data)
+        );
+    }
+
+    function canDeletePaymentData() {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          bodExistingPaymentIsScoped(resource.data)
+        );
+    }
+
+    function selfPaymentAssignmentPath(paymentId) {
+      return /databases/$(database)/documents/payments/$(paymentId)/students/$(request.auth.uid);
+    }
+
+    function hasSelfPaymentAssignment(paymentId) {
+      return signedIn() && exists(selfPaymentAssignmentPath(paymentId));
+    }
+
+    function targetProfileCourseMatchesScope(uid) {
+      return exists(userProfilePath(uid)) &&
+        studentProfileHasIdentityAndMatchesCurrentScope(
+          get(userProfilePath(uid)).data
+        );
+    }
+
+    function canManagePaymentStudentDataForBod(paymentData, studentData) {
+      return isBOD() &&
+        courseMatchesCurrentScope(studentData.course) &&
+        bodExistingPaymentIsScoped(paymentData);
+    }
+
+    function canManagePaymentStudentData(paymentId, data) {
+      return isAdminOrRegularEC() ||
+        (
+          exists(paymentPath(paymentId)) &&
+          canManagePaymentStudentDataForBod(get(paymentPath(paymentId)).data, data)
+        );
+    }
+
+    function canDeletePaymentStudentDataForBod(paymentData, studentData) {
+      let courseScope = currentCourseScope();
+      let creatorCourseScope = normalizeCourseScopeValue(paymentData.createdByCourseScope);
+      let course = normalizeCourseScopeValue(paymentData.course);
+
+      return isBOD() &&
+        courseScope != "" &&
+        courseMatchesCurrentScope(studentData.course) &&
+        paymentCourseScope(paymentData) == courseScope &&
+        paymentData.createdByUid == request.auth.uid &&
+        creatorCourseScope == courseScope &&
+        course == courseScope;
+    }
+
+    function canDeletePaymentStudentData(paymentId, data) {
+      return isAdminOrRegularEC() ||
+        (
+          exists(paymentPath(paymentId)) &&
+          canDeletePaymentStudentDataForBod(get(paymentPath(paymentId)).data, data)
+        );
+    }
+
+    function ecDocumentOwnerType(data) {
+      return data.ownerType == "bod" ? "bod" : "ec";
+    }
+
+    function ecDocumentCourseScope(data) {
+      return firstCourseScopeValue(
+        data.courseScope,
+        data.createdByCourseScope,
+        data.course
+      );
+    }
+
+    function ecDocumentStrictCourseScope(data) {
+      return ecDocumentCourseScope(data);
+    }
+
+    function ecDocumentCourseScopeSlugMatchesScope(data) {
+      return !(data.courseScopeSlug is string) ||
+        data.courseScopeSlug == "" ||
+        data.courseScopeSlug == currentCourseScopeSlug();
+    }
+
+    function ecDocumentStoragePathIsScoped(data) {
+      return data.storagePath is string &&
+        currentCourseScopeSlug() != "" &&
+        (
+          data.storagePath.matches("^documents/course/" + currentCourseScopeSlug() + "/[^/]+/.+$") ||
+          data.storagePath.matches("^ec-documents/course/" + currentCourseScopeSlug() + "/[^/]+/.+$")
+        );
+    }
+
+    function ecDocumentCreatedByUid(data) {
+      return data.createdBy != null && data.createdBy != "" ? data.createdBy :
+        (
+          data.createdByUid != null &&
+          data.createdByUid != ""
+        ) ? data.createdByUid :
+        (
+          data.uploadedByUid != null &&
+          data.uploadedByUid != ""
+        ) ? data.uploadedByUid :
+        (
+          data.ownerUid != null &&
+          data.ownerUid != ""
+        ) ? data.ownerUid :
+        "";
+    }
+
+    function canManageOwnBodEcDocumentData(data) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        ecDocumentOwnerType(data) == "bod" &&
+        ecDocumentCreatedByUid(data) == request.auth.uid &&
+        ecDocumentStrictCourseScope(data) == currentCourseScope() &&
+        ecDocumentCourseScopeSlugMatchesScope(data) &&
+        ecDocumentStoragePathIsScoped(data);
+    }
+
+    function canViewEcDocumentData(data) {
+      return isAdminOrRegularEC() || canManageOwnBodEcDocumentData(data);
+    }
+
+    function enrollmentSessionCourseScope(data) {
+      return firstCourseScopeValue(
+        data.courseScope,
+        data.createdByCourseScope,
+        null
+      );
+    }
+
+    function canViewEnrollmentSessionData(data) {
+      return isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          enrollmentSessionCourseScope(data) == currentCourseScope()
+        );
+    }
+
+    match /profiles/{uid} {
+      allow read: if isSelf(uid) || isAdmin() || canReadStudentProfile(uid, resource.data);
+      allow create: if isAdmin();
+      allow update: if isAdmin() ||
+        canManageStudentProfileUpdate() ||
+        (isSelf(uid) && selfProfileUpdateKeepsAccessAssignments());
+      allow delete: if isAdmin();
+
+      match /documents/{docId} {
+        allow read: if isSelf(uid) || isAdmin();
+        allow create, update, delete: if (isSelf(uid) && isEC()) || isAdmin();
+      }
+
+      match /notifications/{notificationId} {
+        allow read: if (isSelf(uid) && hasStudentSelfIdentity()) || isAdminOrRegularEC() ||
+          (isBOD() && canManageStudentNotification(uid));
+        allow create: if isAdminOrRegularEC() ||
+          bodNotificationWriteIsScoped(uid, request.resource.data);
+        allow update: if isAdminOrRegularEC() ||
+          (
+            canManageExistingBodNotification(uid, resource.data) &&
+            bodNotificationWriteIsScoped(uid, request.resource.data)
+          );
+        allow delete: if isAdminOrRegularEC() ||
+          canManageExistingBodNotification(uid, resource.data);
+      }
+    }
+
+    match /logs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /events/{eventId} {
+      allow read: if signedIn() && canViewEventData(resource.data);
+      allow create: if signedIn() && canCreateEventData(request.resource.data);
+      allow update: if signedIn() && canUpdateEventData();
+      allow delete: if signedIn() && canDeleteEventData();
+
+      match /images/{imageId} {
+        allow read: if canReadEventSubcollection(eventId);
+        allow create, update, delete: if signedIn() &&
+          canManageEventSubcollection(eventId);
+      }
+
+      match /docs/{docId} {
+        allow read: if isTeacher() || (
+          canReadEventSubcollection(eventId)
+        );
+        allow create, update, delete: if signedIn() &&
+          canManageEventSubcollection(eventId);
+      }
+
+      match /attendance/{uid} {
+        allow read: if isAdminOrRegularEC() || isTeacher() ||
+          (isSelf(uid) && hasStudentSelfIdentity()) ||
+          canReadScopedEventParticipant(eventId, uid, resource.data);
+        allow create, update, delete: if isAdminOrRegularEC() ||
+          canWriteScopedEventParticipant(
+            eventId,
+            exists(/databases/$(database)/documents/events/$(eventId)/attendance/$(uid)),
+            resource.data,
+            request.resource.data
+          );
+      }
+
+      match /{subcollection}/{docId} {
+        allow read, create, update, delete: if isAdminOrRegularEC();
+      }
+    }
+
+    match /payments/{paymentId} {
+      allow read: if signedIn() &&
+        (
+          canViewPaymentData(resource.data) ||
+          hasSelfPaymentAssignment(paymentId)
+        );
+      allow create: if signedIn() && canCreatePaymentData(request.resource.data);
+      allow update: if signedIn() && canUpdatePaymentData();
+      allow delete: if signedIn() && canDeletePaymentData();
+
+      match /students/{studentUid} {
+        allow read: if isAdminOrRegularEC() ||
+          (isSelf(studentUid) && hasStudentSelfIdentity()) ||
+          (
+            signedIn() &&
+            resource.data.uid == request.auth.uid &&
+            hasStudentSelfIdentity()
+          ) ||
+          (
+            isBOD() &&
+            hasCurrentCourseScope() &&
+            exists(paymentPath(paymentId)) &&
+            canViewPaymentData(get(paymentPath(paymentId)).data) &&
+            (
+              courseMatchesCurrentScope(resource.data.course) ||
+              targetProfileCourseMatchesScope(studentUid)
+            )
+          );
+        allow create: if canManagePaymentStudentData(paymentId, request.resource.data);
+        allow update: if canManagePaymentStudentData(paymentId, resource.data) &&
+          canManagePaymentStudentData(paymentId, request.resource.data);
+        allow delete: if canDeletePaymentStudentData(paymentId, resource.data);
+      }
+    }
+
+    match /ecDocuments/{docId} {
+      allow read: if signedIn() && canViewEcDocumentData(resource.data);
+      allow create: if isAdminOrRegularEC() ||
+        canManageOwnBodEcDocumentData(request.resource.data);
+      allow update: if isAdminOrRegularEC() ||
+        (
+          canManageOwnBodEcDocumentData(resource.data) &&
+          canManageOwnBodEcDocumentData(request.resource.data)
+        );
+      allow delete: if isAdminOrRegularEC() ||
+        canManageOwnBodEcDocumentData(resource.data);
+    }
+
+    match /students/{studentId} {
+      allow read: if isTeacher() ||
+        (isSelf(studentId) && hasStudentSelfIdentity()) ||
+        canManageStudentData(resource.data);
+      allow create: if isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          canManageStudentData(request.resource.data)
+        );
+      allow update: if isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          canManageStudentData(resource.data) &&
+          canManageStudentData(request.resource.data)
+        );
+      allow delete: if isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          hasCurrentCourseScope() &&
+          canManageStudentData(resource.data)
+        );
+    }
+
+    match /devices/{deviceId} {
+      allow read, write: if isAdmin();
+
+      match /syncLogs/{logId} {
+        allow read: if isAdminOrEC();
+        allow write: if false;
+      }
+    }
+
+    match /devicePairings/{deviceId} {
+      allow read: if isAdminOrEC();
+      allow create, update, delete: if isAdminOrEC();
+    }
+
+    match /enrollmentSessions/{sessionId} {
+      allow read: if canViewEnrollmentSessionData(resource.data);
+      allow create, update, delete: if isAdminOrRegularEC();
+
+      match /students/{studentId} {
+        allow read: if canViewEnrollmentSessionData(
+          get(/databases/$(database)/documents/enrollmentSessions/$(sessionId)).data
+        );
+        allow create, update, delete: if isAdminOrRegularEC();
+      }
+    }
+
+    match /enrollmentQueue/{queueId} {
+      allow read, create, update, delete: if isAdminOrRegularEC();
+    }
+
+    match /fingerprintTemplates/{templateId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /moduleCleanupQueue/{cleanupId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /syncLogs/{logId} {
+      allow read: if isAdminOrEC();
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

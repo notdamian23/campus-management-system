@@ -627,30 +627,19 @@ service cloud.firestore {
         );
     }
 
-    function eventVisibleToBodScope(data, courseScope) {
-      return courseScope != "" &&
-        (
-          eventOwnerType(data) == "ec" ||
-          eventCourseScope(data) == courseScope
-        );
-    }
-
-    function eventManagedByBodScope(data, courseScope) {
-      return courseScope != "" &&
-        eventOwnerType(data) == "bod" &&
-        eventCourseScope(data) == courseScope &&
-        data.createdBy == request.auth.uid;
-    }
-
     function canViewEventData(data) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return !isECMemberRole(currentRoleValue) ? signedIn() :
-        currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
-        eventVisibleToBodScope(data, courseScope);
+      return !isEC() ? signedIn() :
+        isAdminOrRegularEC() ||
+        (
+          isBOD() &&
+          (
+            eventOwnerType(data) == "ec" ||
+            (
+              hasCurrentCourseScope() &&
+              eventCourseScope(data) == currentCourseScope()
+            )
+          )
+        );
     }
 
     function canCreateEventData(data) {
@@ -693,72 +682,50 @@ service cloud.firestore {
       return exists(eventPath(eventId));
     }
 
-    function canManageOwnBodEventSubcollectionData(data, courseScope) {
-      return eventManagedByBodScope(data, courseScope);
+    function canManageOwnBodEventSubcollectionData(data) {
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        eventOwnerType(data) == "bod" &&
+        eventCourseScope(data) == currentCourseScope() &&
+        data.createdBy == request.auth.uid;
     }
 
     function canReadEventSubcollection(eventId) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
       return signedIn() &&
         eventExists(eventId) &&
-        (
-          !isECMemberRole(currentRoleValue) ||
-          currentRoleValue == "admin" ||
-          isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
-          eventVisibleToBodScope(eventDoc(eventId), courseScope)
-        );
+        canViewEventData(eventDoc(eventId));
     }
 
     function canManageEventSubcollection(eventId) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return currentRoleValue == "admin" ||
-        isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
+      return isAdminOrRegularEC() ||
         (
           eventExists(eventId) &&
-          canManageOwnBodEventSubcollectionData(eventDoc(eventId), courseScope)
+          canManageOwnBodEventSubcollectionData(eventDoc(eventId))
         );
     }
 
-    function eventTargetProfileMatchesScope(uid, courseScope) {
-      return courseScope != "" &&
-        userProfileExists(uid) &&
-        studentProfileHasIdentityAndMatchesScope(userProfileDoc(uid), courseScope);
-    }
-
-    function eventParticipantMatchesCurrentScope(uid, data, courseScope) {
-      return dataCourseMatchesScope(data, courseScope) ||
-        eventTargetProfileMatchesScope(uid, courseScope);
+    function eventParticipantMatchesCurrentScope(uid, data) {
+      return courseMatchesCurrentScope(data.course) ||
+        targetProfileCourseMatchesScope(uid);
     }
 
     function canReadScopedEventParticipant(eventId, uid, data) {
-      let currentData = currentProfileData();
-      let currentRoleValue = profileRole(currentData);
-      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
-
-      return eventExists(eventId) &&
-        eventVisibleToBodScope(eventDoc(eventId), courseScope) &&
-        eventParticipantMatchesCurrentScope(uid, data, courseScope);
+      return isBOD() &&
+        hasCurrentCourseScope() &&
+        eventParticipantMatchesCurrentScope(uid, data) &&
+        canReadEventSubcollection(eventId);
     }
 
     function canWriteScopedEventParticipant(eventId, currentExists, currentData, nextData) {
-      let currentProfile = currentProfileData();
-      let currentRoleValue = profileRole(currentProfile);
-      let courseScope = currentCourseScopeFromData(currentProfile, currentRoleValue);
-
-      return eventExists(eventId) &&
+      return isBOD() &&
+        hasCurrentCourseScope() &&
         nextData != null &&
-        dataCourseMatchesScope(nextData, courseScope) &&
+        courseMatchesCurrentScope(nextData.course) &&
         (
           !currentExists ||
-          dataCourseMatchesScope(currentData, courseScope)
+          courseMatchesCurrentScope(currentData.course)
         ) &&
-        eventManagedByBodScope(eventDoc(eventId), courseScope);
+        canManageEventSubcollection(eventId);
     }
 
     function paymentOwnerType(data) {
@@ -1130,7 +1097,7 @@ service cloud.firestore {
       }
 
       match /docs/{docId} {
-        allow read: if currentIsTeacher() || (
+        allow read: if isTeacher() || (
           canReadEventSubcollection(eventId)
         );
         allow create, update, delete: if signedIn() &&
@@ -1138,10 +1105,10 @@ service cloud.firestore {
       }
 
       match /attendance/{uid} {
-        allow read: if currentIsAdminOrRegularEC() || currentIsTeacher() ||
-          (isSelf(uid) && currentHasStudentIdentity()) ||
+        allow read: if isAdminOrRegularEC() || isTeacher() ||
+          (isSelf(uid) && hasStudentSelfIdentity()) ||
           canReadScopedEventParticipant(eventId, uid, resource.data);
-        allow create, update, delete: if currentIsAdminOrRegularEC() ||
+        allow create, update, delete: if isAdminOrRegularEC() ||
           canWriteScopedEventParticipant(
             eventId,
             exists(/databases/$(database)/documents/events/$(eventId)/attendance/$(uid)),
@@ -1151,10 +1118,10 @@ service cloud.firestore {
       }
 
       match /registrations/{uid} {
-        allow read: if currentIsAdminOrRegularEC() ||
-          (isSelf(uid) && currentHasStudentIdentity()) ||
+        allow read: if isAdminOrRegularEC() ||
+          (isSelf(uid) && hasStudentSelfIdentity()) ||
           canReadScopedEventParticipant(eventId, uid, resource.data);
-        allow create, update, delete: if currentIsAdminOrRegularEC() ||
+        allow create, update, delete: if isAdminOrRegularEC() ||
           canWriteScopedEventParticipant(
             eventId,
             exists(/databases/$(database)/documents/events/$(eventId)/registrations/$(uid)),
@@ -1164,7 +1131,7 @@ service cloud.firestore {
       }
 
       match /{subcollection}/{docId} {
-        allow read, create, update, delete: if currentIsAdminOrRegularEC();
+        allow read, create, update, delete: if isAdminOrRegularEC();
       }
     }
 
