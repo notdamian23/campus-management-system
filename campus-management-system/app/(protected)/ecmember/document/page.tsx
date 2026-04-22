@@ -191,10 +191,6 @@ const inferDocType = (filename: string): DocType | null => {
   return null;
 };
 
-const courseScopeToStorageSlug = (courseScope: string) => {
-  return normalizeCourseSlug(courseScope) || normalizeCourseSlug(normalizeCourse(courseScope));
-};
-
 const normalizeDocType = (
   rawType: string | undefined,
   filename: string,
@@ -461,6 +457,10 @@ export default function DocumentsPage() {
     () => normalizeCourse(viewerCourseScope ?? ""),
     [viewerCourseScope],
   );
+  const viewerCourseScopeSlug = useMemo(
+    () => normalizeCourseSlug(viewerCourseScopeValue),
+    [viewerCourseScopeValue],
+  );
 
   const loadDocuments = useCallback(async () => {
     if (!authReady || !viewerProfileReady) {
@@ -499,16 +499,22 @@ export default function DocumentsPage() {
 
     try {
       if (viewerIsBod && viewerCourseScopeValue) {
-        const bodDocumentsSnap = await getDocs(
-          query(
-            collection(db, "ecDocuments"),
-            where("ownerType", "==", "bod"),
-            where("createdBy", "==", activeUid),
-            where("courseScope", "==", viewerCourseScopeValue),
+        const [createdBySnap, createdByUidSnap] = await Promise.all([
+          getDocs(
+            query(collection(db, "ecDocuments"), where("createdBy", "==", activeUid)),
           ),
-        );
+          getDocs(
+            query(collection(db, "ecDocuments"), where("createdByUid", "==", activeUid)),
+          ),
+        ]);
 
-        setDocuments(sortDocumentItems(bodDocumentsSnap.docs.map(mapFirestoreDocumentItem)));
+        const mergedDocuments = new Map<string, DocumentItem>();
+        [...createdBySnap.docs, ...createdByUidSnap.docs].forEach((snapshot) => {
+          const item = mapFirestoreDocumentItem(snapshot);
+          mergedDocuments.set(snapshot.id, item);
+        });
+
+        setDocuments(sortDocumentItems(Array.from(mergedDocuments.values())));
         setDocumentsLoading(false);
         return;
       }
@@ -761,7 +767,7 @@ export default function DocumentsPage() {
       return;
     }
 
-    if (viewerIsBod && !viewerCourseScopeValue) {
+    if (viewerIsBod && (!viewerCourseScopeValue || !viewerCourseScopeSlug)) {
       setUploadError("B.O.D. course scope is missing. Please contact an administrator.");
       addToast({
         title: "Missing course scope",
@@ -787,8 +793,8 @@ export default function DocumentsPage() {
       const rejectedMessages: string[] = [];
       let nextTotalBytes = totalStorageBytes;
       let uploadedCount = 0;
-      const bodStoragePrefix = viewerIsBod && viewerCourseScopeValue
-        ? `documents/course/${courseScopeToStorageSlug(viewerCourseScopeValue)}`
+      const bodStoragePrefix = viewerIsBod && viewerCourseScopeSlug
+        ? `documents/course/${viewerCourseScopeSlug}`
         : "";
 
       if (viewerIsBod) {
@@ -836,7 +842,7 @@ export default function DocumentsPage() {
         const docRef = doc(collection(db, "ecDocuments"));
         const storagePath = viewerIsBod && bodStoragePrefix
           ? `${bodStoragePrefix}/${docRef.id}/${file.name}`
-          : `documents/shared/${docRef.id}/${file.name}`;
+          : `ec-documents/shared/${docRef.id}/${file.name}`;
         const storageRef = ref(storage, storagePath);
 
         try {

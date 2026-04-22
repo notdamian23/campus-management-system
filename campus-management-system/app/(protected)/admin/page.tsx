@@ -142,6 +142,7 @@ type Profile = {
   assignedCourse?: string | null;
   courseScope?: string | null;
   courseScopeLabel?: string | null;
+  courseScopeSlug?: string | null;
   isBod?: boolean;
   name?: string;
   fullName?: string;
@@ -479,6 +480,9 @@ function buildRoleProfileFields(
   const courseScope = courseScopeLabel ?
     normalizeCourseSlug(courseScopeLabel) || null :
     null;
+  const courseScopeSlug = courseScopeLabel ?
+    normalizeCourseSlug(courseScopeLabel) || null :
+    null;
 
   if (role === "bod") {
     return {
@@ -488,6 +492,7 @@ function buildRoleProfileFields(
       ecScope: "course" as const,
       assignedCourse: normalizedAssignedCourse || null,
       courseScope,
+      courseScopeSlug,
       courseScopeLabel,
       isBod: true,
       isStudent: true,
@@ -500,6 +505,7 @@ function buildRoleProfileFields(
       ecScope: null,
       assignedCourse: null,
       courseScope: null,
+      courseScopeSlug: null,
       courseScopeLabel: null,
       isBod: false,
       isStudent: role === "student",
@@ -515,6 +521,7 @@ function buildRoleProfileFields(
       ecScope: "course" as const,
       assignedCourse: normalizedAssignedCourse || null,
       courseScope,
+      courseScopeSlug,
       courseScopeLabel,
       isBod: Boolean(normalizedAssignedCourse),
       isStudent: Boolean(normalizedAssignedCourse),
@@ -526,10 +533,42 @@ function buildRoleProfileFields(
     ecScope: "all" as const,
     assignedCourse: null,
     courseScope: null,
+    courseScopeSlug: null,
     courseScopeLabel: null,
     isBod: false,
     isStudent: false,
   };
+}
+
+function hasBodProfileRepairGap(profile: Profile) {
+  if (normalizeCampusRole(profile.role) !== "bod") {
+    return false;
+  }
+
+  const assignedCourse = normalizeCourseCode(profile.assignedCourse ?? "");
+  const expectedCourseLabel =
+    resolveCourseFromCode(assignedCourse) ||
+    String(profile.courseScopeLabel ?? "").trim() ||
+    String(profile.course ?? "").trim();
+  const expectedCourseScopeSlug = expectedCourseLabel
+    ? normalizeCourseSlug(expectedCourseLabel)
+    : "";
+  const ecPosition = String(profile.ecPosition ?? "").trim();
+  const courseScope = String(profile.courseScope ?? "").trim();
+  const courseScopeLabel = String(profile.courseScopeLabel ?? "").trim();
+  const courseScopeSlug = String(profile.courseScopeSlug ?? "").trim();
+
+  return (
+    !assignedCourse ||
+    !expectedCourseLabel ||
+    courseScope !== expectedCourseScopeSlug ||
+    courseScopeLabel !== expectedCourseLabel ||
+    courseScopeSlug !== expectedCourseScopeSlug ||
+    ecPosition !== formatBodPosition(assignedCourse) ||
+    profile.ecScope !== "course" ||
+    profile.isBod !== true ||
+    profile.isStudent !== true
+  );
 }
 
 function hasEmail(profile: Pick<CampusUserRow, "email">) {
@@ -1128,6 +1167,10 @@ export default function AdminDashboardPage() {
   );
 
   const usersWithoutEmailCount = profiles.length - usersWithEmailCount;
+  const bodProfilesNeedingRepairCount = useMemo(
+    () => profileDocs.filter((profile) => hasBodProfileRepairGap(profile)).length,
+    [profileDocs],
+  );
   const isStudentCreateRole = newRole === "student";
   const isTeacherCreateRole = newRole === "teacher";
   const isEcCreateRole = newRole === "ecmember";
@@ -1413,6 +1456,20 @@ export default function AdminDashboardPage() {
       });
     }
 
+    if (!profilesLoading && bodProfilesNeedingRepairCount > 0) {
+      items.push({
+        id: "bod-profile-repair",
+        color: "warning",
+        title: "B.O.D. profiles need normalization",
+        description: `${bodProfilesNeedingRepairCount} B.O.D. account(s) are missing one or more normalized scope fields. Opening and saving each profile will repair the stored B.O.D. scope data.`,
+        actionLabel: "Review B.O.D.",
+        onPress: () => {
+          setTab("users");
+          setRoleFilter("bod");
+        },
+      });
+    }
+
     if (!logsLoading && logs.length === 0) {
       items.push({
         id: "no-logs",
@@ -1464,6 +1521,7 @@ export default function AdminDashboardPage() {
     duplicateAuditLoading,
     duplicateEntryCount,
     duplicateGroupCount,
+    bodProfilesNeedingRepairCount,
     usersWithoutEmailCount,
   ]);
 
@@ -1573,6 +1631,7 @@ export default function AdminDashboardPage() {
       ecPosition,
       bodCourse,
     );
+    const storedRole = ecProfileFields.isBod ? "bod" : newRole;
 
     if (!schoolId) {
       campusToast.warning({
@@ -1678,7 +1737,7 @@ export default function AdminDashboardPage() {
       >(getCampusFunctions(), "adminCreateUser");
       const result = await fn({
         schoolId,
-        role: newRole,
+        role: storedRole,
         email: email || null,
         name: name || null,
         course: requiresCourse ? course : null,
@@ -2009,6 +2068,7 @@ export default function AdminDashboardPage() {
       ecPosition,
       bodCourse,
     );
+    const storedRole = ecProfileFields.isBod ? "bod" : editProfileRole;
     const originalRawName = String(editingProfile.rawFullName ?? "").trim();
     const originalDisplayName = formatStudentFullName(
       {
@@ -2109,7 +2169,7 @@ export default function AdminDashboardPage() {
         email,
         name,
         schoolId,
-        role: editProfileRole,
+        role: storedRole,
         course,
         yearLevel,
         ecPosition: editProfileRole === "ecmember" ? ecPosition : null,

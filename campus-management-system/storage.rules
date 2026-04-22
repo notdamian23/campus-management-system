@@ -72,6 +72,35 @@ service firebase.storage {
       return normalizeCourseScopeValue(courseCode);
     }
 
+    function isAllScopeECPosition(position) {
+      return position == "President" ||
+        position == "Vice President" ||
+        position == "Secretary" ||
+        position == "Treasurer" ||
+        position == "Auditor" ||
+        position == "P.I.O." ||
+        position == "H.A.S.";
+    }
+
+    function isBODPosition(position) {
+      return position == "B.O.D." ||
+        position == "B.O.D. (ME)" ||
+        position == "B.O.D. (EE)" ||
+        position == "B.O.D. (IE)" ||
+        position == "B.O.D. (CPE)" ||
+        position == "B.O.D. (ECE)";
+    }
+
+    function hasBodCourseMarkers(data) {
+      return data != null &&
+        (
+          normalizeCourseScopeValue(data.courseScope) != null ||
+          normalizeCourseScopeValue(data.courseScopeLabel) != null ||
+          courseScopeFromAssignedCourse(data.assignedCourse) != null ||
+          inferCourseScopeFromPosition(data.ecPosition) != null
+        );
+    }
+
     function courseScopeSlug(courseScope) {
       return courseScope == "Mechanical Engineering" ? "mechanical-engineering" :
         courseScope == "Electrical Engineering" ? "electrical-engineering" :
@@ -82,19 +111,16 @@ service firebase.storage {
     }
 
     function currentCourseScope() {
-      return !hasProfile() ? null :
-        normalizeCourseScopeValue(profile().courseScope) != null ?
-        normalizeCourseScopeValue(profile().courseScope) :
+      return !hasProfile() || !isBOD() ? null :
         normalizeCourseScopeValue(profile().courseScopeLabel) != null ?
         normalizeCourseScopeValue(profile().courseScopeLabel) :
+        normalizeCourseScopeValue(profile().course) != null ?
+        normalizeCourseScopeValue(profile().course) :
         courseScopeFromAssignedCourse(profile().assignedCourse) != null ?
         courseScopeFromAssignedCourse(profile().assignedCourse) :
-        (
-          (profile().ecScope == "course" || role() == "bod") &&
-          normalizeCourseScopeValue(profile().course) != null
-        ) ?
-        normalizeCourseScopeValue(profile().course) :
-        inferCourseScopeFromPosition(profile().ecPosition);
+        inferCourseScopeFromPosition(profile().ecPosition) != null ?
+        inferCourseScopeFromPosition(profile().ecPosition) :
+        normalizeCourseScopeValue(profile().courseScope);
     }
 
     function currentCourseScopeSlug() {
@@ -105,15 +131,30 @@ service firebase.storage {
       return hasProfile() &&
         (
           role() == "bod" ||
-          profile().ecScope == "course" ||
-          profile().isBod == true ||
-          courseScopeFromAssignedCourse(profile().assignedCourse) != null ||
-          inferCourseScopeFromPosition(profile().ecPosition) != null
+          (
+            isECMemberRole(role()) &&
+            (
+              profile().ecScope == "course" ||
+              (
+                profile().ecScope != "all" &&
+                (
+                  profile().isBod == true ||
+                  isBODPosition(profile().ecPosition) ||
+                  (
+                    !isAllScopeECPosition(profile().ecPosition) &&
+                    hasBodCourseMarkers(profile())
+                  )
+                )
+              )
+            )
+          )
         );
     }
 
     function isRegularEC() {
-      return hasProfile() && isRegularECMemberRole(role()) && !isBOD();
+      return hasProfile() &&
+        isRegularECMemberRole(role()) &&
+        (profile().ecScope == "all" || !isBOD());
     }
 
     function isTeacher() {
@@ -166,7 +207,21 @@ service firebase.storage {
       return data != null &&
         normalizeCourseScopeValue(data.courseScope) != null ?
         normalizeCourseScopeValue(data.courseScope) :
-        null;
+        data != null &&
+          normalizeCourseScopeValue(data.createdByCourseScope) != null ?
+          normalizeCourseScopeValue(data.createdByCourseScope) :
+          (
+            data != null ?
+              normalizeCourseScopeValue(data.course) :
+              null
+          );
+    }
+
+    function ecDocumentCourseScopeSlugMatchesScope(data) {
+      return data == null ||
+        !(data.courseScopeSlug is string) ||
+        data.courseScopeSlug == "" ||
+        data.courseScopeSlug == currentCourseScopeSlug();
     }
 
     function canReadOwnBodEcDocument(docId) {
@@ -175,6 +230,7 @@ service firebase.storage {
         ecDocumentExists(docId) &&
         ecDocumentOwnerType(ecDocumentData(docId)) == "bod" &&
         ecDocumentCreatedByUid(ecDocumentData(docId)) == request.auth.uid &&
+        ecDocumentCourseScopeSlugMatchesScope(ecDocumentData(docId)) &&
         ecDocumentCourseScope(ecDocumentData(docId)) == currentCourseScope();
     }
 

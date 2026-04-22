@@ -20,7 +20,16 @@ const eslintConfig = [
     },
   },
   {
-    ignores: [".next/**", "out/**", "build/**", "next-env.d.ts"],
+    ignores: [
+      ".next/**",
+      "out/**",
+      "build/**",
+      "next-env.d.ts",
+      "functions/lib/**",
+      "portable-device-functions/lib/**",
+      "functions/eslint.config.cjs",
+      "tailwind.config.js",
+    ],
   },
 ];
 

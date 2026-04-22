@@ -263,6 +263,15 @@ const BOD_POSITION_TO_COURSE_SCOPE: Record<string, typeof VALID_COURSES[number]>
   "B.O.D. (CPE)": "Computer Engineering",
   "B.O.D. (ECE)": "Electronics Engineering",
 };
+const ALL_SCOPE_EC_POSITIONS = new Set<string>([
+  "President",
+  "Vice President",
+  "Secretary",
+  "Treasurer",
+  "Auditor",
+  "P.I.O.",
+  "H.A.S.",
+]);
 
 function isValidCourse(value: string): boolean {
   return VALID_COURSES.includes(value as typeof VALID_COURSES[number]);
@@ -439,6 +448,16 @@ function inferCourseScopeFromPosition(value: unknown): string {
   return BOD_POSITION_TO_COURSE_SCOPE[normalizedPosition] ?? "";
 }
 
+function isAllScopeECPosition(value: unknown): boolean {
+  return ALL_SCOPE_EC_POSITIONS.has(normalizeECPosition(value));
+}
+
+function isBodPosition(value: unknown): boolean {
+  const normalizedPosition = normalizeECPosition(value);
+  return normalizedPosition === "B.O.D." ||
+    normalizedPosition.startsWith("B.O.D. (");
+}
+
 function extractAssignedCourseFromPosition(value: unknown): string {
   const match = normalizeText(value).match(/^B\.O\.D\.\s*\(([A-Za-z]+)\)$/i);
   if (!match) {
@@ -455,11 +474,21 @@ function normalizeEcScope(value: unknown): "all" | "course" | "" {
   return "";
 }
 
+function resolveExplicitProfileCourseScope(
+  data: FirebaseFirestore.DocumentData,
+): string {
+  return (
+    normalizeCourseLabel(data.courseScopeLabel) ||
+    normalizeCourseLabel(data.courseScope)
+  );
+}
+
 function resolveAssignedCourseCode(data: FirebaseFirestore.DocumentData): string {
   return (
     normalizeAssignedCourseCode(data.assignedCourse) ||
     extractAssignedCourseFromPosition(data.ecPosition) ||
-    normalizeAssignedCourseCode(data.courseScope)
+    normalizeAssignedCourseCode(data.courseScope) ||
+    normalizeAssignedCourseCode(data.courseScopeLabel)
   );
 }
 
@@ -471,11 +500,7 @@ function resolveProfileEcScope(
   }
 
   if (isBodRole(data.role)) {
-    return resolveAssignedCourseCode(data) ||
-      normalizeCourseLabel(data.courseScope) ||
-      normalizeCourseLabel(data.courseScopeLabel) ?
-      "course" :
-      "";
+    return "course";
   }
 
   const explicitScope = normalizeEcScope(data.ecScope);
@@ -483,32 +508,59 @@ function resolveProfileEcScope(
     return explicitScope;
   }
 
-  return resolveAssignedCourseCode(data) ? "course" : "all";
+  if (data.isBod === true) {
+    return "course";
+  }
+
+  if (isBodPosition(data.ecPosition)) {
+    return "course";
+  }
+
+  if (isAllScopeECPosition(data.ecPosition)) {
+    return "all";
+  }
+
+  return resolveAssignedCourseCode(data) ||
+      inferCourseScopeFromPosition(data.ecPosition) ||
+      resolveExplicitProfileCourseScope(data) ?
+    "course" :
+    "all";
 }
 
 function resolveProfileCourseScope(data: FirebaseFirestore.DocumentData): string {
-  if (isBodRole(data.role)) {
-    return (
-      COURSE_CODE_TO_SCOPE[resolveAssignedCourseCode(data)] ||
-      normalizeCourseLabel(data.courseScope) ||
-      normalizeCourseLabel(data.courseScopeLabel) ||
-      inferCourseScopeFromPosition(data.ecPosition)
-    );
-  }
-
   const assignedCourseCode = resolveAssignedCourseCode(data);
-  if (resolveProfileEcScope(data) === "course" && assignedCourseCode) {
-    return COURSE_CODE_TO_SCOPE[assignedCourseCode] ?? "";
-  }
+  const explicitScope = normalizeEcScope(data.ecScope);
+  const courseScopeLabel = normalizeCourseLabel(data.courseScopeLabel);
+  const course = normalizeCourseLabel(data.course);
+  const assignedCourseScope = COURSE_CODE_TO_SCOPE[assignedCourseCode] || "";
+  const positionScope = inferCourseScopeFromPosition(data.ecPosition);
+  const courseScope = normalizeCourseLabel(data.courseScope);
 
-  if (resolveProfileEcScope(data) === "all") {
+  if (!isECMemberRole(data.role)) {
     return "";
   }
 
-  return (
-    normalizeCourseLabel(data.courseScope) ||
-    inferCourseScopeFromPosition(data.ecPosition)
-  );
+  if (isBodProfileData(data)) {
+    return (
+      courseScopeLabel ||
+      course ||
+      assignedCourseScope ||
+      positionScope ||
+      courseScope
+    );
+  }
+
+  if (explicitScope === "course") {
+    return (
+      courseScopeLabel ||
+      course ||
+      assignedCourseScope ||
+      positionScope ||
+      courseScope
+    );
+  }
+
+  return "";
 }
 
 function isBodProfileData(data: FirebaseFirestore.DocumentData): boolean {
@@ -516,17 +568,35 @@ function isBodProfileData(data: FirebaseFirestore.DocumentData): boolean {
     return true;
   }
 
-  const explicitEcScope = normalizeEcScope(data.ecScope);
-  if (!isRegularEcRole(data.role) || explicitEcScope === "all") {
+  if (!isECMemberRole(data.role)) {
     return false;
   }
 
-  return isRegularEcRole(data.role) &&
-    (
-      resolveProfileEcScope(data) === "course" ||
-      data.isBod === true ||
-      Boolean(inferCourseScopeFromPosition(data.ecPosition))
-    );
+  const explicitEcScope = normalizeEcScope(data.ecScope);
+  if (explicitEcScope === "course") {
+    return true;
+  }
+  if (explicitEcScope === "all") {
+    return false;
+  }
+
+  if (data.isBod === true) {
+    return true;
+  }
+
+  if (isBodPosition(data.ecPosition)) {
+    return true;
+  }
+
+  if (isAllScopeECPosition(data.ecPosition)) {
+    return false;
+  }
+
+  return Boolean(
+    resolveAssignedCourseCode(data) ||
+      inferCourseScopeFromPosition(data.ecPosition) ||
+      resolveExplicitProfileCourseScope(data),
+  );
 }
 
 function hasStudentIdentityData(
@@ -1607,6 +1677,12 @@ function buildCampusProfilePayload(
   data: FirebaseFirestore.DocumentData
 ): CampusProfilePayload {
   const resolvedCourseScope = resolveProfileCourseScope(data) || null;
+  const storedCourseScope =
+    data.courseScope === null ? null : optionalText(data.courseScope) || null;
+  const storedCourseScopeLabel =
+    data.courseScopeLabel === null ?
+      null :
+      (optionalText(data.courseScopeLabel) || resolvedCourseScope);
   return {
     role: normalizeCampusRoleValue(data.role) || optionalText(data.role),
     schoolId: optionalText(data.schoolId),
@@ -1636,10 +1712,8 @@ function buildCampusProfilePayload(
         (resolveProfileEcScope(data) === "course" ?
           (resolveAssignedCourseCode(data) || null) :
           null),
-    courseScope:
-      data.courseScope === null ? null : optionalText(data.courseScope) || resolvedCourseScope || null,
-    courseScopeLabel:
-      data.courseScope === null ? null : resolvedCourseScope,
+    courseScope: storedCourseScope,
+    courseScopeLabel: storedCourseScopeLabel,
     year: optionalText(data.year) || optionalText(data.yearLevel),
     yearLevel: optionalText(data.yearLevel) || optionalText(data.year),
     readyForClearance: optionalBoolean(data.readyForClearance),
@@ -2049,31 +2123,44 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
     const inferredAssignedCourse = extractAssignedCourseFromPosition(
       requestedEcPosition,
     );
+    const requestedProfileCourseScope =
+      normalizeCourseLabel(body.courseScope) ||
+      normalizeCourseLabel(body.courseScopeLabel);
     const bodAssignedCourse = requestedAssignedCourse || inferredAssignedCourse;
     const isLegacyBod = role === "ecmember" &&
+      requestedEcScope !== "all" &&
       (
         requestedEcScope === "course" ||
-        requestedEcPosition === "B.O.D." ||
-        Boolean(inferredCourseScope) ||
-        Boolean(bodAssignedCourse)
+        isBodPosition(requestedEcPosition) ||
+        (
+          !isAllScopeECPosition(requestedEcPosition) &&
+          (
+            Boolean(inferredCourseScope) ||
+            Boolean(bodAssignedCourse) ||
+            Boolean(requestedProfileCourseScope)
+          )
+        )
       );
     const isBod = role === "bod" || isLegacyBod;
-    const ecPosition = !isEcWorkspaceRoleValue(role) ?
+    const storedRole = isBod ? "bod" : role;
+    const ecPosition = !isEcWorkspaceRoleValue(storedRole) ?
       "" :
       isBod ?
         (bodAssignedCourse ? `B.O.D. (${bodAssignedCourse})` : "B.O.D.") :
         requestedEcPosition;
-    const ecScope = !isEcWorkspaceRoleValue(role) ?
+    const ecScope = !isEcWorkspaceRoleValue(storedRole) ?
       "" :
       isBod ?
         "course" :
         "all";
-    const courseScope = isBod && bodAssignedCourse ?
+    const courseScopeLabel = isBod && bodAssignedCourse ?
       (COURSE_CODE_TO_SCOPE[bodAssignedCourse] ?? "") :
       "";
-    const courseScopeSlug = isBod ? courseScopeSlugFromValue(courseScope) : "";
-    const tracksStudentProjection = shouldTrackStudentProjection(role, {isBod});
-    const course = normalizeText(body.course);
+    const courseScope = isBod ? courseScopeSlugFromValue(courseScopeLabel) : "";
+    const courseScopeSlug = courseScope;
+    const tracksStudentProjection = shouldTrackStudentProjection(storedRole, {isBod});
+    const requestedCourse = normalizeCourseLabel(body.course) || normalizeText(body.course);
+    const course = isBod ? courseScopeLabel : requestedCourse;
     const yearSource = body.yearLevel ?? body.year;
     const yearRaw = normalizeText(yearSource);
     const year = normalizeYear(yearSource);
@@ -2202,12 +2289,13 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
         schoolId,
         schoolIdKey,
         email,
-        role,
-        ecPosition: isEcWorkspaceRoleValue(role) ? ecPosition : "",
-        ecScope: isEcWorkspaceRoleValue(role) ? ecScope : null,
+        role: storedRole,
+        ecPosition: isEcWorkspaceRoleValue(storedRole) ? ecPosition : "",
+        ecScope: isEcWorkspaceRoleValue(storedRole) ? ecScope : null,
         assignedCourse: isBod ? (bodAssignedCourse || null) : null,
-        courseScope: isBod ? (courseScopeSlug || null) : null,
-        courseScopeLabel: isBod ? (courseScope || null) : null,
+        courseScope: isBod ? (courseScope || null) : null,
+        courseScopeSlug: isBod ? (courseScopeSlug || null) : null,
+        courseScopeLabel: isBod ? (courseScopeLabel || null) : null,
         isBod,
         isStudent: tracksStudentProjection,
         course: course || "",
@@ -2248,7 +2336,7 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
           {
             schoolId,
             schoolIdKey,
-            role,
+            role: storedRole,
             isStudent: true,
             studentName: name,
             name,
@@ -2272,13 +2360,13 @@ export const adminCreateUser = onCall({region: REGION}, async (request) => {
 
       authLogger.debug("adminCreateUser profile write complete", {
         uid,
-        role,
+        role: storedRole,
         schoolId,
       });
 
       authLogger.info("adminCreateUser created account", {
         uid,
-        role,
+        role: storedRole,
         schoolId,
       });
 
@@ -2349,7 +2437,6 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
     const schoolIdKey = normalizeSchoolIdKey(schoolId);
     const role = normalizeCampusRoleValue(body.role);
     const name = normalizeNamePart(body.name);
-    const course = normalizeCourseLabel(body.course) || normalizeText(body.course);
     const yearLevelRaw = normalizeText(body.yearLevel ?? body.year);
     const yearLevel = yearLevelRaw ? normalizeYear(body.yearLevel ?? body.year) : "";
     const requestedEcPosition = normalizeECPosition(body.ecPosition);
@@ -2359,31 +2446,45 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
     const inferredAssignedCourse = extractAssignedCourseFromPosition(
       requestedEcPosition,
     );
+    const requestedProfileCourseScope =
+      normalizeCourseLabel(body.courseScope) ||
+      normalizeCourseLabel(body.courseScopeLabel);
     const bodAssignedCourse = requestedAssignedCourse || inferredAssignedCourse;
     const isLegacyBod = role === "ecmember" &&
+      requestedEcScope !== "all" &&
       (
         requestedEcScope === "course" ||
-        requestedEcPosition === "B.O.D." ||
-        Boolean(inferredCourseScope) ||
-        Boolean(bodAssignedCourse)
+        isBodPosition(requestedEcPosition) ||
+        (
+          !isAllScopeECPosition(requestedEcPosition) &&
+          (
+            Boolean(inferredCourseScope) ||
+            Boolean(bodAssignedCourse) ||
+            Boolean(requestedProfileCourseScope)
+          )
+        )
       );
     const isBod = role === "bod" || isLegacyBod;
-    const ecPosition = !isEcWorkspaceRoleValue(role) ?
+    const storedRole = isBod ? "bod" : role;
+    const ecPosition = !isEcWorkspaceRoleValue(storedRole) ?
       "" :
       isBod ?
         (bodAssignedCourse ? `B.O.D. (${bodAssignedCourse})` : "B.O.D.") :
         requestedEcPosition;
-    const ecScope = !isEcWorkspaceRoleValue(role) ?
+    const ecScope = !isEcWorkspaceRoleValue(storedRole) ?
       null :
       isBod ?
         "course" :
         "all";
-    const courseScope = isBod && bodAssignedCourse ?
+    const courseScopeLabel = isBod && bodAssignedCourse ?
       (COURSE_CODE_TO_SCOPE[bodAssignedCourse] ?? "") :
       "";
-    const courseScopeSlug = isBod ? courseScopeSlugFromValue(courseScope) : "";
+    const courseScope = isBod ? courseScopeSlugFromValue(courseScopeLabel) : "";
+    const courseScopeSlug = courseScope;
+    const requestedCourse = normalizeCourseLabel(body.course) || normalizeText(body.course);
+    const course = isBod ? courseScopeLabel : requestedCourse;
     const requiresAcademicFields =
-      role === "student" || role === "ecmember" || role === "bod";
+      storedRole === "student" || storedRole === "ecmember" || storedRole === "bod";
 
     if (!targetUid) {
       throw new HttpsError("invalid-argument", "targetUid is required.");
@@ -2482,7 +2583,7 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
       }
 
       const tracksStudentProjection =
-        shouldTrackStudentProjection(role, {isBod}) ||
+        shouldTrackStudentProjection(storedRole, {isBod}) ||
         shouldTrackStudentProjection(previousRole, profileData) ||
         shouldTrackStudentProjection(previousRole, studentData);
       if (tracksStudentProjection) {
@@ -2529,19 +2630,20 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
         email: normalizedUpdatedEmail,
         schoolId,
         schoolIdKey,
-        role,
+        role: storedRole,
         name,
         fullName: name,
         course,
         year: yearLevel,
         yearLevel,
-        ecPosition: isEcWorkspaceRoleValue(role) ? ecPosition : null,
-        ecScope: isEcWorkspaceRoleValue(role) ? ecScope : null,
+        ecPosition: isEcWorkspaceRoleValue(storedRole) ? ecPosition : null,
+        ecScope: isEcWorkspaceRoleValue(storedRole) ? ecScope : null,
         assignedCourse: isBod ? (bodAssignedCourse || null) : null,
-        courseScope: isBod ? (courseScopeSlug || null) : null,
-        courseScopeLabel: isBod ? (courseScope || null) : null,
+        courseScope: isBod ? (courseScope || null) : null,
+        courseScopeSlug: isBod ? (courseScopeSlug || null) : null,
+        courseScopeLabel: isBod ? (courseScopeLabel || null) : null,
         isBod,
-        isStudent: shouldTrackStudentProjection(role, {isBod}),
+        isStudent: shouldTrackStudentProjection(storedRole, {isBod}),
         updatedAt: timestamp,
         updatedBy: actorUid,
       };
@@ -2604,7 +2706,7 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
         name,
       );
       appendChangedField("schoolId", previousSchoolId, schoolId);
-      appendChangedField("role", previousRole || profileData.role, role);
+      appendChangedField("role", previousRole || profileData.role, storedRole);
       appendChangedField("course", currentCourse, course);
       appendChangedField("yearLevel", currentYear, yearLevel);
       appendChangedField("ecPosition", normalizeECPosition(profileData.ecPosition), ecPosition);
@@ -2616,20 +2718,30 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
       );
       appendChangedField(
         "courseScope",
-        optionalText(profileData.courseScope) || resolveProfileCourseScope(profileData),
-        courseScopeSlug || courseScope,
+        optionalText(profileData.courseScope),
+        courseScope,
+      );
+      appendChangedField(
+        "courseScopeLabel",
+        optionalText(profileData.courseScopeLabel) || resolveProfileCourseScope(profileData),
+        courseScopeLabel,
+      );
+      appendChangedField(
+        "courseScopeSlug",
+        optionalText(profileData.courseScopeSlug),
+        courseScopeSlug,
       );
       appendChangedField("isBod", profileData.isBod === true, isBod);
       appendChangedField(
         "isStudent",
         profileData.isStudent === true,
-        shouldTrackStudentProjection(role, {isBod}),
+        shouldTrackStudentProjection(storedRole, {isBod}),
       );
 
       const updateBatch = db.batch();
       updateBatch.set(db.doc(`profiles/${targetUid}`), profilePatch, {merge: true});
 
-      if (shouldTrackStudentProjection(role, {isBod})) {
+      if (shouldTrackStudentProjection(storedRole, {isBod})) {
         updateBatch.set(
           db.doc(`students/${targetUid}`),
           {
@@ -2637,7 +2749,7 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
             studentId: targetUid,
             schoolId,
             schoolIdKey,
-            role,
+            role: storedRole,
             isStudent: true,
             name,
             fullName: name,
@@ -2660,7 +2772,7 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
 
       await updateBatch.commit();
 
-      if (shouldTrackStudentProjection(role, {isBod})) {
+      if (shouldTrackStudentProjection(storedRole, {isBod})) {
         await syncStudentSchoolIdIndex(schoolId, schoolIdKey, targetUid, "profile").catch(
           (indexError) => {
             authLogger.warn("adminUpdateUserProfile school ID index sync failed", {
@@ -2724,7 +2836,7 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
       authLogger.info("adminUpdateUserProfile updated account", {
         actorUid,
         targetUid,
-        role,
+        role: storedRole,
         schoolId,
         changedFields,
       });
@@ -2734,7 +2846,7 @@ export const adminUpdateUserProfile = onCall({region: REGION}, async (request) =
         email: profilePatch.email,
         name,
         schoolId,
-        role,
+        role: storedRole,
         course,
         yearLevel,
       };
@@ -4132,6 +4244,7 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
 
         return Boolean(
           actorCourseScope &&
+          isStudentOnlyRole(student.role) &&
           normalizeCourseLabel(student.course) === actorCourseScope,
         );
       });
@@ -4396,44 +4509,6 @@ function allowedDocumentStoragePrefixesForActor(
   ];
 }
 
-function courseScopeQueryValues(courseScope: string): string[] {
-  const normalizedCourseScope = normalizeCourseLabel(courseScope);
-  if (!normalizedCourseScope) {
-    return [];
-  }
-
-  const courseCode = COURSE_SCOPE_TO_CODE[normalizedCourseScope] ?? "";
-  const values = new Set<string>([
-    normalizedCourseScope,
-    sanitizeCourseScopeForStoragePath(normalizedCourseScope),
-  ]);
-
-  if (courseCode === "ME") {
-    values.add("Mechanical");
-    values.add("BSME");
-  } else if (courseCode === "EE") {
-    values.add("Electrical");
-    values.add("BSEE");
-  } else if (courseCode === "ECE") {
-    values.add("Electronics");
-    values.add("BSECE");
-  } else if (courseCode === "CPE") {
-    values.add("Computer");
-    values.add("BSCpE");
-    values.add("BSCPE");
-  } else if (courseCode === "IE") {
-    values.add("Industrial");
-    values.add("BSIE");
-  }
-
-  if (courseCode) {
-    values.add(courseCode);
-    values.add(courseCode.toLowerCase());
-  }
-
-  return Array.from(values).slice(0, 10);
-}
-
 function enrollmentSessionCourseScope(data: FirebaseFirestore.DocumentData): string {
   return (
     normalizeCourseLabel(data.courseScope) ||
@@ -4445,8 +4520,16 @@ function ecDocumentOwnerType(data: FirebaseFirestore.DocumentData): "ec" | "bod"
   return normalizeLower(data.ownerType) === "bod" ? "bod" : "ec";
 }
 
+function ecDocumentCourseScope(data: FirebaseFirestore.DocumentData): string {
+  return (
+    normalizeCourseLabel(data.courseScope) ||
+    normalizeCourseLabel(data.createdByCourseScope) ||
+    normalizeCourseLabel(data.course)
+  );
+}
+
 function ecDocumentStrictCourseScope(data: FirebaseFirestore.DocumentData): string {
-  return normalizeCourseLabel(data.courseScope);
+  return ecDocumentCourseScope(data);
 }
 
 function ecDocumentCreatedByUid(data: FirebaseFirestore.DocumentData): string {
@@ -4536,6 +4619,47 @@ function paymentMatchesCourseScope(
     paymentCreatedByCourseScope(data) === courseScope ||
     paymentCourseValue(data) === courseScope ||
     paymentTargetCourses(data).includes(courseScope);
+}
+
+function courseScopeQueryValues(courseScope: string): string[] {
+  const normalizedCourseScope = normalizeCourseLabel(courseScope);
+  if (!normalizedCourseScope) {
+    return [];
+  }
+
+  const assignedCourseCode = COURSE_SCOPE_TO_CODE[normalizedCourseScope] || "";
+  const storageSlug = courseScopeSlugFromValue(normalizedCourseScope);
+
+  return Array.from(new Set(
+    [
+      normalizedCourseScope,
+      normalizeLower(normalizedCourseScope),
+      storageSlug,
+      assignedCourseCode,
+      normalizeLower(assignedCourseCode),
+      assignedCourseCode ? `BS${assignedCourseCode}` : "",
+      assignedCourseCode ? `bs${normalizeLower(assignedCourseCode)}` : "",
+    ].map((value) => normalizeText(value)).filter(Boolean),
+  )).slice(0, 10);
+}
+
+async function paymentStudentCourseMatchExists(
+  paymentId: string,
+  courseScopeValues: string[],
+): Promise<boolean> {
+  if (!paymentId || courseScopeValues.length === 0) {
+    return false;
+  }
+
+  const paymentStudentsSnapshot = await db
+    .collection("payments")
+    .doc(paymentId)
+    .collection("students")
+    .where("course", "in", courseScopeValues)
+    .limit(1)
+    .get();
+
+  return !paymentStudentsSnapshot.empty;
 }
 
 async function deleteSnapshotDocumentsInBatches(
@@ -5538,6 +5662,7 @@ export const createCampusDocumentMetadata = onCall({region: REGION}, async (requ
 
     let ownerType: "ec" | "bod" = "ec";
     let courseScope: string | null = null;
+    let courseScopeSlug: string | null = null;
     let createdByCourseScope: string | null = null;
     let courses: string[] = [];
     let course: string | null = null;
@@ -5554,6 +5679,7 @@ export const createCampusDocumentMetadata = onCall({region: REGION}, async (requ
     if (actor.isBod) {
       ownerType = "bod";
       courseScope = actor.courseScope;
+      courseScopeSlug = courseScopeSlugFromValue(actor.courseScope) || null;
       createdByCourseScope = actor.courseScope;
       course = actor.courseScope;
       courses = [actor.courseScope];
@@ -5575,6 +5701,12 @@ export const createCampusDocumentMetadata = onCall({region: REGION}, async (requ
         metadataCourse: course,
         metadataCourseScope: courseScope,
       });
+      if (!courseScopeSlug || pathCourseSlug !== courseScopeSlug) {
+        throw new HttpsError(
+          "permission-denied",
+          "B.O.D. members can only upload documents inside their assigned course scope.",
+        );
+      }
       if (!allowedPrefixes.some((prefix) => storagePath.startsWith(prefix))) {
         throw new HttpsError(
           "permission-denied",
@@ -5603,6 +5735,7 @@ export const createCampusDocumentMetadata = onCall({region: REGION}, async (requ
         ownerType,
         course,
         courseScope,
+        courseScopeSlug,
         createdByCourseScope,
         courses,
         createdAt: serverTimestamp(),
@@ -5962,7 +6095,10 @@ export const listCampusPayments = onCall({region: REGION}, async (request) => {
         amount: Number(data.amount ?? 0),
         date: normalizeText(data.date),
         yearLevel: normalizeText(data.yearLevel) || "All Years",
-        course: normalizeText(data.course) || "All Courses",
+        course:
+          paymentCourseValue(data) ||
+          normalizeText(data.course) ||
+          "All Courses",
         targetStudent: normalizeText(data.targetStudent),
         targetCourses: paymentTargetCourses(data),
         details: normalizeText(data.details),
@@ -6002,21 +6138,63 @@ export const listCampusPayments = onCall({region: REGION}, async (request) => {
       }
 
       const actorCourseScope = actor.courseScope;
-      const candidatePayments = new Map<string, FirebaseFirestore.DocumentSnapshot>();
-      const scopedCounts = new Map<
+      const actorCourseScopeValues = courseScopeQueryValues(actorCourseScope);
+      const candidatePayments = new Map<
         string,
-        {total: number; paidCount: number; unpaidCount: number}
+        FirebaseFirestore.DocumentData
       >();
-      const addCandidatePayment = (paymentSnapshot: FirebaseFirestore.DocumentSnapshot) => {
-        if (paymentSnapshot.exists) {
-          candidatePayments.set(paymentSnapshot.id, paymentSnapshot);
-        }
+
+      const addPaymentCandidates = (
+        snapshot: FirebaseFirestore.QuerySnapshot,
+      ) => {
+        snapshot.docs.forEach((paymentDoc) => {
+          candidatePayments.set(paymentDoc.id, paymentDoc.data() ?? {});
+        });
       };
 
-      const assignmentCourseValues =
-        courseScopeQueryValues(actorCourseScope).length > 0 ?
-          courseScopeQueryValues(actorCourseScope) :
-          [actorCourseScope];
+      const runScopedPaymentQuery = async (
+        queryName: string,
+        buildQuery: () => FirebaseFirestore.Query,
+      ) => {
+        try {
+          console.info("[PAYMENT][BOD][QUERY][START]", {
+            uid: actor.uid,
+            actorCourseScope,
+            actorCourseScopeValues,
+            queryName,
+          });
+          const snapshot = await buildQuery().get();
+          console.info("[PAYMENT][BOD][QUERY][OK]", {
+            uid: actor.uid,
+            actorCourseScope,
+            actorCourseScopeValues,
+            queryName,
+            resultCount: snapshot.size,
+          });
+          addPaymentCandidates(snapshot);
+        } catch (error: unknown) {
+          console.error("[PAYMENT][BOD][QUERY][FAIL]", {
+            uid: actor.uid,
+            actorCourseScope,
+            actorCourseScopeValues,
+            queryName,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            errorCode:
+              error instanceof HttpsError ?
+                error.code :
+                normalizeText((error as {code?: unknown})?.code),
+          });
+
+          if (error instanceof HttpsError) {
+            throw error;
+          }
+
+          throw new HttpsError(
+            "internal",
+            `B.O.D payment query failed (${queryName}).`,
+          );
+        }
+      };
 
       console.info("[PAYMENT][BOD]", {
         uid: actor.uid,
@@ -6025,106 +6203,103 @@ export const listCampusPayments = onCall({region: REGION}, async (request) => {
         profileCourseScopeRaw: normalizeText(actor.profile.courseScope),
         profileAssignedCourseRaw: normalizeText(actor.profile.assignedCourse),
         bodScopeCanonical: actorCourseScope,
-        assignmentCourseValues,
+        actorCourseScopeValues,
       });
 
-      const [
-        scopedCourseSnapshot,
-        createdByCourseScopeSnapshot,
-        courseSnapshot,
-        targetCoursesSnapshot,
-        scopedStudentAssignmentsSnapshot,
-      ] = await Promise.all([
-        db.collection("payments")
-          .where("courseScope", "==", actorCourseScope)
-          .get(),
-        db.collection("payments")
-          .where("createdByCourseScope", "==", actorCourseScope)
-          .get(),
-        db.collection("payments")
-          .where("course", "==", actorCourseScope)
-          .get(),
-        db.collection("payments")
-          .where("targetCourses", "array-contains", actorCourseScope)
-          .get(),
-        db.collectionGroup("students")
-          .where("course", "in", assignmentCourseValues)
-          .get(),
-      ]);
-
-      [
-        ...scopedCourseSnapshot.docs,
-        ...createdByCourseScopeSnapshot.docs,
-        ...courseSnapshot.docs,
-        ...targetCoursesSnapshot.docs,
-      ].forEach(addCandidatePayment);
-
-      const paymentIdsFromAssignments = new Set<string>();
-      scopedStudentAssignmentsSnapshot.docs.forEach((assignmentSnapshot) => {
-        const paymentDoc = assignmentSnapshot.ref.parent.parent;
-        if (!paymentDoc || paymentDoc.parent.id !== "payments") {
-          return;
-        }
-
-        const paymentId = paymentDoc.id;
-        paymentIdsFromAssignments.add(paymentId);
-        const assignmentData = assignmentSnapshot.data() ?? {};
-        const currentCounts = scopedCounts.get(paymentId) ?? {
-          total: 0,
-          paidCount: 0,
-          unpaidCount: 0,
-        };
-
-        currentCounts.total += 1;
-        if (normalizeLower(assignmentData.status) === "paid") {
-          currentCounts.paidCount += 1;
-        } else {
-          currentCounts.unpaidCount += 1;
-        }
-
-        scopedCounts.set(paymentId, currentCounts);
-      });
-
-      const missingPaymentIds = Array.from(paymentIdsFromAssignments).filter(
-        (paymentId) => !candidatePayments.has(paymentId),
-      );
-      for (let index = 0; index < missingPaymentIds.length; index += 200) {
-        const refs = missingPaymentIds
-          .slice(index, index + 200)
-          .map((paymentId) => db.doc(`payments/${paymentId}`));
-        const snapshots = refs.length > 0 ? await db.getAll(...refs) : [];
-        snapshots.forEach(addCandidatePayment);
+      if (actor.uid) {
+        await runScopedPaymentQuery("createdByUid == actor.uid", () =>
+          db.collection("payments").where("createdByUid", "==", actor.uid),
+        );
+        await runScopedPaymentQuery("createdBy == actor.uid", () =>
+          db.collection("payments").where("createdBy", "==", actor.uid),
+        );
+      }
+      if (actorCourseScopeValues.length > 0) {
+        await runScopedPaymentQuery("courseScope in actor scope variants", () =>
+          db.collection("payments").where("courseScope", "in", actorCourseScopeValues),
+        );
+        await runScopedPaymentQuery("createdByCourseScope in actor scope variants", () =>
+          db.collection("payments").where("createdByCourseScope", "in", actorCourseScopeValues),
+        );
+        await runScopedPaymentQuery("course in actor scope variants", () =>
+          db.collection("payments").where("course", "in", actorCourseScopeValues),
+        );
+        await runScopedPaymentQuery("targetCourses array-contains-any actor scope variants", () =>
+          db.collection("payments").where("targetCourses", "array-contains-any", actorCourseScopeValues),
+        );
       }
 
-      const payments = Array.from(candidatePayments.values())
-        .map((paymentSnapshot) => {
-          if (!paymentSnapshot.exists) {
-            return null;
+      const payments = [] as ReturnType<typeof toPaymentPayload>[];
+
+      for (const [paymentId, paymentData] of candidatePayments.entries()) {
+        if (normalizeLower(paymentData.status) === "archived") {
+          continue;
+        }
+
+        const ownerType = paymentOwnerType(paymentData);
+        const createdByUid = paymentCreatedByUid(paymentData);
+        const scopedCourse = paymentCourseScope(paymentData);
+        const createdByScope =
+          paymentCreatedByCourseScope(paymentData) || scopedCourse;
+        const paymentCourse = paymentCourseValue(paymentData);
+        const isOwnBodPayment =
+          ownerType === "bod" &&
+          createdByUid === actor.uid &&
+          scopedCourse === actorCourseScope &&
+          createdByScope === actorCourseScope &&
+          paymentCourse === actorCourseScope;
+
+        if (isOwnBodPayment) {
+          payments.push(toPaymentPayload(paymentId, paymentData, null));
+          continue;
+        }
+
+        if (ownerType === "bod") {
+          continue;
+        }
+
+        let matchesActorScope = paymentMatchesCourseScope(
+          paymentData,
+          actorCourseScope,
+        );
+        if (!matchesActorScope && actorCourseScopeValues.length > 0) {
+          try {
+            matchesActorScope = await paymentStudentCourseMatchExists(
+              paymentId,
+              actorCourseScopeValues,
+            );
+          } catch (error: unknown) {
+            console.error("[PAYMENT][BOD][QUERY][FAIL]", {
+              uid: actor.uid,
+              actorCourseScope,
+              actorCourseScopeValues,
+              queryName: `payments/${paymentId}/students course in actor scope variants`,
+              errorMessage: error instanceof Error ? error.message : String(error),
+              errorCode:
+                error instanceof HttpsError ?
+                  error.code :
+                  normalizeText((error as {code?: unknown})?.code),
+            });
+
+            if (error instanceof HttpsError) {
+              throw error;
+            }
+
+            throw new HttpsError(
+              "internal",
+              `B.O.D payment student-scope query failed (${paymentId}).`,
+            );
           }
+        }
 
-          const paymentData = paymentSnapshot.data() ?? {};
-          if (normalizeLower(paymentData.status) === "archived") {
-            return null;
-          }
+        if (matchesActorScope) {
+          payments.push(toPaymentPayload(paymentId, paymentData, null));
+        }
+      }
 
-          const hasScopedAssignments = scopedCounts.has(paymentSnapshot.id);
-          if (
-            !paymentMatchesCourseScope(paymentData, actorCourseScope) &&
-            !hasScopedAssignments
-          ) {
-            return null;
-          }
-
-          const counts = scopedCounts.get(paymentSnapshot.id) ?? {
-            total: 0,
-            paidCount: 0,
-            unpaidCount: 0,
-          };
-
-          return toPaymentPayload(paymentSnapshot.id, paymentData, counts);
-        })
-        .filter((payment): payment is NonNullable<typeof payment> => Boolean(payment))
-        .sort((left, right) => Number(right.createdAt ?? 0) - Number(left.createdAt ?? 0));
+      payments.sort(
+        (left, right) => Number(right.createdAt ?? 0) - Number(left.createdAt ?? 0),
+      );
 
       return {payments};
     } catch (error: unknown) {
@@ -6139,7 +6314,19 @@ export const listCampusPayments = onCall({region: REGION}, async (request) => {
       if (error instanceof HttpsError) {
         throw error;
       }
-      throw new HttpsError("internal", "Unable to list payments right now.");
+
+      const rawCode = normalizeLower((error as {code?: unknown})?.code);
+      const rawMessage =
+        normalizeText((error as {message?: unknown})?.message) ||
+        "Failed to list payments.";
+      if (
+        rawCode.includes("failed-precondition") ||
+        rawMessage.toLowerCase().includes("index")
+      ) {
+        throw new HttpsError("failed-precondition", rawMessage);
+      }
+
+      throw new HttpsError("internal", rawMessage);
     }
   });
 
@@ -6942,6 +7129,7 @@ export const createCampusEvent = onCall({region: REGION}, async (request) => {
           linkedEventId: eventId,
           eventId,
           linkedEventTitle: title,
+          ownerType,
           createdByUid: actorUid,
           createdByRole,
           createdByCourseScope,
@@ -7471,6 +7659,7 @@ export const updateCampusEvent = onCall({region: REGION}, async (request) => {
             linkedEventId: eventId,
             eventId,
             linkedEventTitle: title,
+            ownerType,
             createdByUid,
             createdByRole,
             createdByCourseScope,

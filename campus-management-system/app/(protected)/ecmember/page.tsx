@@ -368,21 +368,24 @@ export default function ECMemberDashboard() {
         const documentRows: DocumentDashboardDoc[] = [];
 
         if (viewerIsBod && viewerCourseScope) {
-          const bodDocumentsSnap = await getDocs(
-            query(
-              collection(db, "ecDocuments"),
-              where("ownerType", "==", "bod"),
-              where("createdBy", "==", profile.uid),
-              where("courseScope", "==", viewerCourseScope),
+          const [createdBySnap, createdByUidSnap] = await Promise.all([
+            getDocs(
+              query(collection(db, "ecDocuments"), where("createdBy", "==", profile.uid)),
             ),
-          );
+            getDocs(
+              query(collection(db, "ecDocuments"), where("createdByUid", "==", profile.uid)),
+            ),
+          ]);
 
-          bodDocumentsSnap.docs.forEach((snapshot) => {
-            documentRows.push({
+          const mergedDocuments = new Map<string, DocumentDashboardDoc>();
+          [...createdBySnap.docs, ...createdByUidSnap.docs].forEach((snapshot) => {
+            mergedDocuments.set(snapshot.id, {
               id: snapshot.id,
               ...(snapshot.data() as Omit<DocumentDashboardDoc, "id">),
             });
           });
+
+          documentRows.push(...mergedDocuments.values());
         } else {
           const allDocumentsSnap = await getDocs(collection(db, "ecDocuments"));
           allDocumentsSnap.docs.forEach((snapshot) => {

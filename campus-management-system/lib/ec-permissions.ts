@@ -51,6 +51,7 @@ type ECProfileLike = {
   ecPosition?: unknown;
   ecScope?: unknown;
   assignedCourse?: unknown;
+  course?: unknown;
   courseScope?: unknown;
   courseScopeLabel?: unknown;
   isBod?: unknown;
@@ -58,6 +59,8 @@ type ECProfileLike = {
 } | null | undefined;
 
 type StudentLike = {
+  role?: unknown;
+  isStudent?: unknown;
   course?: unknown;
 } | null | undefined;
 
@@ -71,7 +74,9 @@ type EventLike = {
 
 type DocumentLike = {
   ownerType?: unknown;
+  course?: unknown;
   courseScope?: unknown;
+  createdByCourseScope?: unknown;
   createdBy?: unknown;
   createdByUid?: unknown;
   uploadedByUid?: unknown;
@@ -218,20 +223,35 @@ export function getCourseScope(profile: ECProfileLike) {
   const normalizedRole = normalizeCampusRole(profile.role);
   const ecScope = normalizeECScope(profile.ecScope);
   const assignedCourse = getAssignedCourseCode(profile);
-  const explicitLegacyScope =
-    normalizeMaybeCourse(profile.courseScope) ||
-    normalizeMaybeCourse(profile.courseScopeLabel);
+  const courseScopeLabel = normalizeMaybeCourse(profile.courseScopeLabel);
+  const course = normalizeMaybeCourse(profile.course);
+  const assignedCourseScope = assignedCourse ?
+    (resolveCourseFromCode(assignedCourse) || null) :
+    null;
+  const positionScope = inferCourseScopeFromPosition(profile.ecPosition);
+  const courseScope = normalizeMaybeCourse(profile.courseScope);
 
   if (isBOD(profile)) {
-    if (explicitLegacyScope) return explicitLegacyScope;
-    if (assignedCourse) {
-      return resolveCourseFromCode(assignedCourse) || null;
-    }
-    return inferCourseScopeFromPosition(profile.ecPosition);
+    return (
+      courseScopeLabel ||
+      course ||
+      assignedCourseScope ||
+      positionScope ||
+      courseScope
+    );
   }
 
-  if ((normalizedRole === "ecmember" || isEcRole(profile.role)) && ecScope === "course" && assignedCourse) {
-    return resolveCourseFromCode(assignedCourse) || null;
+  if (
+    (normalizedRole === "ecmember" || isEcRole(profile.role)) &&
+    ecScope === "course"
+  ) {
+    return (
+      courseScopeLabel ||
+      course ||
+      assignedCourseScope ||
+      positionScope ||
+      courseScope
+    );
   }
 
   if (ecScope === "all") {
@@ -240,13 +260,14 @@ export function getCourseScope(profile: ECProfileLike) {
   if (isAllScopeECPosition(profile.ecPosition)) {
     return null;
   }
-  if (explicitLegacyScope) return explicitLegacyScope;
 
-  if (assignedCourse) {
-    return resolveCourseFromCode(assignedCourse) || null;
-  }
-
-  return inferCourseScopeFromPosition(profile.ecPosition);
+  return (
+    courseScopeLabel ||
+    course ||
+    assignedCourseScope ||
+    positionScope ||
+    courseScope
+  );
 }
 
 export function isBOD(profile: ECProfileLike) {
@@ -277,6 +298,11 @@ export function canManageStudent(profile: ECProfileLike, student: StudentLike) {
   if (isRegularEC(profile)) return true;
   if (!isBOD(profile)) return false;
 
+  const studentRole = normalizeCampusRole(student?.role);
+  if (studentRole && studentRole !== "student") {
+    return false;
+  }
+
   const courseScope = getCourseScope(profile);
   const studentCourse = normalizeMaybeCourse(student?.course);
   return Boolean(courseScope && studentCourse && courseScope === studentCourse);
@@ -285,6 +311,7 @@ export function canManageStudent(profile: ECProfileLike, student: StudentLike) {
 export function canManagePayment(
   profile: ECProfileLike,
   payment?: {
+    ownerType?: unknown;
     course?: unknown;
     courseScope?: unknown;
     targetCourses?: unknown;
@@ -297,6 +324,7 @@ export function canManagePayment(
   if (!isBOD(profile)) return false;
 
   const courseScope = getCourseScope(profile);
+  const ownerType = normalizeLower(payment?.ownerType);
   const paymentCourse = normalizeMaybeCourse(payment?.course);
   const paymentScope =
     normalizeMaybeCourse(payment?.courseScope) || paymentCourse;
@@ -308,6 +336,7 @@ export function canManagePayment(
 
   return Boolean(
     courseScope &&
+      ownerType === "bod" &&
       actorUid &&
       createdByUid &&
       actorUid === createdByUid &&
@@ -320,6 +349,7 @@ export function canManagePayment(
 export function canEditPayment(
   profile: ECProfileLike,
   payment?: {
+    ownerType?: unknown;
     course?: unknown;
     courseScope?: unknown;
     createdByUid?: unknown;
@@ -331,6 +361,7 @@ export function canEditPayment(
   if (!isBOD(profile)) return false;
 
   const courseScope = getCourseScope(profile);
+  const ownerType = normalizeLower(payment?.ownerType);
   const paymentCourse = normalizeMaybeCourse(payment?.course);
   const paymentScope =
     normalizeMaybeCourse(payment?.courseScope) || paymentCourse;
@@ -342,6 +373,7 @@ export function canEditPayment(
 
   return Boolean(
     courseScope &&
+      ownerType === "bod" &&
       actorUid &&
       createdByUid &&
       actorUid === createdByUid &&
@@ -354,9 +386,11 @@ export function canEditPayment(
 export function canViewPayment(
   profile: ECProfileLike,
   payment?: {
+    ownerType?: unknown;
     course?: unknown;
     courseScope?: unknown;
     targetCourses?: unknown;
+    createdByUid?: unknown;
     createdByCourseScope?: unknown;
   } | null,
 ) {
@@ -365,11 +399,24 @@ export function canViewPayment(
   if (!isBOD(profile)) return false;
 
   const courseScope = getCourseScope(profile);
+  const ownerType = normalizeLower(payment?.ownerType);
   const paymentScope =
     normalizeMaybeCourse(payment?.courseScope) ||
     normalizeMaybeCourse(payment?.createdByCourseScope) ||
     normalizeMaybeCourse(payment?.course);
   const targetCourses = normalizeCourseList(payment?.targetCourses);
+  const createdByUid = trimValue(payment?.createdByUid);
+  const actorUid = trimValue(profile?.uid);
+  const isOwnBodPayment =
+    ownerType === "bod" &&
+    Boolean(actorUid) &&
+    Boolean(createdByUid) &&
+    actorUid === createdByUid &&
+    Boolean(paymentScope && paymentScope === courseScope);
+
+  if (ownerType === "bod") {
+    return isOwnBodPayment;
+  }
 
   return Boolean(
     courseScope &&
@@ -399,7 +446,10 @@ export function canViewDocument(profile: ECProfileLike, document: DocumentLike) 
   if (!isBOD(profile)) return false;
 
   const courseScope = getCourseScope(profile);
-  const documentScope = normalizeMaybeCourse(document?.courseScope);
+  const documentScope =
+    normalizeMaybeCourse(document?.courseScope) ||
+    normalizeMaybeCourse(document?.createdByCourseScope) ||
+    normalizeMaybeCourse(document?.course);
   const ownerType = normalizeLower(document?.ownerType);
   const actorUid = trimValue(profile?.uid);
   const createdByUid =

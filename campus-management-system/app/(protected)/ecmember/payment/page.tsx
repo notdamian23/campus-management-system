@@ -1007,6 +1007,7 @@ export default function PaymentDashboard() {
     () =>
       (payment: Payment) =>
         canManagePayment(viewerProfileWithUid, {
+          ownerType: payment.ownerType,
           course: payment.course,
           courseScope: payment.courseScope,
           targetCourses: payment.targetCourses,
@@ -1019,9 +1020,11 @@ export default function PaymentDashboard() {
     () =>
       (payment: Payment) =>
         canViewPayment(viewerProfileWithUid, {
+          ownerType: payment.ownerType,
           course: payment.course,
           courseScope: payment.courseScope,
           targetCourses: payment.targetCourses,
+          createdByUid: payment.createdByUid,
           createdByCourseScope: payment.createdByCourseScope,
         }),
     [viewerProfileWithUid],
@@ -1030,6 +1033,7 @@ export default function PaymentDashboard() {
     () =>
       (payment: Payment) =>
         canEditPayment(viewerProfileWithUid, {
+          ownerType: payment.ownerType,
           course: payment.course,
           courseScope: payment.courseScope,
           createdByUid: payment.createdByUid,
@@ -1668,7 +1672,8 @@ export default function PaymentDashboard() {
         targetYearLevels,
         details: cleanDetails,
         ownerType: viewerIsBod ? "bod" : "ec",
-        createdByUid: editingCurrentPayment?.createdByUid || currentUser.uid,
+        createdByUid:
+          viewerIsBod ? currentUser.uid : (editingCurrentPayment?.createdByUid || currentUser.uid),
         createdByRole:
           normalizeCampusRole(viewerProfileWithUid?.role) || "ecmember",
         createdByPosition:
@@ -1686,6 +1691,15 @@ export default function PaymentDashboard() {
         source: editingCurrentPayment?.source || "manual",
         status: editingCurrentPayment?.status || "active",
       };
+
+      if (viewerIsBod && viewerCourseScopeValue) {
+        basePaymentPayload.ownerType = "bod";
+        basePaymentPayload.createdByUid = currentUser.uid;
+        basePaymentPayload.course = viewerCourseScopeValue;
+        basePaymentPayload.courseScope = viewerCourseScopeValue;
+        basePaymentPayload.createdByCourseScope = viewerCourseScopeValue;
+        basePaymentPayload.targetCourses = [viewerCourseScopeValue];
+      }
 
       if (viewerIsBod) {
         console.info("[PAYMENT][BOD]", {

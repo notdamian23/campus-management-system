@@ -57,10 +57,6 @@ service cloud.firestore {
       return isRegularECMemberRole(value) || isBodRole(value);
     }
 
-    function isStudentAudienceRole(value) {
-      return value == "student" || isBodRole(value);
-    }
-
     function isStudentOnlyRole(value) {
       return value == "student";
     }
@@ -75,33 +71,52 @@ service cloud.firestore {
     }
 
     function hasStudentSelfIdentity() {
-      return hasProfile() &&
-        (
-          role() == "student" ||
-          profile().isStudent == true ||
-          isECMemberRole(role())
-        ) &&
-        hasStudentIdentityFields(profile());
+      return hasProfile() && studentProfileHasIdentity(profile());
     }
 
-    function targetHasStudentSelfIdentity(uid) {
-      return exists(userProfilePath(uid)) &&
+    function studentProfileHasIdentity(data) {
+      return data != null &&
         (
-          get(userProfilePath(uid)).data.role == "student" ||
-          get(userProfilePath(uid)).data.isStudent == true ||
-          isECMemberRole(get(userProfilePath(uid)).data.role)
+          data.role == "student" ||
+          data.isStudent == true ||
+          isECMemberRole(data.role)
         ) &&
-        hasStudentIdentityFields(get(userProfilePath(uid)).data);
+        hasStudentIdentityFields(data);
     }
 
     function normalizeCourseScopeValue(value) {
-      return !(value is string) || value == "" ? null :
-        value.matches("^([Mm]echanical([ -]?[Ee]ngineering)?|[Mm][.]?[Ee][.]?|[Bb][Ss][Mm][Ee])$") ? "Mechanical Engineering" :
-        value.matches("^([Ee]lectrical([ -]?[Ee]ngineering)?|[Ee][.]?[Ee][.]?|[Bb][Ss][Ee][Ee])$") ? "Electrical Engineering" :
-        value.matches("^([Ee]lectronics([ -]?[Ee]ngineering)?|[Ee]lectronics[ -]?[Aa]nd[ -]?[Cc]ommunications([ -]?[Ee]ngineering)?|[Ee][.]?[Cc][.]?[Ee][.]?|[Bb][Ss][Ee][Cc][Ee])$") ? "Electronics Engineering" :
-        value.matches("^([Cc]omputer([ -]?[Ee]ngineering)?|[Cc][.]?[Pp][.]?[Ee][.]?|[Bb][Ss][Cc][Pp][Ee])$") ? "Computer Engineering" :
-        value.matches("^([Ii]ndustrial([ -]?[Ee]ngineering)?|[Ii][.]?[Ee][.]?|[Bb][Ss][Ii][Ee])$") ? "Industrial Engineering" :
-        null;
+      return value == "ME" ||
+        value == "BSME" ||
+        value == "Mechanical Engineering" ||
+        value == "mechanical-engineering" ? "Mechanical Engineering" :
+        value == "EE" ||
+        value == "BSEE" ||
+        value == "Electrical Engineering" ||
+        value == "electrical-engineering" ? "Electrical Engineering" :
+        value == "IE" ||
+        value == "BSIE" ||
+        value == "Industrial Engineering" ||
+        value == "industrial-engineering" ? "Industrial Engineering" :
+        value == "CPE" ||
+        value == "BSCpE" ||
+        value == "BSCPE" ||
+        value == "Computer Engineering" ||
+        value == "computer-engineering" ? "Computer Engineering" :
+        value == "ECE" ||
+        value == "BSECE" ||
+        value == "Electronics Engineering" ||
+        value == "electronics-engineering" ? "Electronics Engineering" :
+        "";
+    }
+
+    function firstCourseScopeValue(primary, secondary, tertiary) {
+      let primaryScope = normalizeCourseScopeValue(primary);
+      let secondaryScope = normalizeCourseScopeValue(secondary);
+      let tertiaryScope = normalizeCourseScopeValue(tertiary);
+
+      return primaryScope != "" ? primaryScope :
+        secondaryScope != "" ? secondaryScope :
+        tertiaryScope;
     }
 
     function isEC() {
@@ -114,49 +129,117 @@ service cloud.firestore {
         position == "B.O.D. (IE)" ? "Industrial Engineering" :
         position == "B.O.D. (CPE)" ? "Computer Engineering" :
         position == "B.O.D. (ECE)" ? "Electronics Engineering" :
-        null;
+        "";
     }
 
     function courseScopeFromAssignedCourse(courseCode) {
       return normalizeCourseScopeValue(courseCode);
     }
 
+    function courseScopeFromProfileData(data) {
+      let labelScope = normalizeCourseScopeValue(data.courseScopeLabel);
+      let courseScope = normalizeCourseScopeValue(data.course);
+      let assignedScope = courseScopeFromAssignedCourse(data.assignedCourse);
+      let positionScope = inferCourseScopeFromPosition(data.ecPosition);
+      let slugScope = normalizeCourseScopeValue(data.courseScope);
+
+      return labelScope != "" ? labelScope :
+        courseScope != "" ? courseScope :
+        assignedScope != "" ? assignedScope :
+        positionScope != "" ? positionScope :
+        slugScope;
+    }
+
+    function courseScopeSlug(courseScope) {
+      return courseScope == "Mechanical Engineering" ? "mechanical-engineering" :
+        courseScope == "Electrical Engineering" ? "electrical-engineering" :
+        courseScope == "Industrial Engineering" ? "industrial-engineering" :
+        courseScope == "Computer Engineering" ? "computer-engineering" :
+        courseScope == "Electronics Engineering" ? "electronics-engineering" :
+        "";
+    }
+
+    function isAllScopeECPosition(position) {
+      return position == "President" ||
+        position == "Vice President" ||
+        position == "Secretary" ||
+        position == "Treasurer" ||
+        position == "Auditor" ||
+        position == "P.I.O." ||
+        position == "H.A.S.";
+    }
+
+    function isBODPosition(position) {
+      return position == "B.O.D." ||
+        position == "B.O.D. (ME)" ||
+        position == "B.O.D. (EE)" ||
+        position == "B.O.D. (IE)" ||
+        position == "B.O.D. (CPE)" ||
+        position == "B.O.D. (ECE)";
+    }
+
+    function hasBodCourseMarkers(data) {
+      return data != null && courseScopeFromProfileData(data) != "";
+    }
+
     function currentCourseScope() {
-      return !hasProfile() ? null :
-        normalizeCourseScopeValue(profile().courseScope) != null ?
-        normalizeCourseScopeValue(profile().courseScope) :
-        normalizeCourseScopeValue(profile().courseScopeLabel) != null ?
-        normalizeCourseScopeValue(profile().courseScopeLabel) :
-        courseScopeFromAssignedCourse(profile().assignedCourse) != null ?
-        courseScopeFromAssignedCourse(profile().assignedCourse) :
-        (
-          (profile().ecScope == "course" || role() == "bod") &&
-          normalizeCourseScopeValue(profile().course) != null
-        ) ?
-        normalizeCourseScopeValue(profile().course) :
-        inferCourseScopeFromPosition(profile().ecPosition);
+      return !hasProfile() || !isBOD() ? "" :
+        courseScopeFromProfileData(profile());
+    }
+
+    function hasCurrentCourseScope() {
+      return currentCourseScope() != "";
+    }
+
+    function currentCourseScopeSlug() {
+      let courseScope = currentCourseScope();
+      return courseScope != "" ? courseScopeSlug(courseScope) : "";
+    }
+
+    function courseMatchesCurrentScope(value) {
+      let courseScope = currentCourseScope();
+      return courseScope != "" && normalizeCourseScopeValue(value) == courseScope;
+    }
+
+    function studentOnlyProfileMatchesCurrentScope(data) {
+      return data != null &&
+        isStudentOnlyRole(data.role) &&
+        courseMatchesCurrentScope(data.course);
+    }
+
+    function studentProfileHasIdentityAndMatchesCurrentScope(data) {
+      return studentProfileHasIdentity(data) &&
+        courseMatchesCurrentScope(data.course);
     }
 
     function isBOD() {
       return hasProfile() &&
         (
           role() == "bod" ||
-          profile().ecScope == "course" ||
-          profile().isBod == true ||
           (
-            profile().ecPosition is string &&
-            profile().ecPosition.matches("^B\\.O\\.D\\..*")
-          ) ||
-          courseScopeFromAssignedCourse(profile().assignedCourse) != null ||
-          inferCourseScopeFromPosition(profile().ecPosition) != null
+            isECMemberRole(role()) &&
+            (
+              profile().ecScope == "course" ||
+              (
+                profile().ecScope != "all" &&
+                (
+                  profile().isBod == true ||
+                  isBODPosition(profile().ecPosition) ||
+                  (
+                    !isAllScopeECPosition(profile().ecPosition) &&
+                    hasBodCourseMarkers(profile())
+                  )
+                )
+              )
+            )
+          )
         );
     }
 
     function isRegularEC() {
       return hasProfile() &&
         isRegularECMemberRole(role()) &&
-        profile().ecScope == "all" &&
-        !isBOD();
+        (profile().ecScope == "all" || !isBOD());
     }
 
     function isAdminOrEC() {
@@ -171,32 +254,12 @@ service cloud.firestore {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
-          normalizeCourseScopeValue(data.course) == currentCourseScope()
+          (
+            !("role" in data) ||
+            isStudentOnlyRole(data.role)
+          ) &&
+          courseMatchesCurrentScope(data.course)
         );
-    }
-
-    function canManageStudentProjectionUpdate() {
-      return canManageStudentData(resource.data) &&
-        canManageStudentData(request.resource.data) &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          "uid",
-          "studentId",
-          "schoolId",
-          "schoolIdKey",
-          "studentName",
-          "name",
-          "fullName",
-          "course",
-          "year",
-          "yearLevel",
-          "status",
-          "readyForClearance",
-          "updatedAt",
-          "fingerprintStatus",
-          "fingerprintTemplateId",
-          "templateId",
-        ]);
     }
 
     function canManageStudentProfileUpdate() {
@@ -206,9 +269,8 @@ service cloud.firestore {
           isAdminOrRegularEC() ||
           (
             isBOD() &&
-            currentCourseScope() != null &&
-            normalizeCourseScopeValue(resource.data.course) == currentCourseScope() &&
-            normalizeCourseScopeValue(request.resource.data.course) == currentCourseScope()
+            courseMatchesCurrentScope(resource.data.course) &&
+            courseMatchesCurrentScope(request.resource.data.course)
           )
         ) &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -226,42 +288,52 @@ service cloud.firestore {
         ]);
     }
 
-    function canManageStudentNotification(targetUid) {
-      return targetHasStudentSelfIdentity(targetUid) &&
+    function canReadStudentProfile(uid, data) {
+      return exists(userProfilePath(uid)) &&
         (
           isAdminOrRegularEC() ||
           (
             isBOD() &&
-            currentCourseScope() != null &&
-            normalizeCourseScopeValue(get(userProfilePath(targetUid)).data.course) == currentCourseScope()
+            studentOnlyProfileMatchesCurrentScope(data)
           )
         );
     }
 
-    function notificationCourseScope(data) {
-      return normalizeCourseScopeValue(data.course) != null ?
-        normalizeCourseScopeValue(data.course) :
+    function canManageStudentNotification(targetUid) {
+      return exists(userProfilePath(targetUid)) &&
+        canManageStudentNotificationData(get(userProfilePath(targetUid)).data);
+    }
+
+    function canManageStudentNotificationData(data) {
+      return isAdminOrRegularEC() ||
         (
-          data.courses is list &&
-          data.courses.size() == 1 &&
-          normalizeCourseScopeValue(data.courses[0]) != null
-        ) ?
+          isBOD() &&
+          studentOnlyProfileMatchesCurrentScope(data)
+        );
+    }
+
+    function notificationCourseScope(data) {
+      let directCourseScope = normalizeCourseScopeValue(data.course);
+      let listCourseScope = data.courses is list && data.courses.size() == 1 ?
         normalizeCourseScopeValue(data.courses[0]) :
-        null;
+        "";
+
+      return directCourseScope != "" ? directCourseScope : listCourseScope;
     }
 
     function notificationCoursesStayInScope(data) {
-      return !(data.courses is list) ||
-        data.courses.size() == 0 ||
+      let courses = data.courses is list ? data.courses : [];
+
+      return courses.size() == 0 ||
         (
-          data.courses.size() == 1 &&
-          normalizeCourseScopeValue(data.courses[0]) == currentCourseScope()
+          courses.size() == 1 &&
+          courseMatchesCurrentScope(courses[0])
         );
     }
 
     function canTargetBodNotificationPath(uid) {
       return isBOD() &&
-        currentCourseScope() != null &&
+        hasCurrentCourseScope() &&
         (
           isSelf(uid) ||
           canManageStudentNotification(uid)
@@ -296,11 +368,11 @@ service cloud.firestore {
     }
 
     function eventCourseScope(data) {
-      return normalizeCourseScopeValue(data.courseScope) != null ?
-        normalizeCourseScopeValue(data.courseScope) :
-        normalizeCourseScopeValue(data.createdByCourseScope) != null ?
-        normalizeCourseScopeValue(data.createdByCourseScope) :
-        normalizeCourseScopeValue(data.course);
+      return firstCourseScopeValue(
+        data.courseScope,
+        data.createdByCourseScope,
+        data.course
+      );
     }
 
     function eventSelectedStudentIds(data) {
@@ -312,16 +384,21 @@ service cloud.firestore {
     }
 
     function bodCreateBaseIsScoped(data) {
+      let courseScope = currentCourseScope();
+      let course = normalizeCourseScopeValue(data.course);
+      let ownerCourseScope = normalizeCourseScopeValue(data.courseScope);
+      let creatorCourseScope = normalizeCourseScopeValue(data.createdByCourseScope);
+
       return isBOD() &&
-        currentCourseScope() != null &&
+        courseScope != "" &&
         data.ownerType == "bod" &&
         data.createdBy == request.auth.uid &&
-        normalizeCourseScopeValue(data.course) == currentCourseScope() &&
-        normalizeCourseScopeValue(data.courseScope) == currentCourseScope() &&
-        normalizeCourseScopeValue(data.createdByCourseScope) == currentCourseScope() &&
+        course == courseScope &&
+        ownerCourseScope == courseScope &&
+        creatorCourseScope == courseScope &&
         data.courses is list &&
         data.courses.size() == 1 &&
-        data.courses[0] == currentCourseScope();
+        data.courses[0] == courseScope;
     }
 
     function bodNoSelectedAudienceCreateIsScoped(data) {
@@ -339,20 +416,35 @@ service cloud.firestore {
         );
     }
 
+    function bodSelectedStudentProfileMatchesScope(data, expectedSchoolId) {
+      return studentOnlyProfileMatchesCurrentScope(data) &&
+        (
+          expectedSchoolId == "" ||
+          data.schoolId == expectedSchoolId
+        );
+    }
+
     function bodSelectedStudentAtMatchesScope(studentIds, schoolIds, index) {
       return studentIds.size() <= index ||
         (
           exists(userProfilePath(studentIds[index])) &&
-          isStudentAudienceRole(get(userProfilePath(studentIds[index])).data.role) &&
-          normalizeCourseScopeValue(get(userProfilePath(studentIds[index])).data.course) == currentCourseScope() &&
-          (
-            schoolIds.size() == 0 ||
-            (
-              schoolIds.size() > index &&
-              get(userProfilePath(studentIds[index])).data.schoolId == schoolIds[index]
-            )
+          bodSelectedStudentProfileMatchesScope(
+            get(userProfilePath(studentIds[index])).data,
+            schoolIds.size() > index ? schoolIds[index] : ""
           )
         );
+    }
+
+    function bodSelectedAudienceIdsAreScoped(studentIds, schoolIds) {
+      return bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 0) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 1) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 2) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 3) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 4) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 5) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 6) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 7) &&
+        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 8);
     }
 
     function bodSelectedAudienceCreateIsScoped(data) {
@@ -364,15 +456,7 @@ service cloud.firestore {
         studentIds.size() >= 1 &&
         studentIds.size() <= 9 &&
         (schoolIds.size() == 0 || schoolIds.size() == studentIds.size()) &&
-        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 0) &&
-        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 1) &&
-        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 2) &&
-        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 3) &&
-        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 4) &&
-        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 5) &&
-        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 6) &&
-        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 7) &&
-        bodSelectedStudentAtMatchesScope(studentIds, schoolIds, 8) &&
+        bodSelectedAudienceIdsAreScoped(studentIds, schoolIds) &&
         (
           !("targetStudent" in data) ||
           data.targetStudent == "" ||
@@ -396,7 +480,7 @@ service cloud.firestore {
           (
             eventOwnerType(data) == "ec" ||
             (
-              currentCourseScope() != null &&
+              hasCurrentCourseScope() &&
               eventCourseScope(data) == currentCourseScope()
             )
           )
@@ -407,7 +491,7 @@ service cloud.firestore {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           bodEventAudienceIsScoped(data)
         );
     }
@@ -416,7 +500,7 @@ service cloud.firestore {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           eventOwnerType(resource.data) == "bod" &&
           eventCourseScope(resource.data) == currentCourseScope() &&
           resource.data.createdBy == request.auth.uid &&
@@ -428,89 +512,117 @@ service cloud.firestore {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           eventOwnerType(resource.data) == "bod" &&
           eventCourseScope(resource.data) == currentCourseScope() &&
           resource.data.createdBy == request.auth.uid
         );
     }
 
+    function paymentOwnerType(data) {
+      return data.ownerType == "bod" ? "bod" : "ec";
+    }
+
     function paymentCourseScope(data) {
-      return normalizeCourseScopeValue(data.courseScope) != null ?
-        normalizeCourseScopeValue(data.courseScope) :
-        normalizeCourseScopeValue(data.createdByCourseScope) != null ?
-        normalizeCourseScopeValue(data.createdByCourseScope) :
-        normalizeCourseScopeValue(data.course) != null ?
-        normalizeCourseScopeValue(data.course) :
-        null;
+      return firstCourseScopeValue(
+        data.courseScope,
+        data.createdByCourseScope,
+        data.course
+      );
     }
 
-    function paymentTargetCourses(data) {
-      return data.targetCourses is list ? data.targetCourses : [];
-    }
-
-    function paymentTargetCourseAtMatchesScope(data, courseScope, index) {
-      return !(data.targetCourses is list) ||
-        data.targetCourses.size() <= index ||
-        normalizeCourseScopeValue(data.targetCourses[index]) == courseScope;
+    function paymentTargetCourseAtMatchesScope(targetCourses, courseScope, index) {
+      return targetCourses.size() <= index ||
+        normalizeCourseScopeValue(targetCourses[index]) == courseScope;
     }
 
     function paymentTargetCoursesContainScope(data, courseScope) {
-      return data.targetCourses is list &&
+      let targetCourses = data.targetCourses is list ? data.targetCourses : [];
+
+      return courseScope != "" &&
         (
-          (data.targetCourses.size() > 0 &&
-            normalizeCourseScopeValue(data.targetCourses[0]) == courseScope) ||
-          (data.targetCourses.size() > 1 &&
-            normalizeCourseScopeValue(data.targetCourses[1]) == courseScope) ||
-          (data.targetCourses.size() > 2 &&
-            normalizeCourseScopeValue(data.targetCourses[2]) == courseScope) ||
-          (data.targetCourses.size() > 3 &&
-            normalizeCourseScopeValue(data.targetCourses[3]) == courseScope) ||
-          (data.targetCourses.size() > 4 &&
-            normalizeCourseScopeValue(data.targetCourses[4]) == courseScope)
+          (targetCourses.size() > 0 &&
+            normalizeCourseScopeValue(targetCourses[0]) == courseScope) ||
+          (targetCourses.size() > 1 &&
+            normalizeCourseScopeValue(targetCourses[1]) == courseScope) ||
+          (targetCourses.size() > 2 &&
+            normalizeCourseScopeValue(targetCourses[2]) == courseScope) ||
+          (targetCourses.size() > 3 &&
+            normalizeCourseScopeValue(targetCourses[3]) == courseScope) ||
+          (targetCourses.size() > 4 &&
+            normalizeCourseScopeValue(targetCourses[4]) == courseScope)
         );
     }
 
     function paymentTargetCoursesStayInScope(data) {
-      return !(data.targetCourses is list) ||
-        data.targetCourses.size() == 0 ||
+      let courseScope = currentCourseScope();
+      let targetCourses = data.targetCourses is list ? data.targetCourses : [];
+
+      return targetCourses.size() == 0 ||
         (
-          data.targetCourses.size() <= 5 &&
-          paymentTargetCourseAtMatchesScope(data, currentCourseScope(), 0) &&
-          paymentTargetCourseAtMatchesScope(data, currentCourseScope(), 1) &&
-          paymentTargetCourseAtMatchesScope(data, currentCourseScope(), 2) &&
-          paymentTargetCourseAtMatchesScope(data, currentCourseScope(), 3) &&
-          paymentTargetCourseAtMatchesScope(data, currentCourseScope(), 4)
+          courseScope != "" &&
+          targetCourses.size() <= 5 &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 0) &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 1) &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 2) &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 3) &&
+          paymentTargetCourseAtMatchesScope(targetCourses, courseScope, 4)
         );
     }
 
     function bodPaymentWriteIsScoped(data) {
-      return normalizeCourseScopeValue(data.courseScope) == currentCourseScope() &&
+      let courseScope = currentCourseScope();
+      let paymentScope = normalizeCourseScopeValue(data.courseScope);
+      let creatorCourseScope = normalizeCourseScopeValue(data.createdByCourseScope);
+      let course = normalizeCourseScopeValue(data.course);
+
+      return courseScope != "" &&
+        paymentOwnerType(data) == "bod" &&
+        paymentScope == courseScope &&
         data.createdByUid == request.auth.uid &&
-        normalizeCourseScopeValue(data.createdByCourseScope) == currentCourseScope() &&
-        normalizeCourseScopeValue(data.course) == currentCourseScope() &&
+        creatorCourseScope == courseScope &&
+        course == courseScope &&
         paymentTargetCoursesStayInScope(data);
     }
 
     function bodExistingPaymentIsScoped(data) {
-      return currentCourseScope() != null &&
-        paymentCourseScope(data) == currentCourseScope() &&
+      let courseScope = currentCourseScope();
+      let creatorCourseScope = normalizeCourseScopeValue(data.createdByCourseScope);
+      let course = normalizeCourseScopeValue(data.course);
+
+      return courseScope != "" &&
+        paymentOwnerType(data) == "bod" &&
+        paymentCourseScope(data) == courseScope &&
         data.createdByUid == request.auth.uid &&
-        normalizeCourseScopeValue(data.createdByCourseScope) == currentCourseScope() &&
-        normalizeCourseScopeValue(data.course) == currentCourseScope() &&
+        creatorCourseScope == courseScope &&
+        course == courseScope &&
         paymentTargetCoursesStayInScope(data);
     }
 
     function canViewPaymentData(data) {
+      let courseScope = currentCourseScope();
+      let ownerCourseScope = normalizeCourseScopeValue(data.courseScope);
+      let creatorCourseScope = normalizeCourseScopeValue(data.createdByCourseScope);
+      let course = normalizeCourseScopeValue(data.course);
+
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          courseScope != "" &&
           (
-            paymentCourseScope(data) == currentCourseScope() ||
-            normalizeCourseScopeValue(data.createdByCourseScope) == currentCourseScope() ||
-            normalizeCourseScopeValue(data.course) == currentCourseScope() ||
-            paymentTargetCoursesContainScope(data, currentCourseScope())
+            (
+              paymentOwnerType(data) == "bod" &&
+              bodExistingPaymentIsScoped(data)
+            ) ||
+            (
+              paymentOwnerType(data) == "ec" &&
+              (
+                ownerCourseScope == courseScope ||
+                creatorCourseScope == courseScope ||
+                course == courseScope ||
+                paymentTargetCoursesContainScope(data, courseScope)
+              )
+            )
           )
         );
     }
@@ -519,7 +631,7 @@ service cloud.firestore {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           bodPaymentWriteIsScoped(data)
         );
     }
@@ -528,7 +640,7 @@ service cloud.firestore {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           bodExistingPaymentIsScoped(resource.data) &&
           bodPaymentWriteIsScoped(request.resource.data)
         );
@@ -538,7 +650,7 @@ service cloud.firestore {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           bodExistingPaymentIsScoped(resource.data)
         );
     }
@@ -551,28 +663,46 @@ service cloud.firestore {
       return signedIn() && exists(selfPaymentAssignmentPath(paymentId));
     }
 
+    function targetProfileCourseMatchesScope(uid) {
+      return exists(userProfilePath(uid)) &&
+        studentProfileHasIdentityAndMatchesCurrentScope(
+          get(userProfilePath(uid)).data
+        );
+    }
+
+    function canManagePaymentStudentDataForBod(paymentData, studentData) {
+      return isBOD() &&
+        courseMatchesCurrentScope(studentData.course) &&
+        bodExistingPaymentIsScoped(paymentData);
+    }
+
     function canManagePaymentStudentData(paymentId, data) {
       return isAdminOrRegularEC() ||
         (
-          isBOD() &&
-          currentCourseScope() != null &&
-          normalizeCourseScopeValue(data.course) == currentCourseScope() &&
           exists(paymentPath(paymentId)) &&
-          bodExistingPaymentIsScoped(get(paymentPath(paymentId)).data)
+          canManagePaymentStudentDataForBod(get(paymentPath(paymentId)).data, data)
         );
+    }
+
+    function canDeletePaymentStudentDataForBod(paymentData, studentData) {
+      let courseScope = currentCourseScope();
+      let creatorCourseScope = normalizeCourseScopeValue(paymentData.createdByCourseScope);
+      let course = normalizeCourseScopeValue(paymentData.course);
+
+      return isBOD() &&
+        courseScope != "" &&
+        courseMatchesCurrentScope(studentData.course) &&
+        paymentCourseScope(paymentData) == courseScope &&
+        paymentData.createdByUid == request.auth.uid &&
+        creatorCourseScope == courseScope &&
+        course == courseScope;
     }
 
     function canDeletePaymentStudentData(paymentId, data) {
       return isAdminOrRegularEC() ||
         (
-          isBOD() &&
-          currentCourseScope() != null &&
-          normalizeCourseScopeValue(data.course) == currentCourseScope() &&
           exists(paymentPath(paymentId)) &&
-          paymentCourseScope(get(paymentPath(paymentId)).data) == currentCourseScope() &&
-          get(paymentPath(paymentId)).data.createdByUid == request.auth.uid &&
-          normalizeCourseScopeValue(get(paymentPath(paymentId)).data.createdByCourseScope) == currentCourseScope() &&
-          normalizeCourseScopeValue(get(paymentPath(paymentId)).data.course) == currentCourseScope()
+          canDeletePaymentStudentDataForBod(get(paymentPath(paymentId)).data, data)
         );
     }
 
@@ -581,13 +711,30 @@ service cloud.firestore {
     }
 
     function ecDocumentCourseScope(data) {
-      return normalizeCourseScopeValue(data.courseScope) != null ?
-        normalizeCourseScopeValue(data.courseScope) :
-        normalizeCourseScopeValue(data.createdByCourseScope);
+      return firstCourseScopeValue(
+        data.courseScope,
+        data.createdByCourseScope,
+        data.course
+      );
     }
 
     function ecDocumentStrictCourseScope(data) {
-      return normalizeCourseScopeValue(data.courseScope);
+      return ecDocumentCourseScope(data);
+    }
+
+    function ecDocumentCourseScopeSlugMatchesScope(data) {
+      return !(data.courseScopeSlug is string) ||
+        data.courseScopeSlug == "" ||
+        data.courseScopeSlug == currentCourseScopeSlug();
+    }
+
+    function ecDocumentStoragePathIsScoped(data) {
+      return data.storagePath is string &&
+        currentCourseScopeSlug() != "" &&
+        (
+          data.storagePath.matches("^documents/course/" + currentCourseScopeSlug() + "/[^/]+/.+$") ||
+          data.storagePath.matches("^ec-documents/course/" + currentCourseScopeSlug() + "/[^/]+/.+$")
+        );
     }
 
     function ecDocumentCreatedByUid(data) {
@@ -609,10 +756,12 @@ service cloud.firestore {
 
     function canManageOwnBodEcDocumentData(data) {
       return isBOD() &&
-        currentCourseScope() != null &&
+        hasCurrentCourseScope() &&
         ecDocumentOwnerType(data) == "bod" &&
         ecDocumentCreatedByUid(data) == request.auth.uid &&
-        ecDocumentStrictCourseScope(data) == currentCourseScope();
+        ecDocumentStrictCourseScope(data) == currentCourseScope() &&
+        ecDocumentCourseScopeSlugMatchesScope(data) &&
+        ecDocumentStoragePathIsScoped(data);
     }
 
     function canViewEcDocumentData(data) {
@@ -620,22 +769,24 @@ service cloud.firestore {
     }
 
     function enrollmentSessionCourseScope(data) {
-      return normalizeCourseScopeValue(data.courseScope) != null ?
-        normalizeCourseScopeValue(data.courseScope) :
-        normalizeCourseScopeValue(data.createdByCourseScope);
+      return firstCourseScopeValue(
+        data.courseScope,
+        data.createdByCourseScope,
+        null
+      );
     }
 
     function canViewEnrollmentSessionData(data) {
       return isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           enrollmentSessionCourseScope(data) == currentCourseScope()
         );
     }
 
     match /profiles/{uid} {
-      allow read: if isSelf(uid) || isAdmin();
+      allow read: if isSelf(uid) || isAdmin() || canReadStudentProfile(uid, resource.data);
       allow create: if isAdmin();
       allow update: if isAdmin() ||
         canManageStudentProfileUpdate() ||
@@ -680,7 +831,7 @@ service cloud.firestore {
             isAdminOrRegularEC() ||
             (
               isBOD() &&
-              currentCourseScope() != null &&
+              hasCurrentCourseScope() &&
               eventOwnerType(get(eventPath(eventId)).data) == "bod" &&
               eventCourseScope(get(eventPath(eventId)).data) == currentCourseScope() &&
               get(eventPath(eventId)).data.createdBy == request.auth.uid
@@ -697,7 +848,7 @@ service cloud.firestore {
             isAdminOrRegularEC() ||
             (
               isBOD() &&
-              currentCourseScope() != null &&
+              hasCurrentCourseScope() &&
               eventOwnerType(get(eventPath(eventId)).data) == "bod" &&
               eventCourseScope(get(eventPath(eventId)).data) == currentCourseScope() &&
               get(eventPath(eventId)).data.createdBy == request.auth.uid
@@ -710,18 +861,21 @@ service cloud.firestore {
           (isSelf(uid) && hasStudentSelfIdentity()) ||
           (
             isBOD() &&
-            currentCourseScope() != null &&
-            normalizeCourseScopeValue(resource.data.course) == currentCourseScope() &&
+            hasCurrentCourseScope() &&
+            (
+              courseMatchesCurrentScope(resource.data.course) ||
+              targetProfileCourseMatchesScope(uid)
+            ) &&
             canViewEventData(get(eventPath(eventId)).data)
           );
         allow create, update, delete: if isAdminOrRegularEC() ||
           (
             isBOD() &&
-            currentCourseScope() != null &&
-            normalizeCourseScopeValue(request.resource.data.course) == currentCourseScope() &&
+            hasCurrentCourseScope() &&
+            courseMatchesCurrentScope(request.resource.data.course) &&
             (
               !exists(/databases/$(database)/documents/events/$(eventId)/attendance/$(uid)) ||
-              normalizeCourseScopeValue(resource.data.course) == currentCourseScope()
+              courseMatchesCurrentScope(resource.data.course)
             ) &&
             eventOwnerType(get(eventPath(eventId)).data) == "bod" &&
             eventCourseScope(get(eventPath(eventId)).data) == currentCourseScope() &&
@@ -734,18 +888,21 @@ service cloud.firestore {
           (isSelf(uid) && hasStudentSelfIdentity()) ||
           (
             isBOD() &&
-            currentCourseScope() != null &&
-            normalizeCourseScopeValue(resource.data.course) == currentCourseScope() &&
+            hasCurrentCourseScope() &&
+            (
+              courseMatchesCurrentScope(resource.data.course) ||
+              targetProfileCourseMatchesScope(uid)
+            ) &&
             canViewEventData(get(eventPath(eventId)).data)
           );
         allow create, update, delete: if isAdminOrRegularEC() ||
           (
             isBOD() &&
-            currentCourseScope() != null &&
-            normalizeCourseScopeValue(request.resource.data.course) == currentCourseScope() &&
+            hasCurrentCourseScope() &&
+            courseMatchesCurrentScope(request.resource.data.course) &&
             (
               !exists(/databases/$(database)/documents/events/$(eventId)/registrations/$(uid)) ||
-              normalizeCourseScopeValue(resource.data.course) == currentCourseScope()
+              courseMatchesCurrentScope(resource.data.course)
             ) &&
             eventOwnerType(get(eventPath(eventId)).data) == "bod" &&
             eventCourseScope(get(eventPath(eventId)).data) == currentCourseScope() &&
@@ -778,8 +935,13 @@ service cloud.firestore {
           ) ||
           (
             isBOD() &&
-            currentCourseScope() != null &&
-            normalizeCourseScopeValue(resource.data.course) == currentCourseScope()
+            hasCurrentCourseScope() &&
+            exists(paymentPath(paymentId)) &&
+            canViewPaymentData(get(paymentPath(paymentId)).data) &&
+            (
+              courseMatchesCurrentScope(resource.data.course) ||
+              targetProfileCourseMatchesScope(studentUid)
+            )
           );
         allow create: if canManagePaymentStudentData(paymentId, request.resource.data);
         allow update: if canManagePaymentStudentData(paymentId, resource.data) &&
@@ -808,20 +970,20 @@ service cloud.firestore {
       allow create: if isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           canManageStudentData(request.resource.data)
         );
       allow update: if isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           canManageStudentData(resource.data) &&
           canManageStudentData(request.resource.data)
         );
       allow delete: if isAdminOrRegularEC() ||
         (
           isBOD() &&
-          currentCourseScope() != null &&
+          hasCurrentCourseScope() &&
           canManageStudentData(resource.data)
         );
     }

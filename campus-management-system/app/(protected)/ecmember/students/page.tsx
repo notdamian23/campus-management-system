@@ -73,6 +73,7 @@ import {
 import { normalizeCourse } from "@/lib/courseOptions";
 import {
   createCampusStudent,
+  listCampusPayments,
   logPermissionDeniedAttemptForCurrentUser,
   updateCampusStudentProfile,
   updateStudentAccountStatus,
@@ -599,7 +600,7 @@ function toScopedStudentErrorMessage(
     lowered.includes("permission-denied") ||
     lowered.includes("missing or insufficient permissions")
   ) {
-    return `This B.O.D account can only manage ${viewerCourseScope} records.`;
+    return `This B.O.D account can only manage students under ${viewerCourseScope}.`;
   }
 
   return message;
@@ -1054,7 +1055,7 @@ export default function ECStudentLookup() {
   const selectedStudentReadyForClearance =
     selectedStudent?.readyForClearance ?? false;
   const bodStudentOnlyError = viewerCourseScope
-    ? `This B.O.D account can only manage ${viewerCourseScope} student records.`
+    ? `This B.O.D account can only manage students under ${viewerCourseScope}.`
     : "B.O.D course scope is missing. Ask admin to update your account.";
 
   const updateStudentState = useCallback(
@@ -1220,7 +1221,7 @@ export default function ECStudentLookup() {
         let paymentDocIds: string[] = [];
 
         if (viewerIsBod && viewerCourseScope) {
-          const [ecEventsSnap, scopedEventsSnap, scopedPaymentsSnap] =
+          const [ecEventsSnap, scopedEventsSnap, scopedPayments] =
             await Promise.all([
               getDocs(
                 query(collection(db, "events"), where("ownerType", "==", "ec")),
@@ -1231,12 +1232,7 @@ export default function ECStudentLookup() {
                   where("courseScope", "==", viewerCourseScope),
                 ),
               ),
-              getDocs(
-                query(
-                  collection(db, "payments"),
-                  where("courseScope", "==", viewerCourseScope),
-                ),
-              ),
+              listCampusPayments(),
             ]);
 
           const mergedEvents = new Map<string, RawEventDoc>();
@@ -1267,10 +1263,12 @@ export default function ECStudentLookup() {
           });
 
           rawEvents = Array.from(mergedEvents.values());
-          paymentDocs = scopedPaymentsSnap.docs.map(
-            (paymentDoc) => paymentDoc.data() as PaymentDocData,
-          );
-          paymentDocIds = scopedPaymentsSnap.docs.map((paymentDoc) => paymentDoc.id);
+          paymentDocs = scopedPayments.map((payment) => ({
+            title: payment.title,
+            ref: payment.ref,
+            date: payment.date,
+          }));
+          paymentDocIds = scopedPayments.map((payment) => payment.id);
         } else {
           const [eventsSnap, paymentSnap] = await Promise.all([
             getDocs(
@@ -1364,12 +1362,17 @@ export default function ECStudentLookup() {
               );
               if (lifecycle !== "completed") return null;
 
-              const attendanceSnap = await getDoc(
-                doc(db, "events", event.id, "attendance", currentStudent.uid),
-              );
-              const attendanceData = attendanceSnap.exists()
-                ? (attendanceSnap.data() as AttendanceDocData)
-                : {};
+              let attendanceData: AttendanceDocData = {};
+              try {
+                const attendanceSnap = await getDoc(
+                  doc(db, "events", event.id, "attendance", currentStudent.uid),
+                );
+                attendanceData = attendanceSnap.exists()
+                  ? (attendanceSnap.data() as AttendanceDocData)
+                  : {};
+              } catch {
+                return null;
+              }
               const attendanceRaw = normalizeText(
                 attendanceData.status ?? attendanceData.attendanceStatus ?? "",
               );
@@ -1395,27 +1398,32 @@ export default function ECStudentLookup() {
         const paymentRows = await Promise.all(
           paymentDocIds.map(
             async (paymentId, index): Promise<StudentStatusPayment | null> => {
-              const assignmentSnap = await getDoc(
-                doc(
-                  db,
-                  "payments",
-                  paymentId,
-                  "students",
-                  currentStudent.uid,
-                ),
-              );
-              if (!assignmentSnap.exists()) return null;
+              let assignmentData: PaymentAssignmentData | null = null;
+              try {
+                const assignmentSnap = await getDoc(
+                  doc(
+                    db,
+                    "payments",
+                    paymentId,
+                    "students",
+                    currentStudent.uid,
+                  ),
+                );
+                if (!assignmentSnap.exists()) return null;
+                assignmentData = assignmentSnap.data() as PaymentAssignmentData;
+              } catch {
+                return null;
+              }
 
               const paymentData = paymentDocs[index] ?? {};
-              const assignmentData =
-                assignmentSnap.data() as PaymentAssignmentData;
+              const assignmentRecord = assignmentData ?? {};
               const status =
-                normalizeText(assignmentData.status) === "paid"
+                normalizeText(assignmentRecord.status) === "paid"
                   ? "PAID"
                   : "UNPAID";
-              const createdAtMs = toMillis(assignmentData.createdAt);
+              const createdAtMs = toMillis(assignmentRecord.createdAt);
               const updatedAtMs =
-                toMillis(assignmentData.updatedAt) || createdAtMs;
+                toMillis(assignmentRecord.updatedAt) || createdAtMs;
 
               return {
                 paymentId,
@@ -1542,7 +1550,11 @@ export default function ECStudentLookup() {
 
     setEditProfileName(student.name);
     setEditProfileSchoolId(student.id);
-    setEditProfileCourse(toEditableFieldValue(student.course));
+    setEditProfileCourse(
+      viewerIsBod && viewerCourseScope
+        ? viewerCourseScope
+        : toEditableFieldValue(student.course),
+    );
     setEditProfileYearLevel(toEditableFieldValue(student.year));
     setStatusNotice(null);
     setEditProfileModalOpen(true);
@@ -1744,7 +1756,9 @@ export default function ECStudentLookup() {
 
     const submittedName = editProfileName.trim();
     const schoolId = editProfileSchoolId.trim();
-    const course = editProfileCourse.trim();
+    const course = viewerIsBod && viewerCourseScope
+      ? viewerCourseScope
+      : editProfileCourse.trim();
     const yearLevel = editProfileYearLevel.trim();
     const allowsBlankAcademicFields = selectedStudentRole === "teacher";
     const originalRawName = String(selectedStudent.rawName ?? "").trim();
