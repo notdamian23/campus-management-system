@@ -93,6 +93,9 @@ import {
   getDownloadURL,
   ref,
   uploadBytes,
+  uploadBytesResumable,
+  type StorageReference,
+  type UploadTaskSnapshot,
 } from "firebase/storage";
 import {
   CalendarDate,
@@ -117,7 +120,13 @@ import { normalizeCourse, normalizeCourseSlug } from "@/lib/courseOptions";
 import {
   createCampusNotification,
   createCampusEvent,
+  createEventDocumentDownloadUrl,
+  createEventDocumentUploadTarget,
   deleteCampusEvent,
+  deleteEventDocument,
+  type EventDocumentListItem,
+  finalizeEventDocumentUpload,
+  listEventDocuments,
   updateCampusNotification,
   updateCampusEvent,
   logPermissionDeniedAttemptForCurrentUser,
@@ -322,12 +331,266 @@ type EventFile = {
   id: string;
   name?: string;
   path?: string;
+  storagePath?: string;
+  status?: string;
   downloadURL?: string;
   contentType?: string;
   size?: number;
   createdAt?: any;
   uploadedByUid?: string;
 };
+
+type EventDocumentStage =
+  | "CREATE_TARGET"
+  | "UPLOAD_BYTES"
+  | "FINALIZE"
+  | "REFRESH"
+  | "DOWNLOAD"
+  | "DELETE";
+
+type EventDocumentUploadIssue = {
+  title: string;
+  message: string;
+  stage: EventDocumentStage;
+};
+
+type EventDocumentUploadFlowError = Error & {
+  stage: EventDocumentStage;
+  title: string;
+  detail: string;
+  uploadCompleted: boolean;
+};
+
+type EventUploadToEventResult = {
+  warning?: EventDocumentUploadIssue;
+};
+
+const EVENT_DOC_UPLOAD_TIMEOUT_MS = 2 * 60 * 1000;
+
+function toEventUploadErrorCode(error: unknown): string {
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof (error as {code?: unknown}).code === "string"
+  ) {
+    return String((error as {code: string}).code);
+  }
+
+  return "";
+}
+
+function toEventUploadErrorMessage(error: unknown, fallback: string): string {
+  const code = toEventUploadErrorCode(error).toLowerCase();
+  if (code.startsWith("functions/")) {
+    return describeCallableError(error, fallback);
+  }
+
+  return describeError(error, fallback);
+}
+
+function toScopedEventDocumentUploadErrorMessage(
+  error: unknown,
+  fallback: string,
+  stage: EventDocumentStage,
+  viewerCourseScope: string | null,
+  viewerIsBod: boolean,
+): string {
+  const code = toEventUploadErrorCode(error).toLowerCase();
+  const message = toEventUploadErrorMessage(error, fallback);
+  const lowered = message.toLowerCase();
+
+  if (!viewerIsBod) {
+    return message;
+  }
+
+  if (!viewerCourseScope) {
+    return "B.O.D course scope is missing. Ask admin to update your account.";
+  }
+
+  if (
+    code.includes("storage/unauthorized") ||
+    code.includes("permission-denied") ||
+    code.includes("unauthorized") ||
+    lowered.includes("permission-denied") ||
+    lowered.includes("missing or insufficient permissions")
+  ) {
+    if (stage === "REFRESH") {
+      return `This B.O.D account cannot load event documents outside ${viewerCourseScope}.`;
+    }
+
+    return `This B.O.D account can only manage ${viewerCourseScope} event documents.`;
+  }
+
+  return message;
+}
+
+function eventDocumentStageTitle(stage: EventDocumentStage): string {
+  switch (stage) {
+  case "CREATE_TARGET":
+  case "UPLOAD_BYTES":
+    return "Upload failed.";
+  case "FINALIZE":
+    return "Upload completed, but finalization failed.";
+  case "REFRESH":
+    return "Upload completed, but file list refresh failed.";
+  case "DOWNLOAD":
+    return "Download failed.";
+  case "DELETE":
+    return "Delete failed.";
+  default:
+    return "Upload failed.";
+  }
+}
+
+function createEventDocumentUploadFlowError(
+  stage: EventDocumentStage,
+  detail: string,
+): EventDocumentUploadFlowError {
+  const error = new Error(detail) as EventDocumentUploadFlowError;
+  error.stage = stage;
+  error.title = eventDocumentStageTitle(stage);
+  error.detail = detail;
+  error.uploadCompleted =
+    stage === "FINALIZE" ||
+    stage === "REFRESH";
+  return error;
+}
+
+function isEventDocumentUploadFlowError(
+  error: unknown,
+): error is EventDocumentUploadFlowError {
+  return (
+    error instanceof Error &&
+    "stage" in error &&
+    typeof (error as {stage?: unknown}).stage === "string" &&
+    "title" in error &&
+    typeof (error as {title?: unknown}).title === "string"
+  );
+}
+
+function buildUploadIssuePreview(issues: EventDocumentUploadIssue[]): string {
+  const preview = issues.slice(0, 2).map((issue) => issue.message).join(" | ");
+  const overflow =
+    issues.length > 2 ? ` (+${issues.length - 2} more)` : "";
+  return `${preview}${overflow}`;
+}
+
+function summarizeUploadIssueTitle(
+  issues: EventDocumentUploadIssue[],
+  fallback: string,
+): string {
+  const uniqueTitles = Array.from(new Set(issues.map((issue) => issue.title)));
+  return uniqueTitles.length === 1 ? uniqueTitles[0] : fallback;
+}
+
+function logEventDocumentStage(
+  marker: string,
+  payload: Record<string, unknown>,
+  level: "info" | "warn" | "error" = "info",
+) {
+  if (level === "error") {
+    console.error(marker, payload);
+    ecEventsLogger.error(marker, payload);
+    return;
+  }
+
+  if (level === "warn") {
+    console.warn(marker, payload);
+    ecEventsLogger.warn(marker, payload);
+    return;
+  }
+
+  console.info(marker, payload);
+  ecEventsLogger.debug(marker, payload);
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(`${label} timed out after ${Math.floor(timeoutMs / 1000)}s.`),
+      );
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+async function uploadEventDocumentWithResumable(
+  storageRef: StorageReference,
+  file: File,
+  contentType: string,
+  timeoutMs: number,
+): Promise<UploadTaskSnapshot> {
+  return await new Promise<UploadTaskSnapshot>((resolve, reject) => {
+    const task = uploadBytesResumable(storageRef, file, {
+      contentType: contentType || undefined,
+    });
+
+    const timer = setTimeout(() => {
+      task.cancel();
+      reject(
+        new Error(`Upload timed out after ${Math.floor(timeoutMs / 1000)}s.`),
+      );
+    }, timeoutMs);
+
+    task.on(
+      "state_changed",
+      undefined,
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(task.snapshot);
+      },
+    );
+  });
+}
+
+function startEventFileDownload(url: string, fallbackName: string) {
+  const safeName = String(fallbackName).trim() || "download";
+  const params = new URLSearchParams({
+    url,
+    name: safeName,
+  });
+  const anchor = document.createElement("a");
+  anchor.href = `/api/download?${params.toString()}`;
+  anchor.download = safeName;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+}
+
+function mapEventDocumentListItems(items: EventDocumentListItem[]): EventFile[] {
+  return items.map((item) => ({
+    id: item.id,
+    name: item.name,
+    path: item.path,
+    storagePath: item.storagePath,
+    status: item.status,
+    downloadURL: item.downloadURL,
+    contentType: item.contentType,
+    size: item.size,
+    createdAt: item.createdAtMs,
+    uploadedByUid: item.uploadedByUid,
+  }));
+}
 
 type RegistrationDoc = {
   id: string;
@@ -391,7 +654,7 @@ type PendingDeleteFile = {
   eventId: string;
   kind: "images" | "docs";
   fileDocId: string;
-  path: string;
+  path?: string;
   fileName: string;
 };
 type PendingDeleteEvent = {
@@ -472,6 +735,26 @@ type AttendanceExportRow = {
   attendanceStatus: string;
   attendanceTimeIn: string;
   attendanceTimeOut: string;
+};
+
+type StudentLookupIndexes = {
+  byUid: Map<string, StudentLookup>;
+  bySchoolId: Map<string, StudentLookup>;
+};
+
+type AttendanceExportCandidate = {
+  uid: string;
+  schoolId: string;
+  row: AttendanceExportRow;
+  priority: number;
+  sortMs: number;
+  completeness: number;
+};
+
+type AttendanceExportCandidateCollection = {
+  rowsByKey: Map<string, AttendanceExportCandidate>;
+  keysByUid: Map<string, string>;
+  keysBySchoolId: Map<string, string>;
 };
 
 const ONE_MB_IN_BYTES = 1024 * 1024;
@@ -1759,6 +2042,267 @@ function sortAttendanceExportRows(rows: AttendanceExportRow[]) {
   );
 }
 
+function buildStudentLookupIndexes(
+  students: StudentLookup[],
+): StudentLookupIndexes {
+  const byUid = new Map<string, StudentLookup>();
+  const bySchoolId = new Map<string, StudentLookup>();
+
+  students.forEach((student) => {
+    const uid = String(student.uid ?? "").trim();
+    const schoolId = String(student.schoolId ?? "").trim();
+
+    if (uid) {
+      byUid.set(uid, student);
+    }
+    if (schoolId) {
+      bySchoolId.set(schoolId, student);
+    }
+  });
+
+  return {
+    byUid,
+    bySchoolId,
+  };
+}
+
+function enrichAttendanceRowsWithStudentLookup(
+  attendanceRows: EventAttendanceDoc[],
+  studentLookupIndexes: StudentLookupIndexes,
+) {
+  return attendanceRows.map((rowDoc) => {
+    const uid = String(rowDoc.uid ?? rowDoc.studentUid ?? rowDoc.id).trim();
+    const schoolId = String(rowDoc.schoolId ?? "").trim();
+    const matchedStudent =
+      (uid ? studentLookupIndexes.byUid.get(uid) : undefined) ??
+      (schoolId ? studentLookupIndexes.bySchoolId.get(schoolId) : undefined);
+
+    if (!matchedStudent) {
+      return rowDoc;
+    }
+
+    const matchedYear = String(matchedStudent.year ?? "").trim();
+    return {
+      ...rowDoc,
+      uid: rowDoc.uid ?? uid,
+      studentUid: rowDoc.studentUid ?? uid,
+      schoolId: schoolId || matchedStudent.schoolId,
+      studentName: String(rowDoc.studentName ?? "").trim() || matchedStudent.studentName,
+      name: String(rowDoc.name ?? "").trim() || matchedStudent.studentName,
+      course: String(rowDoc.course ?? "").trim() || matchedStudent.course,
+      yearLevel:
+        String(rowDoc.yearLevel ?? "").trim() ||
+        String(rowDoc.year ?? "").trim() ||
+        matchedYear,
+      year:
+        String(rowDoc.year ?? "").trim() ||
+        String(rowDoc.yearLevel ?? "").trim() ||
+        matchedYear,
+    } satisfies EventAttendanceDoc;
+  });
+}
+
+function normalizeAttendanceExportIdentityValue(value: unknown) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function countAttendanceExportRowCompleteness(row: AttendanceExportRow) {
+  const values = [
+    row.schoolId,
+    row.studentName,
+    row.course,
+    row.year,
+    row.attendanceTimeIn,
+    row.attendanceTimeOut,
+  ];
+
+  return values.filter((value) => {
+    const normalized = String(value ?? "").trim();
+    return normalized !== "" && normalized !== "-";
+  }).length;
+}
+
+function resolveAttendanceExportCandidateKey(
+  uid: string,
+  schoolId: string,
+) {
+  const normalizedUid = normalizeAttendanceExportIdentityValue(uid);
+  if (normalizedUid) {
+    return `uid:${normalizedUid}`;
+  }
+
+  const normalizedSchoolId = normalizeAttendanceExportIdentityValue(schoolId);
+  if (normalizedSchoolId) {
+    return `school:${normalizedSchoolId}`;
+  }
+
+  return "";
+}
+
+function createAttendanceExportCandidateCollection(): AttendanceExportCandidateCollection {
+  return {
+    rowsByKey: new Map<string, AttendanceExportCandidate>(),
+    keysByUid: new Map<string, string>(),
+    keysBySchoolId: new Map<string, string>(),
+  };
+}
+
+function shouldReplaceAttendanceExportCandidate(
+  existing: AttendanceExportCandidate,
+  next: AttendanceExportCandidate,
+) {
+  if (next.priority !== existing.priority) {
+    return next.priority > existing.priority;
+  }
+
+  if (next.sortMs !== existing.sortMs) {
+    return next.sortMs > existing.sortMs;
+  }
+
+  return next.completeness >= existing.completeness;
+}
+
+function addAttendanceExportCandidate(
+  collection: AttendanceExportCandidateCollection,
+  candidate: Omit<AttendanceExportCandidate, "completeness">,
+) {
+  const normalizedUid = normalizeAttendanceExportIdentityValue(candidate.uid);
+  const normalizedSchoolId = normalizeAttendanceExportIdentityValue(
+    candidate.schoolId,
+  );
+  const existingKey =
+    (normalizedUid ? collection.keysByUid.get(normalizedUid) : undefined) ??
+    (normalizedSchoolId ?
+      collection.keysBySchoolId.get(normalizedSchoolId) :
+      undefined);
+  const key =
+    existingKey ??
+    resolveAttendanceExportCandidateKey(candidate.uid, candidate.schoolId);
+
+  if (!key) {
+    return;
+  }
+
+  const nextCandidate: AttendanceExportCandidate = {
+    ...candidate,
+    completeness: countAttendanceExportRowCompleteness(candidate.row),
+  };
+  const existingCandidate = collection.rowsByKey.get(key);
+
+  if (
+    !existingCandidate ||
+    shouldReplaceAttendanceExportCandidate(existingCandidate, nextCandidate)
+  ) {
+    collection.rowsByKey.set(key, nextCandidate);
+  }
+
+  if (normalizedUid) {
+    collection.keysByUid.set(normalizedUid, key);
+  }
+  if (normalizedSchoolId) {
+    collection.keysBySchoolId.set(normalizedSchoolId, key);
+  }
+}
+
+function buildPresentAttendanceExportCandidates(
+  attendanceRows: EventAttendanceDoc[],
+  studentLookupIndexes: StudentLookupIndexes,
+) {
+  const candidates: Array<Omit<AttendanceExportCandidate, "completeness">> = [];
+
+  attendanceRows.forEach((rowDoc) => {
+    const uid = String(rowDoc.uid ?? rowDoc.studentUid ?? rowDoc.id).trim();
+    const attendanceSchoolId = String(rowDoc.schoolId ?? "").trim();
+    const matchedStudent =
+      (uid ? studentLookupIndexes.byUid.get(uid) : undefined) ??
+      (attendanceSchoolId ?
+        studentLookupIndexes.bySchoolId.get(attendanceSchoolId) :
+        undefined);
+    const schoolId = attendanceSchoolId || matchedStudent?.schoolId || uid;
+
+    if (!schoolId) {
+      return;
+    }
+
+    const fallbackStatus =
+      typeof rowDoc.present === "boolean"
+        ? rowDoc.present
+          ? "Present"
+          : "Absent"
+        : "";
+    const timeInValue = formatDateTime(
+      rowDoc.timeInIso ||
+        rowDoc.timeIn ||
+        rowDoc.timestamp ||
+        rowDoc.updatedAt ||
+        rowDoc.createdAt,
+    );
+    const timeOutValue = formatDateTime(rowDoc.timeOutIso || rowDoc.timeOut);
+    const derivedStatus =
+      timeInValue !== "-" && timeOutValue !== "-"
+        ? "Present"
+        : timeInValue !== "-"
+          ? "Timed In"
+          : "";
+    const status =
+      String(
+        rowDoc.attendanceStatus ?? rowDoc.status ?? fallbackStatus ?? "",
+      ).trim() || derivedStatus || "Recorded";
+
+    if (!isPresentAttendanceStatus(status)) {
+      return;
+    }
+
+    const studentName = formatStudentFullName(
+      {
+        studentName: rowDoc.studentName ?? matchedStudent?.studentName,
+        name: rowDoc.name ?? matchedStudent?.studentName,
+        schoolId,
+      },
+      schoolId,
+    );
+
+    candidates.push({
+      uid,
+      schoolId,
+      priority: 2,
+      sortMs: toMillis(
+        rowDoc.updatedAt ||
+          rowDoc.createdAt ||
+          rowDoc.timestamp ||
+          rowDoc.timeInIso ||
+          rowDoc.timeOutIso,
+      ),
+      row: {
+        schoolId,
+        studentName,
+        course: String(rowDoc.course ?? matchedStudent?.course ?? "").trim() || "-",
+        year:
+          String(
+            rowDoc.yearLevel ??
+              rowDoc.year ??
+              matchedStudent?.year ??
+              "",
+          ).trim() || "-",
+        attendanceStatus:
+          normalizeLowerLookupText(status) === "timed in" ? "Timed In" : "Present",
+        attendanceTimeIn: timeInValue,
+        attendanceTimeOut: timeOutValue,
+      },
+    });
+  });
+
+  return candidates;
+}
+
+function attendanceExportRowsFromCollection(
+  collection: AttendanceExportCandidateCollection,
+) {
+  return sortAttendanceExportRows(
+    Array.from(collection.rowsByKey.values()).map((candidate) => candidate.row),
+  );
+}
+
 function toPresentAttendanceExportRow(
   student: StudentLookup,
   participantRow: EventParticipantRow,
@@ -1902,6 +2446,22 @@ function isAllowedEventDocument(file: File) {
   const ext = getFileExtension(file.name);
   if (EVENT_DOC_EXTENSIONS.has(ext)) return true;
   return EVENT_DOC_MIME_TYPES.has(file.type);
+}
+
+function getEventDocumentContentType(file: Pick<File, "name" | "type">) {
+  const normalizedType = String(file.type ?? "").trim().toLowerCase();
+  if (EVENT_DOC_MIME_TYPES.has(normalizedType)) {
+    return normalizedType;
+  }
+
+  const ext = getFileExtension(file.name);
+  if (ext === "pdf") return "application/pdf";
+  if (ext === "doc") return "application/msword";
+  if (ext === "docx") {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+
+  return normalizedType;
 }
 
 function toMegabytesText(bytes: number) {
@@ -2209,6 +2769,7 @@ export default function EventDashboard() {
   const [deleteEventSubmitting, setDeleteEventSubmitting] = useState(false);
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string>("");
+  const [uploadWarn, setUploadWarn] = useState<string>("");
   const [uploadMsg, setUploadMsg] = useState<string>("");
   const [exportingEventId, setExportingEventId] = useState<string | null>(null);
   const [exportMsg, setExportMsg] = useState<string>("");
@@ -2308,7 +2869,7 @@ export default function EventDashboard() {
         { limit: number; includeEcMembers?: boolean },
         { students?: RemoteStudent[] }
       >(functions, "ecListStudents");
-      const res = await fn({ limit: 2000, includeEcMembers: false });
+      const res = await fn({ limit: 2000, includeEcMembers: true });
       const rows = (res.data?.students ?? [])
         .filter(
           (student) =>
@@ -2745,16 +3306,104 @@ export default function EventDashboard() {
     void loadEvents();
   }, [loadEvents]);
 
+  const setEventDocumentsForEvent = useCallback(
+    (eventId: string, documents: EventFile[]) => {
+      setEventDocs((prev) => ({
+        ...prev,
+        [eventId]: documents,
+      }));
+    },
+    [],
+  );
+
+  const loadEventDocumentsFromCallable = useCallback(
+    async (eventId: string, reason = "manual") => {
+      const event = events.find((item) => item.id === eventId) ?? null;
+      if (!event || !canViewEventRecord(event)) {
+        setEventDocumentsForEvent(eventId, []);
+        return false;
+      }
+
+      if (viewerIsBod && !canEditEventRecord(event)) {
+        setEventDocumentsForEvent(eventId, []);
+        logEventDocumentStage("[EVENT_DOC][REFRESH_SUCCESS]", {
+          eventId,
+          source: "callable",
+          reason,
+          documentCount: 0,
+          documentIds: [],
+          note: "Event documents are hidden for non-manageable B.O.D. events",
+        });
+        return true;
+      }
+
+      try {
+        const result = await listEventDocuments({ eventId });
+        logEventDocumentStage("[EVENT_DOC][REFRESH_SUCCESS]", {
+          eventId,
+          source: "callable",
+          reason,
+          documentCount: result.documents.length,
+          documentIds: result.documents.map((item) => item.id),
+          note: "Files loaded through secure server fallback",
+        });
+        ecEventsLogger.debug("Event docs fallback loaded", {
+          eventId,
+          returnedDocumentIds: result.documents.map((item) => item.id),
+          returnedDocumentCount: result.documents.length,
+        });
+        setEventDocumentsForEvent(eventId, mapEventDocumentListItems(result.documents));
+        return true;
+      } catch (error) {
+        logEventDocumentStage(
+          "[EVENT_DOC][REFRESH_ERROR]",
+          {
+            eventId,
+            source: "callable",
+            reason,
+            code: toEventUploadErrorCode(error),
+            message: describeCallableError(error, "Failed to list event documents."),
+          },
+          "warn",
+        );
+        ecEventsLogger.warn("Event docs fallback failed", {
+          eventId,
+          error:
+            error instanceof Error
+              ? { message: error.message, stack: error.stack }
+              : error,
+        });
+        return false;
+      }
+    },
+    [
+      canEditEventRecord,
+      canViewEventRecord,
+      events,
+      setEventDocumentsForEvent,
+      viewerIsBod,
+    ],
+  );
+
+  const refreshEventDocumentsList = useCallback(
+    async (eventId: string, reason = "manual") => {
+      logEventDocumentStage("[EVENT_DOC][REFRESH_START]", {
+        eventId,
+        source: "callable",
+        reason,
+      });
+
+      return await loadEventDocumentsFromCallable(eventId, reason);
+    },
+    [loadEventDocumentsFromCallable],
+  );
+
   // Live files for expanded event
   useEffect(() => {
     if (!expandedEventId) return;
 
     const imgQ = query(
       collection(db, "events", expandedEventId, "images"),
-      orderBy("createdAt", "desc"),
-    );
-    const docQ = query(
-      collection(db, "events", expandedEventId, "docs"),
       orderBy("createdAt", "desc"),
     );
     const attendanceQ =
@@ -2775,15 +3424,7 @@ export default function EventDashboard() {
       }));
     });
 
-    const unsubDocs = onSnapshot(docQ, (snap) => {
-      setEventDocs((prev) => ({
-        ...prev,
-        [expandedEventId]: snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        })),
-      }));
-    });
+    void refreshEventDocumentsList(expandedEventId, "expanded-event");
 
     const unsubAttendance = onSnapshot(attendanceQ, (snap) => {
       setEventAttendance((prev) => ({
@@ -2797,10 +3438,14 @@ export default function EventDashboard() {
 
     return () => {
       unsubImgs();
-      unsubDocs();
       unsubAttendance();
     };
-  }, [expandedEventId, viewerCourseScope, viewerIsBod]);
+  }, [
+    expandedEventId,
+    refreshEventDocumentsList,
+    viewerCourseScope,
+    viewerIsBod,
+  ]);
 
   // Live registrations for pre-registration events
   useEffect(() => {
@@ -3708,7 +4353,7 @@ export default function EventDashboard() {
     eventId: string,
     kind: "images" | "docs",
     file: File,
-  ) {
+  ): Promise<EventUploadToEventResult> {
     if (!currentUser) throw new Error("Not logged in");
     const event = events.find((item) => item.id === eventId) ?? null;
     if (!event || !canEditEventRecord(event)) {
@@ -3717,6 +4362,185 @@ export default function EventDashboard() {
           "B.O.D. members can only upload files to their own course activities." :
           "Only editable events can accept uploads.",
       );
+    }
+
+    if (kind === "docs") {
+      const contentType = getEventDocumentContentType(file);
+      const scopedCourseScope = viewerCourseScopeValue || viewerCourseScope || null;
+      let uploadTarget: Awaited<ReturnType<typeof createEventDocumentUploadTarget>>;
+
+      logEventDocumentStage("[EVENT_DOC][CREATE_TARGET_START]", {
+        eventId,
+        fileName: file.name,
+        contentType,
+        size: file.size,
+      });
+      try {
+        uploadTarget = await withTimeout(
+          createEventDocumentUploadTarget({
+            eventId,
+            fileName: file.name,
+            contentType,
+            size: file.size,
+          }),
+          EVENT_DOC_UPLOAD_TIMEOUT_MS,
+          "Create event document upload target",
+        );
+        logEventDocumentStage("[EVENT_DOC][CREATE_TARGET_SUCCESS]", {
+          eventId,
+          docId: uploadTarget.docId,
+          storagePath: uploadTarget.storagePath,
+          fileName: file.name,
+          resolvedFileName: uploadTarget.fileName,
+          resolvedContentType: contentType,
+          fileSize: file.size,
+        });
+      } catch (error) {
+        logEventDocumentStage(
+          "[EVENT_DOC][CREATE_TARGET_ERROR]",
+          {
+            eventId,
+            fileName: file.name,
+            code: toEventUploadErrorCode(error),
+            message: toEventUploadErrorMessage(
+              error,
+              "Failed to create the event document upload target.",
+            ),
+          },
+          "error",
+        );
+        throw createEventDocumentUploadFlowError(
+          "CREATE_TARGET",
+          toScopedEventDocumentUploadErrorMessage(
+            error,
+            "Failed to create the event document upload target.",
+            "CREATE_TARGET",
+            scopedCourseScope,
+            viewerIsBod,
+          ),
+        );
+      }
+
+      const storageRef = ref(storage, uploadTarget.storagePath);
+      logEventDocumentStage("[EVENT_DOC][UPLOAD_BYTES_RESUMABLE_START]", {
+        eventId,
+        docId: uploadTarget.docId,
+        storagePath: uploadTarget.storagePath,
+        fileName: uploadTarget.fileName,
+        size: file.size,
+      });
+
+      try {
+        await uploadEventDocumentWithResumable(
+          storageRef,
+          file,
+          contentType,
+          EVENT_DOC_UPLOAD_TIMEOUT_MS,
+        );
+        logEventDocumentStage("[EVENT_DOC][UPLOAD_BYTES_RESUMABLE_SUCCESS]", {
+          eventId,
+          docId: uploadTarget.docId,
+          storagePath: uploadTarget.storagePath,
+          fileName: uploadTarget.fileName,
+          size: file.size,
+        });
+      } catch (error) {
+        logEventDocumentStage(
+          "[EVENT_DOC][UPLOAD_BYTES_RESUMABLE_ERROR]",
+          {
+            eventId,
+            docId: uploadTarget.docId,
+            storagePath: uploadTarget.storagePath,
+            fileName: uploadTarget.fileName,
+            code: toEventUploadErrorCode(error),
+            message: toEventUploadErrorMessage(
+              error,
+              "Failed to upload the event document to Storage.",
+            ),
+          },
+          "error",
+        );
+        throw createEventDocumentUploadFlowError(
+          "UPLOAD_BYTES",
+          toScopedEventDocumentUploadErrorMessage(
+            error,
+            "Failed to upload the event document to Storage.",
+            "UPLOAD_BYTES",
+            scopedCourseScope,
+            viewerIsBod,
+          ),
+        );
+      }
+
+      logEventDocumentStage("[EVENT_DOC][FINALIZE_START]", {
+        eventId,
+        docId: uploadTarget.docId,
+        storagePath: uploadTarget.storagePath,
+        size: file.size,
+        contentType,
+      });
+
+      let finalizedUpload: Awaited<ReturnType<typeof finalizeEventDocumentUpload>>;
+      try {
+        finalizedUpload = await withTimeout(
+          finalizeEventDocumentUpload({
+            eventId,
+            docId: uploadTarget.docId,
+            size: file.size,
+            contentType,
+          }),
+          EVENT_DOC_UPLOAD_TIMEOUT_MS,
+          "Finalize event document upload",
+        );
+        logEventDocumentStage("[EVENT_DOC][FINALIZE_SUCCESS]", {
+          eventId,
+          docId: uploadTarget.docId,
+          status: finalizedUpload.status,
+          storagePath: finalizedUpload.storagePath,
+          size: finalizedUpload.size,
+          contentType: finalizedUpload.contentType,
+        });
+      } catch (error) {
+        logEventDocumentStage(
+          "[EVENT_DOC][FINALIZE_ERROR]",
+          {
+            eventId,
+            docId: uploadTarget.docId,
+            storagePath: uploadTarget.storagePath,
+            code: toEventUploadErrorCode(error),
+            message: toEventUploadErrorMessage(
+              error,
+              "Failed to finalize the uploaded event document.",
+            ),
+          },
+          "error",
+        );
+        throw createEventDocumentUploadFlowError(
+          "FINALIZE",
+          toScopedEventDocumentUploadErrorMessage(
+            error,
+            "The file uploaded to Storage, but the server could not finalize it.",
+            "FINALIZE",
+            scopedCourseScope,
+            viewerIsBod,
+          ),
+        );
+      }
+
+      const refreshed = await refreshEventDocumentsList(eventId, "post-finalize-upload");
+      if (!refreshed) {
+        return {
+          warning: {
+            title: eventDocumentStageTitle("REFRESH"),
+            message: eventDocumentStageTitle("REFRESH"),
+            stage: "REFRESH",
+          },
+        };
+      }
+
+      return {
+        warning: undefined,
+      };
     }
 
     const safeName = file.name.replace(/[^\w.\-()+ ]/g, "_");
@@ -3731,6 +4555,7 @@ export default function EventDashboard() {
 
     await addDoc(collection(db, "events", eventId, kind), {
       path,
+      storagePath: path,
       name: file.name,
       contentType: file.type,
       size: file.size,
@@ -3739,31 +4564,104 @@ export default function EventDashboard() {
       createdAt: serverTimestamp(),
     });
 
-    return downloadURL;
+    return {};
   }
 
   function downloadEventFile(file: EventFile, fallbackName: string) {
     setUploadErr("");
+    setUploadWarn("");
     if (!file.downloadURL) {
       setUploadErr(`"${file.name || fallbackName}" has no download URL.`);
       return;
     }
 
     try {
-      const safeName = String(file.name || fallbackName).trim() || fallbackName;
-      const params = new URLSearchParams({
-        url: file.downloadURL,
-        name: safeName,
-      });
-      const anchor = document.createElement("a");
-      anchor.href = `/api/download?${params.toString()}`;
-      anchor.download = safeName;
-      anchor.style.display = "none";
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
+      startEventFileDownload(file.downloadURL, file.name || fallbackName);
     } catch (e: any) {
       setUploadErr(e?.message || "Failed to start download.");
+    }
+  }
+
+  async function downloadEventDocumentFile(
+    eventId: string,
+    file: EventFile,
+    fallbackName: string,
+  ) {
+    setUploadErr("");
+    setUploadWarn("");
+
+    if (!eventId) {
+      const message = eventDocumentStageTitle("DOWNLOAD");
+      setUploadErr(message);
+      addToast({
+        title: eventDocumentStageTitle("DOWNLOAD"),
+        description: "Event context is missing for this document download.",
+        color: "danger",
+        timeout: 5000,
+      });
+      return;
+    }
+
+    try {
+      logEventDocumentStage("[EVENT_DOC][DOWNLOAD_URL_CALL_START]", {
+        eventId,
+        docId: file.id,
+        fileName: file.name || fallbackName,
+      });
+
+      const result = await withTimeout(
+        createEventDocumentDownloadUrl({
+          eventId,
+          docId: file.id,
+        }),
+        EVENT_DOC_UPLOAD_TIMEOUT_MS,
+        "Create event document download URL",
+      );
+
+      logEventDocumentStage("[EVENT_DOC][DOWNLOAD_URL_CALL_SUCCESS]", {
+        eventId,
+        docId: file.id,
+        expiresAt: result.expiresAt,
+      });
+
+      startEventFileDownload(
+        result.url,
+        result.fileName || result.name || file.name || fallbackName,
+      );
+      addToast({
+        title: "Download started",
+        description: `${file.name || fallbackName} is being prepared for download.`,
+        color: "success",
+        timeout: 4000,
+      });
+    } catch (error) {
+      logEventDocumentStage(
+        "[EVENT_DOC][DOWNLOAD_URL_CALL_ERROR]",
+        {
+          eventId,
+          docId: file.id,
+          code: toEventUploadErrorCode(error),
+          message: toEventUploadErrorMessage(
+            error,
+            "Failed to prepare the event document download.",
+          ),
+        },
+        "warn",
+      );
+      const message = toScopedEventDocumentUploadErrorMessage(
+        error,
+        "Failed to prepare the event document download.",
+        "DOWNLOAD",
+        viewerCourseScopeValue || viewerCourseScope || null,
+        viewerIsBod,
+      );
+      setUploadErr(eventDocumentStageTitle("DOWNLOAD"));
+      addToast({
+        title: eventDocumentStageTitle("DOWNLOAD"),
+        description: message,
+        color: "danger",
+        timeout: 6500,
+      });
     }
   }
 
@@ -3775,6 +4673,8 @@ export default function EventDashboard() {
     if (!files || files.length === 0) {
       const msg = "No files were selected.";
       setUploadErr(msg);
+      setUploadWarn("");
+      setUploadMsg("");
       addToast({
         title: "No files selected",
         description: msg,
@@ -3788,6 +4688,8 @@ export default function EventDashboard() {
     if (pickedFiles.length === 0) {
       const msg = "No files were selected.";
       setUploadErr(msg);
+      setUploadWarn("");
+      setUploadMsg("");
       addToast({
         title: "No files selected",
         description: msg,
@@ -3798,12 +4700,14 @@ export default function EventDashboard() {
     }
 
     setUploadErr("");
+    setUploadWarn("");
     setUploadMsg(
       `Uploading ${pickedFiles.length} file${pickedFiles.length === 1 ? "" : "s"}...`,
     );
     setUploadingFor(eventId);
     let uploaded = 0;
     const rejected: string[] = [];
+    const uploadWarnings: EventDocumentUploadIssue[] = [];
 
     try {
       for (const file of pickedFiles) {
@@ -3855,14 +4759,35 @@ export default function EventDashboard() {
         }
 
         try {
-          await uploadToEvent(eventId, kind, file);
+          const result = await uploadToEvent(eventId, kind, file);
           uploaded += 1;
-        } catch (e: any) {
-          rejected.push(`${file.name}: ${e?.message || "Upload failed."}`);
+          if (result.warning) {
+            uploadWarnings.push({
+              ...result.warning,
+              message: `${file.name}: ${result.warning.message}`,
+            });
+          }
+        } catch (error) {
+          if (isEventDocumentUploadFlowError(error)) {
+            if (error.uploadCompleted) {
+              uploadWarnings.push({
+                title: error.title,
+                message: `${file.name}: ${error.title}`,
+                stage: error.stage,
+              });
+            } else {
+              rejected.push(`${file.name}: ${error.title}`);
+            }
+            continue;
+          }
+
+          rejected.push(
+            `${file.name}: ${toEventUploadErrorMessage(error, "Upload failed.")}`,
+          );
         }
       }
-    } catch (e: any) {
-      const msg = e?.message || "Unexpected upload error.";
+    } catch (error) {
+      const msg = toEventUploadErrorMessage(error, "Unexpected upload error.");
       rejected.push(msg);
     } finally {
       setUploadingFor(null);
@@ -3876,6 +4801,22 @@ export default function EventDashboard() {
         description: successMsg,
         color: "success",
         timeout: 4500,
+      });
+    } else {
+      setUploadMsg("");
+    }
+
+    if (uploadWarnings.length > 0) {
+      const warningMsg = buildUploadIssuePreview(uploadWarnings);
+      setUploadWarn(warningMsg);
+      addToast({
+        title: summarizeUploadIssueTitle(
+          uploadWarnings,
+          "Upload completed, but some files need attention.",
+        ),
+        description: warningMsg,
+        color: "warning",
+        timeout: 7000,
       });
     }
 
@@ -3893,7 +4834,7 @@ export default function EventDashboard() {
       });
     }
 
-    if (uploaded === 0 && rejected.length === 0) {
+    if (uploaded === 0 && rejected.length === 0 && uploadWarnings.length === 0) {
       const msg = "No files were uploaded.";
       setUploadErr(msg);
       addToast({
@@ -3932,10 +4873,27 @@ export default function EventDashboard() {
     eventId: string,
     kind: "images" | "docs",
     fileDocId: string,
-    path: string,
+    path?: string,
   ) {
     const event = events.find((item) => item.id === eventId) ?? null;
     if (!event || !canEditEventRecord(event)) return;
+
+    if (kind === "docs") {
+      await deleteEventDocument({
+        eventId,
+        docId: fileDocId,
+      });
+      setEventDocs((prev) => ({
+        ...prev,
+        [eventId]: (prev[eventId] ?? []).filter((file) => file.id !== fileDocId),
+      }));
+      return;
+    }
+
+    if (!path) {
+      throw new Error("Image storage path is missing.");
+    }
+
     await deleteObject(ref(storage, path));
     await deleteDoc(doc(db, "events", eventId, kind, fileDocId));
   }
@@ -3944,7 +4902,7 @@ export default function EventDashboard() {
     eventId: string,
     kind: "images" | "docs",
     fileDocId: string,
-    path: string,
+    path: string | undefined,
     fileName: string,
   ) {
     const event = events.find((item) => item.id === eventId) ?? null;
@@ -3963,6 +4921,7 @@ export default function EventDashboard() {
 
     setDeleteSubmitting(true);
     setUploadErr("");
+    setUploadWarn("");
 
     try {
       await deleteEventFile(
@@ -3986,10 +4945,14 @@ export default function EventDashboard() {
         pendingDeleteFile.eventId,
         error,
       );
-      const message = error?.message || "Failed to delete file.";
-      setUploadErr(message);
+      const message = describeCallableError(error, "Failed to delete file.");
+      const title =
+        pendingDeleteFile.kind === "docs" ?
+          eventDocumentStageTitle("DELETE") :
+          "Delete failed";
+      setUploadErr(title);
       addToast({
-        title: "Delete failed",
+        title,
         description: message,
         color: "danger",
         timeout: 5500,
@@ -5606,10 +6569,20 @@ export default function EventDashboard() {
           ...(paymentStudentDoc.data() as Omit<EventPaymentStudentDoc, "id">),
         }),
       ) ?? [];
+      let allStudents = studentOptions;
+      if (allStudents.length === 0) {
+        allStudents = await loadStudentsForNotifications();
+      }
+
+      const studentLookupIndexes = buildStudentLookupIndexes(allStudents);
+      const enrichedAttendanceRows = enrichAttendanceRowsWithStudentLookup(
+        attendanceRows,
+        studentLookupIndexes,
+      );
       const participantRows = buildEventParticipantRows(
         ev,
         registrations,
-        attendanceRows,
+        enrichedAttendanceRows,
         paymentAssignments,
       );
       const participantRowsByUid = new Map<string, EventParticipantRow>();
@@ -5623,81 +6596,146 @@ export default function EventDashboard() {
         }
       });
 
-      let allStudents = studentOptions;
-      if (allStudents.length === 0) {
-        allStudents = await loadStudentsForNotifications();
-      }
-
       const audience = resolveRequiredEventAudience(ev, allStudents);
+      const directPresentCandidates = buildPresentAttendanceExportCandidates(
+        enrichedAttendanceRows,
+        studentLookupIndexes,
+      );
+      const presentRowCollection = createAttendanceExportCandidateCollection();
+      const absentRowCollection = createAttendanceExportCandidateCollection();
+      const notPaidRowCollection = createAttendanceExportCandidateCollection();
       let presentRows: AttendanceExportRow[] = [];
       let absentRows: AttendanceExportRow[] = [];
       let notPaidRows: AttendanceExportRow[] = [];
 
       if (audience.resolved) {
+        // Regression guard: student, EC, and B.O.D. attendance docs must all
+        // survive the workbook export when they match the event audience.
         audience.students.forEach((student) => {
           const participantRow =
             participantRowsByUid.get(student.uid) ??
             participantRowsBySchoolId.get(student.schoolId);
 
           if (participantRow?.attendanceStatus === "Not Paid") {
-            notPaidRows.push(toNotPaidAttendanceExportRow(student, participantRow));
+            addAttendanceExportCandidate(notPaidRowCollection, {
+              uid: student.uid,
+              schoolId: participantRow.schoolId || student.schoolId,
+              priority: 1,
+              sortMs: participantRow.sortMs,
+              row: toNotPaidAttendanceExportRow(student, participantRow),
+            });
             return;
           }
 
           if (participantRow && isPresentAttendanceStatus(participantRow.attendanceStatus)) {
-            presentRows.push(toPresentAttendanceExportRow(student, participantRow));
+            addAttendanceExportCandidate(presentRowCollection, {
+              uid: student.uid,
+              schoolId: participantRow.schoolId || student.schoolId,
+              priority: 1,
+              sortMs: participantRow.sortMs,
+              row: toPresentAttendanceExportRow(student, participantRow),
+            });
             return;
           }
 
-          absentRows.push(toAbsentAttendanceExportRow(student));
+          addAttendanceExportCandidate(absentRowCollection, {
+            uid: student.uid,
+            schoolId: student.schoolId,
+            priority: 1,
+            sortMs: 0,
+            row: toAbsentAttendanceExportRow(student),
+          });
         });
 
-        presentRows = sortAttendanceExportRows(presentRows);
-        absentRows = sortAttendanceExportRows(absentRows);
-        notPaidRows = sortAttendanceExportRows(notPaidRows);
+        directPresentCandidates.forEach((candidate) => {
+          const participantRow =
+            (candidate.uid ? participantRowsByUid.get(candidate.uid) : undefined) ??
+            participantRowsBySchoolId.get(candidate.schoolId);
+          if (participantRow?.attendanceStatus === "Not Paid") {
+            return;
+          }
+
+          addAttendanceExportCandidate(presentRowCollection, candidate);
+        });
+        participantRows
+          .filter((row) => row.attendanceStatus === "Not Paid")
+          .forEach((row) => {
+            addAttendanceExportCandidate(notPaidRowCollection, {
+              uid: row.uid,
+              schoolId: row.schoolId,
+              priority: 2,
+              sortMs: row.sortMs,
+              row: {
+                schoolId: row.schoolId,
+                studentName: row.studentName,
+                course: row.course,
+                year: row.year,
+                attendanceStatus: "Not Paid",
+                attendanceTimeIn: "",
+                attendanceTimeOut: "",
+              },
+            });
+          });
+
+        presentRows = attendanceExportRowsFromCollection(presentRowCollection);
+        absentRows = attendanceExportRowsFromCollection(absentRowCollection);
+        notPaidRows = attendanceExportRowsFromCollection(notPaidRowCollection);
       } else {
         // Older events do not always store explicit audience filters. In that
         // case we preserve the previous export data and leave the absents sheet
         // and Not Paid sheets empty instead of inferring rows from the whole roster.
-        presentRows = sortAttendanceExportRows(
-          participantRows
-            .filter((row) => isPresentAttendanceStatus(row.attendanceStatus))
-            .map((row) => ({
+        directPresentCandidates.forEach((candidate) => {
+          const participantRow =
+            (candidate.uid ? participantRowsByUid.get(candidate.uid) : undefined) ??
+            participantRowsBySchoolId.get(candidate.schoolId);
+          if (participantRow?.attendanceStatus === "Not Paid") {
+            return;
+          }
+
+          addAttendanceExportCandidate(presentRowCollection, candidate);
+        });
+        participantRows
+          .filter((row) => row.attendanceStatus === "Absent")
+          .forEach((row) => {
+            addAttendanceExportCandidate(absentRowCollection, {
+              uid: row.uid,
               schoolId: row.schoolId,
-              studentName: row.studentName,
-              course: row.course,
-              year: row.year,
-              attendanceStatus: row.attendanceStatus,
-              attendanceTimeIn: row.attendanceTimeIn,
-              attendanceTimeOut: row.attendanceTimeOut,
-            })),
-        );
-        absentRows = sortAttendanceExportRows(
-          participantRows
-            .filter((row) => row.attendanceStatus === "Absent")
-            .map((row) => ({
+              priority: 1,
+              sortMs: row.sortMs,
+              row: {
+                schoolId: row.schoolId,
+                studentName: row.studentName,
+                course: row.course,
+                year: row.year,
+                attendanceStatus: row.attendanceStatus,
+                attendanceTimeIn: "",
+                attendanceTimeOut: "",
+              },
+            });
+          });
+        participantRows
+          .filter((row) => row.attendanceStatus === "Not Paid")
+          .forEach((row) => {
+            addAttendanceExportCandidate(notPaidRowCollection, {
+              uid: row.uid,
               schoolId: row.schoolId,
-              studentName: row.studentName,
-              course: row.course,
-              year: row.year,
-              attendanceStatus: row.attendanceStatus,
-              attendanceTimeIn: "",
-              attendanceTimeOut: "",
-            })),
-        );
-        notPaidRows = sortAttendanceExportRows(
-          participantRows
-            .filter((row) => row.attendanceStatus === "Not Paid")
-            .map((row) => ({
-              schoolId: row.schoolId,
-              studentName: row.studentName,
-              course: row.course,
-              year: row.year,
-              attendanceStatus: row.attendanceStatus,
-              attendanceTimeIn: "",
-              attendanceTimeOut: "",
-            })),
-        );
+              priority: 1,
+              sortMs: row.sortMs,
+              row: {
+                schoolId: row.schoolId,
+                studentName: row.studentName,
+                course: row.course,
+                year: row.year,
+                attendanceStatus: row.attendanceStatus,
+                attendanceTimeIn: "",
+                attendanceTimeOut: "",
+              },
+            });
+          });
+
+        presentRows = attendanceExportRowsFromCollection(presentRowCollection);
+        absentRows = attendanceExportRowsFromCollection(absentRowCollection);
+        notPaidRows = attendanceExportRowsFromCollection(notPaidRowCollection);
       }
 
       if (
@@ -7908,6 +8946,11 @@ export default function EventDashboard() {
                                   {uploadErr}
                                 </p>
                               )}
+                              {uploadWarn && (
+                                <p className="text-sm text-amber-600">
+                                  {uploadWarn}
+                                </p>
+                              )}
                               {uploadMsg && (
                                 <p className="text-sm text-green-600">
                                   {uploadMsg}
@@ -8140,7 +9183,8 @@ export default function EventDashboard() {
                                                 className="h-7 min-w-0 px-2 text-xs sm:text-sm"
                                                 onClick={(e) => {
                                                   e.stopPropagation();
-                                                  downloadEventFile(
+                                                  void downloadEventDocumentFile(
+                                                    ev.id,
                                                     f,
                                                     f.name || "event-document",
                                                   );
@@ -8149,7 +9193,7 @@ export default function EventDashboard() {
                                                 Download
                                               </Button>
 
-                                              {isECUser && f.path && (
+                                              {isECUser && canEditEventRecord(ev) && (
                                                 <Button
                                                   type="button"
                                                   size="sm"
@@ -8162,7 +9206,7 @@ export default function EventDashboard() {
                                                       ev.id,
                                                       "docs",
                                                       f.id,
-                                                      f.path!,
+                                                      f.path,
                                                       f.name ||
                                                         "event-document",
                                                     );
@@ -8757,6 +9801,9 @@ export default function EventDashboard() {
                         {uploadErr ? (
                           <p className="text-sm text-red-600">{uploadErr}</p>
                         ) : null}
+                        {uploadWarn ? (
+                          <p className="text-sm text-amber-600">{uploadWarn}</p>
+                        ) : null}
                         {uploadMsg ? (
                           <p className="text-sm text-green-600">{uploadMsg}</p>
                         ) : null}
@@ -8824,7 +9871,20 @@ export default function EventDashboard() {
                           onOpenDocuments={() =>
                             openViewAllFilesModal(selectedEvent.id, selectedEvent.title, "docs")
                           }
-                          onDownloadFile={(file) =>
+                          onDownloadFile={(file) => {
+                            if (eventFilesTab === "docs") {
+                              void downloadEventDocumentFile(
+                                selectedEvent.id,
+                                {
+                                  id: file.id,
+                                  name: file.name,
+                                  downloadURL: file.downloadURL,
+                                },
+                                file.name,
+                              );
+                              return;
+                            }
+
                             downloadEventFile(
                               {
                                 id: file.id,
@@ -8832,8 +9892,8 @@ export default function EventDashboard() {
                                 downloadURL: file.downloadURL,
                               },
                               file.name,
-                            )
-                          }
+                            );
+                          }}
                           renderImageActions={(file) => {
                             const original = (eventImages[selectedEvent.id] ?? []).find(
                               (item) => item.id === file.id,
@@ -8865,7 +9925,7 @@ export default function EventDashboard() {
                             const original = (eventDocs[selectedEvent.id] ?? []).find(
                               (item) => item.id === file.id,
                             );
-                            if (!selectedEventEditable || !original?.path) return null;
+                            if (!selectedEventEditable || !original) return null;
 
                             return (
                               <Button
@@ -8879,7 +9939,7 @@ export default function EventDashboard() {
                                     selectedEvent.id,
                                     "docs",
                                     original.id,
-                                    original.path!,
+                                    original.path,
                                     original.name || file.name,
                                   )
                                 }
@@ -8968,7 +10028,8 @@ export default function EventDashboard() {
         eventTitle={viewAllFilesModal.eventTitle || "Event files"}
         isCompactView={isCompactViewport}
         onDownloadFile={(file) =>
-          downloadEventFile(
+          void downloadEventDocumentFile(
+            viewAllFilesModal.eventId || "",
             {
               id: file.id,
               name: file.name,
@@ -8981,7 +10042,7 @@ export default function EventDashboard() {
           const original = viewAllModalDocs.find((item) => item.id === file.id);
           const modalEventId = viewAllFilesModal.eventId;
           const modalEvent = events.find((item) => item.id === modalEventId) ?? null;
-          if (!modalEventId || !modalEvent || !canEditEventRecord(modalEvent) || !original?.path) return null;
+          if (!modalEventId || !modalEvent || !canEditEventRecord(modalEvent) || !original) return null;
 
           return (
             <Button
@@ -8995,7 +10056,7 @@ export default function EventDashboard() {
                   modalEventId,
                   "docs",
                   original.id,
-                  original.path!,
+                  original.path,
                   original.name || file.name,
                 )
               }

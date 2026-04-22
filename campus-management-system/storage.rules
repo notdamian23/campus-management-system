@@ -324,6 +324,78 @@ service firebase.storage {
         normalizeCourseScopeValue(data.course);
     }
 
+    function eventCreatedByMatchesCurrentUser(data) {
+      return data != null &&
+        (
+          data.createdBy == request.auth.uid ||
+          data.createdByUid == request.auth.uid
+        );
+    }
+
+    function eventCreatedByCourseScopeValue(data) {
+      return data != null &&
+        normalizeCourseScopeValue(data.createdByCourseScope) != null ?
+        normalizeCourseScopeValue(data.createdByCourseScope) :
+        null;
+    }
+
+    function eventDocumentPath(eventId, docId) {
+      return /databases/(default)/documents/events/$(eventId)/docs/$(docId);
+    }
+
+    function eventDocumentExists(eventId, docId) {
+      return firestore.exists(eventDocumentPath(eventId, docId));
+    }
+
+    function eventDocumentData(eventId, docId) {
+      return eventDocumentExists(eventId, docId) ?
+        firestore.get(eventDocumentPath(eventId, docId)).data :
+        null;
+    }
+
+    function eventDocumentStoragePathValue(data) {
+      return data != null &&
+        data.storagePath is string &&
+        data.storagePath != "" ?
+        data.storagePath :
+        (
+          data != null &&
+          data.path is string &&
+          data.path != ""
+        ) ?
+          data.path :
+          "";
+    }
+
+    function expectedEventDocumentStoragePath(eventId, docId, fileName) {
+      return "events/" + eventId + "/docs/" + docId + "/" + fileName;
+    }
+
+    function eventDocumentPathMatchesObject(data, eventId, docId, fileName) {
+      let expectedPath = expectedEventDocumentStoragePath(eventId, docId, fileName);
+      let storagePath = eventDocumentStoragePathValue(data);
+      return storagePath != "" && storagePath == expectedPath;
+    }
+
+    function eventDocumentStatusAllowsRead(data) {
+      return data != null &&
+        (
+          !(data.status is string) ||
+          data.status == "active"
+        );
+    }
+
+    function eventDocumentMetadataOwnerMatchesCurrentUser(data) {
+      return data != null &&
+        (
+          (data.createdByUid is string && data.createdByUid == request.auth.uid) ||
+          (data.createdBy is string && data.createdBy == request.auth.uid) ||
+          (data.uploadedByUid is string && data.uploadedByUid == request.auth.uid) ||
+          (data.uploadedBy is string && data.uploadedBy == request.auth.uid) ||
+          (data.ownerUid is string && data.ownerUid == request.auth.uid)
+        );
+    }
+
     function canReadCourseDocumentAtPath(docId, pathCourseScopeSlug, fileName) {
       return isAdmin() || isRegularEC() ||
         canReadOwnBodEcDocumentAtPath(docId, pathCourseScopeSlug, fileName);
@@ -360,9 +432,149 @@ service firebase.storage {
             currentCourseScope() != null &&
             eventOwnerType(eventData(eventId)) == "bod" &&
             eventCourseScope(eventData(eventId)) == currentCourseScope() &&
-            eventData(eventId).createdBy == request.auth.uid
+            eventCreatedByMatchesCurrentUser(eventData(eventId))
           )
         );
+    }
+
+    function eventDocumentFileNameHasAllowedExtension(fileName) {
+      return fileName.matches("^.+\\.(pdf|PDF|doc|DOC|docx|DOCX)$");
+    }
+
+    function isAllowedEventDocumentUploadContentType(fileName, contentType) {
+      return contentType == "application/pdf" ||
+        contentType == "application/msword" ||
+        contentType == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+        (
+          eventDocumentFileNameHasAllowedExtension(fileName) &&
+          (
+            contentType == "application/octet-stream" ||
+            contentType == ""
+          )
+        );
+    }
+
+    function eventDocumentPendingContentTypeIsAllowed(data, fileName) {
+      return data != null &&
+        data.contentType is string &&
+        isAllowedEventDocumentUploadContentType(fileName, data.contentType);
+    }
+
+    function eventDocumentRequestContentTypeMatchesPending(data, fileName) {
+      return request.resource != null &&
+        data != null &&
+        data.contentType is string &&
+        (
+          data.contentType == request.resource.contentType ||
+          (
+            eventDocumentFileNameHasAllowedExtension(fileName) &&
+            eventDocumentPendingContentTypeIsAllowed(data, fileName) &&
+            isAllowedEventDocumentUploadContentType(fileName, request.resource.contentType) &&
+            (
+              data.contentType == "application/octet-stream" ||
+              data.contentType == "" ||
+              request.resource.contentType == "application/octet-stream" ||
+              request.resource.contentType == ""
+            )
+          )
+        );
+    }
+
+    function isAllowedEventDocumentContent(fileName) {
+      return request.resource != null &&
+        request.resource.size <= 10 * 1024 * 1024 &&
+        isAllowedEventDocumentUploadContentType(fileName, request.resource.contentType);
+    }
+
+    function eventDocumentStatus(data) {
+      return data != null &&
+        data.status is string &&
+        data.status == "pending-upload" ?
+        "pending-upload" :
+        "active";
+    }
+
+    function eventDocumentOwnedByCurrentUser(data) {
+      return data != null &&
+        (
+          data.createdByUid == request.auth.uid ||
+          data.uploadedByUid == request.auth.uid ||
+          data.ownerUid == request.auth.uid
+        );
+    }
+
+    function eventDocumentStoragePathMatchesUpload(data, eventId, docId, fileName) {
+      return data != null &&
+        data.storagePath is string &&
+        data.storagePath == "events/" + eventId + "/docs/" + docId + "/" + fileName;
+    }
+
+    function canReadEventDocument(eventId) {
+      return eventExists(eventId) &&
+        (
+          isTeacher() ||
+          isAdmin() ||
+          isRegularEC() ||
+          (
+            isBOD() &&
+            canEditEventFiles(eventId)
+          )
+        );
+    }
+
+    function canReadEventDocumentObject(eventId, docId, fileName) {
+      let parentEvent = eventData(eventId);
+      let documentData = eventDocumentData(eventId, docId);
+      let parentEventCourseScope = eventCourseScope(parentEvent);
+      let parentCreatedByCourseScope = eventCreatedByCourseScopeValue(parentEvent);
+
+      return signedIn() &&
+        eventExists(eventId) &&
+        eventDocumentExists(eventId, docId) &&
+        eventDocumentPathMatchesObject(documentData, eventId, docId, fileName) &&
+        eventDocumentStatusAllowsRead(documentData) &&
+        (
+          isTeacher() ||
+          isAdmin() ||
+          isRegularEC() ||
+          (
+            isBOD() &&
+            currentCourseScope() != null &&
+            eventOwnerType(parentEvent) == "bod" &&
+            (
+              parentEventCourseScope == currentCourseScope() ||
+              parentCreatedByCourseScope == currentCourseScope()
+            ) &&
+            (
+              eventDocumentMetadataOwnerMatchesCurrentUser(documentData) ||
+              eventCreatedByMatchesCurrentUser(parentEvent)
+            )
+          )
+        );
+    }
+
+    function canCreateOrUpdatePendingEventDocument(eventId, docId, fileName) {
+      return signedIn() &&
+        eventExists(eventId) &&
+        eventDocumentExists(eventId, docId) &&
+        eventDocumentStatus(eventDocumentData(eventId, docId)) == "pending-upload" &&
+        eventDocumentOwnedByCurrentUser(eventDocumentData(eventId, docId)) &&
+        eventDocumentData(eventId, docId).eventId == eventId &&
+        eventDocumentPendingContentTypeIsAllowed(
+          eventDocumentData(eventId, docId),
+          fileName
+        ) &&
+        eventDocumentStoragePathMatchesUpload(
+          eventDocumentData(eventId, docId),
+          eventId,
+          docId,
+          fileName
+        ) &&
+        eventDocumentRequestContentTypeMatchesPending(
+          eventDocumentData(eventId, docId),
+          fileName
+        ) &&
+        isAllowedEventDocumentContent(fileName);
     }
 
     match /ec-documents/shared/{docId}/{fileName} {
@@ -391,9 +603,14 @@ service firebase.storage {
     }
 
     match /events/{eventId}/docs/{fileId} {
-      allow read: if isTeacher() ||
-        (eventExists(eventId) && canViewEventData(eventData(eventId)));
-      allow write: if canEditEventFiles(eventId);
+      allow read: if canReadEventDocument(eventId);
+      allow delete: if canEditEventFiles(eventId);
+    }
+
+    match /events/{eventId}/docs/{docId}/{fileName} {
+      allow read: if canReadEventDocumentObject(eventId, docId, fileName);
+      allow create, update: if canCreateOrUpdatePendingEventDocument(eventId, docId, fileName);
+      allow delete: if canEditEventFiles(eventId);
     }
 
     match /{allPaths=**} {

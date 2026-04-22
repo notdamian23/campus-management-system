@@ -1,4 +1,7 @@
-import { normalizeCampusRole } from "@/lib/campus-role";
+import {
+  isEcWorkspaceRole,
+  normalizeCampusRole,
+} from "@/lib/campus-role";
 import {
   normalizeStudentNamePart,
   resolveStudentRawFullName,
@@ -74,6 +77,23 @@ function hasMeaningfulStudentAudienceValue(value: unknown) {
   return !INVALID_STUDENT_AUDIENCE_VALUES.has(normalized.toLowerCase());
 }
 
+function hasStudentIdentityHints(
+  profile?: StudentAudienceProfileLike | null,
+) {
+  const hasStudentId =
+    hasMeaningfulStudentAudienceValue(profile?.schoolId) ||
+    hasMeaningfulStudentAudienceValue(profile?.studentId);
+  const hasCourse = hasMeaningfulStudentAudienceValue(profile?.course);
+  const hasYear =
+    hasMeaningfulStudentAudienceValue(profile?.yearLevel) ||
+    hasMeaningfulStudentAudienceValue(profile?.year);
+  const hasName = hasMeaningfulStudentAudienceValue(
+    resolveStudentAudienceName(profile),
+  );
+
+  return hasStudentId && (hasName || hasCourse || hasYear);
+}
+
 export function resolveStudentAudienceName(
   profile?: StudentAudienceProfileLike | null,
 ) {
@@ -94,7 +114,8 @@ export function hasStudentIdentityProfile(
   return (
     normalizedRole === "student" ||
     profile?.isStudent === true ||
-    isLegacyBodProfile(profile)
+    isLegacyBodProfile(profile) ||
+    (isEcWorkspaceRole(profile?.role) && hasStudentIdentityHints(profile))
   );
 }
 

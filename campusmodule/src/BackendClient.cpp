@@ -32,6 +32,12 @@ constexpr size_t kAttendancePayloadJsonCapacity = 2048;
 constexpr size_t kCleanupAckPayloadJsonCapacity = 2048;
 constexpr size_t kCleanupAckResponseJsonCapacity = 1024;
 constexpr size_t kSessionResponseJsonCapacity = 512;
+constexpr size_t kPairEventResponseJsonCapacity = 4096;
+constexpr size_t kPairEventMaxResponseBytes = 32768;
+constexpr size_t kPairedEventContextResponseJsonCapacity = 32768;
+constexpr size_t kPairedEventContextMaxResponseBytes = 32768;
+constexpr size_t kPairedEventContextPageSize = 20;
+constexpr size_t kPairedEventContextMaxPages = 128;
 constexpr uint32_t kTlsLargestFreeBlockWarningBytes = 24U * 1024U;
 constexpr uint32_t kSecureClientCooldownMs = 150;
 constexpr uint8_t kPairedEventTlsConnectAttempts = 2;
@@ -242,6 +248,26 @@ void appendStringValues(JsonVariantConst value, std::vector<String> &outValues) 
   addValue(parseStringField(value));
 }
 
+void appendUniqueStringValue(const String &value, std::vector<String> &outValues) {
+  const String normalized = CampusEligibility::trimAndCollapseWhitespace(value);
+  if (normalized.isEmpty()) {
+    return;
+  }
+  for (const auto &entry : outValues) {
+    if (entry == normalized) {
+      return;
+    }
+  }
+  outValues.push_back(normalized);
+}
+
+void appendUniqueStringValues(const std::vector<String> &values,
+                              std::vector<String> &outValues) {
+  for (const auto &value : values) {
+    appendUniqueStringValue(value, outValues);
+  }
+}
+
 void applyDeviceSecretHeaders(HTTPClient &http) {
   http.addHeader("X-Campus-Device-Id", CampusConfig::kDeviceId);
   http.addHeader("X-Campus-Device-Secret", CampusConfig::kDeviceSecret);
@@ -396,6 +422,15 @@ bool isPairedEventContextRequestPath(const String &path) {
   return path.startsWith(kPairedEventContextPath);
 }
 
+String buildPairedEventContextPath(size_t offset, size_t limit) {
+  String path = kPairedEventContextPath;
+  path += "?offset=";
+  path += String(static_cast<unsigned>(offset));
+  path += "&limit=";
+  path += String(static_cast<unsigned>(limit));
+  return path;
+}
+
 void forceCloseSecureClient(WiFiClientSecure &client) {
   client.stop();
   delay(kSecureClientCooldownMs);
@@ -500,6 +535,25 @@ void logCompactMemory(const char *label) {
                 static_cast<unsigned>(minHeap));
 }
 
+bool hasSafeHeapForPairedContextPage(const String &path, size_t offset,
+                                     String &error) {
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t largestBlock =
+      heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largestBlock >= kTlsLargestFreeBlockWarningBytes) {
+    return true;
+  }
+
+  error = "Context too large";
+  Serial.printf(
+      "[PAIR] skip context page path=%s offset=%u largest=%u belowSafe=%u free=%u\n",
+      path.c_str(), static_cast<unsigned>(offset),
+      static_cast<unsigned>(largestBlock),
+      static_cast<unsigned>(kTlsLargestFreeBlockWarningBytes),
+      static_cast<unsigned>(freeHeap));
+  return false;
+}
+
 void warnIfTlsLargestBlockLow(const String &path, uint8_t attempt = 0,
                               uint8_t maxAttempts = 0) {
   const uint32_t freeHeap = ESP.getFreeHeap();
@@ -521,6 +575,119 @@ void warnIfTlsLargestBlockLow(const String &path, uint8_t attempt = 0,
 
 void reserveJsonBody(const JsonDocument &doc, String &body) {
   body.reserve(measureJson(doc) + 1U);
+}
+
+void mergeEventInfoPage(const EventInfo &pageEvent, EventInfo &event) {
+  if (!pageEvent.isValid()) {
+    return;
+  }
+
+  if (!event.isValid()) {
+    event = pageEvent;
+    CampusEligibility::normalizeEvent(event);
+    return;
+  }
+
+  if (event.title.isEmpty()) {
+    event.title = pageEvent.title;
+  }
+  if (event.date.isEmpty()) {
+    event.date = pageEvent.date;
+  }
+  if (event.scheduledTime.isEmpty()) {
+    event.scheduledTime = pageEvent.scheduledTime;
+  }
+  if (event.scheduledTimeEnd.isEmpty()) {
+    event.scheduledTimeEnd = pageEvent.scheduledTimeEnd;
+  }
+  if (event.location.isEmpty()) {
+    event.location = pageEvent.location;
+  }
+  if (event.status.isEmpty()) {
+    event.status = pageEvent.status;
+  }
+  if (event.targetMode.isEmpty()) {
+    event.targetMode = pageEvent.targetMode;
+  }
+  if (event.courseFilterLabel.isEmpty()) {
+    event.courseFilterLabel = pageEvent.courseFilterLabel;
+  }
+  if (event.yearLevelFilterLabel.isEmpty()) {
+    event.yearLevelFilterLabel = pageEvent.yearLevelFilterLabel;
+  }
+  if (event.sectionFilterLabel.isEmpty()) {
+    event.sectionFilterLabel = pageEvent.sectionFilterLabel;
+  }
+  if (event.bodScope.isEmpty()) {
+    event.bodScope = pageEvent.bodScope;
+  }
+  if (event.bodScopeCanonical.isEmpty()) {
+    event.bodScopeCanonical = pageEvent.bodScopeCanonical;
+  }
+
+  appendUniqueStringValues(pageEvent.courseFilters, event.courseFilters);
+  appendUniqueStringValues(pageEvent.yearLevelFilters, event.yearLevelFilters);
+  appendUniqueStringValues(pageEvent.sectionFilters, event.sectionFilters);
+  appendUniqueStringValues(pageEvent.targetedStudentIds, event.targetedStudentIds);
+  appendUniqueStringValues(pageEvent.targetedSchoolIds, event.targetedSchoolIds);
+
+  event.requiresRegistration =
+      event.requiresRegistration || pageEvent.requiresRegistration;
+  event.preregistrationRequired =
+      event.preregistrationRequired || pageEvent.preregistrationRequired;
+  event.paymentRequired = event.paymentRequired || pageEvent.paymentRequired;
+  event.activeOnly = event.activeOnly || pageEvent.activeOnly;
+  event.timeOutFinalized = event.timeOutFinalized || pageEvent.timeOutFinalized;
+
+  CampusEligibility::normalizeEvent(event);
+}
+
+void upsertEventContextStudents(const std::vector<StudentInfo> &pageStudents,
+                                std::vector<StudentInfo> &students) {
+  for (const auto &student : pageStudents) {
+    bool updated = false;
+    for (auto &existing : students) {
+      if (existing.studentUid == student.studentUid) {
+        existing = student;
+        updated = true;
+        break;
+      }
+    }
+    if (!updated) {
+      students.push_back(student);
+    }
+  }
+}
+
+struct EventContextPageInfo {
+  bool hasMoreStudents = false;
+  bool hasMoreRecordedStudentIds = false;
+  bool hasMoreSelectedStudentIds = false;
+  bool hasMoreSelectedSchoolIds = false;
+  int nextOffset = -1;
+
+  bool hasMore() const {
+    return hasMoreStudents || hasMoreRecordedStudentIds ||
+           hasMoreSelectedStudentIds || hasMoreSelectedSchoolIds;
+  }
+};
+
+EventContextPageInfo eventContextPageInfoFromJson(JsonDocument &response) {
+  EventContextPageInfo info;
+  JsonObjectConst pageObject = response["page"].as<JsonObjectConst>();
+  if (pageObject.isNull()) {
+    return info;
+  }
+
+  info.hasMoreStudents = parseBoolValue(pageObject["hasMoreStudents"], false);
+  info.hasMoreRecordedStudentIds =
+      parseBoolValue(pageObject["hasMoreRecordedStudentIds"], false);
+  info.hasMoreSelectedStudentIds =
+      parseBoolValue(pageObject["hasMoreSelectedStudentIds"], false);
+  info.hasMoreSelectedSchoolIds =
+      parseBoolValue(pageObject["hasMoreSelectedSchoolIds"], false);
+  info.nextOffset = pageObject["nextOffset"] | -1;
+  return info;
 }
 
 bool ensureDynamicJsonCapacity(const DynamicJsonDocument &doc,
@@ -758,9 +925,16 @@ bool BackendClient::pairEvent(const String &eventId, EventInfo &event,
   logMemoryStage("after pairEvent payload", "/campusDevicePairEvent");
   logMemoryStage("before pairEvent response", "/campusDevicePairEvent");
 
-  DynamicJsonDocument response(32768);
+  DynamicJsonDocument response(kPairEventResponseJsonCapacity);
+  if (!ensureDynamicJsonCapacity(response, kPairEventResponseJsonCapacity,
+                                 "/campusDevicePairEvent",
+                                 "pairEvent response", error)) {
+    return false;
+  }
   logMemoryStage("after pairEvent response", "/campusDevicePairEvent");
-  if (!requestJson("POST", "/campusDevicePairEvent", body, response, error)) {
+  if (!requestJson("POST", "/campusDevicePairEvent", body, response, error,
+                   true, 1, 0, kPairEventMaxResponseBytes,
+                   "Pair response too large")) {
     return false;
   }
 
@@ -776,21 +950,90 @@ bool BackendClient::confirmPairing(const EventInfo &event, String &error) {
                    error);
 }
 
-bool BackendClient::fetchPairedEventContext(
-    EventInfo &event, std::vector<StudentInfo> &students,
-    std::vector<String> &recordedStudentIds, String &error) {
+bool BackendClient::downloadPairedEventContextToStorage(
+    EventInfo &event, StorageManager &storage, String &error) {
   if (!ensureSessionForRequest("/campusDevicePairedEventContext", error)) {
     return false;
   }
-
-  DynamicJsonDocument response(32768);
-  if (!requestJson("GET", "/campusDevicePairedEventContext", emptyRequestBody(), response,
-                   error)) {
+  if (!event.isValid()) {
+    error = "No paired event";
+    return false;
+  }
+  if (!storage.beginPairedEventStudentContext(event.eventId)) {
+    error = "Context storage unavailable";
     return false;
   }
 
-  return parseEventContextResponse(response, event, students, recordedStudentIds,
-                                   error);
+  size_t offset = 0;
+  for (size_t pageIndex = 0; pageIndex < kPairedEventContextMaxPages; ++pageIndex) {
+    const String path =
+        buildPairedEventContextPath(offset, kPairedEventContextPageSize);
+    if (!hasSafeHeapForPairedContextPage(path, offset, error)) {
+      return false;
+    }
+
+    DynamicJsonDocument response(kPairedEventContextResponseJsonCapacity);
+    if (!ensureDynamicJsonCapacity(response,
+                                   kPairedEventContextResponseJsonCapacity,
+                                   path, "pairedEventContext response", error)) {
+      return false;
+    }
+    if (!requestJson("GET", path, emptyRequestBody(), response, error, true,
+                     CampusConfig::kHttpRetryAttempts, 0,
+                     kPairedEventContextMaxResponseBytes,
+                     "Paired event context response too large")) {
+      return false;
+    }
+
+    EventInfo pageEvent;
+    std::vector<StudentInfo> pageStudents;
+    std::vector<String> pageRecordedStudentIds;
+    if (!parseEventContextResponse(response, pageEvent, pageStudents,
+                                   pageRecordedStudentIds, error)) {
+      if (error.isEmpty()) {
+        error = "Paired event context parse failed";
+      }
+      return false;
+    }
+
+    mergeEventInfoPage(pageEvent, event);
+    if (!storage.appendPairedEventStudentPage(event.eventId, pageStudents,
+                                              pageRecordedStudentIds)) {
+      error = "Context storage unavailable";
+      return false;
+    }
+
+    Serial.printf(
+        "[PAIR] streamed context page eventId=%s offset=%u students=%u recorded=%u\n",
+        event.eventId.c_str(), static_cast<unsigned>(offset),
+        static_cast<unsigned>(pageStudents.size()),
+        static_cast<unsigned>(pageRecordedStudentIds.size()));
+    const EventContextPageInfo pageInfo = eventContextPageInfoFromJson(response);
+    pageStudents.clear();
+    pageRecordedStudentIds.clear();
+    response.clear();
+
+    if (!pageInfo.hasMore()) {
+      if (!storage.finalizePairedEventStudentContext(event.eventId)) {
+        error = "Context storage unavailable";
+        return false;
+      }
+      return true;
+    }
+
+    const size_t nextOffset =
+        pageInfo.nextOffset > static_cast<int>(offset)
+            ? static_cast<size_t>(pageInfo.nextOffset)
+            : (offset + kPairedEventContextPageSize);
+    if (nextOffset <= offset) {
+      error = "Paired event context pagination stalled";
+      return false;
+    }
+    offset = nextOffset;
+  }
+
+  error = "Paired event context exceeded page limit";
+  return false;
 }
 
 bool BackendClient::fetchPendingEnrollments(std::vector<StudentInfo> &students,
@@ -1439,6 +1682,12 @@ bool BackendClient::parseEventContextResponse(
     if (event.sectionFilterLabel.isEmpty()) {
       event.sectionFilterLabel = eligibilityEvent.sectionFilterLabel;
     }
+    if (event.bodScope.isEmpty()) {
+      event.bodScope = eligibilityEvent.bodScope;
+    }
+    if (event.bodScopeCanonical.isEmpty()) {
+      event.bodScopeCanonical = eligibilityEvent.bodScopeCanonical;
+    }
     appendStringValues(eligibilityObject["courseFilters"], event.courseFilters);
     appendStringValues(eligibilityObject["targetCourses"], event.courseFilters);
     appendStringValues(eligibilityObject["courses"], event.courseFilters);
@@ -1489,6 +1738,11 @@ bool BackendClient::parseEventContextResponse(
                                         rosterObject["sectionFilter"] |
                                         rosterObject["targetSection"] | "");
     }
+    if (event.bodScope.isEmpty()) {
+      event.bodScope = String(rosterObject["bodScope"] |
+                              rosterObject["bodScopeFilter"] |
+                              rosterObject["organizationScope"] | "");
+    }
     appendStringValues(rosterObject["courseFilters"], event.courseFilters);
     appendStringValues(rosterObject["yearLevelFilters"], event.yearLevelFilters);
     appendStringValues(rosterObject["sectionFilters"], event.sectionFilters);
@@ -1529,7 +1783,8 @@ bool BackendClient::requestJson(const char *method, const String &path,
                                 const String &body,
                                 JsonDocument &response, String &error,
                                 bool allowRetry, uint8_t maxAttempts,
-                                size_t recordCount) {
+                                size_t recordCount, size_t maxResponseBytes,
+                                const char *responseTooLargeError) {
   const RequestTarget target = buildRequestTarget(path);
   lastRequestUrl_ = target.url;
   lastRequestPayloadSize_ = body.length();
@@ -1796,6 +2051,22 @@ bool BackendClient::requestJson(const char *method, const String &path,
       if (stream == nullptr) {
         lastFailureStage_ = "response_read";
         error = "Response stream unavailable";
+        cleanupRequest(&https, "after response cleanup");
+        return false;
+      }
+
+      if (maxResponseBytes > 0 && responseBytes > 0 &&
+          static_cast<size_t>(responseBytes) > maxResponseBytes) {
+        lastFailureStage_ = "response_too_large";
+        error =
+            (responseTooLargeError != nullptr && responseTooLargeError[0] != '\0')
+                ? String(responseTooLargeError)
+                : String("Response too large");
+        lastHttpErrorString_ = error + " bytes=" + String(responseBytes) +
+                               " limit=" + String(maxResponseBytes);
+        Serial.printf("[HTTP] response too large path=%s bytes=%d limit=%u\n",
+                      path.c_str(), responseBytes,
+                      static_cast<unsigned>(maxResponseBytes));
         cleanupRequest(&https, "after response cleanup");
         return false;
       }

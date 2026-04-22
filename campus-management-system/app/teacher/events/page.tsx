@@ -36,6 +36,7 @@ import type { CampusTableColumn } from "@/components/ui";
 import { CampusMetricSkeleton } from "@/components/ui";
 import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import { db } from "@/lib/firebase";
+import { createEventDocumentDownloadUrl } from "@/lib/firebase-functions";
 import { formatStudentFullName } from "@/lib/student-name";
 import { campusToast } from "@/lib/toast";
 import {
@@ -324,6 +325,69 @@ export default function TeacherEventsPage() {
     () => selectedDocuments.slice(0, FILE_PREVIEW_LIMIT),
     [selectedDocuments],
   );
+
+  async function downloadTeacherEventDocument(
+    eventId: string,
+    file: { id: string; name: string },
+  ) {
+    if (!eventId || !file.id) {
+      campusToast.error({
+        title: "Download failed",
+        description: "The selected event document is missing its event context.",
+        dedupeKey: `teacher-event-document-missing:${eventId || "unknown"}:${file.id || "unknown"}`,
+      });
+      return;
+    }
+
+    try {
+      const result = await createEventDocumentDownloadUrl({
+        eventId,
+        docId: file.id,
+      });
+
+      downloadTeacherFile({
+        url: result.url,
+        name: result.fileName || result.name || file.name,
+        sourceLabel: "document",
+      });
+    } catch (error) {
+      campusToast.error({
+        title: "Download failed",
+        description:
+          error instanceof Error && error.message.trim() ?
+            error.message :
+            "Failed to prepare the event document download.",
+        dedupeKey: `teacher-event-document-download:${eventId}:${file.id}`,
+      });
+    }
+  }
+
+  function handleTeacherEventFileDownload(file: {
+    id: string;
+    kind: "docs" | "images";
+    name: string;
+    downloadURL?: string;
+  }) {
+    if (file.kind === "images") {
+      downloadTeacherFile({
+        url: file.downloadURL ?? "",
+        name: file.name,
+        sourceLabel: "image",
+      });
+      return;
+    }
+
+    if (!selectedEvent) {
+      campusToast.error({
+        title: "Download failed",
+        description: "The selected event is no longer available.",
+        dedupeKey: `teacher-event-document-selected-event-missing:${file.id}`,
+      });
+      return;
+    }
+
+    void downloadTeacherEventDocument(selectedEvent.id, file);
+  }
 
   const upcomingCount = useMemo(
     () => events.filter((event) => event.lifecycle === "upcoming").length,
@@ -1050,13 +1114,7 @@ export default function TeacherEventsPage() {
                         previewDocumentFiles={previewDocumentFiles}
                         onOpenImages={() => setImagesModalOpen(true)}
                         onOpenDocuments={() => setDocumentsModalOpen(true)}
-                        onDownloadFile={(file) =>
-                          downloadTeacherFile({
-                            url: file.downloadURL ?? "",
-                            name: file.name,
-                            sourceLabel: file.kind === "images" ? "image" : "document",
-                          })
-                        }
+                        onDownloadFile={handleTeacherEventFileDownload}
                       />
                     </div>
                   </Tab>
@@ -1093,13 +1151,18 @@ export default function TeacherEventsPage() {
         files={selectedDocuments}
         eventTitle={selectedEvent?.title || ""}
         isCompactView={isCompactView}
-        onDownloadFile={(file) =>
-          downloadTeacherFile({
-            url: file.downloadURL ?? "",
-            name: file.name,
-            sourceLabel: "document",
-          })
-        }
+        onDownloadFile={(file) => {
+          if (!selectedEvent) {
+            campusToast.error({
+              title: "Download failed",
+              description: "The selected event is no longer available.",
+              dedupeKey: `teacher-event-document-modal-missing:${file.id}`,
+            });
+            return;
+          }
+
+          void downloadTeacherEventDocument(selectedEvent.id, file);
+        }}
         emptyState={{
           title: "No documents found",
           description: "Teacher-visible event documents will appear here once uploaded.",

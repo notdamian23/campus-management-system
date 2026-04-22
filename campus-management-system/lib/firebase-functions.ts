@@ -333,6 +333,101 @@ export type FinalizeCampusDocumentUploadResult = {
   status: "active";
 };
 
+export type CreateEventDocumentUploadTargetPayload = {
+  eventId: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+};
+
+export type CreateEventDocumentUploadTargetResult = {
+  eventId: string;
+  docId: string;
+  storagePath: string;
+  fileName: string;
+  status: "pending-upload";
+};
+
+export type FinalizeEventDocumentUploadPayload = {
+  eventId: string;
+  docId: string;
+  size: number;
+  contentType: string;
+};
+
+export type FinalizeEventDocumentUploadResult = {
+  eventId: string;
+  docId: string;
+  storagePath: string;
+  fileName: string;
+  size: number;
+  contentType: string;
+  status: "active";
+};
+
+export type ListEventDocumentsPayload = {
+  eventId: string;
+};
+
+export type EventDocumentListItem = {
+  id: string;
+  name: string;
+  fileName: string;
+  path: string;
+  storagePath: string;
+  downloadURL: string;
+  type: string;
+  contentType: string;
+  size: number;
+  uploadedByUid: string;
+  status: "active";
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type ListEventDocumentsResult = {
+  documents: EventDocumentListItem[];
+};
+
+export type CleanupPendingEventDocumentUploadPayload = {
+  eventId: string;
+  docId: string;
+};
+
+export type CleanupPendingEventDocumentUploadResult = {
+  eventId: string;
+  docId: string;
+  cleanupAllowed: boolean;
+  cleanupPerformed: boolean;
+  status: "pending-upload" | "active";
+  storagePath: string;
+};
+
+export type CreateEventDocumentDownloadUrlPayload = {
+  eventId: string;
+  docId: string;
+};
+
+export type CreateEventDocumentDownloadUrlResult = {
+  eventId: string;
+  docId: string;
+  name: string;
+  fileName: string;
+  url: string;
+  expiresAt: number;
+};
+
+export type DeleteEventDocumentPayload = {
+  eventId: string;
+  docId: string;
+};
+
+export type DeleteEventDocumentResult = {
+  eventId: string;
+  docId: string;
+  deleted: boolean;
+};
+
 export type DeleteCampusDocumentPayload = {
   docId: string;
 };
@@ -415,6 +510,21 @@ export type UpdateCampusPaymentResult = {
   paymentId: string;
   updated: true;
   totalStudents: number;
+  paidCount: number;
+  unpaidCount: number;
+};
+
+export type RepairCampusPaymentAssignmentsPayload = {
+  paymentId: string;
+};
+
+export type RepairCampusPaymentAssignmentsResult = {
+  paymentId: string;
+  repaired: true;
+  targetCount: number;
+  totalStudents: number;
+  createdAssignmentCount: number;
+  removedAssignmentCount: number;
   paidCount: number;
   unpaidCount: number;
 };
@@ -886,6 +996,107 @@ export async function finalizeCampusDocumentUpload(
   return result.data;
 }
 
+export async function createEventDocumentUploadTarget(
+  payload: CreateEventDocumentUploadTargetPayload,
+): Promise<CreateEventDocumentUploadTargetResult> {
+  logAuthEvent("info", "Creating event document upload target via callable", {
+    eventId: payload.eventId,
+    size: payload.size,
+  });
+
+  const callable = httpsCallable<
+    CreateEventDocumentUploadTargetPayload,
+    CreateEventDocumentUploadTargetResult
+  >(getCampusFunctions(), "createEventDocumentUploadTarget");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function finalizeEventDocumentUpload(
+  payload: FinalizeEventDocumentUploadPayload,
+): Promise<FinalizeEventDocumentUploadResult> {
+  logAuthEvent("info", "Finalizing event document upload via callable", {
+    eventId: payload.eventId,
+    docId: payload.docId,
+  });
+
+  const callable = httpsCallable<
+    FinalizeEventDocumentUploadPayload,
+    FinalizeEventDocumentUploadResult
+  >(getCampusFunctions(), "finalizeEventDocumentUpload");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function listEventDocuments(
+  payload: ListEventDocumentsPayload,
+): Promise<ListEventDocumentsResult> {
+  logAuthEvent("info", "Listing event documents via callable", {
+    eventId: payload.eventId,
+  });
+
+  const callable = httpsCallable<
+    ListEventDocumentsPayload,
+    ListEventDocumentsResult
+  >(getCampusFunctions(), "listEventDocuments");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function cleanupPendingEventDocumentUpload(
+  payload: CleanupPendingEventDocumentUploadPayload,
+): Promise<CleanupPendingEventDocumentUploadResult> {
+  logAuthEvent("info", "Cleaning up pending event document upload via callable", {
+    eventId: payload.eventId,
+    docId: payload.docId,
+  });
+
+  const callable = httpsCallable<
+    CleanupPendingEventDocumentUploadPayload,
+    CleanupPendingEventDocumentUploadResult
+  >(getCampusFunctions(), "cleanupPendingEventDocumentUpload");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function createEventDocumentDownloadUrl(
+  payload: CreateEventDocumentDownloadUrlPayload,
+): Promise<CreateEventDocumentDownloadUrlResult> {
+  logAuthEvent("info", "Creating event document download URL via callable", {
+    eventId: payload.eventId,
+    docId: payload.docId,
+  });
+
+  const callable = httpsCallable<
+    CreateEventDocumentDownloadUrlPayload,
+    CreateEventDocumentDownloadUrlResult
+  >(getCampusFunctions(), "createEventDocumentDownloadUrl");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function deleteEventDocument(
+  payload: DeleteEventDocumentPayload,
+): Promise<DeleteEventDocumentResult> {
+  logAuthEvent("info", "Deleting event document via callable", {
+    eventId: payload.eventId,
+    docId: payload.docId,
+  });
+
+  const callable = httpsCallable<
+    DeleteEventDocumentPayload,
+    DeleteEventDocumentResult
+  >(getCampusFunctions(), "deleteEventDocument");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
 export async function deleteCampusDocument(
   payload: DeleteCampusDocumentPayload,
 ): Promise<DeleteCampusDocumentResult> {
@@ -986,6 +1197,22 @@ export async function updateCampusPayment(
     UpdateCampusPaymentPayload,
     UpdateCampusPaymentResult
   >(getCampusFunctions(), "updateCampusPayment");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function repairCampusPaymentAssignments(
+  payload: RepairCampusPaymentAssignmentsPayload,
+): Promise<RepairCampusPaymentAssignmentsResult> {
+  logAuthEvent("info", "Repairing CAMPUS payment assignments via callable", {
+    paymentId: payload.paymentId,
+  });
+
+  const callable = httpsCallable<
+    RepairCampusPaymentAssignmentsPayload,
+    RepairCampusPaymentAssignmentsResult
+  >(getCampusFunctions(), "repairCampusPaymentAssignments");
 
   const result = await callable(payload);
   return result.data;

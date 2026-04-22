@@ -25,9 +25,8 @@ class BackendClient {
                  std::vector<StudentInfo> &students,
                  std::vector<String> &recordedStudentIds, String &error);
   bool confirmPairing(const EventInfo &event, String &error);
-  bool fetchPairedEventContext(EventInfo &event, std::vector<StudentInfo> &students,
-                               std::vector<String> &recordedStudentIds,
-                               String &error);
+  bool downloadPairedEventContextToStorage(EventInfo &event, StorageManager &storage,
+                                           String &error);
   bool fetchPendingEnrollments(std::vector<StudentInfo> &students, String &error);
   bool submitEnrollment(const StudentInfo &student, String &error);
   bool downloadFingerprintRoster(StorageManager &storage,
@@ -65,7 +64,8 @@ class BackendClient {
   bool requestJson(const char *method, const String &path, const String &body,
                    JsonDocument &response, String &error,
                    bool allowRetry = true, uint8_t maxAttempts = 1,
-                   size_t recordCount = 0);
+                   size_t recordCount = 0, size_t maxResponseBytes = 0,
+                   const char *responseTooLargeError = nullptr);
 
   String sessionToken_;
   int lastHttpStatusCode_ = 0;

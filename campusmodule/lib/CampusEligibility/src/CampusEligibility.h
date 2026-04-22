@@ -44,6 +44,7 @@ String joinCanonicalList(const std::vector<String> &values);
 size_t targetedStudentCount(const EventInfo &event);
 bool isSpecificStudentsMode(const EventInfo &event);
 bool hasBroadAudienceFilters(const EventInfo &event);
+bool requiresPairedStudentContext(const EventInfo &event);
 void normalizeStudent(StudentInfo &student);
 void normalizeEvent(EventInfo &event);
 EventEligibilityDecision evaluateStudentForEvent(

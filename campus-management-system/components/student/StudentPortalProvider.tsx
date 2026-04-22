@@ -1113,7 +1113,16 @@ export function StudentPortalProvider({
       return;
     }
 
-    logStudentLoaderDebug("payments loader", profile, { phase: "start" });
+    const authCurrentUserUid = String(auth.currentUser?.uid ?? "").trim();
+    const profileUid = profile.uid;
+    logStudentLoaderDebug("payments loader", profile, {
+      phase: "start",
+      extra: {
+        authCurrentUserUid,
+        profileUid,
+        authMatchesProfileUid: !authCurrentUserUid || authCurrentUserUid === profileUid,
+      },
+    });
     setLoadingPayments(true);
     let active = true;
 
@@ -1147,12 +1156,29 @@ export function StudentPortalProvider({
               (a.updatedAtMs || a.createdAtMs);
           });
         setPayments(cleaned);
+        logStudentLoaderDebug("payments loader", profile, {
+          phase: "success",
+          extra: {
+            authCurrentUserUid: String(auth.currentUser?.uid ?? "").trim(),
+            profileUid,
+            authMatchesProfileUid:
+              !auth.currentUser?.uid || auth.currentUser.uid === profileUid,
+            paymentCount: cleaned.length,
+            paymentIds: cleaned.map((payment) => payment.paymentId),
+          },
+        });
       } catch (e: unknown) {
         if (!active) return;
         setPayments([]);
         logStudentLoaderDebug("payments loader", profile, {
           phase: "error",
           error: e,
+          extra: {
+            authCurrentUserUid: String(auth.currentUser?.uid ?? "").trim(),
+            profileUid,
+            authMatchesProfileUid:
+              !auth.currentUser?.uid || auth.currentUser.uid === profileUid,
+          },
         });
       } finally {
         if (active) setLoadingPayments(false);

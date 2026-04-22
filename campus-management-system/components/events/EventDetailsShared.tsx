@@ -720,7 +720,7 @@ function DocumentListItem({
             color="primary"
             startContent={<Download size={16} />}
             onPress={() => onDownloadFile(file)}
-            isDisabled={!file.downloadURL}
+            isDisabled={!file.id}
             className="w-full sm:w-auto"
           >
             Download

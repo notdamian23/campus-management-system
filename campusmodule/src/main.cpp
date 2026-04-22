@@ -234,6 +234,10 @@ String eligibilityTargetModeLabel(const EventInfo &event) {
                                                           : "broad";
 }
 
+bool pairedEventNeedsStudentContext(const EventInfo &event) {
+  return CampusEligibility::requiresPairedStudentContext(event);
+}
+
 void logEligibilityDecision(
     const StudentInfo &student, const EventInfo &event,
     const CampusEligibility::EventEligibilityDecision &decision) {
@@ -1027,7 +1031,11 @@ void cachePairedEventContext(const EventInfo &event,
                              const std::vector<String> &recordedStudentIds) {
   EventInfo eventToCache = event;
   CampusEligibility::normalizeEvent(eventToCache);
+  const bool needsStudentContext = pairedEventNeedsStudentContext(eventToCache);
   std::vector<StudentInfo> studentsToCache = students;
+  if (!needsStudentContext) {
+    studentsToCache.clear();
+  }
   for (auto &student : studentsToCache) {
     CampusEligibility::normalizeStudent(student);
   }
@@ -1038,9 +1046,10 @@ void cachePairedEventContext(const EventInfo &event,
 
   g_pairedEvent = eventToCache;
   g_cachedPairedStudents = studentsToCache;
-  g_remoteRecordedStudentIds = recordedStudentIds;
+  g_remoteRecordedStudentIds.clear();
   g_pairedEventRecoveredFromAttendance = false;
-  g_storage.savePairedEventContext(eventToCache, studentsToCache, recordedStudentIds);
+  g_storage.savePairedEventContext(eventToCache, studentsToCache,
+                                   recordedStudentIds);
 }
 
 bool recoverPairedEventFromAttendance(EventInfo &event) {
@@ -1104,6 +1113,10 @@ void loadStoredPairedEventContext() {
     Serial.printf("[PAIR] cached targeted count=%u\n",
                   static_cast<unsigned>(
                       CampusEligibility::targetedStudentCount(g_pairedEvent)));
+    Serial.printf("[PAIR] cached student context on SD=%s\n",
+                  g_storage.hasPairedEventStudentContext(g_pairedEvent.eventId) ?
+                      "yes" :
+                      "no");
     return;
   }
 
@@ -1297,12 +1310,23 @@ bool refreshPairedEventContext(String &error) {
   EventInfo event;
   std::vector<StudentInfo> students;
   std::vector<String> recordedStudentIds;
-  if (!g_backend.fetchPairedEventContext(event, students, recordedStudentIds,
-                                         error)) {
+  if (!g_backend.pairEvent(g_pairedEvent.eventId, event, students,
+                           recordedStudentIds, error)) {
     return false;
   }
 
-  cachePairedEventContext(event, students, recordedStudentIds);
+  if (pairedEventNeedsStudentContext(event)) {
+    Serial.printf("[PAIR] refresh eventId=%s requiresContext=yes\n",
+                  event.eventId.c_str());
+    if (!g_backend.downloadPairedEventContextToStorage(event, g_storage, error)) {
+      return false;
+    }
+    cachePairedEventContext(event, {}, {});
+  } else {
+    Serial.printf("[PAIR] refresh eventId=%s requiresContext=no reason=broad-filter-eligible\n",
+                  event.eventId.c_str());
+    cachePairedEventContext(event, {}, recordedStudentIds);
+  }
   return true;
 }
 
@@ -2108,8 +2132,29 @@ void confirmSelectedPairEvent() {
   String error;
   const EventInfo &selectedEvent =
       g_cachedAvailableEvents[clampIndex(g_pairEventIndex, g_cachedAvailableEvents)];
-  const bool paired = g_backend.pairEvent(selectedEvent.eventId, pairedEvent, students,
-                                          recordedStudentIds, error);
+  bool paired = g_backend.pairEvent(selectedEvent.eventId, pairedEvent, students,
+                                    recordedStudentIds, error);
+  if (paired) {
+    const bool requiresContext = pairedEventNeedsStudentContext(pairedEvent);
+    Serial.printf("[PAIR] eventId=%s targetMode=%s requiresContext=%s\n",
+                  pairedEvent.eventId.c_str(),
+                  eligibilityTargetModeLabel(pairedEvent).c_str(),
+                  requiresContext ? "yes" : "no");
+    if (requiresContext) {
+      if (!g_backend.downloadPairedEventContextToStorage(pairedEvent, g_storage,
+                                                         error)) {
+        Serial.printf("[PAIR] context download failed after pair event=%s error=%s\n",
+                      selectedEvent.eventId.c_str(), error.c_str());
+        paired = false;
+      } else {
+        cachePairedEventContext(pairedEvent, {}, {});
+      }
+    } else {
+      Serial.printf("[PAIR] skip paired context download eventId=%s reason=broad-filter-eligible\n",
+                    pairedEvent.eventId.c_str());
+      cachePairedEventContext(pairedEvent, {}, recordedStudentIds);
+    }
+  }
   disconnectAfterOnlineTask();
 
   if (!paired) {
@@ -2118,7 +2163,6 @@ void confirmSelectedPairEvent() {
     return;
   }
 
-  cachePairedEventContext(pairedEvent, students, recordedStudentIds);
   setScreen(AppScreen::Menu);
   showTimedMessage("Event Paired", trim16(pairedEvent.title), kMediumMessageMs);
   g_feedback.success();

@@ -17,10 +17,16 @@ class StorageManager {
   bool savePairedEventContext(const EventInfo &event,
                               const std::vector<StudentInfo> &students,
                               const std::vector<String> &recordedStudentIds);
+  bool beginPairedEventStudentContext(const String &eventId);
+  bool appendPairedEventStudentPage(const String &eventId,
+                                    const std::vector<StudentInfo> &students,
+                                    const std::vector<String> &recordedStudentIds);
+  bool finalizePairedEventStudentContext(const String &eventId);
   bool loadPairedEventContext(EventInfo &event,
                               std::vector<StudentInfo> &students,
                               std::vector<String> &recordedStudentIds) const;
   bool hasPairedEventContextCache() const;
+  bool hasPairedEventStudentContext(const String &eventId) const;
   String pairedEventContextStatus() const;
   CampusEligibility::EventEligibilityDecision evaluateStudentEligibilityForEvent(
       const EventInfo &event, const StudentInfo &student) const;
@@ -108,6 +114,22 @@ class StorageManager {
   bool saveDeviceConfigSnapshot() const;
   bool backupAttendanceToSd(const AttendanceRecord &record);
   bool mountSdCard();
+  bool removePairedEventStudentContextFiles(const String &eventId);
+  bool removePairedEventStudentRosterFiles(const String &eventId);
+  bool appendPairedEventStudentsToSd(const String &path,
+                                     const std::vector<StudentInfo> &students);
+  bool appendRecordedStudentIdsToSd(const String &path,
+                                    const std::vector<String> &recordedStudentIds);
+  bool pairedEventStudentContextContainsOnSd(const String &eventId,
+                                             const String &studentUid,
+                                             const String &schoolId) const;
+  bool ensureRemoteAttendanceRecordedFile(const String &eventId);
+  bool mergeRemoteAttendanceRecordedToSd(
+      const String &eventId, const std::vector<String> &recordedStudentIds);
+  bool remoteAttendanceRecordedOnSd(const String &eventId,
+                                    const String &studentUid) const;
+  bool appendRemoteAttendanceRecordedOnSd(const String &eventId,
+                                          const String &studentUid);
 
   mutable Preferences prefs_;
   bool prefsReady_ = false;

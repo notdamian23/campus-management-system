@@ -120,7 +120,7 @@ void normalizeStringVector(std::vector<String> &values,
 
 bool applyRestrictionChecks(const EventInfo &event, const StudentInfo &student,
                             EventEligibilityDecision &decision) {
-  if (student.activeKnown && !student.isActive) {
+  if (event.activeOnly && student.activeKnown && !student.isActive) {
     decision.blockedByInactive = true;
     decision.finalReason = "student_inactive";
     return false;
@@ -324,6 +324,11 @@ bool hasBroadAudienceFilters(const EventInfo &event) {
          !event.sectionFilters.empty();
 }
 
+bool requiresPairedStudentContext(const EventInfo &event) {
+  return isSpecificStudentsMode(event) || event.preregistrationRequired ||
+         event.requiresRegistration || event.paymentRequired;
+}
+
 void normalizeStudent(StudentInfo &student) {
   student.studentUid = trimAndCollapseWhitespace(student.studentUid);
   student.schoolId = trimAndCollapseWhitespace(student.schoolId);
@@ -482,6 +487,16 @@ EventEligibilityDecision evaluateStudentForEvent(
     return decision;
   }
 
+  if (!requiresPairedStudentContext(normalizedEvent)) {
+    if (!applyRestrictionChecks(normalizedEvent, normalizedStudent, decision)) {
+      return decision;
+    }
+
+    decision.allowed = true;
+    decision.finalReason = "matched_all_students_event";
+    return decision;
+  }
+
   if (decision.matchedPairedRoster) {
     if (!applyRestrictionChecks(normalizedEvent, normalizedStudent, decision)) {
       return decision;
@@ -529,6 +544,9 @@ String rejectionDetail(const EventEligibilityDecision &decision) {
   }
   if (decision.finalReason == "student_not_in_targeted_list") {
     return "Not targeted";
+  }
+  if (decision.finalReason == "student_not_authorized_for_event") {
+    return "Not authorized";
   }
   if (decision.finalReason == "student_not_in_target_scope") {
     if (decision.blockedByCourse) {

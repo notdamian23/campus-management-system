@@ -22,6 +22,8 @@ const DEFAULT_ENROLLMENT_SESSION_LIMIT = 15;
 const MAX_ENROLLMENT_SESSION_LIMIT = 25;
 const DEFAULT_SYNC_BATCH_LIMIT = 25;
 const MAX_SYNC_BATCH_LIMIT = 50;
+const DEFAULT_PAIRED_EVENT_CONTEXT_LIMIT = 20;
+const MAX_PAIRED_EVENT_CONTEXT_LIMIT = 25;
 const DEFAULT_CLEANUP_LIMIT = 10;
 const MAX_CLEANUP_LIMIT = 50;
 const TOKEN_VERSION = 1;
@@ -44,14 +46,19 @@ type PortableEventSummary = {
   scheduledTimeEnd: string;
   location: string;
   status: string;
+  targetMode: string;
   yearLevels: string[];
   courses: string[];
+  sectionFilters: string[];
   targetStudent: string;
   selectedStudentIds: string[];
   selectedSchoolIds: string[];
+  bodScope: string;
   isPreReg: boolean;
   requiresRegistration: boolean;
+  preregistrationRequired: boolean;
   requiresPayment: boolean;
+  activeOnly: boolean;
   linkedPaymentId: string;
   createdAtMs: number;
   sortMs: number;
@@ -64,10 +71,12 @@ type EventContextStudent = {
   studentName: string;
   course: string;
   yearLevel: string;
+  section: string;
   fingerprintTemplateId: number;
   fingerprintStatus: string;
   fingerprintDeviceId: string;
   queueId: string;
+  bodScope: string;
   registrationId: string;
 };
 
@@ -78,6 +87,9 @@ type EventRegistrationLookup = {
   studentName: string;
   course: string;
   yearLevel: string;
+  section: string;
+  bodScope: string;
+  active: boolean;
   status: "PRE_REGISTERED" | "WAITLISTED" | "CANCELLED";
 };
 
@@ -88,6 +100,8 @@ type PortableFingerprintOwnerEntry = {
   name: string;
   course: string;
   yearLevel: string;
+  section: string;
+  bodScope: string;
   hasFingerprint: boolean;
   active: boolean;
 };
@@ -247,6 +261,48 @@ function toMillis(value: unknown): number {
 function toPositiveInt(value: unknown, fallback = 0): number {
   const parsed = Number.parseInt(normalizeText(value), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoolValue(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  const normalized = normalizeLower(value);
+  if (!normalized) {
+    return fallback;
+  }
+  if (
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "y" ||
+    normalized === "1" ||
+    normalized === "active" ||
+    normalized === "paid" ||
+    normalized === "approved" ||
+    normalized === "registered" ||
+    normalized === "enrolled" ||
+    normalized === "complete"
+  ) {
+    return true;
+  }
+  if (
+    normalized === "false" ||
+    normalized === "no" ||
+    normalized === "n" ||
+    normalized === "0" ||
+    normalized === "inactive" ||
+    normalized === "unpaid" ||
+    normalized === "pending" ||
+    normalized === "rejected" ||
+    normalized === "disabled"
+  ) {
+    return false;
+  }
+  return fallback;
 }
 
 function fingerprintTemplateRef(templateId: number) {
@@ -473,6 +529,18 @@ function buildFingerprintOwnerEntry(
       normalizeYearLevel(mergedData.yearLevel ?? mergedData.year) ||
       normalizeYearLevel(templateData?.yearLevel ?? templateData?.year) ||
       "Unassigned",
+    section:
+      normalizeSection(mergedData.section) ||
+      normalizeSection(templateData?.section) ||
+      "",
+    bodScope:
+      normalizeText(mergedData.bodScope) ||
+      normalizeText(mergedData.organizationScope) ||
+      normalizeText(mergedData.scope) ||
+      normalizeText(templateData?.bodScope) ||
+      normalizeText(templateData?.organizationScope) ||
+      normalizeText(templateData?.scope) ||
+      "",
     hasFingerprint,
     active,
   };
@@ -489,6 +557,8 @@ function mergeFingerprintOwnerEntry(
     name: current.name || next.name,
     course: current.course !== "Unassigned" ? current.course : next.course,
     yearLevel: current.yearLevel !== "Unassigned" ? current.yearLevel : next.yearLevel,
+    section: current.section || next.section,
+    bodScope: current.bodScope || next.bodScope,
     hasFingerprint: current.hasFingerprint || next.hasFingerprint,
     active: current.active || next.active,
   };
@@ -756,6 +826,12 @@ function sendJson(res: Response, status: number, payload: unknown): void {
   res.status(status).json(payload);
 }
 
+function slicePage<T>(items: T[], offset: number, limit: number): T[] {
+  const safeOffset = Math.max(0, offset);
+  const safeLimit = Math.max(1, limit);
+  return items.slice(safeOffset, safeOffset + safeLimit);
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError) {
     return error.message;
@@ -927,6 +1003,41 @@ function normalizeCourse(value: unknown): string {
   return normalizeText(value);
 }
 
+function normalizeSection(value: unknown): string {
+  return normalizeText(value).toUpperCase();
+}
+
+function normalizeScope(value: unknown): string {
+  return normalizeLower(value).replace(/[^a-z0-9]+/g, "");
+}
+
+function normalizeTargetMode(value: unknown): string {
+  const compact = normalizeScope(value);
+  if (!compact) {
+    return "";
+  }
+  if (
+    compact === "specificstudents" ||
+    compact === "specificstudent" ||
+    compact === "specific" ||
+    compact === "selectedstudents" ||
+    compact === "selectedstudent"
+  ) {
+    return "specificStudents";
+  }
+  if (
+    compact === "broad" ||
+    compact === "general" ||
+    compact === "allaudience" ||
+    compact === "allstudents" ||
+    compact === "filters" ||
+    compact === "generalaudience"
+  ) {
+    return "broad";
+  }
+  return compact;
+}
+
 function normalizeEnrollmentSessionStatus(value: unknown): EnrollmentSessionStatus {
   const raw = normalizeLower(value);
   if (raw === "paired") return "paired";
@@ -970,6 +1081,10 @@ function normalizeTargetList(value: unknown): string[] {
 
 function normalizeIdentifierList(value: unknown): string[] {
   return dedupeStrings(asStringArray(value));
+}
+
+function normalizeSectionList(value: unknown): string[] {
+  return dedupeStrings(asStringArray(value).map((item) => normalizeSection(item)).filter(Boolean));
 }
 
 function getEventLinkedPaymentId(data: FirebaseFirestore.DocumentData): string {
@@ -1030,6 +1145,9 @@ function evaluateEventEligibility(
     studentName: string;
     course: string;
     yearLevel: string;
+    section?: unknown;
+    bodScope?: unknown;
+    active?: unknown;
     registrationStatus?: unknown;
     paymentStatus?: unknown;
   }
@@ -1055,6 +1173,18 @@ function evaluateEventEligibility(
     if (!matchesTargetList(event.yearLevels, normalizeYearLevel(candidate.yearLevel))) {
       return {allowed: false, reason: "not_target_year"};
     }
+
+    if (!matchesTargetList(event.sectionFilters, normalizeSection(candidate.section))) {
+      return {allowed: false, reason: "not_target_section"};
+    }
+  }
+
+  if (event.bodScope && normalizeScope(candidate.bodScope) !== normalizeScope(event.bodScope)) {
+    return {allowed: false, reason: "bod_scope_mismatch"};
+  }
+
+  if (event.activeOnly && parseBoolValue(candidate.active, true) !== true) {
+    return {allowed: false, reason: "inactive_student"};
   }
 
   if (event.requiresRegistration &&
@@ -1127,6 +1257,15 @@ function registrationLookupFromSnapshot(
       studentId,
     course: normalizeCourse(data.course),
     yearLevel: normalizeYearLevel(data.year ?? data.yearLevel),
+    section: normalizeSection(data.section),
+    bodScope:
+      normalizeText(data.bodScope) ||
+      normalizeText(data.organizationScope) ||
+      normalizeText(data.scope),
+    active: parseBoolValue(
+      data.isActive,
+      parseBoolValue(data.active, parseBoolValue(data.accountActive, true))
+    ),
     status: parseRegistrationStatus(data.status),
   };
 }
@@ -1447,6 +1586,9 @@ function eventSummaryFromSnapshot(
   );
   const yearLevels = normalizeTargetList(data.yearLevels);
   const courses = normalizeTargetList(data.courses);
+  const sectionFilters = normalizeSectionList(
+    data.sectionFilters ?? data.sections ?? data.targetSections
+  );
   const selectedStudentIds = normalizeIdentifierList(data.selectedStudentIds);
   const selectedSchoolIds = normalizeIdentifierList(data.selectedSchoolIds);
   const linkedPaymentId = getEventLinkedPaymentId(data);
@@ -1454,6 +1596,17 @@ function eventSummaryFromSnapshot(
     data.paymentRequired === true ||
     data.withPayment === true ||
     linkedPaymentId.length > 0;
+  const preregistrationRequired = data.isPreReg === true;
+  const targetMode =
+    normalizeTargetMode(data.targetMode ?? data.targetingMode ?? data.audienceMode) ||
+    (selectedStudentIds.length > 0 || selectedSchoolIds.length > 0 ||
+    normalizeText(data.targetStudent).length > 0 ?
+      "specificStudents" :
+      "broad");
+  const bodScope =
+    normalizeText(data.bodScope) ||
+    normalizeText(data.bodScopeFilter) ||
+    normalizeText(data.organizationScope);
 
   return {
     eventId: snap.id,
@@ -1463,14 +1616,20 @@ function eventSummaryFromSnapshot(
     scheduledTimeEnd: schedule.scheduledTimeEnd,
     location: normalizeText(data.location) || "TBA",
     status: normalizeText(data.status) || "upcoming",
+    targetMode,
     yearLevels,
     courses,
+    sectionFilters,
     targetStudent: normalizeText(data.targetStudent),
     selectedStudentIds,
     selectedSchoolIds,
+    bodScope,
     isPreReg: data.isPreReg === true,
-    requiresRegistration: data.isPreReg === true,
+    requiresRegistration: preregistrationRequired,
+    preregistrationRequired,
     requiresPayment,
+    activeOnly:
+      data.activeOnly === true || data.requiresActiveStatus === true,
     linkedPaymentId,
     createdAtMs: toMillis(data.createdAt),
     sortMs: parseEventStartMs(date, schedule.scheduledTime),
@@ -1571,6 +1730,9 @@ async function resolveAuthorizedStudentIds(
         studentName: registration.studentName,
         course: registration.course,
         yearLevel: registration.yearLevel,
+        section: registration.section,
+        bodScope: registration.bodScope,
+        active: registration.active,
         registrationStatus: registration.status,
         paymentStatus: paymentStatusesByStudentId.get(registration.studentId),
       });
@@ -1611,12 +1773,30 @@ async function resolveAuthorizedStudentIds(
       const yearLevel =
         normalizeYearLevel(merged.yearLevel ?? merged.year) ||
         normalizeYearLevel(registration?.yearLevel);
+      const section =
+        normalizeSection(merged.section) ||
+        normalizeSection(registration?.section);
+      const bodScope =
+        normalizeText(merged.bodScope) ||
+        normalizeText(merged.organizationScope) ||
+        normalizeText(merged.scope) ||
+        normalizeText(registration?.bodScope);
+      const active = parseBoolValue(
+        merged.isActive,
+        parseBoolValue(
+          merged.active,
+          parseBoolValue(merged.accountActive, registration?.active ?? true)
+        )
+      );
       const eligibility = evaluateEventEligibility(event, {
         studentId,
         schoolId,
         studentName,
         course,
         yearLevel,
+        section,
+        bodScope,
+        active,
         registrationStatus: registration?.status,
         paymentStatus: paymentStatusesByStudentId.get(studentId),
       });
@@ -1650,6 +1830,15 @@ async function resolveAuthorizedStudentIds(
           doc.id,
         course: normalizeCourse(data.course),
         yearLevel: normalizeYearLevel(data.year ?? data.yearLevel),
+        section: normalizeSection(data.section),
+        bodScope:
+          normalizeText(data.bodScope) ||
+          normalizeText(data.organizationScope) ||
+          normalizeText(data.scope),
+        active: parseBoolValue(
+          data.isActive,
+          parseBoolValue(data.active, parseBoolValue(data.accountActive, true))
+        ),
         registrationStatus: registration?.status,
         paymentStatus: paymentStatusesByStudentId.get(doc.id),
       });
@@ -1684,6 +1873,15 @@ async function resolveAuthorizedStudentIds(
         doc.id,
       course: normalizeCourse(data.course),
       yearLevel: normalizeYearLevel(data.year ?? data.yearLevel),
+      section: normalizeSection(data.section),
+      bodScope:
+        normalizeText(data.bodScope) ||
+        normalizeText(data.organizationScope) ||
+        normalizeText(data.scope),
+      active: parseBoolValue(
+        data.isActive,
+        parseBoolValue(data.active, parseBoolValue(data.accountActive, true))
+      ),
       registrationStatus: registration?.status,
       paymentStatus: paymentStatusesByStudentId.get(doc.id),
     });
@@ -1699,7 +1897,7 @@ async function resolveAuthorizedStudentIds(
   return authorized;
 }
 
-function portableEventPayload(event: PortableEventSummary) {
+function portableEventMinimalPayload(event: PortableEventSummary) {
   return {
     eventId: event.eventId,
     title: event.title,
@@ -1708,26 +1906,42 @@ function portableEventPayload(event: PortableEventSummary) {
     scheduledTimeEnd: event.scheduledTimeEnd,
     location: event.location,
     status: event.status,
-    yearLevels: event.yearLevels,
-    courses: event.courses,
-    targetStudent: event.targetStudent,
-    selectedStudentIds: event.selectedStudentIds,
-    selectedSchoolIds: event.selectedSchoolIds,
-    requiresRegistration: event.requiresRegistration,
-    requiresPayment: event.requiresPayment,
-    linkedPaymentId: event.linkedPaymentId,
   };
 }
 
-function portableEventEligibilityPayload(event: PortableEventSummary) {
+function portableEventPairEligibilityPayload(event: PortableEventSummary) {
   return {
+    targetMode: event.targetMode,
+    courseFilters: event.courses,
+    yearLevelFilters: event.yearLevels,
+    sectionFilters: event.sectionFilters,
+    bodScope: event.bodScope,
+    preregistrationRequired: event.preregistrationRequired,
+    requiresRegistration: event.requiresRegistration,
+    paymentRequired: event.requiresPayment,
+    activeOnly: event.activeOnly,
+  };
+}
+
+function portableEventEligibilityPayload(
+  event: PortableEventSummary,
+  offset = 0,
+  limit = Number.MAX_SAFE_INTEGER
+) {
+  return {
+    targetMode: event.targetMode,
     yearLevels: event.yearLevels,
     courses: event.courses,
+    sectionFilters: event.sectionFilters,
     targetStudent: event.targetStudent,
-    selectedStudentIds: event.selectedStudentIds,
-    selectedSchoolIds: event.selectedSchoolIds,
+    selectedStudentIds: slicePage(event.selectedStudentIds, offset, limit),
+    selectedSchoolIds: slicePage(event.selectedSchoolIds, offset, limit),
+    bodScope: event.bodScope,
+    preregistrationRequired: event.preregistrationRequired,
     requiresRegistration: event.requiresRegistration,
+    paymentRequired: event.requiresPayment,
     requiresPayment: event.requiresPayment,
+    activeOnly: event.activeOnly,
     linkedPaymentId: event.linkedPaymentId,
   };
 }
@@ -1756,12 +1970,17 @@ function mapStudentContext(
       schoolId,
     course: normalizeCourse(merged.course) || "Unassigned",
     yearLevel: yearLevel || "Unassigned",
+    section: normalizeSection(merged.section),
     fingerprintTemplateId,
     fingerprintStatus:
       normalizeText(merged.fingerprintStatus) ||
       (fingerprintTemplateId > 0 ? "enrolled" : "pending"),
     fingerprintDeviceId: normalizeText(merged.fingerprintDeviceId),
     queueId: normalizeText(merged.queueId),
+    bodScope:
+      normalizeText(merged.bodScope) ||
+      normalizeText(merged.organizationScope) ||
+      normalizeText(merged.scope),
     registrationId,
   };
 }
@@ -2254,10 +2473,12 @@ async function listPendingEnrollments(
         studentName: student.fullName,
         course: student.course,
         yearLevel: student.yearLevel,
+        section: "",
         fingerprintTemplateId: student.fingerprintTemplateId,
         fingerprintStatus: student.status,
         fingerprintDeviceId: student.enrolledByDevice,
         queueId: student.studentId,
+        bodScope: "",
         registrationId: "",
         eventId: activeEnrollmentSessionId,
       }));
@@ -2731,9 +2952,11 @@ async function createDeviceSessionResponse(device: DeviceContext) {
   };
 }
 
-async function pairDeviceToEvent(device: DeviceContext, eventId: string) {
-  const context = await buildEventContext(eventId);
-  const event = context.event;
+async function pairDeviceToEvent(
+  device: DeviceContext,
+  eventId: string
+): Promise<PortableEventSummary> {
+  const event = await getEventSummary(eventId);
 
   await device.pairingRef.set(
     {
@@ -2748,9 +2971,9 @@ async function pairDeviceToEvent(device: DeviceContext, eventId: string) {
       source: "portable-device",
       pairedAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-      lastContextRefreshAt: serverTimestamp(),
-      rosterCount: context.students.length,
-      attendanceCount: context.attendanceCount,
+      lastContextRefreshAt: admin.firestore.FieldValue.delete(),
+      rosterCount: admin.firestore.FieldValue.delete(),
+      attendanceCount: admin.firestore.FieldValue.delete(),
       eventSnapshot: {
         eventId: event.eventId,
         title: event.title,
@@ -2773,7 +2996,7 @@ async function pairDeviceToEvent(device: DeviceContext, eventId: string) {
     {merge: true}
   );
 
-  return context;
+  return event;
 }
 
 async function findStudentRegistrationStatusForEvent(
@@ -2948,6 +3171,21 @@ async function syncAttendanceRecord(
     normalizeYearLevel(record.yearLevel ?? record.year) ||
     normalizeYearLevel(mergedStudent.yearLevel ?? mergedStudent.year) ||
     "Unassigned";
+  const resolvedSection =
+    normalizeSection(record.section) ||
+    normalizeSection(mergedStudent.section);
+  const resolvedBodScope =
+    normalizeText(record.bodScope) ||
+    normalizeText(mergedStudent.bodScope) ||
+    normalizeText(mergedStudent.organizationScope) ||
+    normalizeText(mergedStudent.scope);
+  const resolvedActive = parseBoolValue(
+    mergedStudent.isActive,
+    parseBoolValue(
+      mergedStudent.active,
+      parseBoolValue(mergedStudent.accountActive, true)
+    )
+  );
   const paymentStatus =
     event.requiresPayment && event.linkedPaymentId ?
       await loadPaymentStatusForStudent(event.linkedPaymentId, studentId) :
@@ -2964,6 +3202,9 @@ async function syncAttendanceRecord(
     studentName: resolvedStudentName,
     course: resolvedCourse,
     yearLevel: resolvedYearLevel,
+    section: resolvedSection,
+    bodScope: resolvedBodScope,
+    active: resolvedActive,
     registrationStatus,
     paymentStatus,
   });
@@ -3489,35 +3730,64 @@ export const campusDevicePairEvent = deviceEndpoint(
       throw new ApiError(400, "eventId is required.");
     }
 
-    const context = await pairDeviceToEvent(device, eventId);
-    sendJson(res, 200, {
-      status: "paired",
-      event: portableEventPayload(context.event),
-      eligibility: portableEventEligibilityPayload(context.event),
-      roster: {
-        count: context.students.length,
-        recordedStudentIds: context.recordedStudentIds,
-      },
-      students: context.students.map((student) => ({
-        studentId: student.studentId,
-        studentUid: student.studentUid,
-        schoolId: student.schoolId,
-        studentName: student.studentName,
-        course: student.course,
-        yearLevel: student.yearLevel,
-        fingerprintTemplateId: student.fingerprintTemplateId,
-        fingerprintStatus: student.fingerprintStatus,
-        fingerprintDeviceId: student.fingerprintDeviceId,
-      })),
+    const event = await pairDeviceToEvent(device, eventId);
+    const payload = {
+      ok: true,
+      event: portableEventMinimalPayload(event),
+      eligibility: portableEventPairEligibilityPayload(event),
+    };
+    const responseJson = JSON.stringify(payload);
+    deviceLogger.info("Portable device pair event response", {
+      deviceId: device.deviceId,
+      eventId: event.eventId,
+      responseBytes: Buffer.byteLength(responseJson, "utf8"),
+      responseFields: Object.keys(payload),
+      eventFields: Object.keys(payload.event),
     });
+    sendJson(res, 200, payload);
   }
 );
 
 export const campusDevicePairedEventContext = deviceEndpoint(
   "GET",
   "session-or-secret",
-  async (_req, res, device) => {
+  async (req, res, device) => {
+    const offset = parseQueryInt(req.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
+    const limit = parseQueryInt(
+      req.query.limit,
+      DEFAULT_PAIRED_EVENT_CONTEXT_LIMIT,
+      1,
+      MAX_PAIRED_EVENT_CONTEXT_LIMIT
+    );
     const context = await ensurePairedEventContext(device);
+    const studentPage = slicePage(context.students, offset, limit);
+    const recordedStudentIdsPage = slicePage(
+      context.recordedStudentIds,
+      offset,
+      limit
+    );
+    const selectedStudentIdsPage = slicePage(
+      context.event.selectedStudentIds,
+      offset,
+      limit
+    );
+    const selectedSchoolIdsPage = slicePage(
+      context.event.selectedSchoolIds,
+      offset,
+      limit
+    );
+    const hasMoreStudents = offset + studentPage.length < context.students.length;
+    const hasMoreRecordedStudentIds =
+      offset + recordedStudentIdsPage.length < context.recordedStudentIds.length;
+    const hasMoreSelectedStudentIds =
+      offset + selectedStudentIdsPage.length < context.event.selectedStudentIds.length;
+    const hasMoreSelectedSchoolIds =
+      offset + selectedSchoolIdsPage.length < context.event.selectedSchoolIds.length;
+    const hasMore =
+      hasMoreStudents ||
+      hasMoreRecordedStudentIds ||
+      hasMoreSelectedStudentIds ||
+      hasMoreSelectedSchoolIds;
 
     await device.pairingRef.set(
       {
@@ -3530,28 +3800,42 @@ export const campusDevicePairedEventContext = deviceEndpoint(
     );
 
     sendJson(res, 200, {
+      ok: true,
       pairing: {
         deviceId: device.deviceId,
         eventId: context.event.eventId,
         status: normalizeText(context.pairing.status) || "paired",
       },
-      event: portableEventPayload(context.event),
-      eligibility: portableEventEligibilityPayload(context.event),
+      event: portableEventMinimalPayload(context.event),
+      eligibility: portableEventEligibilityPayload(context.event, offset, limit),
       roster: {
         count: context.students.length,
-        recordedStudentIds: context.recordedStudentIds,
+        attendanceCount: context.attendanceCount,
+        recordedCount: context.recordedStudentIds.length,
+        recordedStudentIds: recordedStudentIdsPage,
       },
-      students: context.students.map((student) => ({
+      page: {
+        offset,
+        limit,
+        nextOffset: hasMore ? offset + limit : null,
+        hasMoreStudents,
+        hasMoreRecordedStudentIds,
+        hasMoreSelectedStudentIds,
+        hasMoreSelectedSchoolIds,
+      },
+      students: studentPage.map((student) => ({
         studentId: student.studentId,
         studentUid: student.studentUid,
         schoolId: student.schoolId,
         studentName: student.studentName,
         course: student.course,
         yearLevel: student.yearLevel,
+        section: student.section,
         fingerprintTemplateId: student.fingerprintTemplateId,
         fingerprintStatus: student.fingerprintStatus,
         fingerprintDeviceId: student.fingerprintDeviceId,
         queueId: student.queueId,
+        bodScope: student.bodScope,
       })),
     });
   }
@@ -3571,7 +3855,9 @@ export const campusDeviceDownloadFingerprintRoster = deviceEndpoint(
     res.status(200);
     res.set("Content-Type", "text/csv; charset=utf-8");
     res.set("X-Campus-Roster-Count", String(entries.length));
-    res.write("templateId,studentId,schoolId,name,course,yearLevel,active,hasFingerprint\n");
+    res.write(
+      "templateId,studentId,schoolId,name,course,yearLevel,section,bodScope,active,hasFingerprint\n"
+    );
     for (const entry of entries) {
       res.write(
         [
@@ -3581,6 +3867,8 @@ export const campusDeviceDownloadFingerprintRoster = deviceEndpoint(
           csvEscapeCell(entry.name),
           csvEscapeCell(entry.course),
           csvEscapeCell(entry.yearLevel),
+          csvEscapeCell(entry.section),
+          csvEscapeCell(entry.bodScope),
           entry.active ? "true" : "false",
           entry.hasFingerprint ? "true" : "false",
         ].join(",") + "\n"
@@ -3640,6 +3928,9 @@ export const campusDeviceResolveAttendanceOwner = deviceEndpoint(
         studentName: resolvedOwner.entry.name,
         course: resolvedOwner.entry.course,
         yearLevel: resolvedOwner.entry.yearLevel,
+        section: resolvedOwner.entry.section,
+        bodScope: resolvedOwner.entry.bodScope,
+        active: resolvedOwner.entry.active,
         registrationStatus,
         paymentStatus,
       });
@@ -3669,6 +3960,8 @@ export const campusDeviceResolveAttendanceOwner = deviceEndpoint(
       studentName: resolvedOwner.entry.name,
       course: resolvedOwner.entry.course,
       yearLevel: resolvedOwner.entry.yearLevel,
+      section: resolvedOwner.entry.section,
+      bodScope: resolvedOwner.entry.bodScope,
       hasFingerprint: resolvedOwner.entry.hasFingerprint,
       active: resolvedOwner.entry.active,
     });

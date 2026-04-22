@@ -522,6 +522,20 @@ service cloud.firestore {
       return data.ownerType == "bod" ? "bod" : "ec";
     }
 
+    function eventCreatedByUidValue(data) {
+      return data.createdByUid is string && data.createdByUid != "" ? data.createdByUid :
+        (
+          data.createdBy is string &&
+          data.createdBy != ""
+        ) ? data.createdBy :
+        "";
+    }
+
+    function eventCreatedByMatchesCurrentUser(data) {
+      return data != null &&
+        eventCreatedByUidValue(data) == request.auth.uid;
+    }
+
     function eventCourseScope(data) {
       return firstCourseScopeValue(
         data.courseScope,
@@ -639,7 +653,7 @@ service cloud.firestore {
       return courseScope != "" &&
         eventOwnerType(data) == "bod" &&
         eventCourseScope(data) == courseScope &&
-        data.createdBy == request.auth.uid;
+        eventCreatedByMatchesCurrentUser(data);
     }
 
     function canViewEventData(data) {
@@ -669,7 +683,7 @@ service cloud.firestore {
           hasCurrentCourseScope() &&
           eventOwnerType(resource.data) == "bod" &&
           eventCourseScope(resource.data) == currentCourseScope() &&
-          resource.data.createdBy == request.auth.uid &&
+          eventCreatedByMatchesCurrentUser(resource.data) &&
           bodEventAudienceIsScoped(request.resource.data)
         );
     }
@@ -681,7 +695,7 @@ service cloud.firestore {
           hasCurrentCourseScope() &&
           eventOwnerType(resource.data) == "bod" &&
           eventCourseScope(resource.data) == currentCourseScope() &&
-          resource.data.createdBy == request.auth.uid
+          eventCreatedByMatchesCurrentUser(resource.data)
         );
     }
 
@@ -723,6 +737,117 @@ service cloud.firestore {
           eventExists(eventId) &&
           canManageOwnBodEventSubcollectionData(eventDoc(eventId), courseScope)
         );
+    }
+
+    function canReadEventDocumentSubcollection(eventId) {
+      let currentData = currentProfileData();
+      let currentRoleValue = profileRole(currentData);
+      let courseScope = currentCourseScopeFromData(currentData, currentRoleValue);
+
+      return signedIn() &&
+        eventExists(eventId) &&
+        (
+          currentRoleValue == "admin" ||
+          currentIsTeacher() ||
+          isRegularECProfileDataWithRole(currentData, currentRoleValue) ||
+          (
+            isBODProfileDataWithRole(currentData, currentRoleValue) &&
+            canManageOwnBodEventSubcollectionData(eventDoc(eventId), courseScope)
+          )
+        );
+    }
+
+    function eventDocumentStoragePathValue(data) {
+      return data.storagePath is string && data.storagePath != "" ? data.storagePath :
+        (
+          data.path is string &&
+          data.path != ""
+        ) ? data.path :
+        "";
+    }
+
+    function eventDocumentStoragePathMatchesEvent(eventId, data) {
+      let storagePath = eventDocumentStoragePathValue(data);
+      return storagePath != "" &&
+        storagePath.matches("^events/" + eventId + "/docs/[^/]+/[^/]+$");
+    }
+
+    function isAllowedEventDocumentContentType(contentType) {
+      return contentType == "application/pdf" ||
+        contentType == "application/msword" ||
+        contentType == "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    }
+
+    function eventDocumentContentTypeIsAllowed(data) {
+      return data.contentType is string &&
+        isAllowedEventDocumentContentType(data.contentType);
+    }
+
+    function eventDocumentSizeWithinLimit(data) {
+      return (
+        data.size is int ||
+        data.size is float
+      ) &&
+        data.size >= 0 &&
+        data.size <= 10 * 1024 * 1024;
+    }
+
+    function eventDocumentUploadedByMatchesCurrentUser(data) {
+      return data.uploadedByUid is string &&
+        data.uploadedByUid == request.auth.uid;
+    }
+
+    function eventDocumentCreatedByMatchesCurrentUser(data) {
+      return (data.createdByUid is string && data.createdByUid == request.auth.uid) ||
+        (data.createdBy is string && data.createdBy == request.auth.uid) ||
+        eventDocumentUploadedByMatchesCurrentUser(data);
+    }
+
+    function eventDocumentStatusIsValid(data) {
+      return !(data.status is string) ||
+        data.status == "pending-upload" ||
+        data.status == "active";
+    }
+
+    function eventDocumentEventIdMatchesParent(eventId, data) {
+      return !(data.eventId is string) || data.eventId == eventId;
+    }
+
+    function eventDocumentOwnerTypeMatchesParent(eventId, data) {
+      return !(data.ownerType is string) ||
+        data.ownerType == eventOwnerType(eventDoc(eventId));
+    }
+
+    function eventDocumentMetadataScope(data) {
+      return firstCourseScopeValue(
+        data.courseScope,
+        data.createdByCourseScope,
+        data.course
+      );
+    }
+
+    function eventDocumentBodMetadataMatchesCurrentScope(eventId, data) {
+      let courseScope = currentCourseScope();
+      let parentEvent = eventDoc(eventId);
+      let metadataScope = eventDocumentMetadataScope(data);
+
+      return courseScope != "" &&
+        eventOwnerType(parentEvent) == "bod" &&
+        eventManagedByBodScope(parentEvent, courseScope) &&
+        data.ownerType == "bod" &&
+        (metadataScope == "" || metadataScope == courseScope);
+    }
+
+    function eventDocumentMetadataIsValid(eventId, data) {
+      return data != null &&
+        eventDocumentEventIdMatchesParent(eventId, data) &&
+        eventDocumentStoragePathMatchesEvent(eventId, data) &&
+        eventDocumentStatusIsValid(data) &&
+        eventDocumentOwnerTypeMatchesParent(eventId, data) &&
+        eventDocumentContentTypeIsAllowed(data) &&
+        eventDocumentSizeWithinLimit(data) &&
+        eventDocumentCreatedByMatchesCurrentUser(data) &&
+        (!isBOD() || eventDocumentBodMetadataMatchesCurrentScope(eventId, data));
     }
 
     function eventTargetProfileMatchesScope(uid, courseScope) {
@@ -1130,10 +1255,11 @@ service cloud.firestore {
       }
 
       match /docs/{docId} {
-        allow read: if currentIsTeacher() || (
-          canReadEventSubcollection(eventId)
-        );
-        allow create, update, delete: if signedIn() &&
+        allow read: if canReadEventDocumentSubcollection(eventId);
+        allow create, update: if signedIn() &&
+          canManageEventSubcollection(eventId) &&
+          eventDocumentMetadataIsValid(eventId, request.resource.data);
+        allow delete: if signedIn() &&
           canManageEventSubcollection(eventId);
       }
 

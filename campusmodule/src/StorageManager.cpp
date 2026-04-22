@@ -23,6 +23,7 @@ constexpr char kEnrollmentLogsPath[] = "/logs/enrollment_logs.json";
 constexpr char kEnrollmentSyncQueuePath[] = "/logs/sync_queue.json";
 constexpr char kPairedEventContextPath[] = "/paired_event_context.json";
 constexpr char kSdEnrollmentDir[] = "/enrollment";
+constexpr char kSdPairedEventDir[] = "/events";
 constexpr char kSdEnrollmentQueuePath[] = "/enrollment/session_students.csv";
 constexpr char kSdEnrollmentQueueTempPath[] = "/enrollment/session_students.tmp";
 constexpr char kSdEnrollmentResultsPath[] = "/enrollment/results_queue.csv";
@@ -39,9 +40,12 @@ constexpr size_t kAttendanceDocSize = 65536;
 constexpr size_t kPairedEventContextDocSize = 65536;
 constexpr size_t kEnrollmentSessionDocSize = 4096;
 constexpr size_t kFingerprintRosterFieldCount = 8;
+constexpr size_t kFingerprintRosterFieldCountExtended = 10;
 constexpr size_t kFingerprintRosterMaxLineLength = 320;
 constexpr size_t kEnrollmentQueueFieldCount = 12;
 constexpr size_t kEnrollmentResultFieldCount = 12;
+constexpr size_t kPairedEventStudentFieldCount = 8;
+constexpr size_t kPairedEventRecordedFieldCount = 1;
 
 bool parseBoolValue(JsonVariantConst value, bool fallback = false) {
   if (value.isNull()) {
@@ -443,6 +447,61 @@ bool writeCsvLine(File &file, const String &line) {
   return file.println(line) > 0;
 }
 
+String safePathComponent(const String &value) {
+  String output = value;
+  output.trim();
+  output.replace(" ", "_");
+  output.replace("/", "_");
+  output.replace("\\", "_");
+  output.replace(":", "_");
+  output.replace("|", "_");
+  output.replace("\"", "_");
+  output.replace("?", "_");
+  output.replace("*", "_");
+  output.replace("<", "_");
+  output.replace(">", "_");
+  return output;
+}
+
+String pairedEventStudentsPathForEvent(const String &eventId) {
+  return String(kSdPairedEventDir) + "/" + safePathComponent(eventId) +
+         "_students.csv";
+}
+
+String pairedEventStudentsTempPathForEvent(const String &eventId) {
+  return String(kSdPairedEventDir) + "/" + safePathComponent(eventId) +
+         "_students.tmp";
+}
+
+String pairedEventRecordedPathForEvent(const String &eventId) {
+  return String(kSdPairedEventDir) + "/" + safePathComponent(eventId) +
+         "_recorded.csv";
+}
+
+String pairedEventRecordedTempPathForEvent(const String &eventId) {
+  return String(kSdPairedEventDir) + "/" + safePathComponent(eventId) +
+         "_recorded.tmp";
+}
+
+String pairedEventStudentCsvHeader() {
+  return "studentUid,schoolId,studentName,course,yearLevel,section,bodScope,queueId";
+}
+
+String pairedEventStudentCsvRow(const StudentInfo &student) {
+  return csvEscape(student.studentUid) + "," + csvEscape(student.schoolId) + "," +
+         csvEscape(student.studentName) + "," + csvEscape(student.course) + "," +
+         csvEscape(student.yearLevel) + "," + csvEscape(student.section) + "," +
+         csvEscape(student.bodScope) + "," + csvEscape(student.queueId);
+}
+
+String pairedEventRecordedCsvHeader() {
+  return "studentUid";
+}
+
+String pairedEventRecordedCsvRow(const String &studentUid) {
+  return csvEscape(studentUid);
+}
+
 bool readBoundedLine(File &file, String &line, bool &truncated) {
   line = "";
   truncated = false;
@@ -523,9 +582,9 @@ bool isFingerprintRosterHeader(const String *fields, size_t fieldCount) {
 
 bool parseFingerprintRosterStudent(const String &line, StudentInfo &student,
                                    bool &active, bool &hasFingerprint) {
-  String fields[kFingerprintRosterFieldCount];
+  String fields[kFingerprintRosterFieldCountExtended];
   const size_t parsedFields =
-      splitCsvLine(line, fields, kFingerprintRosterFieldCount);
+      splitCsvLine(line, fields, kFingerprintRosterFieldCountExtended);
   if (parsedFields == 0 || isFingerprintRosterHeader(fields, parsedFields)) {
     return false;
   }
@@ -545,8 +604,15 @@ bool parseFingerprintRosterStudent(const String &line, StudentInfo &student,
   student.studentName = fields[3];
   student.course = fields[4];
   student.yearLevel = fields[5];
-  active = parseBoolText(fields[6], true);
-  hasFingerprint = parseBoolText(fields[7], true);
+  if (parsedFields >= kFingerprintRosterFieldCountExtended) {
+    student.section = fields[6];
+    student.bodScope = fields[7];
+    active = parseBoolText(fields[8], true);
+    hasFingerprint = parseBoolText(fields[9], true);
+  } else {
+    active = parseBoolText(fields[6], true);
+    hasFingerprint = parseBoolText(fields[7], true);
+  }
   student.isActive = active;
   student.activeKnown = true;
   student.fingerprintStatus =
@@ -558,6 +624,45 @@ bool parseFingerprintRosterStudent(const String &line, StudentInfo &student,
 
   CampusEligibility::normalizeStudent(student);
   return true;
+}
+
+bool isPairedEventStudentHeader(const String *fields, size_t fieldCount) {
+  if (fields == nullptr || fieldCount == 0) {
+    return false;
+  }
+
+  String header = fields[0];
+  header.toLowerCase();
+  return header == "studentuid";
+}
+
+StudentInfo pairedEventStudentFromFields(const String *fields, size_t fieldCount) {
+  StudentInfo student;
+  if (fields == nullptr || fieldCount < kPairedEventStudentFieldCount ||
+      isPairedEventStudentHeader(fields, fieldCount)) {
+    return student;
+  }
+
+  student.studentUid = fields[0];
+  student.schoolId = fields[1];
+  student.studentName = fields[2];
+  student.course = fields[3];
+  student.yearLevel = fields[4];
+  student.section = fields[5];
+  student.bodScope = fields[6];
+  student.queueId = fields[7];
+  CampusEligibility::normalizeStudent(student);
+  return student;
+}
+
+bool isPairedEventRecordedHeader(const String *fields, size_t fieldCount) {
+  if (fields == nullptr || fieldCount == 0) {
+    return false;
+  }
+
+  String header = fields[0];
+  header.toLowerCase();
+  return header == "studentuid";
 }
 
 FingerprintRosterStats collectFingerprintRosterStats(fs::FS &fs, const char *path) {
@@ -1121,6 +1226,7 @@ bool StorageManager::mountSdCard() {
   SD.mkdir("/students");
   SD.mkdir("/logs");
   SD.mkdir(kSdEnrollmentDir);
+  SD.mkdir(kSdPairedEventDir);
   SD.mkdir(kSdExportDir);
   return true;
 }
@@ -1201,6 +1307,17 @@ bool StorageManager::ensurePairedEventContextLoaded() const {
     }
   }
 
+  if (!CampusEligibility::requiresPairedStudentContext(pairedEventCache_)) {
+    pairedStudentsCache_.clear();
+    if (!remoteRecordedStudentIdsCache_.empty()) {
+      StorageManager *storage = const_cast<StorageManager *>(this);
+      if (storage->mergeRemoteAttendanceRecordedToSd(
+              pairedEventCache_.eventId, remoteRecordedStudentIdsCache_)) {
+        remoteRecordedStudentIdsCache_.clear();
+      }
+    }
+  }
+
   pairedEventContextAvailable_ = true;
   pairedEventContextStatus_ = "ok";
   return true;
@@ -1248,6 +1365,9 @@ bool StorageManager::savePairedEvent(const EventInfo &event) {
 }
 
 bool StorageManager::clearPairedEvent() {
+  const String currentEventId =
+      !pairedEventCache_.eventId.isEmpty() ? pairedEventCache_.eventId
+                                           : loadPairedEvent().eventId;
   if (!prefsReady_) {
     return false;
   }
@@ -1264,6 +1384,9 @@ bool StorageManager::clearPairedEvent() {
   if (littleFsReady_ && LittleFS.exists(kPairedEventContextPath)) {
     LittleFS.remove(kPairedEventContextPath);
   }
+  if (!currentEventId.isEmpty()) {
+    removePairedEventStudentContextFiles(currentEventId);
+  }
 
   pairedEventCache_ = EventInfo{};
   pairedStudentsCache_.clear();
@@ -1277,12 +1400,30 @@ bool StorageManager::clearPairedEvent() {
 bool StorageManager::savePairedEventContext(
     const EventInfo &event, const std::vector<StudentInfo> &students,
     const std::vector<String> &recordedStudentIds) {
+  const String previousEventId =
+      !pairedEventCache_.eventId.isEmpty() ? pairedEventCache_.eventId
+                                           : loadPairedEvent().eventId;
   EventInfo normalizedEvent = event;
   CampusEligibility::normalizeEvent(normalizedEvent);
+  const bool needsStudentContext =
+      CampusEligibility::requiresPairedStudentContext(normalizedEvent);
 
   std::vector<StudentInfo> normalizedStudents = students;
+  if (!needsStudentContext) {
+    normalizedStudents.clear();
+  }
   for (auto &student : normalizedStudents) {
     CampusEligibility::normalizeStudent(student);
+  }
+  std::vector<String> storedRecordedStudentIds = recordedStudentIds;
+  if (!needsStudentContext) {
+    if (!mergeRemoteAttendanceRecordedToSd(normalizedEvent.eventId,
+                                           recordedStudentIds)) {
+      pairedEventContextAvailable_ = false;
+      pairedEventContextStatus_ = "paired_event_context_corrupt";
+      return false;
+    }
+    storedRecordedStudentIds.clear();
   }
 
   Serial.printf("[PAIR] saving paired event context eventId=%s\n",
@@ -1293,6 +1434,13 @@ bool StorageManager::savePairedEventContext(
                       CampusEligibility::targetedStudentCount(normalizedEvent)));
   }
 
+  if (!previousEventId.isEmpty() && previousEventId != normalizedEvent.eventId) {
+    removePairedEventStudentContextFiles(previousEventId);
+  }
+  if (!needsStudentContext) {
+    removePairedEventStudentRosterFiles(normalizedEvent.eventId);
+  }
+
   if (!savePairedEvent(normalizedEvent) || !littleFsReady_) {
     pairedEventContextAvailable_ = false;
     pairedEventContextStatus_ = "paired_event_context_missing";
@@ -1300,7 +1448,7 @@ bool StorageManager::savePairedEventContext(
   }
 
   if (!writePairedEventContext(normalizedEvent, normalizedStudents,
-                               recordedStudentIds)) {
+                               storedRecordedStudentIds)) {
     pairedEventContextAvailable_ = false;
     pairedEventContextStatus_ = "paired_event_context_corrupt";
     return false;
@@ -1308,7 +1456,7 @@ bool StorageManager::savePairedEventContext(
 
   pairedEventCache_ = normalizedEvent;
   pairedStudentsCache_ = normalizedStudents;
-  remoteRecordedStudentIdsCache_ = recordedStudentIds;
+  remoteRecordedStudentIdsCache_ = storedRecordedStudentIds;
   pairedEventContextLoaded_ = true;
   pairedEventContextAvailable_ = true;
   pairedEventContextStatus_ = "ok";
@@ -1329,6 +1477,404 @@ bool StorageManager::savePairedEventContext(
   return true;
 }
 
+bool StorageManager::beginPairedEventStudentContext(const String &eventId) {
+  if (eventId.isEmpty() || !ensureSdReady()) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  SD.mkdir(kSdPairedEventDir);
+  const String studentTempPath = pairedEventStudentsTempPathForEvent(eventId);
+  const String recordedTempPath = pairedEventRecordedTempPathForEvent(eventId);
+
+  SD.remove(studentTempPath.c_str());
+  SD.remove(recordedTempPath.c_str());
+
+  File studentTemp = SD.open(studentTempPath.c_str(), FILE_WRITE);
+  if (!studentTemp) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+  if (!writeCsvLine(studentTemp, pairedEventStudentCsvHeader())) {
+    studentTemp.close();
+    SD.remove(studentTempPath.c_str());
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+  studentTemp.close();
+
+  File recordedTemp = SD.open(recordedTempPath.c_str(), FILE_WRITE);
+  if (!recordedTemp) {
+    SD.remove(studentTempPath.c_str());
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+  if (!writeCsvLine(recordedTemp, pairedEventRecordedCsvHeader())) {
+    recordedTemp.close();
+    SD.remove(studentTempPath.c_str());
+    SD.remove(recordedTempPath.c_str());
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+  recordedTemp.close();
+
+  Serial.printf("[PAIR] begin SD paired context eventId=%s\n", eventId.c_str());
+  lastSdWriteSucceeded_ = true;
+  return true;
+}
+
+bool StorageManager::appendPairedEventStudentPage(
+    const String &eventId, const std::vector<StudentInfo> &students,
+    const std::vector<String> &recordedStudentIds) {
+  if (eventId.isEmpty() || !ensureSdReady()) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  const String studentTempPath = pairedEventStudentsTempPathForEvent(eventId);
+  const String recordedTempPath = pairedEventRecordedTempPathForEvent(eventId);
+  if (!appendPairedEventStudentsToSd(studentTempPath, students) ||
+      !appendRecordedStudentIdsToSd(recordedTempPath, recordedStudentIds)) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  Serial.printf(
+      "[PAIR] append SD paired context page eventId=%s students=%u recorded=%u\n",
+      eventId.c_str(), static_cast<unsigned>(students.size()),
+      static_cast<unsigned>(recordedStudentIds.size()));
+  lastSdWriteSucceeded_ = true;
+  return true;
+}
+
+bool StorageManager::finalizePairedEventStudentContext(const String &eventId) {
+  if (eventId.isEmpty() || !ensureSdReady()) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  const String studentTempPath = pairedEventStudentsTempPathForEvent(eventId);
+  const String recordedTempPath = pairedEventRecordedTempPathForEvent(eventId);
+  const String studentPath = pairedEventStudentsPathForEvent(eventId);
+  const String recordedPath = pairedEventRecordedPathForEvent(eventId);
+
+  if (!SD.exists(studentTempPath.c_str()) || !SD.exists(recordedTempPath.c_str())) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  SD.remove(studentPath.c_str());
+  SD.remove(recordedPath.c_str());
+  const bool studentsRenamed =
+      SD.rename(studentTempPath.c_str(), studentPath.c_str());
+  const bool recordedRenamed =
+      SD.rename(recordedTempPath.c_str(), recordedPath.c_str());
+  if (!studentsRenamed || !recordedRenamed) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  File studentFile = SD.open(studentPath.c_str(), FILE_READ);
+  const size_t studentSize =
+      studentFile ? static_cast<size_t>(studentFile.size()) : 0U;
+  if (studentFile) {
+    studentFile.close();
+  }
+  File recordedFile = SD.open(recordedPath.c_str(), FILE_READ);
+  const size_t recordedSize =
+      recordedFile ? static_cast<size_t>(recordedFile.size()) : 0U;
+  if (recordedFile) {
+    recordedFile.close();
+  }
+
+  Serial.printf(
+      "[PAIR] finalized SD paired context eventId=%s studentsSize=%u recordedSize=%u\n",
+      eventId.c_str(), static_cast<unsigned>(studentSize),
+      static_cast<unsigned>(recordedSize));
+  lastSdWriteSucceeded_ = true;
+  return true;
+}
+
+bool StorageManager::removePairedEventStudentRosterFiles(const String &eventId) {
+  if (eventId.isEmpty() || !CampusConfig::kUseSd) {
+    return true;
+  }
+  if (!ensureSdReady()) {
+    return true;
+  }
+
+  const String studentTempPath = pairedEventStudentsTempPathForEvent(eventId);
+  const String recordedTempPath = pairedEventRecordedTempPathForEvent(eventId);
+  const String studentPath = pairedEventStudentsPathForEvent(eventId);
+
+  bool cleared = true;
+  if (SD.exists(studentTempPath.c_str())) {
+    cleared = SD.remove(studentTempPath.c_str()) && cleared;
+  }
+  if (SD.exists(recordedTempPath.c_str())) {
+    cleared = SD.remove(recordedTempPath.c_str()) && cleared;
+  }
+  if (SD.exists(studentPath.c_str())) {
+    cleared = SD.remove(studentPath.c_str()) && cleared;
+  }
+  return cleared;
+}
+
+bool StorageManager::removePairedEventStudentContextFiles(const String &eventId) {
+  if (eventId.isEmpty() || !CampusConfig::kUseSd) {
+    return true;
+  }
+  if (!ensureSdReady()) {
+    return true;
+  }
+
+  const String studentTempPath = pairedEventStudentsTempPathForEvent(eventId);
+  const String recordedTempPath = pairedEventRecordedTempPathForEvent(eventId);
+  const String studentPath = pairedEventStudentsPathForEvent(eventId);
+  const String recordedPath = pairedEventRecordedPathForEvent(eventId);
+
+  bool cleared = true;
+  if (SD.exists(studentTempPath.c_str())) {
+    cleared = SD.remove(studentTempPath.c_str()) && cleared;
+  }
+  if (SD.exists(recordedTempPath.c_str())) {
+    cleared = SD.remove(recordedTempPath.c_str()) && cleared;
+  }
+  if (SD.exists(studentPath.c_str())) {
+    cleared = SD.remove(studentPath.c_str()) && cleared;
+  }
+  if (SD.exists(recordedPath.c_str())) {
+    cleared = SD.remove(recordedPath.c_str()) && cleared;
+  }
+  return cleared;
+}
+
+bool StorageManager::appendPairedEventStudentsToSd(
+    const String &path, const std::vector<StudentInfo> &students) {
+  File file = SD.open(path.c_str(), FILE_APPEND);
+  if (!file) {
+    return false;
+  }
+
+  for (auto student : students) {
+    CampusEligibility::normalizeStudent(student);
+    if (!student.isValid()) {
+      continue;
+    }
+    if (!writeCsvLine(file, pairedEventStudentCsvRow(student))) {
+      file.close();
+      return false;
+    }
+  }
+
+  file.close();
+  return true;
+}
+
+bool StorageManager::appendRecordedStudentIdsToSd(
+    const String &path, const std::vector<String> &recordedStudentIds) {
+  File file = SD.open(path.c_str(), FILE_APPEND);
+  if (!file) {
+    return false;
+  }
+
+  for (const auto &studentUid : recordedStudentIds) {
+    const String normalized = CampusEligibility::trimAndCollapseWhitespace(studentUid);
+    if (normalized.isEmpty()) {
+      continue;
+    }
+    if (!writeCsvLine(file, pairedEventRecordedCsvRow(normalized))) {
+      file.close();
+      return false;
+    }
+  }
+
+  file.close();
+  return true;
+}
+
+bool StorageManager::pairedEventStudentContextContainsOnSd(
+    const String &eventId, const String &studentUid, const String &schoolId) const {
+  if (eventId.isEmpty() || !CampusConfig::kUseSd) {
+    return false;
+  }
+
+  StorageManager *storage = const_cast<StorageManager *>(this);
+  if (!storage->ensureSdReady()) {
+    return false;
+  }
+
+  const String studentPath = pairedEventStudentsPathForEvent(eventId);
+  if (!SD.exists(studentPath.c_str())) {
+    return false;
+  }
+
+  const String normalizedStudentUid =
+      CampusEligibility::trimAndCollapseWhitespace(studentUid);
+  const String normalizedSchoolId =
+      CampusEligibility::trimAndCollapseWhitespace(schoolId);
+
+  File file = SD.open(studentPath.c_str(), FILE_READ);
+  if (!file) {
+    return false;
+  }
+
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(file, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kPairedEventStudentFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kPairedEventStudentFieldCount);
+    StudentInfo row = pairedEventStudentFromFields(fields, parsedFields);
+    if (!row.isValid()) {
+      continue;
+    }
+
+    if ((!normalizedStudentUid.isEmpty() && row.studentUid == normalizedStudentUid) ||
+        (!normalizedSchoolId.isEmpty() && row.schoolId == normalizedSchoolId)) {
+      file.close();
+      return true;
+    }
+  }
+
+  file.close();
+  return false;
+}
+
+bool StorageManager::ensureRemoteAttendanceRecordedFile(const String &eventId) {
+  if (eventId.isEmpty() || !CampusConfig::kUseSd) {
+    return false;
+  }
+  if (!ensureSdReady()) {
+    return false;
+  }
+
+  SD.mkdir(kSdPairedEventDir);
+  const String recordedPath = pairedEventRecordedPathForEvent(eventId);
+  if (SD.exists(recordedPath.c_str())) {
+    return true;
+  }
+
+  const String recordedTempPath = pairedEventRecordedTempPathForEvent(eventId);
+  SD.remove(recordedTempPath.c_str());
+
+  File file = SD.open(recordedTempPath.c_str(), FILE_WRITE);
+  if (!file) {
+    return false;
+  }
+  const bool wroteHeader = writeCsvLine(file, pairedEventRecordedCsvHeader());
+  file.close();
+  if (!wroteHeader) {
+    SD.remove(recordedTempPath.c_str());
+    return false;
+  }
+
+  SD.remove(recordedPath.c_str());
+  if (!SD.rename(recordedTempPath.c_str(), recordedPath.c_str())) {
+    SD.remove(recordedTempPath.c_str());
+    return false;
+  }
+  return true;
+}
+
+bool StorageManager::mergeRemoteAttendanceRecordedToSd(
+    const String &eventId, const std::vector<String> &recordedStudentIds) {
+  if (recordedStudentIds.empty()) {
+    return true;
+  }
+  if (!ensureRemoteAttendanceRecordedFile(eventId)) {
+    return false;
+  }
+
+  for (const auto &studentUid : recordedStudentIds) {
+    if (!appendRemoteAttendanceRecordedOnSd(eventId, studentUid)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool StorageManager::remoteAttendanceRecordedOnSd(const String &eventId,
+                                                  const String &studentUid) const {
+  if (eventId.isEmpty() || studentUid.isEmpty() || !CampusConfig::kUseSd) {
+    return false;
+  }
+
+  StorageManager *storage = const_cast<StorageManager *>(this);
+  if (!storage->ensureSdReady()) {
+    return false;
+  }
+
+  const String recordedPath = pairedEventRecordedPathForEvent(eventId);
+  if (!SD.exists(recordedPath.c_str())) {
+    return false;
+  }
+
+  File file = SD.open(recordedPath.c_str(), FILE_READ);
+  if (!file) {
+    return false;
+  }
+
+  const String normalizedStudentUid =
+      CampusEligibility::trimAndCollapseWhitespace(studentUid);
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(file, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kPairedEventRecordedFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kPairedEventRecordedFieldCount);
+    if (isPairedEventRecordedHeader(fields, parsedFields)) {
+      continue;
+    }
+    if (parsedFields == 0) {
+      continue;
+    }
+
+    const String rowStudentUid =
+        CampusEligibility::trimAndCollapseWhitespace(fields[0]);
+    if (!rowStudentUid.isEmpty() && rowStudentUid == normalizedStudentUid) {
+      file.close();
+      return true;
+    }
+  }
+
+  file.close();
+  return false;
+}
+
+bool StorageManager::appendRemoteAttendanceRecordedOnSd(const String &eventId,
+                                                        const String &studentUid) {
+  if (eventId.isEmpty() || studentUid.isEmpty() || !CampusConfig::kUseSd) {
+    return false;
+  }
+  if (!ensureRemoteAttendanceRecordedFile(eventId)) {
+    return false;
+  }
+  if (remoteAttendanceRecordedOnSd(eventId, studentUid)) {
+    return true;
+  }
+
+  const String recordedPath = pairedEventRecordedPathForEvent(eventId);
+  File file = SD.open(recordedPath.c_str(), FILE_APPEND);
+  if (!file) {
+    return false;
+  }
+  const bool written = writeCsvLine(
+      file,
+      pairedEventRecordedCsvRow(
+          CampusEligibility::trimAndCollapseWhitespace(studentUid)));
+  file.close();
+  return written;
+}
+
 bool StorageManager::loadPairedEventContext(
     EventInfo &event, std::vector<StudentInfo> &students,
     std::vector<String> &recordedStudentIds) const {
@@ -1337,6 +1883,21 @@ bool StorageManager::loadPairedEventContext(
   students = pairedStudentsCache_;
   recordedStudentIds = remoteRecordedStudentIdsCache_;
   return pairedEventContextAvailable_ && event.isValid();
+}
+
+bool StorageManager::hasPairedEventStudentContext(const String &eventId) const {
+  if (eventId.isEmpty() || !CampusConfig::kUseSd) {
+    return false;
+  }
+
+  StorageManager *storage = const_cast<StorageManager *>(this);
+  if (!storage->ensureSdReady()) {
+    return false;
+  }
+
+  const String studentPath = pairedEventStudentsPathForEvent(eventId);
+  const String recordedPath = pairedEventRecordedPathForEvent(eventId);
+  return SD.exists(studentPath.c_str()) && SD.exists(recordedPath.c_str());
 }
 
 CampusEligibility::EventEligibilityDecision
@@ -1366,6 +1927,49 @@ StorageManager::evaluateStudentEligibilityForEvent(const EventInfo &event,
     decision.finalReason = "paired_event_id_mismatch";
     return decision;
   }
+
+  if (CampusEligibility::requiresPairedStudentContext(pairedEventCache_)) {
+    StudentInfo normalizedStudent = student;
+    CampusEligibility::normalizeStudent(normalizedStudent);
+    decision.targetModeSpecific =
+        CampusEligibility::isSpecificStudentsMode(pairedEventCache_);
+    decision.broadAudienceMode = !decision.targetModeSpecific;
+    decision.normalizedStudentCourse = normalizedStudent.courseCanonical;
+    decision.normalizedStudentYearLevel = normalizedStudent.yearLevelCanonical;
+    decision.normalizedStudentSection = normalizedStudent.sectionCanonical;
+    decision.eventCourseFilter =
+        CampusEligibility::joinCanonicalList(pairedEventCache_.courseFilters);
+    decision.eventYearLevelFilter =
+        CampusEligibility::joinCanonicalList(pairedEventCache_.yearLevelFilters);
+    decision.eventSectionFilter =
+        CampusEligibility::joinCanonicalList(pairedEventCache_.sectionFilters);
+    const bool authorized =
+        isStudentAuthorizedForEvent(pairedEventCache_.eventId,
+                                    normalizedStudent.studentUid) ||
+        pairedEventStudentContextContainsOnSd(pairedEventCache_.eventId,
+                                              normalizedStudent.studentUid,
+                                              normalizedStudent.schoolId);
+    if (authorized) {
+      decision.allowed = true;
+      decision.matchedPairedRoster = true;
+      decision.usedPairedRosterFallback = true;
+      decision.finalReason = "matched_paired_context_file";
+      return decision;
+    }
+
+    if (!hasPairedEventStudentContext(pairedEventCache_.eventId) &&
+        pairedStudentsCache_.empty()) {
+      decision.stalePairedEventData = true;
+      decision.finalReason = "paired_event_targeted_roster_missing";
+      return decision;
+    }
+
+    decision.finalReason = decision.targetModeSpecific ?
+        "student_not_in_targeted_list" :
+        "student_not_authorized_for_event";
+    return decision;
+  }
+
   return CampusEligibility::evaluateStudentForEvent(event, pairedStudentsCache_,
                                                     student);
 }
@@ -1384,17 +1988,16 @@ bool StorageManager::isStudentAuthorizedForEvent(const String &eventId,
                                                  const String &studentUid) const {
   ensurePairedEventContextLoaded();
 
-  if (!pairedEventCache_.isValid() || pairedEventCache_.eventId != eventId ||
-      pairedStudentsCache_.empty()) {
+  if (!pairedEventCache_.isValid() || pairedEventCache_.eventId != eventId) {
     return false;
   }
 
   for (const auto &student : pairedStudentsCache_) {
-    if (student.studentUid == studentUid) {
+    if (student.studentUid == studentUid || student.schoolId == studentUid) {
       return true;
     }
   }
-  return false;
+  return pairedEventStudentContextContainsOnSd(eventId, studentUid, studentUid);
 }
 
 bool StorageManager::isRemoteAttendanceRecorded(const String &eventId,
@@ -1404,13 +2007,18 @@ bool StorageManager::isRemoteAttendanceRecorded(const String &eventId,
   if (!pairedEventCache_.isValid() || pairedEventCache_.eventId != eventId) {
     return false;
   }
+  const String normalizedStudentUid =
+      CampusEligibility::trimAndCollapseWhitespace(studentUid);
+  if (normalizedStudentUid.isEmpty()) {
+    return false;
+  }
 
   for (const auto &recordedUid : remoteRecordedStudentIdsCache_) {
-    if (recordedUid == studentUid) {
+    if (recordedUid == normalizedStudentUid) {
       return true;
     }
   }
-  return false;
+  return remoteAttendanceRecordedOnSd(eventId, normalizedStudentUid);
 }
 
 bool StorageManager::markRemoteAttendanceRecorded(const String &eventId,
@@ -1422,14 +2030,27 @@ bool StorageManager::markRemoteAttendanceRecorded(const String &eventId,
   if (pairedEventCache_.eventId != eventId) {
     return false;
   }
+  const String normalizedStudentUid =
+      CampusEligibility::trimAndCollapseWhitespace(studentUid);
+  if (normalizedStudentUid.isEmpty()) {
+    return false;
+  }
 
   for (const auto &recordedUid : remoteRecordedStudentIdsCache_) {
-    if (recordedUid == studentUid) {
+    if (recordedUid == normalizedStudentUid) {
       return true;
     }
   }
 
-  remoteRecordedStudentIdsCache_.push_back(studentUid);
+  if (appendRemoteAttendanceRecordedOnSd(eventId, normalizedStudentUid)) {
+    return true;
+  }
+
+  if (!CampusEligibility::requiresPairedStudentContext(pairedEventCache_)) {
+    return false;
+  }
+
+  remoteRecordedStudentIdsCache_.push_back(normalizedStudentUid);
   return writePairedEventContext(pairedEventCache_, pairedStudentsCache_,
                                  remoteRecordedStudentIdsCache_);
 }
