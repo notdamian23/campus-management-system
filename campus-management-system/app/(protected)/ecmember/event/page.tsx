@@ -1593,6 +1593,31 @@ function normalizePaymentAssignmentStatus(value: unknown): "Paid" | "Unpaid" {
   return normalizeLowerLookupText(value) === "paid" ? "Paid" : "Unpaid";
 }
 
+function buildPaymentAssignmentIndexes(
+  paymentAssignments: EventPaymentStudentDoc[],
+) {
+  const byUid = new Map<string, "Paid" | "Unpaid">();
+  const bySchoolId = new Map<string, "Paid" | "Unpaid">();
+
+  paymentAssignments.forEach((assignment) => {
+    const uid = String(assignment.uid ?? assignment.id).trim();
+    const schoolId = String(assignment.schoolId ?? "").trim();
+    const status = normalizePaymentAssignmentStatus(assignment.status);
+
+    if (uid) {
+      byUid.set(uid, status);
+    }
+    if (schoolId) {
+      bySchoolId.set(schoolId, status);
+    }
+  });
+
+  return {
+    byUid,
+    bySchoolId,
+  };
+}
+
 function getPaymentStatusByStudent(
   event: Pick<EventDoc, "withPayment" | "paymentRequired"> | null | undefined,
   paymentAssignmentsByUid: Map<string, "Paid" | "Unpaid">,
@@ -1770,21 +1795,10 @@ function buildEventParticipantRows(
   const rowsByUid = new Map<string, EventParticipantRow>();
   const preRegisteredByUid = new Set<string>();
   const preRegisteredBySchoolId = new Set<string>();
-  const paymentAssignmentsByUid = new Map<string, "Paid" | "Unpaid">();
-  const paymentAssignmentsBySchoolId = new Map<string, "Paid" | "Unpaid">();
-
-  paymentAssignments.forEach((assignment) => {
-    const uid = String(assignment.uid ?? assignment.id).trim();
-    const schoolId = String(assignment.schoolId ?? "").trim();
-    const status = normalizePaymentAssignmentStatus(assignment.status);
-
-    if (uid) {
-      paymentAssignmentsByUid.set(uid, status);
-    }
-    if (schoolId) {
-      paymentAssignmentsBySchoolId.set(schoolId, status);
-    }
-  });
+  const {
+    byUid: paymentAssignmentsByUid,
+    bySchoolId: paymentAssignmentsBySchoolId,
+  } = buildPaymentAssignmentIndexes(paymentAssignments);
 
   audienceStudents.forEach((student) => {
     const uid = String(student.uid ?? "").trim();
@@ -2066,6 +2080,39 @@ function buildStudentLookupIndexes(
   };
 }
 
+function resolveStudentLookupByIdentity(
+  studentLookupIndexes: StudentLookupIndexes,
+  uid: string,
+  schoolId: string,
+) {
+  const normalizedUid = String(uid ?? "").trim();
+  const normalizedSchoolId = String(schoolId ?? "").trim();
+
+  return (
+    (normalizedUid ? studentLookupIndexes.byUid.get(normalizedUid) : undefined) ??
+    (normalizedSchoolId ?
+      studentLookupIndexes.bySchoolId.get(normalizedSchoolId) :
+      undefined)
+  );
+}
+
+function resolveParticipantRowByIdentity(
+  participantRowsByUid: Map<string, EventParticipantRow>,
+  participantRowsBySchoolId: Map<string, EventParticipantRow>,
+  uid: string,
+  schoolId: string,
+) {
+  const normalizedUid = String(uid ?? "").trim();
+  const normalizedSchoolId = String(schoolId ?? "").trim();
+
+  return (
+    (normalizedUid ? participantRowsByUid.get(normalizedUid) : undefined) ??
+    (normalizedSchoolId ?
+      participantRowsBySchoolId.get(normalizedSchoolId) :
+      undefined)
+  );
+}
+
 function enrichAttendanceRowsWithStudentLookup(
   attendanceRows: EventAttendanceDoc[],
   studentLookupIndexes: StudentLookupIndexes,
@@ -2204,6 +2251,23 @@ function addAttendanceExportCandidate(
   }
 }
 
+function hasAttendanceExportCandidateIdentity(
+  collection: AttendanceExportCandidateCollection,
+  uid: string,
+  schoolId: string,
+) {
+  const normalizedUid = normalizeAttendanceExportIdentityValue(uid);
+  if (normalizedUid && collection.keysByUid.has(normalizedUid)) {
+    return true;
+  }
+
+  const normalizedSchoolId = normalizeAttendanceExportIdentityValue(schoolId);
+  return Boolean(
+    normalizedSchoolId &&
+    collection.keysBySchoolId.has(normalizedSchoolId),
+  );
+}
+
 function buildPresentAttendanceExportCandidates(
   attendanceRows: EventAttendanceDoc[],
   studentLookupIndexes: StudentLookupIndexes,
@@ -2339,6 +2403,23 @@ function toNotPaidAttendanceExportRow(
     studentName: participantRow?.studentName || student.studentName,
     course: participantRow?.course || student.course || "-",
     year: participantRow?.year || student.year || "-",
+    attendanceStatus: "Not Paid",
+    attendanceTimeIn: "",
+    attendanceTimeOut: "",
+  };
+}
+
+function toFallbackNotPaidAttendanceExportRow(
+  fallbackRow: AttendanceExportRow,
+  participantRow?: EventParticipantRow | null,
+  student?: StudentLookup | null,
+): AttendanceExportRow {
+  return {
+    schoolId: participantRow?.schoolId || student?.schoolId || fallbackRow.schoolId,
+    studentName:
+      participantRow?.studentName || student?.studentName || fallbackRow.studentName,
+    course: participantRow?.course || student?.course || fallbackRow.course || "-",
+    year: participantRow?.year || student?.year || fallbackRow.year || "-",
     attendanceStatus: "Not Paid",
     attendanceTimeIn: "",
     attendanceTimeOut: "",
@@ -6574,6 +6655,7 @@ export default function EventDashboard() {
         allStudents = await loadStudentsForNotifications();
       }
 
+      const audience = resolveRequiredEventAudience(ev, allStudents);
       const studentLookupIndexes = buildStudentLookupIndexes(allStudents);
       const enrichedAttendanceRows = enrichAttendanceRowsWithStudentLookup(
         attendanceRows,
@@ -6584,9 +6666,14 @@ export default function EventDashboard() {
         registrations,
         enrichedAttendanceRows,
         paymentAssignments,
+        audience.resolved ? audience.students : [],
       );
       const participantRowsByUid = new Map<string, EventParticipantRow>();
       const participantRowsBySchoolId = new Map<string, EventParticipantRow>();
+      const {
+        byUid: paymentAssignmentsByUid,
+        bySchoolId: paymentAssignmentsBySchoolId,
+      } = buildPaymentAssignmentIndexes(paymentAssignments);
 
       participantRows.forEach((row) => {
         participantRowsByUid.set(row.uid, row);
@@ -6596,7 +6683,6 @@ export default function EventDashboard() {
         }
       });
 
-      const audience = resolveRequiredEventAudience(ev, allStudents);
       const directPresentCandidates = buildPresentAttendanceExportCandidates(
         enrichedAttendanceRows,
         studentLookupIndexes,
@@ -6608,20 +6694,107 @@ export default function EventDashboard() {
       let absentRows: AttendanceExportRow[] = [];
       let notPaidRows: AttendanceExportRow[] = [];
 
-      if (audience.resolved) {
-        // Regression guard: student, EC, and B.O.D. attendance docs must all
-        // survive the workbook export when they match the event audience.
-        audience.students.forEach((student) => {
-          const participantRow =
-            participantRowsByUid.get(student.uid) ??
-            participantRowsBySchoolId.get(student.schoolId);
+      directPresentCandidates.forEach((candidate) => {
+        const participantRow = resolveParticipantRowByIdentity(
+          participantRowsByUid,
+          participantRowsBySchoolId,
+          candidate.uid,
+          candidate.schoolId,
+        );
+        const matchedStudent = resolveStudentLookupByIdentity(
+          studentLookupIndexes,
+          candidate.uid,
+          candidate.schoolId,
+        );
+        const resolvedUid =
+          participantRow?.uid || matchedStudent?.uid || candidate.uid;
+        const resolvedSchoolId =
+          participantRow?.schoolId ||
+          matchedStudent?.schoolId ||
+          candidate.schoolId;
+        const paymentStatus = getPaymentStatusByStudent(
+          ev,
+          paymentAssignmentsByUid,
+          paymentAssignmentsBySchoolId,
+          resolvedUid,
+          resolvedSchoolId,
+        );
 
-          if (participantRow?.attendanceStatus === "Not Paid") {
+        if (paymentStatus === "Not Paid") {
+          addAttendanceExportCandidate(notPaidRowCollection, {
+            uid: resolvedUid,
+            schoolId: resolvedSchoolId,
+            priority: 3,
+            sortMs: Math.max(candidate.sortMs, participantRow?.sortMs ?? 0),
+            row: toFallbackNotPaidAttendanceExportRow(
+              candidate.row,
+              participantRow,
+              matchedStudent,
+            ),
+          });
+          return;
+        }
+
+        addAttendanceExportCandidate(presentRowCollection, {
+          ...candidate,
+          uid: resolvedUid,
+          schoolId: resolvedSchoolId,
+          row: {
+            ...candidate.row,
+            schoolId: resolvedSchoolId,
+            studentName:
+              participantRow?.studentName ||
+              matchedStudent?.studentName ||
+              candidate.row.studentName,
+            course:
+              participantRow?.course ||
+              matchedStudent?.course ||
+              candidate.row.course ||
+              "-",
+            year:
+              participantRow?.year ||
+              matchedStudent?.year ||
+              candidate.row.year ||
+              "-",
+          },
+        });
+      });
+
+      if (audience.resolved) {
+        audience.students.forEach((student) => {
+          const participantRow = resolveParticipantRowByIdentity(
+            participantRowsByUid,
+            participantRowsBySchoolId,
+            student.uid,
+            student.schoolId,
+          );
+          const resolvedUid = participantRow?.uid || student.uid;
+          const resolvedSchoolId = participantRow?.schoolId || student.schoolId;
+
+          if (
+            hasAttendanceExportCandidateIdentity(
+              presentRowCollection,
+              resolvedUid,
+              resolvedSchoolId,
+            ) ||
+            hasAttendanceExportCandidateIdentity(
+              notPaidRowCollection,
+              resolvedUid,
+              resolvedSchoolId,
+            )
+          ) {
+            return;
+          }
+
+          if (
+            participantRow?.attendanceStatus === "Not Paid" ||
+            participantRow?.paymentStatus === "Not Paid"
+          ) {
             addAttendanceExportCandidate(notPaidRowCollection, {
-              uid: student.uid,
-              schoolId: participantRow.schoolId || student.schoolId,
+              uid: resolvedUid,
+              schoolId: resolvedSchoolId,
               priority: 1,
-              sortMs: participantRow.sortMs,
+              sortMs: participantRow?.sortMs ?? 0,
               row: toNotPaidAttendanceExportRow(student, participantRow),
             });
             return;
@@ -6629,8 +6802,8 @@ export default function EventDashboard() {
 
           if (participantRow && isPresentAttendanceStatus(participantRow.attendanceStatus)) {
             addAttendanceExportCandidate(presentRowCollection, {
-              uid: student.uid,
-              schoolId: participantRow.schoolId || student.schoolId,
+              uid: resolvedUid,
+              schoolId: resolvedSchoolId,
               priority: 1,
               sortMs: participantRow.sortMs,
               row: toPresentAttendanceExportRow(student, participantRow),
@@ -6647,56 +6820,28 @@ export default function EventDashboard() {
           });
         });
 
-        directPresentCandidates.forEach((candidate) => {
-          const participantRow =
-            (candidate.uid ? participantRowsByUid.get(candidate.uid) : undefined) ??
-            participantRowsBySchoolId.get(candidate.schoolId);
-          if (participantRow?.attendanceStatus === "Not Paid") {
-            return;
-          }
-
-          addAttendanceExportCandidate(presentRowCollection, candidate);
-        });
-        participantRows
-          .filter((row) => row.attendanceStatus === "Not Paid")
-          .forEach((row) => {
-            addAttendanceExportCandidate(notPaidRowCollection, {
-              uid: row.uid,
-              schoolId: row.schoolId,
-              priority: 2,
-              sortMs: row.sortMs,
-              row: {
-                schoolId: row.schoolId,
-                studentName: row.studentName,
-                course: row.course,
-                year: row.year,
-                attendanceStatus: "Not Paid",
-                attendanceTimeIn: "",
-                attendanceTimeOut: "",
-              },
-            });
-          });
-
         presentRows = attendanceExportRowsFromCollection(presentRowCollection);
         absentRows = attendanceExportRowsFromCollection(absentRowCollection);
         notPaidRows = attendanceExportRowsFromCollection(notPaidRowCollection);
       } else {
-        // Older events do not always store explicit audience filters. In that
-        // case we preserve the previous export data and leave the absents sheet
-        // and Not Paid sheets empty instead of inferring rows from the whole roster.
-        directPresentCandidates.forEach((candidate) => {
-          const participantRow =
-            (candidate.uid ? participantRowsByUid.get(candidate.uid) : undefined) ??
-            participantRowsBySchoolId.get(candidate.schoolId);
-          if (participantRow?.attendanceStatus === "Not Paid") {
-            return;
-          }
-
-          addAttendanceExportCandidate(presentRowCollection, candidate);
-        });
         participantRows
           .filter((row) => row.attendanceStatus === "Absent")
           .forEach((row) => {
+            if (
+              hasAttendanceExportCandidateIdentity(
+                presentRowCollection,
+                row.uid,
+                row.schoolId,
+              ) ||
+              hasAttendanceExportCandidateIdentity(
+                notPaidRowCollection,
+                row.uid,
+                row.schoolId,
+              )
+            ) {
+              return;
+            }
+
             addAttendanceExportCandidate(absentRowCollection, {
               uid: row.uid,
               schoolId: row.schoolId,
@@ -6716,6 +6861,21 @@ export default function EventDashboard() {
         participantRows
           .filter((row) => row.attendanceStatus === "Not Paid")
           .forEach((row) => {
+            if (
+              hasAttendanceExportCandidateIdentity(
+                presentRowCollection,
+                row.uid,
+                row.schoolId,
+              ) ||
+              hasAttendanceExportCandidateIdentity(
+                notPaidRowCollection,
+                row.uid,
+                row.schoolId,
+              )
+            ) {
+              return;
+            }
+
             addAttendanceExportCandidate(notPaidRowCollection, {
               uid: row.uid,
               schoolId: row.schoolId,

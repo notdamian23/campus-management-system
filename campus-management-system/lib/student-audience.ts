@@ -77,7 +77,7 @@ function hasMeaningfulStudentAudienceValue(value: unknown) {
   return !INVALID_STUDENT_AUDIENCE_VALUES.has(normalized.toLowerCase());
 }
 
-function hasStudentIdentityHints(
+function hasCompleteStudentIdentity(
   profile?: StudentAudienceProfileLike | null,
 ) {
   const hasStudentId =
@@ -91,7 +91,18 @@ function hasStudentIdentityHints(
     resolveStudentAudienceName(profile),
   );
 
-  return hasStudentId && (hasName || hasCourse || hasYear);
+  return hasStudentId && hasCourse && hasYear && hasName;
+}
+
+function isEcStudentLikeRole(
+  profile?: StudentAudienceProfileLike | null,
+) {
+  const normalizedRole = normalizeCampusRole(profile?.role);
+  return (
+    normalizedRole === "bod" ||
+    isLegacyBodProfile(profile) ||
+    isEcWorkspaceRole(profile?.role)
+  );
 }
 
 export function resolveStudentAudienceName(
@@ -111,31 +122,23 @@ export function hasStudentIdentityProfile(
   profile?: StudentAudienceProfileLike | null,
 ) {
   const normalizedRole = normalizeCampusRole(profile?.role);
-  return (
-    normalizedRole === "student" ||
-    profile?.isStudent === true ||
-    isLegacyBodProfile(profile) ||
-    (isEcWorkspaceRole(profile?.role) && hasStudentIdentityHints(profile))
-  );
+  if (normalizedRole === "student") {
+    return true;
+  }
+
+  return isEcStudentLikeRole(profile) && hasCompleteStudentIdentity(profile);
 }
 
 export function isStudentAudienceProfile(
   profile?: StudentAudienceProfileLike | null,
 ) {
-  if (!hasStudentIdentityProfile(profile)) {
+  const normalizedRole = normalizeCampusRole(profile?.role);
+  if (
+    normalizedRole !== "student" &&
+    !isEcStudentLikeRole(profile)
+  ) {
     return false;
   }
 
-  const hasStudentId =
-    hasMeaningfulStudentAudienceValue(profile?.schoolId) ||
-    hasMeaningfulStudentAudienceValue(profile?.studentId);
-  const hasCourse = hasMeaningfulStudentAudienceValue(profile?.course);
-  const hasYear =
-    hasMeaningfulStudentAudienceValue(profile?.yearLevel) ||
-    hasMeaningfulStudentAudienceValue(profile?.year);
-  const hasName = hasMeaningfulStudentAudienceValue(
-    resolveStudentAudienceName(profile),
-  );
-
-  return hasStudentId && hasCourse && hasYear && hasName;
+  return hasCompleteStudentIdentity(profile);
 }
