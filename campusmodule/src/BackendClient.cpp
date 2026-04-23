@@ -268,6 +268,75 @@ void appendUniqueStringValues(const std::vector<String> &values,
   }
 }
 
+bool hasPairAudienceEvidence(const EventInfo &event) {
+  EventInfo normalized = event;
+  CampusEligibility::normalizeEvent(normalized);
+  return CampusEligibility::isSpecificStudentsMode(normalized) ||
+         CampusEligibility::hasBroadAudienceFilters(normalized) ||
+         normalized.preregistrationRequired || normalized.requiresRegistration ||
+         normalized.paymentRequired || normalized.activeOnly ||
+         normalized.audienceRestricted || normalized.rosterRequired;
+}
+
+bool hasPairAudienceContradiction(const EventInfo &event,
+                                  const String &rawTargetMode) {
+  const String targetMode = CampusEligibility::normalizeTargetMode(rawTargetMode);
+  EventInfo normalized = event;
+  CampusEligibility::normalizeEvent(normalized);
+  const bool hasSpecificAudience =
+      CampusEligibility::isSpecificStudentsMode(normalized);
+  const bool hasAudienceFilters =
+      CampusEligibility::hasBroadAudienceFilters(normalized);
+  const bool requiresContextHint =
+      event.audienceRestricted || event.rosterRequired;
+
+  if (targetMode.isEmpty() && requiresContextHint) {
+    return true;
+  }
+  if (targetMode == "broad" && (hasSpecificAudience || hasAudienceFilters)) {
+    return true;
+  }
+  if (hasPairAudienceEvidence(event) && !requiresContextHint) {
+    return true;
+  }
+  return false;
+}
+
+bool shouldReplaceTargetMode(const String &current, const String &incoming) {
+  const String normalizedIncoming =
+      CampusEligibility::normalizeTargetMode(incoming);
+  if (normalizedIncoming.isEmpty()) {
+    return false;
+  }
+  const String normalizedCurrent = CampusEligibility::normalizeTargetMode(current);
+  return normalizedCurrent.isEmpty() ||
+         (normalizedCurrent == "broad" && normalizedIncoming != "broad");
+}
+
+void logEventAudienceState(const char *stage, const EventInfo &event,
+                           size_t studentCount, size_t recordedCount) {
+  Serial.printf(
+      "[PAIR][HTTP] stage=%s eventId=%s title=%s targetMode=%s targetStudent=%s "
+      "yearLevels=%s courses=%s sections=%s selectedStudentCount=%u "
+      "selectedSchoolCount=%u bodScope=%s preregRequired=%s paymentRequired=%s "
+      "activeOnly=%s audienceRestricted=%s rosterRequired=%s schema=%u "
+      "students=%u recorded=%u\n",
+      stage != nullptr ? stage : "-", event.eventId.c_str(), event.title.c_str(),
+      event.targetMode.c_str(), event.targetStudent.c_str(),
+      CampusEligibility::joinCanonicalList(event.yearLevelFilters).c_str(),
+      CampusEligibility::joinCanonicalList(event.courseFilters).c_str(),
+      CampusEligibility::joinCanonicalList(event.sectionFilters).c_str(),
+      static_cast<unsigned>(event.targetedStudentIds.size()),
+      static_cast<unsigned>(event.targetedSchoolIds.size()),
+      event.bodScope.c_str(),
+      event.preregistrationRequired || event.requiresRegistration ? "yes" : "no",
+      event.paymentRequired ? "yes" : "no", event.activeOnly ? "yes" : "no",
+      event.audienceRestricted ? "yes" : "no",
+      event.rosterRequired ? "yes" : "no",
+      static_cast<unsigned>(event.contextSchemaVersion),
+      static_cast<unsigned>(studentCount), static_cast<unsigned>(recordedCount));
+}
+
 void applyDeviceSecretHeaders(HTTPClient &http) {
   http.addHeader("X-Campus-Device-Id", CampusConfig::kDeviceId);
   http.addHeader("X-Campus-Device-Secret", CampusConfig::kDeviceSecret);
@@ -275,7 +344,8 @@ void applyDeviceSecretHeaders(HTTPClient &http) {
   http.addHeader("X-Device-Secret", CampusConfig::kDeviceSecret);
 }
 
-void eventFromJson(JsonObjectConst object, EventInfo &event) {
+void eventFromJson(JsonObjectConst object, EventInfo &event,
+                   bool *invalidAudienceSummary = nullptr) {
   event.eventId = String(object["eventId"] | object["id"] | "");
   event.title = String(object["title"] | "");
   event.date = String(object["date"] | "");
@@ -286,17 +356,20 @@ void eventFromJson(JsonObjectConst object, EventInfo &event) {
       String(object["scheduledTimeEnd"] | object["endTime"] | "");
   event.location = String(object["location"] | "");
   event.status = String(object["status"] | "");
-  event.targetMode = String(object["targetMode"] | object["targetingMode"] |
-                            object["audienceMode"] | "");
+  const String rawTargetMode = String(object["targetMode"] |
+                                      object["targetingMode"] |
+                                      object["audienceMode"] | "");
+  event.targetMode = rawTargetMode;
+  event.targetStudent = String(object["targetStudent"] | "");
   if (event.targetMode.isEmpty() && !object["targetSpecificStudents"].isNull()) {
-    event.targetMode =
-        parseBoolValue(object["targetSpecificStudents"], false) ? "specificStudents"
-                                                                : "broad";
+    if (parseBoolValue(object["targetSpecificStudents"], false)) {
+      event.targetMode = "specificStudents";
+    }
   } else if (event.targetMode.isEmpty() &&
              !object["specificStudentsOnly"].isNull()) {
-    event.targetMode =
-        parseBoolValue(object["specificStudentsOnly"], false) ? "specificStudents"
-                                                              : "broad";
+    if (parseBoolValue(object["specificStudentsOnly"], false)) {
+      event.targetMode = "specificStudents";
+    }
   }
   event.courseFilterLabel = String(object["courseFilterLabel"] |
                                    object["courseFilter"] |
@@ -320,10 +393,8 @@ void eventFromJson(JsonObjectConst object, EventInfo &event) {
   appendStringValues(object["selectedStudentIds"], event.targetedStudentIds);
   appendStringValues(object["targetedSchoolIds"], event.targetedSchoolIds);
   appendStringValues(object["selectedSchoolIds"], event.targetedSchoolIds);
-  if (event.targetMode.isEmpty() && !object["targetStudent"].isNull()) {
-    event.targetMode = parseBoolValue(object["targetStudent"], false)
-                           ? "specificStudents"
-                           : "broad";
+  if (event.targetMode.isEmpty() && !event.targetStudent.isEmpty()) {
+    event.targetMode = "specificStudents";
   }
   appendStringValues(object["courses"], event.courseFilters);
   appendStringValues(object["yearLevels"], event.yearLevelFilters);
@@ -339,6 +410,19 @@ void eventFromJson(JsonObjectConst object, EventInfo &event) {
   event.activeOnly =
       parseBoolValue(object["activeOnly"],
                      parseBoolValue(object["requiresActiveStatus"], false));
+  event.audienceRestricted = parseBoolValue(object["audienceRestricted"], false);
+  event.rosterRequired = parseBoolValue(
+      object["rosterRequired"],
+      parseBoolValue(object["requiresContext"],
+                     parseBoolValue(object["pairedContextRequired"], false)));
+  event.contextSchemaVersion = object["contextSchemaVersion"] | 0;
+  if (event.contextSchemaVersion == 0) {
+    event.contextSchemaVersion = object["pairedEventContextVersion"] | 0;
+  }
+  if (invalidAudienceSummary != nullptr) {
+    *invalidAudienceSummary =
+        hasPairAudienceContradiction(event, rawTargetMode);
+  }
   if (event.scheduledTimeEnd.isEmpty()) {
     const int dashIndex = event.scheduledTime.indexOf('-');
     if (dashIndex > 0) {
@@ -606,8 +690,11 @@ void mergeEventInfoPage(const EventInfo &pageEvent, EventInfo &event) {
   if (event.status.isEmpty()) {
     event.status = pageEvent.status;
   }
-  if (event.targetMode.isEmpty()) {
+  if (shouldReplaceTargetMode(event.targetMode, pageEvent.targetMode)) {
     event.targetMode = pageEvent.targetMode;
+  }
+  if (event.targetStudent.isEmpty()) {
+    event.targetStudent = pageEvent.targetStudent;
   }
   if (event.courseFilterLabel.isEmpty()) {
     event.courseFilterLabel = pageEvent.courseFilterLabel;
@@ -623,6 +710,11 @@ void mergeEventInfoPage(const EventInfo &pageEvent, EventInfo &event) {
   }
   if (event.bodScopeCanonical.isEmpty()) {
     event.bodScopeCanonical = pageEvent.bodScopeCanonical;
+  }
+  event.audienceRestricted = event.audienceRestricted || pageEvent.audienceRestricted;
+  event.rosterRequired = event.rosterRequired || pageEvent.rosterRequired;
+  if (event.contextSchemaVersion == 0) {
+    event.contextSchemaVersion = pageEvent.contextSchemaVersion;
   }
 
   appendUniqueStringValues(pageEvent.courseFilters, event.courseFilters);
@@ -1665,13 +1757,21 @@ bool BackendClient::parseEventContextResponse(
     return false;
   }
 
-  eventFromJson(eventObject, event);
+  bool invalidAudienceSummary = false;
+  eventFromJson(eventObject, event, &invalidAudienceSummary);
   JsonObject eligibilityObject = response["eligibility"];
   if (!eligibilityObject.isNull()) {
     EventInfo eligibilityEvent;
-    eventFromJson(eligibilityObject, eligibilityEvent);
-    if (event.targetMode.isEmpty()) {
+    bool invalidEligibilitySummary = false;
+    eventFromJson(eligibilityObject, eligibilityEvent,
+                  &invalidEligibilitySummary);
+    invalidAudienceSummary =
+        invalidAudienceSummary || invalidEligibilitySummary;
+    if (shouldReplaceTargetMode(event.targetMode, eligibilityEvent.targetMode)) {
       event.targetMode = eligibilityEvent.targetMode;
+    }
+    if (event.targetStudent.isEmpty()) {
+      event.targetStudent = eligibilityEvent.targetStudent;
     }
     if (event.courseFilterLabel.isEmpty()) {
       event.courseFilterLabel = eligibilityEvent.courseFilterLabel;
@@ -1687,6 +1787,12 @@ bool BackendClient::parseEventContextResponse(
     }
     if (event.bodScopeCanonical.isEmpty()) {
       event.bodScopeCanonical = eligibilityEvent.bodScopeCanonical;
+    }
+    event.audienceRestricted =
+        event.audienceRestricted || eligibilityEvent.audienceRestricted;
+    event.rosterRequired = event.rosterRequired || eligibilityEvent.rosterRequired;
+    if (event.contextSchemaVersion == 0) {
+      event.contextSchemaVersion = eligibilityEvent.contextSchemaVersion;
     }
     appendStringValues(eligibilityObject["courseFilters"], event.courseFilters);
     appendStringValues(eligibilityObject["targetCourses"], event.courseFilters);
@@ -1718,9 +1824,14 @@ bool BackendClient::parseEventContextResponse(
   }
   JsonObject rosterObject = response["roster"];
   if (!rosterObject.isNull()) {
-    if (event.targetMode.isEmpty()) {
-      event.targetMode =
-          String(rosterObject["targetMode"] | rosterObject["targetingMode"] | "");
+    const String rosterTargetMode =
+        String(rosterObject["targetMode"] | rosterObject["targetingMode"] |
+               rosterObject["audienceMode"] | "");
+    if (shouldReplaceTargetMode(event.targetMode, rosterTargetMode)) {
+      event.targetMode = rosterTargetMode;
+    }
+    if (event.targetStudent.isEmpty()) {
+      event.targetStudent = String(rosterObject["targetStudent"] | "");
     }
     if (event.courseFilterLabel.isEmpty()) {
       event.courseFilterLabel = String(rosterObject["courseFilterLabel"] |
@@ -1743,6 +1854,18 @@ bool BackendClient::parseEventContextResponse(
                               rosterObject["bodScopeFilter"] |
                               rosterObject["organizationScope"] | "");
     }
+    event.audienceRestricted =
+        event.audienceRestricted ||
+        parseBoolValue(rosterObject["audienceRestricted"], false);
+    event.rosterRequired = event.rosterRequired ||
+                           parseBoolValue(rosterObject["rosterRequired"], false);
+    if (event.contextSchemaVersion == 0) {
+      event.contextSchemaVersion = rosterObject["contextSchemaVersion"] | 0;
+      if (event.contextSchemaVersion == 0) {
+        event.contextSchemaVersion =
+            rosterObject["pairedEventContextVersion"] | 0;
+      }
+    }
     appendStringValues(rosterObject["courseFilters"], event.courseFilters);
     appendStringValues(rosterObject["yearLevelFilters"], event.yearLevelFilters);
     appendStringValues(rosterObject["sectionFilters"], event.sectionFilters);
@@ -1753,6 +1876,11 @@ bool BackendClient::parseEventContextResponse(
     appendStringValues(rosterObject["selectedSchoolIds"], event.targetedSchoolIds);
   }
   CampusEligibility::normalizeEvent(event);
+  if (invalidAudienceSummary) {
+    logEventAudienceState("invalid", event, 0, 0);
+    error = "Pair data audience invalid; re-pair/sync required";
+    return false;
+  }
   students.clear();
   recordedStudentIds.clear();
 
@@ -1776,6 +1904,7 @@ bool BackendClient::parseEventContextResponse(
     }
   }
 
+  logEventAudienceState("parsed", event, students.size(), recordedStudentIds.size());
   return event.isValid();
 }
 

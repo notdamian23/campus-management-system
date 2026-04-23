@@ -59,6 +59,8 @@ type PortableEventSummary = {
   preregistrationRequired: boolean;
   requiresPayment: boolean;
   activeOnly: boolean;
+  audienceRestricted: boolean;
+  rosterRequired: boolean;
   linkedPaymentId: string;
   createdAtMs: number;
   sortMs: number;
@@ -1021,21 +1023,47 @@ function normalizeTargetMode(value: unknown): string {
     compact === "specificstudent" ||
     compact === "specific" ||
     compact === "selectedstudents" ||
-    compact === "selectedstudent"
+    compact === "selectedstudent" ||
+    compact === "explicit" ||
+    compact === "explicitstudents" ||
+    compact === "explicitstudent"
   ) {
     return "specificStudents";
+  }
+  if (
+    compact === "filtered" ||
+    compact === "filteredaudience" ||
+    compact === "filters" ||
+    compact === "course" ||
+    compact === "courses" ||
+    compact === "year" ||
+    compact === "years" ||
+    compact === "yearlevel" ||
+    compact === "yearlevels" ||
+    compact === "courseyear" ||
+    compact === "yearcourse" ||
+    compact === "scoped" ||
+    compact === "restricted"
+  ) {
+    return "filteredAudience";
   }
   if (
     compact === "broad" ||
     compact === "general" ||
     compact === "allaudience" ||
     compact === "allstudents" ||
-    compact === "filters" ||
     compact === "generalaudience"
   ) {
     return "broad";
   }
   return compact;
+}
+
+function hasSpecificTargetStudentValue(value: unknown): boolean {
+  const compact = normalizeScope(value);
+  return compact.length > 0 &&
+    compact !== "allstudents" &&
+    compact !== "allstudent";
 }
 
 function normalizeEnrollmentSessionStatus(value: unknown): EnrollmentSessionStatus {
@@ -1074,9 +1102,198 @@ function parseRegistrationStatus(value: unknown): "PRE_REGISTERED" | "WAITLISTED
   return "PRE_REGISTERED";
 }
 
-function normalizeTargetList(value: unknown): string[] {
-  const raw = dedupeStrings(asStringArray(value));
-  return raw.filter((item) => normalizeLower(item) !== "all years" && normalizeLower(item) !== "all courses");
+function splitTargetValue(value: unknown): string[] {
+  const raw = normalizeText(value);
+  if (!raw) {
+    return [];
+  }
+  return raw
+    .split(/[,\n;|]/)
+    .map((item) => normalizeText(item))
+    .filter(Boolean);
+}
+
+function normalizeMergedTargetList(
+  values: unknown[],
+  normalizer: (value: unknown) => string,
+  excludedLabels: string[]
+): string[] {
+  const excluded = new Set(excludedLabels.map((item) => normalizeLower(item)));
+  const merged = values.flatMap((value) =>
+    Array.isArray(value) ? asStringArray(value) : splitTargetValue(value)
+  );
+  return dedupeStrings(
+    merged
+      .map((item) => normalizer(item))
+      .filter((item) => item && !excluded.has(normalizeLower(item)))
+  );
+}
+
+function normalizeCourseTargets(data: FirebaseFirestore.DocumentData): string[] {
+  return normalizeMergedTargetList(
+    [
+      data.courses,
+      data.targetCourses,
+      data.selectedCourses,
+      data.courseFilters,
+      data.courseFilter,
+      data.course,
+      data.targetCourse,
+    ],
+    normalizeCourse,
+    ["all courses"]
+  );
+}
+
+function normalizeYearTargets(data: FirebaseFirestore.DocumentData): string[] {
+  return normalizeMergedTargetList(
+    [
+      data.yearLevels,
+      data.targetYearLevels,
+      data.selectedYearLevels,
+      data.yearLevelFilters,
+      data.yearLevelFilter,
+      data.yearLevel,
+      data.year,
+      data.targetYearLevel,
+    ],
+    normalizeYearLevel,
+    ["all years", "unassigned"]
+  );
+}
+
+function normalizeSelectedStudentIds(data: FirebaseFirestore.DocumentData): string[] {
+  return dedupeStrings([
+    ...normalizeIdentifierList(data.selectedStudentIds),
+    ...normalizeIdentifierList(data.targetStudentIds),
+    ...normalizeIdentifierList(data.targetedStudentIds),
+  ]);
+}
+
+function normalizeSelectedSchoolIds(data: FirebaseFirestore.DocumentData): string[] {
+  return dedupeStrings([
+    ...normalizeIdentifierList(data.selectedSchoolIds),
+    ...normalizeIdentifierList(data.targetSchoolIds),
+    ...normalizeIdentifierList(data.targetedSchoolIds),
+  ]);
+}
+
+function portableEventHasSpecificAudience(event: Pick<
+  PortableEventSummary,
+  "selectedStudentIds" | "selectedSchoolIds" | "targetStudent"
+>): boolean {
+  return (
+    event.selectedStudentIds.length > 0 ||
+    event.selectedSchoolIds.length > 0 ||
+    hasSpecificTargetStudentValue(event.targetStudent)
+  );
+}
+
+function portableEventHasBroadAudienceFilters(event: Pick<
+  PortableEventSummary,
+  "courses" | "yearLevels" | "sectionFilters"
+>): boolean {
+  return (
+    event.courses.length > 0 ||
+    event.yearLevels.length > 0 ||
+    event.sectionFilters.length > 0
+  );
+}
+
+function portableEventAudienceRestricted(event: Pick<
+  PortableEventSummary,
+  | "selectedStudentIds"
+  | "selectedSchoolIds"
+  | "targetStudent"
+  | "courses"
+  | "yearLevels"
+  | "sectionFilters"
+  | "bodScope"
+  | "preregistrationRequired"
+  | "requiresRegistration"
+  | "requiresPayment"
+  | "activeOnly"
+>): boolean {
+  return (
+    portableEventHasSpecificAudience(event) ||
+    portableEventHasBroadAudienceFilters(event) ||
+    normalizeText(event.bodScope).length > 0 ||
+    event.preregistrationRequired ||
+    event.requiresRegistration ||
+    event.requiresPayment ||
+    event.activeOnly
+  );
+}
+
+function rawEventAudienceLogFields(
+  eventId: string,
+  data: FirebaseFirestore.DocumentData
+) {
+  return {
+    eventId,
+    title: data.title ?? null,
+    targetMode: data.targetMode ?? null,
+    course: data.course ?? null,
+    courses: data.courses ?? null,
+    yearLevel: data.yearLevel ?? null,
+    yearLevels: data.yearLevels ?? null,
+    section: data.section ?? null,
+    sectionFilters: data.sectionFilters ?? null,
+    targetStudent: data.targetStudent ?? null,
+    selectedStudentIds: data.selectedStudentIds ?? null,
+    selectedStudentIdsCount: normalizeIdentifierList(data.selectedStudentIds).length,
+    selectedSchoolIds: data.selectedSchoolIds ?? null,
+    selectedSchoolIdsCount: normalizeIdentifierList(data.selectedSchoolIds).length,
+    targetStudentIds: data.targetStudentIds ?? null,
+    targetSchoolIds: data.targetSchoolIds ?? null,
+    audienceMode: data.audienceMode ?? null,
+    sendToFilteredAudience: data.sendToFilteredAudience ?? null,
+    preregistrationRequired: data.preregistrationRequired ?? null,
+    isPreReg: data.isPreReg ?? null,
+    requiresPayment: data.requiresPayment ?? null,
+    paymentRequired: data.paymentRequired ?? null,
+    withPayment: data.withPayment ?? null,
+    activeOnly: data.activeOnly ?? null,
+    ownerType: data.ownerType ?? null,
+    bodScope: data.bodScope ?? null,
+    courseScope: data.courseScope ?? null,
+  };
+}
+
+function portableEventAudienceLogFields(event: PortableEventSummary) {
+  return {
+    eventId: event.eventId,
+    title: event.title,
+    targetMode: event.targetMode,
+    requiresContext: event.rosterRequired,
+    yearLevels: event.yearLevels,
+    courses: event.courses,
+    sectionFilters: event.sectionFilters,
+    targetStudent: event.targetStudent,
+    selectedStudentCount: event.selectedStudentIds.length,
+    selectedSchoolCount: event.selectedSchoolIds.length,
+    bodScope: event.bodScope,
+    preregistrationRequired: event.preregistrationRequired,
+    requiresPayment: event.requiresPayment,
+    activeOnly: event.activeOnly,
+    audienceRestricted: event.audienceRestricted,
+    rosterRequired: event.rosterRequired,
+  };
+}
+
+function portableEventSummaryResponseLogFields(event: PortableEventSummary) {
+  return {
+    eventId: event.eventId,
+    targetMode: event.targetMode,
+    requiresContext: event.rosterRequired,
+    audienceRestricted: event.audienceRestricted,
+    rosterRequired: event.rosterRequired,
+    yearLevels: event.yearLevels,
+    courses: event.courses,
+    targetStudent: event.targetStudent,
+    selectedStudentIdsCount: event.selectedStudentIds.length,
+    selectedSchoolIdsCount: event.selectedSchoolIds.length,
+  };
 }
 
 function normalizeIdentifierList(value: unknown): string[] {
@@ -1101,6 +1318,9 @@ function matchesTargetList(targets: string[], value: string): boolean {
 }
 
 function matchesSpecificStudentTarget(targetStudent: unknown, candidate: FirebaseFirestore.DocumentData): boolean {
+  if (!hasSpecificTargetStudentValue(targetStudent)) {
+    return true;
+  }
   const target = normalizeLower(targetStudent);
   if (!target) {
     return true;
@@ -1584,29 +1804,69 @@ function eventSummaryFromSnapshot(
       normalizeText(data.endTime) ||
       normalizeText(data.timeEnd)
   );
-  const yearLevels = normalizeTargetList(data.yearLevels);
-  const courses = normalizeTargetList(data.courses);
+  const yearLevels = normalizeYearTargets(data);
+  const courses = normalizeCourseTargets(data);
   const sectionFilters = normalizeSectionList(
-    data.sectionFilters ?? data.sections ?? data.targetSections
+    data.sectionFilters ??
+      data.sections ??
+      data.targetSections ??
+      data.section ??
+      data.targetSection
   );
-  const selectedStudentIds = normalizeIdentifierList(data.selectedStudentIds);
-  const selectedSchoolIds = normalizeIdentifierList(data.selectedSchoolIds);
+  const selectedStudentIds = normalizeSelectedStudentIds(data);
+  const selectedSchoolIds = normalizeSelectedSchoolIds(data);
   const linkedPaymentId = getEventLinkedPaymentId(data);
   const requiresPayment =
     data.paymentRequired === true ||
     data.withPayment === true ||
     linkedPaymentId.length > 0;
-  const preregistrationRequired = data.isPreReg === true;
-  const targetMode =
-    normalizeTargetMode(data.targetMode ?? data.targetingMode ?? data.audienceMode) ||
-    (selectedStudentIds.length > 0 || selectedSchoolIds.length > 0 ||
-    normalizeText(data.targetStudent).length > 0 ?
-      "specificStudents" :
-      "broad");
+  const preregistrationRequired =
+    data.isPreReg === true || data.requiresRegistration === true;
+  const activeOnly =
+    data.activeOnly === true || data.requiresActiveStatus === true;
+  const targetStudent = normalizeText(data.targetStudent);
   const bodScope =
     normalizeText(data.bodScope) ||
     normalizeText(data.bodScopeFilter) ||
     normalizeText(data.organizationScope);
+  const explicitTargetMode =
+    normalizeTargetMode(data.targetMode ?? data.targetingMode ?? data.audienceMode);
+  const hasSpecificAudience =
+    selectedStudentIds.length > 0 ||
+    selectedSchoolIds.length > 0 ||
+    hasSpecificTargetStudentValue(targetStudent);
+  const hasFilteredAudience =
+    portableEventHasBroadAudienceFilters({yearLevels, courses, sectionFilters}) ||
+    explicitTargetMode === "filteredAudience" ||
+    data.sendToFilteredAudience === true;
+  const targetMode =
+    hasSpecificAudience ?
+      "specificStudents" :
+    hasFilteredAudience ?
+      "filteredAudience" :
+    explicitTargetMode === "specificStudents" ?
+      "specificStudents" :
+    explicitTargetMode && explicitTargetMode !== "broad" ?
+      explicitTargetMode :
+      "broad";
+  const audienceRestricted = portableEventAudienceRestricted({
+    yearLevels,
+    courses,
+    sectionFilters,
+    targetStudent,
+    selectedStudentIds,
+    selectedSchoolIds,
+    bodScope,
+    requiresRegistration: preregistrationRequired,
+    preregistrationRequired,
+    requiresPayment,
+    activeOnly,
+  }) ||
+    explicitTargetMode === "specificStudents" ||
+    explicitTargetMode === "filteredAudience" ||
+    (data.sendToFilteredAudience === false &&
+      normalizeScope(data.audienceMode) === "explicit");
+  const rosterRequired = audienceRestricted;
 
   return {
     eventId: snap.id,
@@ -1620,7 +1880,7 @@ function eventSummaryFromSnapshot(
     yearLevels,
     courses,
     sectionFilters,
-    targetStudent: normalizeText(data.targetStudent),
+    targetStudent,
     selectedStudentIds,
     selectedSchoolIds,
     bodScope,
@@ -1628,8 +1888,9 @@ function eventSummaryFromSnapshot(
     requiresRegistration: preregistrationRequired,
     preregistrationRequired,
     requiresPayment,
-    activeOnly:
-      data.activeOnly === true || data.requiresActiveStatus === true,
+    activeOnly,
+    audienceRestricted,
+    rosterRequired,
     linkedPaymentId,
     createdAtMs: toMillis(data.createdAt),
     sortMs: parseEventStartMs(date, schedule.scheduledTime),
@@ -1672,6 +1933,11 @@ async function getEventSummary(eventId: string): Promise<PortableEventSummary> {
     throw new ApiError(404, "Event not found.");
   }
 
+  const data = snap.data() ?? {};
+  deviceLogger.info(
+    "Portable device raw Firestore event fields",
+    rawEventAudienceLogFields(snap.id, data)
+  );
   const event = eventSummaryFromSnapshot(snap);
   if (!isActiveEvent(event)) {
     throw new ApiError(400, "Event is no longer available for pairing.");
@@ -1915,11 +2181,20 @@ function portableEventPairEligibilityPayload(event: PortableEventSummary) {
     courseFilters: event.courses,
     yearLevelFilters: event.yearLevels,
     sectionFilters: event.sectionFilters,
+    courses: event.courses,
+    yearLevels: event.yearLevels,
+    targetStudent: event.targetStudent,
+    selectedStudentIds: event.selectedStudentIds,
+    selectedSchoolIds: event.selectedSchoolIds,
     bodScope: event.bodScope,
     preregistrationRequired: event.preregistrationRequired,
     requiresRegistration: event.requiresRegistration,
     paymentRequired: event.requiresPayment,
+    requiresPayment: event.requiresPayment,
     activeOnly: event.activeOnly,
+    audienceRestricted: event.audienceRestricted,
+    rosterRequired: event.rosterRequired,
+    requiresContext: event.rosterRequired,
   };
 }
 
@@ -1942,6 +2217,9 @@ function portableEventEligibilityPayload(
     paymentRequired: event.requiresPayment,
     requiresPayment: event.requiresPayment,
     activeOnly: event.activeOnly,
+    audienceRestricted: event.audienceRestricted,
+    rosterRequired: event.rosterRequired,
+    requiresContext: event.rosterRequired,
     linkedPaymentId: event.linkedPaymentId,
   };
 }
@@ -3739,7 +4017,8 @@ export const campusDevicePairEvent = deviceEndpoint(
     const responseJson = JSON.stringify(payload);
     deviceLogger.info("Portable device pair event response", {
       deviceId: device.deviceId,
-      eventId: event.eventId,
+      ...portableEventAudienceLogFields(event),
+      portableEventSummary: portableEventSummaryResponseLogFields(event),
       responseBytes: Buffer.byteLength(responseJson, "utf8"),
       responseFields: Object.keys(payload),
       eventFields: Object.keys(payload.event),
@@ -3799,7 +4078,7 @@ export const campusDevicePairedEventContext = deviceEndpoint(
       {merge: true}
     );
 
-    sendJson(res, 200, {
+    const payload = {
       ok: true,
       pairing: {
         deviceId: device.deviceId,
@@ -3837,7 +4116,17 @@ export const campusDevicePairedEventContext = deviceEndpoint(
         queueId: student.queueId,
         bodScope: student.bodScope,
       })),
+    };
+    deviceLogger.info("Portable device paired event context response", {
+      deviceId: device.deviceId,
+      offset,
+      limit,
+      studentPageCount: studentPage.length,
+      recordedStudentIdsPageCount: recordedStudentIdsPage.length,
+      ...portableEventAudienceLogFields(context.event),
+      portableEventSummary: portableEventSummaryResponseLogFields(context.event),
     });
+    sendJson(res, 200, payload);
   }
 );
 

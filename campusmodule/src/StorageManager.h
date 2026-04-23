@@ -27,6 +27,8 @@ class StorageManager {
                               std::vector<String> &recordedStudentIds) const;
   bool hasPairedEventContextCache() const;
   bool hasPairedEventStudentContext(const String &eventId) const;
+  bool findPairedEventStudent(const String &eventId, const String &studentUid,
+                              const String &schoolId, StudentInfo &outStudent) const;
   String pairedEventContextStatus() const;
   CampusEligibility::EventEligibilityDecision evaluateStudentEligibilityForEvent(
       const EventInfo &event, const StudentInfo &student) const;

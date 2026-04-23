@@ -12,6 +12,7 @@ struct EventInfo {
   String location;
   String status;
   String targetMode;
+  String targetStudent;
   String courseFilterLabel;
   String yearLevelFilterLabel;
   String sectionFilterLabel;
@@ -26,6 +27,9 @@ struct EventInfo {
   bool preregistrationRequired = false;
   bool paymentRequired = false;
   bool activeOnly = false;
+  bool audienceRestricted = false;
+  bool rosterRequired = false;
+  uint16_t contextSchemaVersion = 0;
   bool timeOutFinalized = false;
 
   bool isValid() const {

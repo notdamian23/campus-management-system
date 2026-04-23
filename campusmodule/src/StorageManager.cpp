@@ -33,6 +33,7 @@ constexpr char kSdFingerprintRosterTempPath[] = "/logs/fingerprint_roster.tmp";
 constexpr char kTempPath[] = "/campus_tmp.json";
 constexpr char kSdAuditPath[] = "/attendance_audit.csv";
 constexpr char kSdExportDir[] = "/exports";
+constexpr uint16_t kPairedEventContextSchemaVersion = 2;
 
 constexpr size_t kPendingDocSize = 16384;
 constexpr size_t kFingerprintDocSize = 16384;
@@ -115,6 +116,30 @@ String parseStringField(JsonVariantConst value) {
   return value.as<String>();
 }
 
+void logPairedEventSummary(const char *stage, const EventInfo &event,
+                           size_t studentCount, size_t recordedCount) {
+  Serial.printf(
+      "[PAIR][CACHE] stage=%s eventId=%s title=%s targetMode=%s targetStudent=%s "
+      "yearLevels=%s courses=%s sections=%s selectedStudentCount=%u "
+      "selectedSchoolCount=%u bodScope=%s preregRequired=%s paymentRequired=%s "
+      "activeOnly=%s audienceRestricted=%s rosterRequired=%s schema=%u "
+      "students=%u recorded=%u\n",
+      stage != nullptr ? stage : "-", event.eventId.c_str(), event.title.c_str(),
+      event.targetMode.c_str(), event.targetStudent.c_str(),
+      CampusEligibility::joinCanonicalList(event.yearLevelFilters).c_str(),
+      CampusEligibility::joinCanonicalList(event.courseFilters).c_str(),
+      CampusEligibility::joinCanonicalList(event.sectionFilters).c_str(),
+      static_cast<unsigned>(event.targetedStudentIds.size()),
+      static_cast<unsigned>(event.targetedSchoolIds.size()),
+      event.bodScope.c_str(),
+      event.preregistrationRequired || event.requiresRegistration ? "yes" : "no",
+      event.paymentRequired ? "yes" : "no", event.activeOnly ? "yes" : "no",
+      event.audienceRestricted ? "yes" : "no",
+      event.rosterRequired ? "yes" : "no",
+      static_cast<unsigned>(event.contextSchemaVersion),
+      static_cast<unsigned>(studentCount), static_cast<unsigned>(recordedCount));
+}
+
 void appendStringValues(JsonVariantConst value, std::vector<String> &outValues) {
   if (value.isNull()) {
     return;
@@ -157,6 +182,40 @@ void appendStringValues(JsonVariantConst value, std::vector<String> &outValues) 
   if (!exists) {
     outValues.push_back(parsed);
   }
+}
+
+bool hasCachedAudienceEvidence(const EventInfo &event) {
+  EventInfo normalized = event;
+  CampusEligibility::normalizeEvent(normalized);
+  return CampusEligibility::isSpecificStudentsMode(normalized) ||
+         CampusEligibility::hasBroadAudienceFilters(normalized) ||
+         normalized.preregistrationRequired || normalized.requiresRegistration ||
+         normalized.paymentRequired || normalized.activeOnly ||
+         normalized.audienceRestricted || normalized.rosterRequired;
+}
+
+bool hasCachedAudienceContradiction(const EventInfo &event,
+                                    const String &rawTargetMode) {
+  const String targetMode = CampusEligibility::normalizeTargetMode(rawTargetMode);
+  EventInfo normalized = event;
+  CampusEligibility::normalizeEvent(normalized);
+  const bool hasSpecificAudience =
+      CampusEligibility::isSpecificStudentsMode(normalized);
+  const bool hasAudienceFilters =
+      CampusEligibility::hasBroadAudienceFilters(normalized);
+  const bool requiresContextHint =
+      event.audienceRestricted || event.rosterRequired;
+
+  if (targetMode.isEmpty() && requiresContextHint) {
+    return true;
+  }
+  if (targetMode == "broad" && (hasSpecificAudience || hasAudienceFilters)) {
+    return true;
+  }
+  if (hasCachedAudienceEvidence(event) && !requiresContextHint) {
+    return true;
+  }
+  return false;
 }
 
 const char *sdCardTypeName(uint8_t cardType) {
@@ -1039,6 +1098,7 @@ void eventToJson(JsonObject object, const EventInfo &event) {
   object["location"] = event.location;
   object["status"] = event.status;
   object["targetMode"] = event.targetMode;
+  object["targetStudent"] = event.targetStudent;
   object["courseFilterLabel"] = event.courseFilterLabel;
   object["yearLevelFilterLabel"] = event.yearLevelFilterLabel;
   object["sectionFilterLabel"] = event.sectionFilterLabel;
@@ -1068,10 +1128,15 @@ void eventToJson(JsonObject object, const EventInfo &event) {
   object["preregistrationRequired"] = event.preregistrationRequired;
   object["paymentRequired"] = event.paymentRequired;
   object["activeOnly"] = event.activeOnly;
+  object["audienceRestricted"] = event.audienceRestricted;
+  object["rosterRequired"] = event.rosterRequired;
+  object["requiresContext"] = event.rosterRequired;
+  object["contextSchemaVersion"] = event.contextSchemaVersion;
   object["timeOutFinalized"] = event.timeOutFinalized;
 }
 
-EventInfo eventFromJson(JsonObjectConst object) {
+EventInfo eventFromJson(JsonObjectConst object,
+                        bool *invalidAudienceSummary = nullptr) {
   EventInfo event;
   event.eventId = String(object["eventId"] | "");
   event.title = String(object["title"] | "");
@@ -1083,17 +1148,20 @@ EventInfo eventFromJson(JsonObjectConst object) {
       String(object["scheduledTimeEnd"] | object["endTime"] | "");
   event.location = String(object["location"] | "");
   event.status = String(object["status"] | "");
-  event.targetMode = String(object["targetMode"] | object["targetingMode"] |
-                            object["audienceMode"] | "");
+  const String rawTargetMode = String(object["targetMode"] |
+                                      object["targetingMode"] |
+                                      object["audienceMode"] | "");
+  event.targetMode = rawTargetMode;
+  event.targetStudent = String(object["targetStudent"] | "");
   if (event.targetMode.isEmpty() && !object["targetSpecificStudents"].isNull()) {
-    event.targetMode =
-        parseBoolValue(object["targetSpecificStudents"], false) ? "specificStudents"
-                                                                : "broad";
+    if (parseBoolValue(object["targetSpecificStudents"], false)) {
+      event.targetMode = "specificStudents";
+    }
   } else if (event.targetMode.isEmpty() &&
              !object["specificStudentsOnly"].isNull()) {
-    event.targetMode =
-        parseBoolValue(object["specificStudentsOnly"], false) ? "specificStudents"
-                                                              : "broad";
+    if (parseBoolValue(object["specificStudentsOnly"], false)) {
+      event.targetMode = "specificStudents";
+    }
   }
   event.courseFilterLabel = String(object["courseFilterLabel"] |
                                    object["courseFilter"] |
@@ -1117,10 +1185,8 @@ EventInfo eventFromJson(JsonObjectConst object) {
   appendStringValues(object["selectedStudentIds"], event.targetedStudentIds);
   appendStringValues(object["targetedSchoolIds"], event.targetedSchoolIds);
   appendStringValues(object["selectedSchoolIds"], event.targetedSchoolIds);
-  if (event.targetMode.isEmpty() && !object["targetStudent"].isNull()) {
-    event.targetMode = parseBoolValue(object["targetStudent"], false)
-                           ? "specificStudents"
-                           : "broad";
+  if (event.targetMode.isEmpty() && !event.targetStudent.isEmpty()) {
+    event.targetMode = "specificStudents";
   }
   appendStringValues(object["courses"], event.courseFilters);
   appendStringValues(object["yearLevels"], event.yearLevelFilters);
@@ -1136,7 +1202,20 @@ EventInfo eventFromJson(JsonObjectConst object) {
   event.activeOnly =
       parseBoolValue(object["activeOnly"],
                      parseBoolValue(object["requiresActiveStatus"], false));
+  event.audienceRestricted = parseBoolValue(object["audienceRestricted"], false);
+  event.rosterRequired = parseBoolValue(
+      object["rosterRequired"],
+      parseBoolValue(object["requiresContext"],
+                     parseBoolValue(object["pairedContextRequired"], false)));
+  event.contextSchemaVersion = object["contextSchemaVersion"] | 0;
+  if (event.contextSchemaVersion == 0) {
+    event.contextSchemaVersion = object["pairedEventContextVersion"] | 0;
+  }
   event.timeOutFinalized = object["timeOutFinalized"] | false;
+  if (invalidAudienceSummary != nullptr) {
+    *invalidAudienceSummary =
+        hasCachedAudienceContradiction(event, rawTargetMode);
+  }
   normalizeEventSchedule(event);
   CampusEligibility::normalizeEvent(event);
   return event;
@@ -1279,10 +1358,33 @@ bool StorageManager::ensurePairedEventContextLoaded() const {
     pairedEventContextStatus_ = "paired_event_context_corrupt";
     return false;
   }
+  uint16_t schemaVersion = doc["schemaVersion"] | 0;
+  if (schemaVersion == 0) {
+    schemaVersion = eventObject["contextSchemaVersion"] | 0;
+  }
+  if (schemaVersion < kPairedEventContextSchemaVersion) {
+    pairedEventContextStatus_ = "paired_event_context_legacy";
+    Serial.printf(
+        "[PAIR][CACHE] stage=load rejected reason=legacy-schema schema=%u required=%u\n",
+        static_cast<unsigned>(schemaVersion),
+        static_cast<unsigned>(kPairedEventContextSchemaVersion));
+    return false;
+  }
 
-  const EventInfo parsedEvent = eventFromJson(eventObject);
+  bool invalidAudienceSummary = false;
+  const EventInfo parsedEvent = eventFromJson(eventObject, &invalidAudienceSummary);
   if (!parsedEvent.isValid()) {
     pairedEventContextStatus_ = "paired_event_context_corrupt";
+    return false;
+  }
+  if (invalidAudienceSummary) {
+    pairedEventContextStatus_ = "paired_event_audience_invalid";
+    Serial.printf(
+        "[PAIR][CACHE] stage=load rejected reason=audience-invalid eventId=%s "
+        "targetMode=%s audienceRestricted=%s rosterRequired=%s\n",
+        parsedEvent.eventId.c_str(), parsedEvent.targetMode.c_str(),
+        parsedEvent.audienceRestricted ? "yes" : "no",
+        parsedEvent.rosterRequired ? "yes" : "no");
     return false;
   }
   pairedEventCache_ = parsedEvent;
@@ -1320,6 +1422,8 @@ bool StorageManager::ensurePairedEventContextLoaded() const {
 
   pairedEventContextAvailable_ = true;
   pairedEventContextStatus_ = "ok";
+  logPairedEventSummary("load", pairedEventCache_, pairedStudentsCache_.size(),
+                        remoteRecordedStudentIdsCache_.size());
   return true;
 }
 
@@ -1405,6 +1509,19 @@ bool StorageManager::savePairedEventContext(
                                            : loadPairedEvent().eventId;
   EventInfo normalizedEvent = event;
   CampusEligibility::normalizeEvent(normalizedEvent);
+  normalizedEvent.contextSchemaVersion = kPairedEventContextSchemaVersion;
+  if (hasCachedAudienceContradiction(normalizedEvent,
+                                     normalizedEvent.targetMode)) {
+    pairedEventContextAvailable_ = false;
+    pairedEventContextStatus_ = "paired_event_audience_invalid";
+    Serial.printf(
+        "[PAIR][CACHE] stage=save rejected reason=audience-invalid eventId=%s "
+        "targetMode=%s audienceRestricted=%s rosterRequired=%s\n",
+        normalizedEvent.eventId.c_str(), normalizedEvent.targetMode.c_str(),
+        normalizedEvent.audienceRestricted ? "yes" : "no",
+        normalizedEvent.rosterRequired ? "yes" : "no");
+    return false;
+  }
   const bool needsStudentContext =
       CampusEligibility::requiresPairedStudentContext(normalizedEvent);
 
@@ -1428,6 +1545,8 @@ bool StorageManager::savePairedEventContext(
 
   Serial.printf("[PAIR] saving paired event context eventId=%s\n",
                 normalizedEvent.eventId.c_str());
+  logPairedEventSummary("save", normalizedEvent, normalizedStudents.size(),
+                        storedRecordedStudentIds.size());
   if (CampusEligibility::isSpecificStudentsMode(normalizedEvent)) {
     Serial.printf("[PAIR] saving targeted roster count=%u\n",
                   static_cast<unsigned>(
@@ -1745,6 +1864,76 @@ bool StorageManager::pairedEventStudentContextContainsOnSd(
   return false;
 }
 
+bool StorageManager::findPairedEventStudent(const String &eventId,
+                                            const String &studentUid,
+                                            const String &schoolId,
+                                            StudentInfo &outStudent) const {
+  ensurePairedEventContextLoaded();
+
+  if (eventId.isEmpty()) {
+    return false;
+  }
+
+  const String normalizedStudentUid =
+      CampusEligibility::trimAndCollapseWhitespace(studentUid);
+  const String normalizedSchoolId =
+      CampusEligibility::trimAndCollapseWhitespace(schoolId);
+
+  for (const auto &student : pairedStudentsCache_) {
+    if ((!normalizedStudentUid.isEmpty() &&
+         student.studentUid == normalizedStudentUid) ||
+        (!normalizedSchoolId.isEmpty() && student.schoolId == normalizedSchoolId)) {
+      outStudent = student;
+      return true;
+    }
+  }
+
+  if (!CampusConfig::kUseSd || eventId.isEmpty()) {
+    return false;
+  }
+
+  StorageManager *storage = const_cast<StorageManager *>(this);
+  if (!storage->ensureSdReady()) {
+    return false;
+  }
+
+  const String studentPath = pairedEventStudentsPathForEvent(eventId);
+  if (!SD.exists(studentPath.c_str())) {
+    return false;
+  }
+
+  File file = SD.open(studentPath.c_str(), FILE_READ);
+  if (!file) {
+    return false;
+  }
+
+  String line;
+  bool truncated = false;
+  while (readBoundedLine(file, line, truncated)) {
+    if (truncated || line.isEmpty()) {
+      continue;
+    }
+
+    String fields[kPairedEventStudentFieldCount];
+    const size_t parsedFields =
+        splitCsvLine(line, fields, kPairedEventStudentFieldCount);
+    StudentInfo row = pairedEventStudentFromFields(fields, parsedFields);
+    if (!row.isValid()) {
+      continue;
+    }
+
+    if ((!normalizedStudentUid.isEmpty() && row.studentUid == normalizedStudentUid) ||
+        (!normalizedSchoolId.isEmpty() && row.schoolId == normalizedSchoolId)) {
+      file.close();
+      outStudent = row;
+      return true;
+    }
+  }
+
+  file.close();
+  return false;
+}
+
 bool StorageManager::ensureRemoteAttendanceRecordedFile(const String &eventId) {
   if (eventId.isEmpty() || !CampusConfig::kUseSd) {
     return false;
@@ -1927,51 +2116,54 @@ StorageManager::evaluateStudentEligibilityForEvent(const EventInfo &event,
     decision.finalReason = "paired_event_id_mismatch";
     return decision;
   }
+  EventInfo normalizedEvent = pairedEventCache_;
+  CampusEligibility::normalizeEvent(normalizedEvent);
 
-  if (CampusEligibility::requiresPairedStudentContext(pairedEventCache_)) {
-    StudentInfo normalizedStudent = student;
-    CampusEligibility::normalizeStudent(normalizedStudent);
-    decision.targetModeSpecific =
-        CampusEligibility::isSpecificStudentsMode(pairedEventCache_);
-    decision.broadAudienceMode = !decision.targetModeSpecific;
-    decision.normalizedStudentCourse = normalizedStudent.courseCanonical;
-    decision.normalizedStudentYearLevel = normalizedStudent.yearLevelCanonical;
-    decision.normalizedStudentSection = normalizedStudent.sectionCanonical;
-    decision.eventCourseFilter =
-        CampusEligibility::joinCanonicalList(pairedEventCache_.courseFilters);
-    decision.eventYearLevelFilter =
-        CampusEligibility::joinCanonicalList(pairedEventCache_.yearLevelFilters);
-    decision.eventSectionFilter =
-        CampusEligibility::joinCanonicalList(pairedEventCache_.sectionFilters);
-    const bool authorized =
-        isStudentAuthorizedForEvent(pairedEventCache_.eventId,
-                                    normalizedStudent.studentUid) ||
-        pairedEventStudentContextContainsOnSd(pairedEventCache_.eventId,
-                                              normalizedStudent.studentUid,
-                                              normalizedStudent.schoolId);
-    if (authorized) {
-      decision.allowed = true;
-      decision.matchedPairedRoster = true;
-      decision.usedPairedRosterFallback = true;
-      decision.finalReason = "matched_paired_context_file";
-      return decision;
+  StudentInfo effectiveStudent = student;
+  CampusEligibility::normalizeStudent(effectiveStudent);
+
+  StudentInfo pairedStudent;
+  const bool matchedPairedRoster = findPairedEventStudent(
+      normalizedEvent.eventId, effectiveStudent.studentUid,
+      effectiveStudent.schoolId, pairedStudent);
+  const bool rosterAvailable = !pairedStudentsCache_.empty() ||
+                               hasPairedEventStudentContext(normalizedEvent.eventId);
+
+  if (matchedPairedRoster) {
+    if (!pairedStudent.studentUid.isEmpty()) {
+      effectiveStudent.studentUid = pairedStudent.studentUid;
     }
-
-    if (!hasPairedEventStudentContext(pairedEventCache_.eventId) &&
-        pairedStudentsCache_.empty()) {
-      decision.stalePairedEventData = true;
-      decision.finalReason = "paired_event_targeted_roster_missing";
-      return decision;
+    if (!pairedStudent.schoolId.isEmpty()) {
+      effectiveStudent.schoolId = pairedStudent.schoolId;
     }
-
-    decision.finalReason = decision.targetModeSpecific ?
-        "student_not_in_targeted_list" :
-        "student_not_authorized_for_event";
-    return decision;
+    if (!pairedStudent.studentName.isEmpty()) {
+      effectiveStudent.studentName = pairedStudent.studentName;
+    }
+    if (!pairedStudent.course.isEmpty()) {
+      effectiveStudent.course = pairedStudent.course;
+    }
+    if (!pairedStudent.yearLevel.isEmpty()) {
+      effectiveStudent.yearLevel = pairedStudent.yearLevel;
+    }
+    if (!pairedStudent.section.isEmpty()) {
+      effectiveStudent.section = pairedStudent.section;
+    }
+    if (!pairedStudent.bodScope.isEmpty()) {
+      effectiveStudent.bodScope = pairedStudent.bodScope;
+    }
+    if (!pairedStudent.queueId.isEmpty()) {
+      effectiveStudent.queueId = pairedStudent.queueId;
+    }
+    CampusEligibility::normalizeStudent(effectiveStudent);
   }
 
-  return CampusEligibility::evaluateStudentForEvent(event, pairedStudentsCache_,
-                                                    student);
+  const CampusEligibility::EventEligibilityDecision baseDecision =
+      CampusEligibility::evaluateStudentForEvent(normalizedEvent,
+                                                 pairedStudentsCache_,
+                                                 effectiveStudent);
+  return CampusEligibility::reconcileWithPairedRoster(
+      normalizedEvent, effectiveStudent, baseDecision, rosterAvailable,
+      matchedPairedRoster);
 }
 
 bool StorageManager::hasPairedEventContextCache() const {
@@ -3603,6 +3795,7 @@ bool StorageManager::writePairedEventContext(
     const EventInfo &event, const std::vector<StudentInfo> &students,
     const std::vector<String> &recordedStudentIds) const {
   DynamicJsonDocument doc(kPairedEventContextDocSize);
+  doc["schemaVersion"] = kPairedEventContextSchemaVersion;
   JsonObject eventObject = doc.createNestedObject("event");
   eventToJson(eventObject, event);
 

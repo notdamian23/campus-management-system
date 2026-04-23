@@ -15,6 +15,8 @@ struct EventEligibilityDecision {
   bool matchedTargetedStudent = false;
   bool matchedTargetedSchoolId = false;
   bool matchedPairedRoster = false;
+  bool rosterRequired = false;
+  bool rosterAvailable = false;
   bool usedBroadAudienceFilters = false;
   bool usedPairedRosterFallback = false;
   bool blockedByInactive = false;
@@ -24,6 +26,7 @@ struct EventEligibilityDecision {
   bool blockedByCourse = false;
   bool blockedByYearLevel = false;
   bool blockedBySection = false;
+  bool blockedByPairedRoster = false;
   bool stalePairedEventData = false;
   String normalizedStudentCourse;
   String normalizedStudentYearLevel;
@@ -50,6 +53,10 @@ void normalizeEvent(EventInfo &event);
 EventEligibilityDecision evaluateStudentForEvent(
     const EventInfo &event, const std::vector<StudentInfo> &pairedStudents,
     const StudentInfo &student);
+EventEligibilityDecision reconcileWithPairedRoster(
+    const EventInfo &event, const StudentInfo &student,
+    const EventEligibilityDecision &baseDecision, bool rosterAvailable,
+    bool matchedPairedRoster);
 String rejectionTitle(const EventEligibilityDecision &decision);
 String rejectionDetail(const EventEligibilityDecision &decision);
 

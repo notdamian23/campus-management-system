@@ -230,8 +230,9 @@ void showWrappedMessage(const String &message, uint32_t holdMs) {
 }
 
 String eligibilityTargetModeLabel(const EventInfo &event) {
-  return CampusEligibility::isSpecificStudentsMode(event) ? "specificStudents"
-                                                          : "broad";
+  EventInfo normalized = event;
+  CampusEligibility::normalizeEvent(normalized);
+  return normalized.targetMode.isEmpty() ? "unknown" : normalized.targetMode;
 }
 
 bool pairedEventNeedsStudentContext(const EventInfo &event) {
@@ -239,29 +240,43 @@ bool pairedEventNeedsStudentContext(const EventInfo &event) {
 }
 
 void logEligibilityDecision(
-    const StudentInfo &student, const EventInfo &event,
+    int templateId, const StudentInfo &student, const EventInfo &event,
     const CampusEligibility::EventEligibilityDecision &decision) {
   Serial.printf(
-      "[ATTEND][ELIG] uid=%s schoolId=%s name=%s course=%s year=%s "
-      "section=%s normCourse=%s normYear=%s normSection=%s targetMode=%s "
-      "targetedCount=%u pairedRoster=%u eventCourse=%s eventYear=%s "
-      "eventSection=%s inactiveBlocked=%s preregBlocked=%s "
-      "paymentBlocked=%s bodBlocked=%s stalePairing=%s finalReason=%s\n",
+      "[ATTEND][ELIG] templateId=%d eventId=%s title=%s uid=%s schoolId=%s "
+      "name=%s course=%s year=%s section=%s normCourse=%s normYear=%s "
+      "normSection=%s targetMode=%s targetStudent=%s "
+      "selectedStudentCount=%u selectedSchoolCount=%u rosterRequired=%s "
+      "rosterRequiredHint=%s audienceRestricted=%s rosterAvailable=%s "
+      "matchedPairedRoster=%s eventCourse=%s eventYear=%s eventSection=%s "
+      "preregRequired=%s paymentRequired=%s activeOnly=%s schema=%u "
+      "inactiveBlocked=%s preregBlocked=%s paymentBlocked=%s bodBlocked=%s "
+      "allowed=%s stalePairing=%s finalReason=%s\n",
+      templateId, event.eventId.c_str(), event.title.c_str(),
       student.studentUid.c_str(), student.schoolId.c_str(),
       student.studentName.c_str(), student.course.c_str(),
       student.yearLevel.c_str(), student.section.c_str(),
       decision.normalizedStudentCourse.c_str(),
       decision.normalizedStudentYearLevel.c_str(),
       decision.normalizedStudentSection.c_str(),
-      eligibilityTargetModeLabel(event).c_str(),
-      static_cast<unsigned>(CampusEligibility::targetedStudentCount(event)),
-      static_cast<unsigned>(g_cachedPairedStudents.size()),
+      eligibilityTargetModeLabel(event).c_str(), event.targetStudent.c_str(),
+      static_cast<unsigned>(event.targetedStudentIds.size()),
+      static_cast<unsigned>(event.targetedSchoolIds.size()),
+      decision.rosterRequired ? "yes" : "no",
+      event.rosterRequired ? "yes" : "no",
+      event.audienceRestricted ? "yes" : "no",
+      decision.rosterAvailable ? "yes" : "no",
+      decision.matchedPairedRoster ? "yes" : "no",
       decision.eventCourseFilter.c_str(), decision.eventYearLevelFilter.c_str(),
       decision.eventSectionFilter.c_str(),
+      event.preregistrationRequired || event.requiresRegistration ? "yes" : "no",
+      event.paymentRequired ? "yes" : "no", event.activeOnly ? "yes" : "no",
+      static_cast<unsigned>(event.contextSchemaVersion),
       decision.blockedByInactive ? "yes" : "no",
       decision.blockedByPrereg ? "yes" : "no",
       decision.blockedByPayment ? "yes" : "no",
       decision.blockedByBodScope ? "yes" : "no",
+      decision.allowed ? "yes" : "no",
       decision.stalePairedEventData ? "yes" : "no",
       decision.finalReason.c_str());
 }
@@ -293,7 +308,13 @@ String backendEligibilityTitle(const String &reason) {
   if (reason == "registration_required") {
     return "PREREG REQUIRED";
   }
-  return "NOT INCLUDED";
+  if (reason == "inactive_student") {
+    return "INACTIVE";
+  }
+  if (reason == "bod_scope_mismatch") {
+    return "BOD RESTRICTED";
+  }
+  return "NOT ELIGIBLE";
 }
 
 String backendEligibilityDetail(const String &reason) {
@@ -309,13 +330,62 @@ String backendEligibilityDetail(const String &reason) {
   if (reason == "not_target_year") {
     return "Year mismatch";
   }
+  if (reason == "not_target_section") {
+    return "Section mismatch";
+  }
   if (reason == "registration_required") {
     return "Pre-reg required";
   }
   if (reason == "payment_required") {
     return "Payment required";
   }
+  if (reason == "inactive_student") {
+    return "Account inactive";
+  }
+  if (reason == "bod_scope_mismatch") {
+    return "Scope mismatch";
+  }
   return "See operator";
+}
+
+bool applyPairedEventStudentContext(StudentInfo &student) {
+  if (!g_pairedEvent.isValid()) {
+    return false;
+  }
+
+  StudentInfo pairedStudent;
+  if (!g_storage.findPairedEventStudent(g_pairedEvent.eventId, student.studentUid,
+                                        student.schoolId, pairedStudent)) {
+    return false;
+  }
+
+  if (!pairedStudent.studentUid.isEmpty()) {
+    student.studentUid = pairedStudent.studentUid;
+  }
+  if (!pairedStudent.schoolId.isEmpty()) {
+    student.schoolId = pairedStudent.schoolId;
+  }
+  if (!pairedStudent.studentName.isEmpty()) {
+    student.studentName = pairedStudent.studentName;
+  }
+  if (!pairedStudent.course.isEmpty()) {
+    student.course = pairedStudent.course;
+  }
+  if (!pairedStudent.yearLevel.isEmpty()) {
+    student.yearLevel = pairedStudent.yearLevel;
+  }
+  if (!pairedStudent.section.isEmpty()) {
+    student.section = pairedStudent.section;
+  }
+  if (!pairedStudent.bodScope.isEmpty()) {
+    student.bodScope = pairedStudent.bodScope;
+  }
+  if (!pairedStudent.queueId.isEmpty()) {
+    student.queueId = pairedStudent.queueId;
+  }
+
+  CampusEligibility::normalizeStudent(student);
+  return true;
 }
 
 bool handleOwnershipLookupFailure(int templateId, const String &line1,
@@ -1113,6 +1183,10 @@ void loadStoredPairedEventContext() {
     Serial.printf("[PAIR] cached targeted count=%u\n",
                   static_cast<unsigned>(
                       CampusEligibility::targetedStudentCount(g_pairedEvent)));
+    Serial.printf("[PAIR] cached audienceRestricted=%s rosterRequired=%s schema=%u\n",
+                  g_pairedEvent.audienceRestricted ? "yes" : "no",
+                  g_pairedEvent.rosterRequired ? "yes" : "no",
+                  static_cast<unsigned>(g_pairedEvent.contextSchemaVersion));
     Serial.printf("[PAIR] cached student context on SD=%s\n",
                   g_storage.hasPairedEventStudentContext(g_pairedEvent.eventId) ?
                       "yes" :
@@ -1124,12 +1198,8 @@ void loadStoredPairedEventContext() {
   g_cachedPairedStudents.clear();
   g_remoteRecordedStudentIds.clear();
   const String pairedContextStatus = g_storage.pairedEventContextStatus();
-  if (pairedContextStatus == "paired_event_context_corrupt") {
-    Serial.printf("[PAIR] cached paired event context corrupt reason=%s\n",
-                  pairedContextStatus.c_str());
-  } else {
-    Serial.println("[PAIR] cached paired event context missing");
-  }
+  Serial.printf("[PAIR] cached paired event context unavailable reason=%s\n",
+                pairedContextStatus.c_str());
   if (g_pairedEvent.isValid()) {
     Serial.printf("[PAIR] cached paired event metadata eventId=%s title=%s\n",
                   g_pairedEvent.eventId.c_str(), g_pairedEvent.title.c_str());
@@ -1323,7 +1393,7 @@ bool refreshPairedEventContext(String &error) {
     }
     cachePairedEventContext(event, {}, {});
   } else {
-    Serial.printf("[PAIR] refresh eventId=%s requiresContext=no reason=broad-filter-eligible\n",
+    Serial.printf("[PAIR] refresh eventId=%s requiresContext=no reason=unrestricted-audience\n",
                   event.eventId.c_str());
     cachePairedEventContext(event, {}, recordedStudentIds);
   }
@@ -2140,6 +2210,16 @@ void confirmSelectedPairEvent() {
                   pairedEvent.eventId.c_str(),
                   eligibilityTargetModeLabel(pairedEvent).c_str(),
                   requiresContext ? "yes" : "no");
+    Serial.printf(
+        "[PAIR] audienceRestricted=%s rosterRequired=%s yearLevels=%s courses=%s "
+        "targetStudent=%s selectedStudentCount=%u selectedSchoolCount=%u\n",
+        pairedEvent.audienceRestricted ? "yes" : "no",
+        pairedEvent.rosterRequired ? "yes" : "no",
+        CampusEligibility::joinCanonicalList(pairedEvent.yearLevelFilters).c_str(),
+        CampusEligibility::joinCanonicalList(pairedEvent.courseFilters).c_str(),
+        pairedEvent.targetStudent.c_str(),
+        static_cast<unsigned>(pairedEvent.targetedStudentIds.size()),
+        static_cast<unsigned>(pairedEvent.targetedSchoolIds.size()));
     if (requiresContext) {
       if (!g_backend.downloadPairedEventContextToStorage(pairedEvent, g_storage,
                                                          error)) {
@@ -2150,7 +2230,7 @@ void confirmSelectedPairEvent() {
         cachePairedEventContext(pairedEvent, {}, {});
       }
     } else {
-      Serial.printf("[PAIR] skip paired context download eventId=%s reason=broad-filter-eligible\n",
+      Serial.printf("[PAIR] skip paired context download eventId=%s reason=unrestricted-audience\n",
                     pairedEvent.eventId.c_str());
       cachePairedEventContext(pairedEvent, {}, recordedStudentIds);
     }
@@ -2433,7 +2513,7 @@ void enrollSelectedStudent() {
   if (g_pairedEvent.isValid()) {
     const CampusEligibility::EventEligibilityDecision decision =
         g_storage.evaluateStudentEligibilityForEvent(g_pairedEvent, student);
-    logEligibilityDecision(student, g_pairedEvent, decision);
+    logEligibilityDecision(templateId, student, g_pairedEvent, decision);
     if (decision.allowed || decision.matchedPairedRoster ||
         decision.matchedTargetedStudent || decision.matchedTargetedSchoolId) {
       upsertCachedPairedStudent(student);
@@ -2549,8 +2629,18 @@ void handleAttendanceLoop() {
     return;
   }
 
-  Serial.printf("[ATTEND] matched schoolId=%s name=%s\n", student.schoolId.c_str(),
-                student.studentName.c_str());
+  Serial.printf(
+      "[ATTEND] templateId=%d matched uid=%s schoolId=%s name=%s course=%s "
+      "year=%s section=%s\n",
+      match.templateId, student.studentUid.c_str(), student.schoolId.c_str(),
+      student.studentName.c_str(), student.course.c_str(),
+      student.yearLevel.c_str(), student.section.c_str());
+  if (applyPairedEventStudentContext(student)) {
+    Serial.printf(
+        "[ATTEND] paired context applied uid=%s schoolId=%s course=%s year=%s\n",
+        student.studentUid.c_str(), student.schoolId.c_str(),
+        student.course.c_str(), student.yearLevel.c_str());
+  }
   if (backendEligibilityKnown) {
     Serial.printf(
         "[ATTEND] eligibility allowed=%s reason=%s ownerFound=yes source=backend\n",
@@ -2601,16 +2691,21 @@ void handleAttendanceLoop() {
       Serial.printf("[ATTEND][ELIG] broad scope rejected reason=%s\n",
                     decision.finalReason.c_str());
     }
+    logEligibilityDecision(match.templateId, student, g_pairedEvent, decision);
     if (!decision.allowed) {
-      logEligibilityDecision(student, g_pairedEvent, decision);
       Serial.printf("[ATTEND] rejected reason=%s ownerFound=yes\n",
                     decision.finalReason.c_str());
-      showTimedMessage(CampusEligibility::rejectionTitle(decision),
-                       trim16(student.studentName.isEmpty() ? student.schoolId
-                                                            : student.studentName),
-                       kMediumMessageMs,
-                       trim16(CampusEligibility::rejectionDetail(decision)),
-                       trim16(decision.finalReason));
+      if (decision.stalePairedEventData) {
+        showTimedMessage("Event audience", "data incomplete", kMediumMessageMs,
+                         "Re-pair event", "context");
+      } else {
+        showTimedMessage(CampusEligibility::rejectionTitle(decision),
+                         trim16(student.studentName.isEmpty() ? student.schoolId
+                                                              : student.studentName),
+                         kMediumMessageMs,
+                         trim16(CampusEligibility::rejectionDetail(decision)),
+                         trim16(decision.finalReason));
+      }
       g_feedback.error();
       startFingerRemovalWait();
       return;
