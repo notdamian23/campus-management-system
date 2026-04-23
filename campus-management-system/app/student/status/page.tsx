@@ -271,6 +271,7 @@ export default function StudentStatus() {
                     }
                     location={event.location}
                     status={event.status}
+                    lifecycle={event.lifecycle}
                     audienceLabel={buildStudentAudienceLabel(
                       event.course,
                       event.yearLevel,
@@ -322,6 +323,7 @@ export default function StudentStatus() {
                     }
                     location={event.location}
                     status={event.status}
+                    lifecycle={event.lifecycle}
                     audienceLabel={buildStudentAudienceLabel(
                       event.course,
                       event.yearLevel,

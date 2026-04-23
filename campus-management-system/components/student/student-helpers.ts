@@ -1,5 +1,6 @@
 import type {
   StudentAccountStatus,
+  StudentEventLifecycle,
   StudentEventStatus,
   StudentNotificationType,
   StudentPayment,
@@ -110,6 +111,28 @@ export function getStudentEventTone(status: StudentEventStatus): StudentTone {
   if (status === "Cancelled") return "slate";
   if (status === "Pre-registration") return "blue";
   return "amber";
+}
+
+export function getStudentEventLifecycleTone(
+  lifecycle: StudentEventLifecycle,
+): StudentTone {
+  if (lifecycle === "completed") return "green";
+  if (lifecycle === "ongoing") return "blue";
+  return "amber";
+}
+
+export function formatStudentEventLifecycleLabel(
+  lifecycle: StudentEventLifecycle,
+) {
+  return `${lifecycle.charAt(0).toUpperCase()}${lifecycle.slice(1)}`;
+}
+
+export function shouldShowStudentEventContextStatus(
+  status: StudentEventStatus,
+  lifecycle?: StudentEventLifecycle,
+) {
+  if (!lifecycle) return true;
+  return status !== "Upcoming";
 }
 
 export function getStudentNotificationTone(

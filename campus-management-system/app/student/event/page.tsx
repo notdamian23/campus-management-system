@@ -41,14 +41,17 @@ import {
   StudentCardStackSkeleton,
   StudentEmptyState,
   StudentEventCard,
+  StudentEventLifecycleBadge,
   StudentEventStatusBadge,
   StudentFilterBar,
   StudentFilterBarSkeleton,
   StudentPageHeader,
   StudentStatsGrid,
   buildStudentAudienceLabel,
+  getStudentEventLifecycleTone,
   getStudentEventTone,
   getStudentToneClasses,
+  shouldShowStudentEventContextStatus,
   useIsBelowBreakpoint,
   useStudentPageErrorToast,
   useStudentPortal,
@@ -58,7 +61,7 @@ import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import { campusToast } from "@/lib/toast";
 
 type EventSortMode = "oldest_to_latest" | "latest_to_oldest";
-type EventStatusFilter = "all" | "upcoming" | "attended" | "missed";
+type EventStatusFilter = "all" | "upcoming" | "ongoing" | "attended" | "missed";
 
 type EventGroup = {
   label: string;
@@ -68,17 +71,11 @@ type EventGroup = {
 
 function matchesStatusFilter(item: StudentEvent, filter: EventStatusFilter) {
   if (filter === "all") return true;
+  if (filter === "upcoming") return item.lifecycle === "upcoming";
+  if (filter === "ongoing") return item.lifecycle === "ongoing";
   if (filter === "attended") return item.status === "Attended";
   if (filter === "missed") return item.status === "Missed";
-
-  return (
-    item.status === "Upcoming" ||
-    item.status === "Payment Due" ||
-    item.status === "Pre-registration" ||
-    item.status === "Pre-registered" ||
-    item.status === "Waitlisted" ||
-    item.status === "Cancelled"
-  );
+  return false;
 }
 
 function matchesEventSearch(item: StudentEvent, query: string) {
@@ -161,14 +158,10 @@ export default function StudentEventsPage() {
 
   const eventCounts = useMemo(
     () => ({
-      upcoming: eventOnlyItems.filter(
-        (item) =>
-          item.status === "Upcoming" ||
-          item.status === "Payment Due" ||
-          item.status === "Pre-registration" ||
-          item.status === "Pre-registered" ||
-          item.status === "Waitlisted",
-      ).length,
+      upcoming: eventOnlyItems.filter((item) => item.lifecycle === "upcoming")
+        .length,
+      ongoing: eventOnlyItems.filter((item) => item.lifecycle === "ongoing")
+        .length,
       attended: eventOnlyItems.filter((item) => item.status === "Attended")
         .length,
       missed: eventOnlyItems.filter((item) => item.status === "Missed").length,
@@ -315,16 +308,26 @@ export default function StudentEventsPage() {
       />
 
       {loading ? (
-        <CampusMetricSkeleton count={3} className="sm:grid-cols-3 xl:grid-cols-3" />
+        <CampusMetricSkeleton
+          count={4}
+          className="sm:grid-cols-2 xl:grid-cols-4"
+        />
       ) : (
         <StudentStatsGrid
           items={[
             {
               label: "Upcoming",
               value: eventCounts.upcoming,
-              description: "Events that are still open or waiting for your review.",
+              description: "Events that have not reached their start time yet.",
               tone: "amber",
               icon: Clock3,
+            },
+            {
+              label: "Ongoing",
+              value: eventCounts.ongoing,
+              description: "Events currently happening within their scheduled time.",
+              tone: "blue",
+              icon: CalendarDays,
             },
             {
               label: "Attended",
@@ -341,7 +344,7 @@ export default function StudentEventsPage() {
               icon: CircleAlert,
             },
           ]}
-          className="xl:grid-cols-3"
+          className="sm:grid-cols-2 xl:grid-cols-4"
         />
       )}
 
@@ -385,6 +388,7 @@ export default function StudentEventsPage() {
           >
             <SelectItem key="all">All events</SelectItem>
             <SelectItem key="upcoming">Upcoming</SelectItem>
+            <SelectItem key="ongoing">Ongoing</SelectItem>
             <SelectItem key="attended">Attended</SelectItem>
             <SelectItem key="missed">Missed</SelectItem>
           </Select>
@@ -485,6 +489,7 @@ export default function StudentEventsPage() {
                       scheduleLabel={schedule.scheduleLabel}
                       location={item.location}
                       status={item.status}
+                      lifecycle={item.lifecycle}
                       audienceLabel={buildStudentAudienceLabel(
                         item.course,
                         item.yearLevel,
@@ -644,7 +649,11 @@ function StudentEventDetails({
 }) {
   const [detailTab, setDetailTab] = useState<"overview" | "images">("overview");
   const [imagesModalOpen, setImagesModalOpen] = useState(false);
-  const toneClasses = getStudentToneClasses(getStudentEventTone(event.status));
+  const toneClasses = getStudentToneClasses(
+    shouldShowStudentEventContextStatus(event.status, event.lifecycle)
+      ? getStudentEventTone(event.status)
+      : getStudentEventLifecycleTone(event.lifecycle),
+  );
   const canRegister = event.status === "Pre-registration";
   const canCancel =
     event.lifecycle !== "completed" &&
@@ -677,7 +686,10 @@ function StudentEventDetails({
           <div className={`rounded-[24px] p-4 sm:p-5 ${toneClasses.surface}`}>
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-2">
-                <StudentEventStatusBadge status={event.status} />
+                <StudentEventLifecycleBadge lifecycle={event.lifecycle} />
+                {shouldShowStudentEventContextStatus(event.status, event.lifecycle) ? (
+                  <StudentEventStatusBadge status={event.status} />
+                ) : null}
                 <Chip size="sm" className="bg-white/80 text-slate-700">
                   {buildStudentAudienceLabel(event.course, event.yearLevel)}
                 </Chip>
@@ -895,10 +907,38 @@ function StudentEventDetails({
                   </Card>
                 ) : null}
 
-                {event.status === "Upcoming" ? (
+                {!shouldShowStudentEventContextStatus(
+                  event.status,
+                  event.lifecycle,
+                ) && event.lifecycle === "upcoming" ? (
                   <Card shadow="none" className="border border-amber-100 bg-amber-50/80">
                     <CardBody className="p-4 text-sm text-amber-700">
                       Keep this event on your radar and watch for updates in your notifications.
+                    </CardBody>
+                  </Card>
+                ) : null}
+
+                {!shouldShowStudentEventContextStatus(
+                  event.status,
+                  event.lifecycle,
+                ) && event.lifecycle === "ongoing" ? (
+                  <Card shadow="none" className="border border-blue-100 bg-blue-50/80">
+                    <CardBody className="p-4 text-sm text-blue-700">
+                      This event is currently ongoing based on its scheduled start and end time.
+                    </CardBody>
+                  </Card>
+                ) : null}
+
+                {!shouldShowStudentEventContextStatus(
+                  event.status,
+                  event.lifecycle,
+                ) && event.lifecycle === "completed" ? (
+                  <Card
+                    shadow="none"
+                    className="border border-emerald-100 bg-emerald-50/80"
+                  >
+                    <CardBody className="p-4 text-sm text-emerald-700">
+                      This event has already finished based on its scheduled end time.
                     </CardBody>
                   </Card>
                 ) : null}

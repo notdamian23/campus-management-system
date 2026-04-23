@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import type {
   StudentAccountStatus,
+  StudentEventLifecycle,
   StudentEventStatus,
   StudentNotificationType,
   StudentPayment,
@@ -33,12 +34,15 @@ import {
 import {
   buildStudentAudienceLabel,
   formatStudentCurrency,
+  formatStudentEventLifecycleLabel,
   getStudentAccountStatusTone,
+  getStudentEventLifecycleTone,
   getStudentEventTone,
   getStudentNotificationTone,
   getStudentPaymentTone,
   getStudentToneClasses,
   isStudentPaymentOverdue,
+  shouldShowStudentEventContextStatus,
   type StudentTone,
 } from "./student-helpers";
 
@@ -272,6 +276,22 @@ export function StudentEventStatusBadge({
   );
 }
 
+export function StudentEventLifecycleBadge({
+  lifecycle,
+}: {
+  lifecycle: StudentEventLifecycle;
+}) {
+  const toneClasses = getStudentToneClasses(
+    getStudentEventLifecycleTone(lifecycle),
+  );
+
+  return (
+    <Chip size="sm" className={toneClasses.chip}>
+      {formatStudentEventLifecycleLabel(lifecycle)}
+    </Chip>
+  );
+}
+
 export function StudentAccountStatusChip({
   status,
   helperText,
@@ -297,6 +317,7 @@ type StudentEventCardProps = {
   scheduleLabel: string;
   location?: string;
   status: StudentEventStatus;
+  lifecycle?: StudentEventLifecycle;
   audienceLabel?: string;
   action?: ReactNode;
   footer?: ReactNode;
@@ -310,6 +331,7 @@ export function StudentEventCard({
   scheduleLabel,
   location,
   status,
+  lifecycle,
   audienceLabel,
   action,
   footer,
@@ -332,7 +354,12 @@ export function StudentEventCard({
       <CardHeader className="flex flex-col gap-4 p-4 sm:p-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 flex-1 space-y-3">
           <div className="flex flex-wrap items-center gap-2">
-            <StudentEventStatusBadge status={status} />
+            {lifecycle ? (
+              <StudentEventLifecycleBadge lifecycle={lifecycle} />
+            ) : null}
+            {shouldShowStudentEventContextStatus(status, lifecycle) ? (
+              <StudentEventStatusBadge status={status} />
+            ) : null}
             {audienceLabel ? (
               <Chip size="sm" className="bg-slate-100 text-slate-700">
                 {audienceLabel}

@@ -26,11 +26,17 @@ import {
 import { normalizeCampusRole } from "@/lib/campus-role";
 import { normalizeCourse } from "@/lib/courseOptions";
 import { getCourseScope, isBOD } from "@/lib/ec-permissions";
+import {
+  resolveEventLifecycle,
+  type EventLifecycle,
+  type EventLifecycleDetails,
+  type EventScheduleDateInput,
+} from "@/lib/eventSchedule";
 import { listStudentPayments } from "@/lib/firebase-functions";
 import { app, auth, db } from "@/lib/firebase";
 import { formatStudentFullName } from "@/lib/student-name";
 
-type LifecycleStatus = "upcoming" | "ongoing" | "completed";
+export type StudentEventLifecycle = EventLifecycle;
 export type StudentAccountStatus = "Active" | "Inactive";
 
 export type StudentEventStatus =
@@ -108,7 +114,7 @@ export type StudentEvent = {
   title: string;
   description: string;
   details: string;
-  date: string;
+  date: Date | string | null;
   scheduledTime: string;
   timeStart: string;
   timeEnd: string;
@@ -118,7 +124,7 @@ export type StudentEvent = {
   isPreReg: boolean;
   withPayment: boolean;
   paymentRequired: boolean;
-  lifecycle: LifecycleStatus;
+  lifecycle: StudentEventLifecycle;
   status: StudentEventStatus;
   eventDate: Date | null;
   attendanceStatus: string | null;
@@ -171,10 +177,13 @@ type StudentPortalContextValue = {
 type RawEventDoc = {
   id: string;
   title: string;
-  date: string;
+  date: EventScheduleDateInput;
   scheduledTime: string;
   timeStart: string;
   timeEnd: string;
+  startAt: EventScheduleDateInput;
+  endAt: EventScheduleDateInput;
+  storedStatus: string;
   location: string;
   yearLevel: string;
   course: string;
@@ -388,6 +397,33 @@ function logStudentLoaderDebug(
   console.info("[STUDENT][LOADER]", payload);
 }
 
+function logStudentEventLifecycleDebug(
+  event: Pick<
+    RawEventDoc,
+    "id" | "title" | "date" | "scheduledTime" | "timeStart" | "timeEnd" | "storedStatus"
+  >,
+  resolution: EventLifecycleDetails,
+) {
+  if (!STUDENT_LOADER_DEBUG) {
+    return;
+  }
+
+  console.info("[STUDENT][EVENT_LIFECYCLE]", {
+    eventId: event.id,
+    title: event.title,
+    rawDate: event.date,
+    rawScheduledTime: event.scheduledTime,
+    rawTimeStart: event.timeStart,
+    rawTimeEnd: event.timeEnd,
+    parsedStartDateTime: formatLifecycleDebugDateTime(resolution.startAt),
+    parsedEndDateTime: formatLifecycleDebugDateTime(resolution.endAt),
+    now: formatDateTime(resolution.now),
+    computedLifecycle: resolution.lifecycle,
+    storedStatus: event.storedStatus || null,
+    statusFallbackUsed: resolution.statusFallbackUsed,
+  });
+}
+
 function normalizeText(value: unknown) {
   return String(value ?? "")
     .trim()
@@ -437,76 +473,6 @@ function parseDateOnly(input: string): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-function parseTime12ToMinutes(timeValue: string): number | null {
-  const value = String(timeValue ?? "").trim();
-  if (!value) return null;
-
-  const match = value.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-  if (!match) return null;
-
-  let hour = Number(match[1]);
-  const minute = Number(match[2]);
-  const meridiem = match[3].toUpperCase();
-
-  if (hour === 12) hour = 0;
-  if (meridiem === "PM") hour += 12;
-
-  return hour * 60 + minute;
-}
-
-function toDateWithMinutes(baseDate: Date, minutes: number) {
-  const date = new Date(baseDate);
-  date.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
-  return date;
-}
-
-function computeLifecycle(
-  date: string,
-  scheduledTime: string,
-  timeEnd: string,
-) {
-  const baseDate = parseDateOnly(date);
-  if (!baseDate) return "upcoming" as LifecycleStatus;
-
-  const now = new Date();
-  const startMin = parseTime12ToMinutes(scheduledTime);
-  const endMin = parseTime12ToMinutes(timeEnd);
-
-  if (startMin == null) {
-    const start = new Date(baseDate);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(baseDate);
-    end.setHours(23, 59, 59, 999);
-
-    if (now < start) return "upcoming";
-    if (now > end) return "completed";
-    return "ongoing";
-  }
-
-  const start = toDateWithMinutes(baseDate, startMin);
-  if (endMin == null) {
-    if (now < start) return "upcoming";
-    return "completed";
-  }
-
-  const safeEndMin = endMin >= startMin ? endMin : startMin + 60;
-  const end = toDateWithMinutes(baseDate, safeEndMin);
-
-  if (now < start) return "upcoming";
-  if (now > end) return "completed";
-  return "ongoing";
-}
-
-function toEventDate(date: string, scheduledTime: string) {
-  const baseDate = parseDateOnly(date);
-  if (!baseDate) return null;
-
-  const startMin = parseTime12ToMinutes(scheduledTime);
-  if (startMin == null) return baseDate;
-
-  return toDateWithMinutes(baseDate, startMin);
-}
-
 function formatDateTime(d: Date) {
   return d.toLocaleString(undefined, {
     year: "numeric",
@@ -515,6 +481,10 @@ function formatDateTime(d: Date) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatLifecycleDebugDateTime(value: Date | null) {
+  return value ? formatDateTime(value) : null;
 }
 
 function toMillis(value: unknown) {
@@ -646,6 +616,7 @@ export function StudentPortalProvider({
   const [eventImagesByEvent, setEventImagesByEvent] = useState<
     Record<string, StudentEventImageFile[]>
   >({});
+  const [lifecycleNowMs, setLifecycleNowMs] = useState(() => Date.now());
 
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(true);
@@ -654,6 +625,14 @@ export function StudentPortalProvider({
   const [loadingProfileNotifications, setLoadingProfileNotifications] =
     useState(true);
   const [portalError, setPortalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setLifecycleNowMs(Date.now());
+    }, 30_000);
+
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     let unsubscribeProfileDoc: (() => void) | null = null;
@@ -889,13 +868,23 @@ export function StudentPortalProvider({
             data.paymentRequired === true ||
             data.withPayment === true ||
             linkedPaymentId.length > 0;
+          const rawDate =
+            (data as { date?: EventScheduleDateInput }).date ?? null;
+
           return {
             id: d.id,
             title: String(data.title ?? "Untitled Event"),
-            date: String(data.date ?? ""),
+            date: rawDate,
             scheduledTime: String(data.scheduledTime ?? data.timeStart ?? ""),
             timeStart: String(data.timeStart ?? ""),
             timeEnd: String(data.timeEnd ?? ""),
+            startAt:
+              (data as { startAt?: EventScheduleDateInput }).startAt ?? null,
+            endAt:
+              (data as { endAt?: EventScheduleDateInput }).endAt ?? null,
+            storedStatus: String(
+              (data as { status?: unknown }).status ?? "",
+            ).trim(),
             location: String(data.location ?? ""),
             yearLevel:
               String(data.yearLevel ?? "").trim() ||
@@ -1403,15 +1392,28 @@ export function StudentPortalProvider({
       }
     });
 
+    const now = new Date(lifecycleNowMs);
+
     return rawEvents
       .map((raw) => {
         const scheduledTime = raw.scheduledTime || raw.timeStart;
-        const eventDate = toEventDate(raw.date, scheduledTime);
-        const lifecycle = computeLifecycle(
-          raw.date,
-          scheduledTime,
-          raw.timeEnd,
+        const lifecycleDetails = resolveEventLifecycle(
+          {
+            date: raw.date,
+            scheduledTime: raw.scheduledTime,
+            timeStart: raw.timeStart,
+            timeEnd: raw.timeEnd,
+            startAt: raw.startAt,
+            endAt: raw.endAt,
+            status: raw.storedStatus,
+          },
+          now,
         );
+        const eventDate = lifecycleDetails.startAt;
+        const lifecycle = lifecycleDetails.lifecycle;
+
+        logStudentEventLifecycleDebug(raw, lifecycleDetails);
+
         const attendanceRaw = normalizeText(attendanceByEvent[raw.id] ?? "");
         const registration = registrationsByEvent[raw.id] ?? null;
         const linkedPaymentId = getLinkedPaymentId(raw)
@@ -1458,7 +1460,7 @@ export function StudentPortalProvider({
           title: raw.title,
           description: raw.details || "No description provided.",
           details: raw.details || "",
-          date: raw.date,
+          date: eventDate ?? (typeof raw.date === "string" ? raw.date : null),
           scheduledTime: scheduledTime || "TBA",
           timeStart: raw.timeStart || scheduledTime || "",
           timeEnd: raw.timeEnd || "",
@@ -1495,6 +1497,7 @@ export function StudentPortalProvider({
   }, [
     attendanceByEvent,
     eventImagesByEvent,
+    lifecycleNowMs,
     payments,
     rawEvents,
     registrationsByEvent,
@@ -1517,7 +1520,10 @@ export function StudentPortalProvider({
     };
 
     profileNotifications.forEach((note) => {
-      const scheduledDate = toEventDate(note.date, note.scheduledTime);
+      const scheduledDate = resolveEventLifecycle({
+        date: note.date,
+        scheduledTime: note.scheduledTime,
+      }).startAt;
       const createdAtMs = toMillis(note.createdAt);
       const when =
         scheduledDate ?? (createdAtMs ? new Date(createdAtMs) : new Date());
@@ -1534,7 +1540,7 @@ export function StudentPortalProvider({
     events.forEach((ev) => {
       const date = ev.eventDate ?? new Date();
 
-      if (ev.status === "Upcoming") {
+      if (ev.status === "Upcoming" && ev.lifecycle === "upcoming") {
         pushItem(`event-upcoming:${ev.id}`, {
           id: `event-upcoming:${ev.id}`,
           title: `Upcoming: ${ev.title}`,

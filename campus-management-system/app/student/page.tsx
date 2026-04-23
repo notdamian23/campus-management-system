@@ -50,7 +50,9 @@ export default function StudentDashboard() {
 
   const readSet = new Set(readNotificationIds);
 
-  const upcomingCount = events.filter((event) => event.lifecycle !== "completed").length;
+  const upcomingCount = events.filter(
+    (event) => event.lifecycle === "upcoming",
+  ).length;
   const completedCount = events.filter(
     (event) => event.lifecycle === "completed",
   ).length;
@@ -176,6 +178,7 @@ export default function StudentDashboard() {
                     }
                     location={event.location}
                     status={event.status}
+                    lifecycle={event.lifecycle}
                     audienceLabel={buildStudentAudienceLabel(
                       event.course,
                       event.yearLevel,
