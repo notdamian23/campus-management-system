@@ -7,6 +7,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <ctype.h>
+
 #include <CampusEligibility.h>
 
 #include "Config.h"
@@ -31,7 +33,7 @@ constexpr size_t kResolveAttendanceOwnerResponseJsonCapacity = 2048;
 constexpr size_t kAttendancePayloadJsonCapacity = 2048;
 constexpr size_t kCleanupAckPayloadJsonCapacity = 2048;
 constexpr size_t kCleanupAckResponseJsonCapacity = 1024;
-constexpr size_t kSessionResponseJsonCapacity = 512;
+constexpr size_t kSessionResponseMaxBytes = 2048;
 constexpr size_t kPairEventResponseJsonCapacity = 4096;
 constexpr size_t kPairEventMaxResponseBytes = 32768;
 constexpr size_t kPairedEventContextResponseJsonCapacity = 32768;
@@ -823,6 +825,84 @@ void captureErrorPreview(HTTPClient &http, String &preview) {
     }
     delay(2);
   }
+}
+
+String redactedJsonPreview(const String &payload) {
+  String preview = payload;
+  if (preview.length() > kErrorPreviewBytes) {
+    preview = preview.substring(0, kErrorPreviewBytes);
+  }
+
+  const char *sensitiveKeys[] = {
+      "\"sessionToken\"",
+      "\"token\"",
+      "\"secret\"",
+      "\"Authorization\"",
+  };
+
+  for (const char *key : sensitiveKeys) {
+    int searchFrom = 0;
+    while (true) {
+      const int keyIndex = preview.indexOf(key, searchFrom);
+      if (keyIndex < 0) {
+        break;
+      }
+      const int colonIndex = preview.indexOf(':', keyIndex);
+      if (colonIndex < 0) {
+        break;
+      }
+      int valueStart = colonIndex + 1;
+      while (valueStart < preview.length() &&
+             isspace(static_cast<unsigned char>(preview[valueStart]))) {
+        ++valueStart;
+      }
+      if (valueStart >= preview.length() || preview[valueStart] != '"') {
+        searchFrom = valueStart;
+        continue;
+      }
+      const int valueEnd = preview.indexOf('"', valueStart + 1);
+      if (valueEnd < 0) {
+        preview.remove(valueStart + 1);
+        preview += "[REDACTED]";
+        break;
+      }
+      const int redactStart = valueStart + 1;
+      preview = preview.substring(0, redactStart) + "[REDACTED]" +
+                preview.substring(valueEnd);
+      searchFrom = redactStart + 10;
+    }
+  }
+
+  return preview;
+}
+
+bool readResponseBody(HTTPClient &http, String &body, size_t maxBytes) {
+  body = "";
+  WiFiClient *stream = http.getStreamPtr();
+  if (stream == nullptr) {
+    return false;
+  }
+
+  body.reserve(maxBytes > 0 ? maxBytes : kErrorPreviewBytes);
+  uint32_t startedAt = millis();
+  while ((maxBytes == 0 || body.length() < maxBytes) &&
+         (millis() - startedAt) < CampusConfig::kHttpTimeoutMs) {
+    while (stream->available() > 0 &&
+           (maxBytes == 0 || body.length() < maxBytes)) {
+      const int nextByte = stream->read();
+      if (nextByte < 0) {
+        break;
+      }
+      body += static_cast<char>(nextByte);
+    }
+
+    if (!stream->connected() && stream->available() == 0) {
+      break;
+    }
+    delay(2);
+  }
+
+  return true;
 }
 }  // namespace
 
@@ -1713,7 +1793,8 @@ bool BackendClient::requestSession(String &error) {
   const String &body = emptyJsonObjectBody();
   logMemoryStage("after session payload", kCreateSessionPath);
   if (!requestJson("POST", kCreateSessionPath, body, response, error, false,
-                   CampusConfig::kHttpRetryAttempts)) {
+                   CampusConfig::kHttpRetryAttempts, 0,
+                   kSessionResponseMaxBytes, "Session response too large")) {
     return false;
   }
 
@@ -2202,7 +2283,40 @@ bool BackendClient::requestJson(const char *method, const String &path,
 
       lastFailureStage_ = "response_parse";
       logMemoryStage("before response parse", path, attempt, loopAttempts);
-      const DeserializationError jsonError = deserializeJson(response, *stream);
+      DeserializationError jsonError = DeserializationError::Ok;
+      String sessionResponseBody;
+      if (isSessionRequest) {
+        if (!readResponseBody(https, sessionResponseBody,
+                              kSessionResponseMaxBytes + 1U)) {
+          lastFailureStage_ = "response_read";
+          error = "Response stream unavailable";
+          cleanupRequest(&https, "after response cleanup");
+          return false;
+        }
+        if (sessionResponseBody.length() > kSessionResponseMaxBytes) {
+          lastFailureStage_ = "response_too_large";
+          error = "Session response too large";
+          error += " bytes=";
+          error += String(sessionResponseBody.length());
+          error += " limit=";
+          error += String(kSessionResponseMaxBytes);
+          lastHttpErrorString_ = error;
+          lastResponseBody_ = redactedJsonPreview(sessionResponseBody);
+          Serial.printf(
+              "[HTTP][JSON] parseBlocked path=%s reason=response_too_large "
+              "rawBytes=%u cap=%u preview=%s\n",
+              path.c_str(),
+              static_cast<unsigned>(sessionResponseBody.length()),
+              static_cast<unsigned>(response.capacity()),
+              lastResponseBody_.c_str());
+          cleanupRequest(&https, "after response cleanup");
+          return false;
+        }
+        lastResponsePayloadSize_ = sessionResponseBody.length();
+        jsonError = deserializeJson(response, sessionResponseBody);
+      } else {
+        jsonError = deserializeJson(response, *stream);
+      }
       logMemoryStage("after response parse", path, attempt, loopAttempts);
       cleanupRequest(&https, "after response cleanup");
       if (jsonError) {
@@ -2223,7 +2337,22 @@ bool BackendClient::requestJson(const char *method, const String &path,
           }
         }
         lastHttpErrorString_ = error;
+        if (isSessionRequest) {
+          const String redactedPreview = redactedJsonPreview(sessionResponseBody);
+          lastResponseBody_ = redactedPreview;
+          const size_t rawLength = sessionResponseBody.length();
+          Serial.printf(
+              "[HTTP][JSON] parseFailed path=%s rawBytes=%u cap=%u "
+              "errorCode=%d error=%s preview=%s\n",
+              path.c_str(), static_cast<unsigned>(rawLength),
+              static_cast<unsigned>(response.capacity()),
+              static_cast<int>(jsonError.code()), jsonError.c_str(),
+              redactedPreview.c_str());
+        }
         return false;
+      }
+      if (isSessionRequest) {
+        lastResponseBody_ = "";
       }
       lastFailureStage_ = "none";
       return true;

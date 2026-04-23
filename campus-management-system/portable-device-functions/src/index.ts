@@ -3215,18 +3215,11 @@ async function createDeviceSessionResponse(device: DeviceContext) {
   );
 
   return {
+    ok: true,
     sessionToken: token,
     expiresAtMs: payload.expMs,
-    authMode: "bearer",
-    device: {
-      deviceId: device.deviceId,
-      label: normalizeText(device.data.label) || normalizeText(device.data.name) || device.deviceId,
-    },
-    pairing: device.pairingData ? {
-      eventId: normalizeText(device.pairingData.eventId),
-      eventTitle: normalizeText(device.pairingData.eventTitle),
-      status: normalizeText(device.pairingData.status) || "paired",
-    } : null,
+    deviceId: device.deviceId,
+    sessionVersion,
   };
 }
 

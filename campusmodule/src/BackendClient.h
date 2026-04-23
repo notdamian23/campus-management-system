@@ -11,6 +11,8 @@ class StorageManager;
 
 class BackendClient {
  public:
+  static constexpr size_t kSessionResponseJsonCapacity = 1536;
+
   bool fetchAvailableEvents(std::vector<EventInfo> &events, String &error);
   bool fetchLatestEvent(EventInfo &event, String &error);
   bool fetchEnrollmentSessions(std::vector<EnrollmentSessionInfo> &sessions,
