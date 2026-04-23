@@ -5,6 +5,7 @@ import {
   onDocumentCreatedWithAuthContext,
   onDocumentDeletedWithAuthContext,
   onDocumentUpdatedWithAuthContext,
+  onDocumentWritten,
 } from "firebase-functions/v2/firestore";
 import {createCampusLogger} from "./campusLogger";
 
@@ -13145,6 +13146,12 @@ export const createCampusEvent = onCall({region: REGION}, async (request) => {
         preRegCount,
         preRegRemaining,
         waitlistCount,
+        attendanceCount: 0,
+        presentCount: 0,
+        absentCount: 0,
+        imageCount: 0,
+        documentCount: 0,
+        fileCount: 0,
         ownerType,
         courseScope: eventCourseScope,
         createdBy: actorUid,
@@ -14848,6 +14855,134 @@ export const auditEventDeletes = onDocumentDeletedWithAuthContext(
         courseScope: normalizeCourseLabel(event.data?.data()?.courseScope) || null,
       },
     });
+  },
+);
+
+/**
+ * Converts event attendance metadata into the count bucket teachers see.
+ */
+function aggregateAttendanceStatus(
+  data: FirebaseFirestore.DocumentData,
+): "Present" | "Absent" | "Recorded" {
+  const normalizedStatus = normalizeLower(
+    data.attendanceStatus ?? data.status,
+  );
+
+  if (normalizedStatus === "present" || normalizedStatus === "attended") {
+    return "Present";
+  }
+  if (normalizedStatus === "absent" || normalizedStatus === "missed") {
+    return "Absent";
+  }
+  if (typeof data.present === "boolean") {
+    return data.present ? "Present" : "Absent";
+  }
+
+  return "Recorded";
+}
+
+/**
+ * Normalizes existing event summary counts before comparing updates.
+ */
+function nonNegativeAggregateValue(value: unknown): number {
+  const numericValue = Number(value ?? 0);
+  return Number.isFinite(numericValue) && numericValue > 0 ?
+    Math.trunc(numericValue) :
+    0;
+}
+
+/**
+ * Recomputes lightweight event-level summary fields from child records.
+ */
+async function syncEventActivitySummary(eventId: string): Promise<void> {
+  if (!eventId) {
+    return;
+  }
+
+  const eventRef = db.doc(`events/${eventId}`);
+  const [eventSnap, attendanceSnap, imagesSnap, docsSnap] = await Promise.all([
+    eventRef.get(),
+    eventRef.collection("attendance").get(),
+    eventRef.collection("images").get(),
+    eventRef.collection("docs").get(),
+  ]);
+
+  if (!eventSnap.exists) {
+    return;
+  }
+
+  let presentCount = 0;
+  let absentCount = 0;
+  attendanceSnap.docs.forEach((attendanceDoc) => {
+    const status = aggregateAttendanceStatus(attendanceDoc.data());
+    if (status === "Present") {
+      presentCount += 1;
+    } else if (status === "Absent") {
+      absentCount += 1;
+    }
+  });
+
+  const nextSummary = {
+    attendanceCount: attendanceSnap.size,
+    presentCount,
+    absentCount,
+    imageCount: imagesSnap.size,
+    documentCount: docsSnap.size,
+    fileCount: imagesSnap.size + docsSnap.size,
+  };
+  const eventData = eventSnap.data() ?? {};
+  const summaryKeys = Object.keys(nextSummary) as Array<
+    keyof typeof nextSummary
+  >;
+  const changed = summaryKeys.some(
+    (key) => nonNegativeAggregateValue(eventData[key]) !== nextSummary[key],
+  );
+
+  if (!changed) {
+    return;
+  }
+
+  await eventRef.update({
+    ...nextSummary,
+    eventActivitySummaryUpdatedAt: serverTimestamp(),
+  });
+}
+
+/**
+ * Runs event summary sync from Firestore trigger params without retry storms.
+ */
+async function syncEventActivitySummaryForParam(
+  rawEventId: unknown,
+): Promise<void> {
+  const eventId = normalizeText(rawEventId);
+  try {
+    await syncEventActivitySummary(eventId);
+  } catch (error) {
+    functionsLogger.warn("Failed to sync event activity summary", {
+      eventId,
+      error,
+    });
+  }
+}
+
+export const syncEventAttendanceSummary = onDocumentWritten(
+  {region: REGION, document: "events/{eventId}/attendance/{attendanceId}"},
+  async (event) => {
+    await syncEventActivitySummaryForParam(event.params.eventId);
+  },
+);
+
+export const syncEventImageSummary = onDocumentWritten(
+  {region: REGION, document: "events/{eventId}/images/{imageId}"},
+  async (event) => {
+    await syncEventActivitySummaryForParam(event.params.eventId);
+  },
+);
+
+export const syncEventDocumentSummary = onDocumentWritten(
+  {region: REGION, document: "events/{eventId}/docs/{docId}"},
+  async (event) => {
+    await syncEventActivitySummaryForParam(event.params.eventId);
   },
 );
 

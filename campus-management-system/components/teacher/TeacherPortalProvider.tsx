@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { usePathname } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
@@ -51,6 +52,11 @@ type TeacherEventDoc = {
   withPayment?: boolean;
   preRegSlots?: number | null;
   preRegCount?: number;
+  attendanceCount?: number;
+  presentCount?: number;
+  absentCount?: number;
+  imageCount?: number;
+  documentCount?: number;
   createdAt?: unknown;
   createdBy?: string | null;
 };
@@ -225,6 +231,13 @@ function toMillis(value: unknown) {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
+function toNonNegativeNumber(value: unknown) {
+  const numericValue = Number(value ?? 0);
+  return Number.isFinite(numericValue) && numericValue > 0
+    ? Math.trunc(numericValue)
+    : 0;
+}
+
 function parseDateOnly(input: string) {
   const value = String(input ?? "").trim();
   if (!value) return null;
@@ -327,6 +340,8 @@ export function TeacherPortalProvider({
 }: {
   children: React.ReactNode;
 }) {
+  const pathname = usePathname();
+  const shouldLoadPortalActivity = pathname !== "/teacher/events";
   const [accessState, setAccessState] = useState<TeacherAccessState>("loading");
   const [profile, setProfile] = useState<TeacherProfile | null>(null);
 
@@ -433,9 +448,9 @@ export function TeacherPortalProvider({
   }, [accessState]);
 
   useEffect(() => {
-    if (accessState !== "authorized") {
+    if (accessState !== "authorized" || !shouldLoadPortalActivity) {
       setAttendance([]);
-      setLoadingActivity(accessState === "loading");
+      setLoadingActivity(accessState === "loading" && shouldLoadPortalActivity);
       return;
     }
 
@@ -514,12 +529,12 @@ export function TeacherPortalProvider({
     return () => {
       unsubs.forEach((unsub) => unsub());
     };
-  }, [accessState, rawEvents]);
+  }, [accessState, rawEvents, shouldLoadPortalActivity]);
 
   useEffect(() => {
-    if (accessState !== "authorized") {
+    if (accessState !== "authorized" || !shouldLoadPortalActivity) {
       setFiles([]);
-      setLoadingFiles(accessState === "loading");
+      setLoadingFiles(accessState === "loading" && shouldLoadPortalActivity);
       return;
     }
 
@@ -617,7 +632,7 @@ export function TeacherPortalProvider({
     return () => {
       unsubs.forEach((unsub) => unsub());
     };
-  }, [accessState, rawEvents]);
+  }, [accessState, rawEvents, shouldLoadPortalActivity]);
 
   const events = useMemo<TeacherEvent[]>(() => {
     const attendanceCounts = new Map<string, number>();
@@ -684,12 +699,25 @@ export function TeacherPortalProvider({
           timeEnd,
         );
         const preRegCount = Math.max(0, Number(data.preRegCount ?? 0));
-        const presentCount = presentCounts.get(eventItem.id) ?? 0;
-        const baseAbsentCount = absentCounts.get(eventItem.id) ?? 0;
+        const presentCount = shouldLoadPortalActivity
+          ? (presentCounts.get(eventItem.id) ?? 0)
+          : toNonNegativeNumber(data.presentCount);
+        const baseAbsentCount = shouldLoadPortalActivity
+          ? (absentCounts.get(eventItem.id) ?? 0)
+          : toNonNegativeNumber(data.absentCount);
         const derivedAbsentCount =
           data.isPreReg === true && lifecycle === "completed"
             ? Math.max(baseAbsentCount, preRegCount - presentCount)
             : baseAbsentCount;
+        const attendanceCount = shouldLoadPortalActivity
+          ? (attendanceCounts.get(eventItem.id) ?? 0)
+          : toNonNegativeNumber(data.attendanceCount);
+        const imageCount = shouldLoadPortalActivity
+          ? (imageCounts.get(eventItem.id) ?? 0)
+          : toNonNegativeNumber(data.imageCount);
+        const documentCount = shouldLoadPortalActivity
+          ? (documentCounts.get(eventItem.id) ?? 0)
+          : toNonNegativeNumber(data.documentCount);
 
         return {
           id: eventItem.id,
@@ -713,11 +741,11 @@ export function TeacherPortalProvider({
           createdAtMs: toMillis(data.createdAt),
           createdBy: data.createdBy ?? null,
           registrationCount: preRegCount,
-          attendanceCount: attendanceCounts.get(eventItem.id) ?? 0,
+          attendanceCount,
           presentCount,
           absentCount: derivedAbsentCount,
-          imageCount: imageCounts.get(eventItem.id) ?? 0,
-          documentCount: documentCounts.get(eventItem.id) ?? 0,
+          imageCount,
+          documentCount,
         } as TeacherEvent;
       })
       .sort((a, b) => {
@@ -725,7 +753,7 @@ export function TeacherPortalProvider({
         const bMs = b.eventDate?.getTime() ?? b.createdAtMs ?? 0;
         return bMs - aMs;
       });
-  }, [attendance, files, rawEvents]);
+  }, [attendance, files, rawEvents, shouldLoadPortalActivity]);
 
   const students = useMemo<TeacherStudent[]>(() => {
     const byUid = new Map<string, TeacherStudent>();
@@ -821,8 +849,7 @@ export function TeacherPortalProvider({
   const loading =
     accessState === "loading" ||
     loadingEvents ||
-    loadingActivity ||
-    loadingFiles;
+    (shouldLoadPortalActivity && (loadingActivity || loadingFiles));
 
   const value = useMemo<TeacherPortalContextValue>(
     () => ({

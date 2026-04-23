@@ -17,8 +17,7 @@ export {
   TeacherPageHeaderSkeleton,
 } from "./TeacherSkeletons";
 export {
-  TeacherFileDetailsDrawer,
-  TeacherFileDetailsPanel,
+  TeacherStudentActivityModal,
   TeacherStudentDetailPanel,
   TeacherStudentDrawer,
 } from "./TeacherPanels";
@@ -28,12 +27,10 @@ export {
   formatTeacherBytes,
   formatTeacherDateTime,
   getTeacherAttendanceTone,
-  getTeacherFileTone,
   getTeacherLifecycleTone,
   getTeacherToneClasses,
   isTeacherImageFile,
   teacherAudienceLabel,
-  teacherFileKindLabel,
   type TeacherTone,
 } from "./teacher-helpers";
 export { useIsBelowBreakpoint } from "./useIsBelowBreakpoint";

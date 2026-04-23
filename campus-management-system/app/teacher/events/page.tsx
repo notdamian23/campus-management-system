@@ -1,7 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { collection, getDocs } from "firebase/firestore";
+import {
+  collection,
+  getDocs,
+  onSnapshot,
+  orderBy,
+  query,
+  type DocumentData,
+  type QuerySnapshot,
+} from "firebase/firestore";
 import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
@@ -44,7 +52,6 @@ import {
   TeacherEmptyState,
   TeacherFilterBar,
   TeacherFilterBarSkeleton,
-  TeacherActivityChipGroup,
   TeacherPageHeader,
   TeacherStatsGrid,
   capitalizeTeacherLabel,
@@ -56,6 +63,12 @@ import {
   useTeacherPageErrorToast,
   useTeacherPortal,
 } from "@/components/teacher";
+import type {
+  TeacherAttendance,
+  TeacherAttendanceStatus,
+  TeacherFile,
+  TeacherFileKind,
+} from "@/components/teacher/TeacherPortalProvider";
 
 const EVENTS_PER_PAGE = 6;
 const FILE_PREVIEW_LIMIT = 3;
@@ -68,23 +81,42 @@ const teacherEventColumns: CampusTableColumn<{
   lifecycle: "upcoming" | "ongoing" | "completed";
   schedule: string;
   audience: string;
-  registrationCount: number;
-  presentCount: number;
-  absentCount: number;
-  documentCount: number;
-  imageCount: number;
 }>[] = [
   { key: "event", label: "Event" },
   { key: "status", label: "Status" },
   { key: "schedule", label: "Schedule" },
   { key: "audience", label: "Audience" },
-  { key: "summary", label: "Summary" },
   { key: "actions", label: "Actions", align: "end", className: "text-right" },
 ];
 
 type EventTabKey = "overview" | "participants" | "files";
 type EventFilesView = "images" | "documents";
 type ParticipantStatusFilter = "all" | "Present" | "Absent";
+
+type TeacherAttendanceDoc = {
+  uid?: string;
+  studentUid?: string;
+  schoolId?: string;
+  studentName?: string;
+  name?: string;
+  course?: string;
+  year?: string;
+  yearLevel?: string;
+  status?: string;
+  attendanceStatus?: string;
+  present?: boolean;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+};
+
+type TeacherFileDoc = {
+  name?: string;
+  path?: string;
+  downloadURL?: string;
+  contentType?: string;
+  size?: number;
+  createdAt?: unknown;
+};
 
 type SelectOption = {
   key: string;
@@ -154,6 +186,96 @@ function normalizeParticipantStatus(value: string) {
   return "Recorded";
 }
 
+function normalizeYear(raw: unknown) {
+  const value = String(raw ?? "").trim();
+  const lowered = value.toLowerCase();
+
+  if (!value) return "Unassigned";
+  if (value === "1" || lowered === "1st year") return "1st Year";
+  if (value === "2" || lowered === "2nd year") return "2nd Year";
+  if (value === "3" || lowered === "3rd year") return "3rd Year";
+  if (value === "4" || lowered === "4th year") return "4th Year";
+  if (value === "5" || lowered === "5th year") return "5th Year";
+
+  return value;
+}
+
+function normalizeLiveAttendanceStatus(
+  rawStatus: unknown,
+  rawPresent: unknown,
+): TeacherAttendanceStatus {
+  const normalized = String(rawStatus ?? "").trim().toLowerCase();
+
+  if (normalized === "present" || normalized === "attended") return "Present";
+  if (normalized === "absent" || normalized === "missed") return "Absent";
+  if (typeof rawPresent === "boolean") return rawPresent ? "Present" : "Absent";
+  return "Recorded";
+}
+
+function mapAttendanceSnapshot(
+  eventId: string,
+  snap: QuerySnapshot<DocumentData>,
+): TeacherAttendance[] {
+  return snap.docs
+    .map((attendanceDoc) => {
+      const data = attendanceDoc.data() as TeacherAttendanceDoc;
+      const uid = String(data.uid ?? data.studentUid ?? attendanceDoc.id).trim();
+      if (!uid) return null;
+
+      const schoolId = String(data.schoolId ?? "").trim() || uid;
+      const studentName = formatStudentFullName(
+        {
+          studentName: data.studentName,
+          name: data.name,
+          schoolId,
+        },
+        schoolId,
+      );
+
+      return {
+        id: attendanceDoc.id,
+        eventId,
+        uid,
+        schoolId,
+        studentName,
+        course: String(data.course ?? "").trim() || "Unassigned",
+        year: normalizeYear(data.yearLevel ?? data.year),
+        status: normalizeLiveAttendanceStatus(
+          data.status ?? data.attendanceStatus,
+          data.present,
+        ),
+        createdAtMs: toMillis(data.createdAt),
+        updatedAtMs: toMillis(data.updatedAt) || toMillis(data.createdAt),
+      };
+    })
+    .filter((item): item is TeacherAttendance => Boolean(item));
+}
+
+function mapFileSnapshot(
+  eventId: string,
+  kind: TeacherFileKind,
+  snap: QuerySnapshot<DocumentData>,
+): TeacherFile[] {
+  return snap.docs
+    .map((fileDoc) => {
+      const data = fileDoc.data() as TeacherFileDoc;
+      const fallbackName = kind === "images" ? "Untitled image" : "Untitled file";
+
+      return {
+        id: fileDoc.id,
+        eventId,
+        kind,
+        name: String(data.name ?? fallbackName).trim() || fallbackName,
+        path: String(data.path ?? "").trim(),
+        downloadURL: String(data.downloadURL ?? "").trim(),
+        contentType: String(data.contentType ?? "").trim(),
+        size: Number(data.size ?? 0),
+        createdAtMs: toMillis(data.createdAt),
+      };
+    })
+    .filter((item): item is TeacherFile => Boolean(item));
+}
+
 function getTeacherEventSchedule(
   event: {
     date: string;
@@ -170,7 +292,8 @@ function getTeacherEventSchedule(
 }
 
 export default function TeacherEventsPage() {
-  const { attendance, events, files, loading, error } = useTeacherPortal();
+  const { events, loadingEvents, error } = useTeacherPortal();
+  const loading = loadingEvents;
   const isCompactView = useIsBelowBreakpoint(1024);
 
   useTeacherPageErrorToast(error, "teacher event records");
@@ -194,6 +317,14 @@ export default function TeacherEventsPage() {
   const [filesView, setFilesView] = useState<EventFilesView>("images");
   const [imagesModalOpen, setImagesModalOpen] = useState(false);
   const [documentsModalOpen, setDocumentsModalOpen] = useState(false);
+  const [selectedEventAttendance, setSelectedEventAttendance] = useState<
+    TeacherAttendance[]
+  >([]);
+  const [selectedEventFiles, setSelectedEventFiles] = useState<TeacherFile[]>(
+    [],
+  );
+  const [selectedEventDetailsLoading, setSelectedEventDetailsLoading] =
+    useState(false);
 
   const statusOptions: SelectOption[] = [
     { key: "__all_status__", label: "All status" },
@@ -231,15 +362,52 @@ export default function TeacherEventsPage() {
     () => events.find((event) => event.id === selectedEventId) ?? null,
     [events, selectedEventId],
   );
+  const selectedEventLiveId = selectedEvent?.id ?? "";
   const selectedEventSchedule = useMemo(
     () => (selectedEvent ? getTeacherEventSchedule(selectedEvent) : null),
     [selectedEvent],
   );
 
+  const selectedEventReview = useMemo(() => {
+    if (!selectedEvent) return null;
+    if (selectedEventDetailsLoading) return selectedEvent;
+
+    const presentCount = selectedEventAttendance.filter(
+      (item) => item.status === "Present",
+    ).length;
+    const baseAbsentCount = selectedEventAttendance.filter(
+      (item) => item.status === "Absent",
+    ).length;
+    const absentCount =
+      selectedEvent.isPreReg && selectedEvent.lifecycle === "completed"
+        ? Math.max(baseAbsentCount, selectedEvent.registrationCount - presentCount)
+        : baseAbsentCount;
+    const imageCount = selectedEventFiles.filter(
+      (file) => file.kind === "images",
+    ).length;
+    const documentCount = selectedEventFiles.filter(
+      (file) => file.kind === "docs",
+    ).length;
+
+    return {
+      ...selectedEvent,
+      attendanceCount: selectedEventAttendance.length,
+      presentCount,
+      absentCount,
+      imageCount,
+      documentCount,
+    };
+  }, [
+    selectedEvent,
+    selectedEventAttendance,
+    selectedEventDetailsLoading,
+    selectedEventFiles,
+  ]);
+
   const selectedParticipants = useMemo(() => {
     if (!selectedEvent) return [];
 
-    return attendance
+    return selectedEventAttendance
       .filter((item) => item.eventId === selectedEvent.id)
       .map((item) => ({
         uid: item.uid,
@@ -254,7 +422,7 @@ export default function TeacherEventsPage() {
         if (byName !== 0) return byName;
         return a.schoolId.localeCompare(b.schoolId);
       });
-  }, [attendance, selectedEvent]);
+  }, [selectedEvent, selectedEventAttendance]);
 
   const filteredParticipants = useMemo(() => {
     const search = participantsSearch.trim().toLowerCase();
@@ -304,10 +472,10 @@ export default function TeacherEventsPage() {
 
   const selectedFiles = useMemo(() => {
     if (!selectedEvent) return [];
-    return files
+    return selectedEventFiles
       .filter((file) => file.eventId === selectedEvent.id)
       .sort((a, b) => b.createdAtMs - a.createdAtMs);
-  }, [files, selectedEvent]);
+  }, [selectedEvent, selectedEventFiles]);
 
   const selectedDocuments = useMemo(
     () => selectedFiles.filter((file) => file.kind === "docs"),
@@ -412,9 +580,123 @@ export default function TeacherEventsPage() {
 
   useEffect(() => {
     if (!selectedEvent) {
+      if (selectedEventId) {
+        setSelectedEventId(null);
+      }
       setSelectedTab("overview");
     }
-  }, [selectedEvent]);
+  }, [selectedEvent, selectedEventId]);
+
+  useEffect(() => {
+    if (!selectedEventLiveId) {
+      setSelectedEventAttendance([]);
+      setSelectedEventFiles([]);
+      setSelectedEventDetailsLoading(false);
+      return;
+    }
+
+    const eventId = selectedEventLiveId;
+    let attendanceReady = false;
+    let documentsReady = false;
+    let imagesReady = false;
+
+    const syncLoading = () => {
+      setSelectedEventDetailsLoading(
+        !(attendanceReady && documentsReady && imagesReady),
+      );
+    };
+
+    setSelectedEventDetailsLoading(true);
+    setSelectedEventAttendance([]);
+    setSelectedEventFiles([]);
+
+    const updateFileBucket = (kind: TeacherFileKind, rows: TeacherFile[]) => {
+      setSelectedEventFiles((currentFiles) =>
+        [
+          ...currentFiles.filter((file) => file.kind !== kind),
+          ...rows,
+        ].sort((a, b) => b.createdAtMs - a.createdAtMs),
+      );
+    };
+
+    const unsubAttendance = onSnapshot(
+      collection(db, "events", eventId, "attendance"),
+      (snap) => {
+        setSelectedEventAttendance(mapAttendanceSnapshot(eventId, snap));
+        attendanceReady = true;
+        syncLoading();
+      },
+      (nextError) => {
+        setSelectedEventAttendance([]);
+        attendanceReady = true;
+        syncLoading();
+        campusToast.error({
+          title: "Participants unavailable",
+          description:
+            nextError instanceof Error
+              ? nextError.message
+              : "Failed to load live event participants.",
+          dedupeKey: `teacher-event-live-attendance:${eventId}`,
+        });
+      },
+    );
+
+    const unsubDocuments = onSnapshot(
+      query(
+        collection(db, "events", eventId, "docs"),
+        orderBy("createdAt", "desc"),
+      ),
+      (snap) => {
+        updateFileBucket("docs", mapFileSnapshot(eventId, "docs", snap));
+        documentsReady = true;
+        syncLoading();
+      },
+      (nextError) => {
+        updateFileBucket("docs", []);
+        documentsReady = true;
+        syncLoading();
+        campusToast.error({
+          title: "Documents unavailable",
+          description:
+            nextError instanceof Error
+              ? nextError.message
+              : "Failed to load live event documents.",
+          dedupeKey: `teacher-event-live-docs:${eventId}`,
+        });
+      },
+    );
+
+    const unsubImages = onSnapshot(
+      query(
+        collection(db, "events", eventId, "images"),
+        orderBy("createdAt", "desc"),
+      ),
+      (snap) => {
+        updateFileBucket("images", mapFileSnapshot(eventId, "images", snap));
+        imagesReady = true;
+        syncLoading();
+      },
+      (nextError) => {
+        updateFileBucket("images", []);
+        imagesReady = true;
+        syncLoading();
+        campusToast.error({
+          title: "Images unavailable",
+          description:
+            nextError instanceof Error
+              ? nextError.message
+              : "Failed to load live event images.",
+          dedupeKey: `teacher-event-live-images:${eventId}`,
+        });
+      },
+    );
+
+    return () => {
+      unsubAttendance();
+      unsubDocuments();
+      unsubImages();
+    };
+  }, [selectedEventLiveId]);
 
   useEffect(() => {
     setParticipantsPage(1);
@@ -710,11 +992,6 @@ export default function TeacherEventsPage() {
             lifecycle: event.lifecycle,
             schedule: schedule.scheduleLabel,
             audience: teacherAudienceLabel(event),
-            registrationCount: event.registrationCount,
-            presentCount: event.presentCount,
-            absentCount: event.absentCount,
-            documentCount: event.documentCount,
-            imageCount: event.imageCount,
           };
         })}
         getRowKey={(event) => event.id}
@@ -760,26 +1037,9 @@ export default function TeacherEventsPage() {
 
           if (columnKey === "audience") {
             return (
-              <p className="max-w-xs text-sm leading-6 text-campus-text-secondary">
+              <p className="max-w-sm text-sm leading-6 text-campus-text-secondary">
                 {event.audience}
               </p>
-            );
-          }
-
-          if (columnKey === "summary") {
-            return (
-              <TeacherActivityChipGroup
-                items={[
-                  { label: "Pre-Reg", value: event.registrationCount, tone: "blue" },
-                  { label: "Present", value: event.presentCount, tone: "green" },
-                  { label: "Missed", value: event.absentCount, tone: "red" },
-                  {
-                    label: "Files",
-                    value: event.documentCount + event.imageCount,
-                    tone: "purple",
-                  },
-                ]}
-              />
             );
           }
 
@@ -839,27 +1099,17 @@ export default function TeacherEventsPage() {
               </ModalHeader>
 
               <ModalBody className="space-y-5 pb-6">
-                <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-                  <EventDetailStat
-                    label="Pre-Reg"
-                    value={selectedEvent?.registrationCount ?? 0}
-                    tone="blue"
-                  />
+                <div className="grid max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
                   <EventDetailStat
                     label="Present"
-                    value={selectedEvent?.presentCount ?? 0}
+                    value={selectedEventReview?.presentCount ?? 0}
                     tone="green"
-                  />
-                  <EventDetailStat
-                    label="Missed"
-                    value={selectedEvent?.absentCount ?? 0}
-                    tone="red"
                   />
                   <EventDetailStat
                     label="Files"
                     value={
-                      (selectedEvent?.documentCount ?? 0) +
-                      (selectedEvent?.imageCount ?? 0)
+                      (selectedEventReview?.documentCount ?? 0) +
+                      (selectedEventReview?.imageCount ?? 0)
                     }
                     tone="purple"
                   />
@@ -880,7 +1130,11 @@ export default function TeacherEventsPage() {
                         <CardBody className="space-y-4 p-4">
                           <EventDetailInfoRow
                             label="Audience"
-                            value={selectedEvent ? teacherAudienceLabel(selectedEvent) : "-"}
+                            value={
+                              selectedEventReview
+                                ? teacherAudienceLabel(selectedEventReview)
+                                : "-"
+                            }
                           />
                           <EventDetailInfoRow
                             label="Schedule"
@@ -889,22 +1143,22 @@ export default function TeacherEventsPage() {
                           <EventDetailInfoRow
                             label="Status"
                             value={
-                              selectedEvent
-                                ? capitalizeTeacherLabel(selectedEvent.lifecycle)
+                              selectedEventReview
+                                ? capitalizeTeacherLabel(selectedEventReview.lifecycle)
                                 : "-"
                             }
                           />
                           <EventDetailInfoRow
                             label="Payment linked"
-                            value={selectedEvent?.withPayment ? "Yes" : "No"}
+                            value={selectedEventReview?.withPayment ? "Yes" : "No"}
                           />
                           <EventDetailInfoRow
                             label="Pre-registration"
                             value={
-                              selectedEvent?.isPreReg
+                              selectedEventReview?.isPreReg
                                 ? `Enabled${
-                                    selectedEvent.preRegSlots
-                                      ? ` (${selectedEvent.preRegSlots} slots)`
+                                    selectedEventReview.preRegSlots
+                                      ? ` (${selectedEventReview.preRegSlots} slots)`
                                       : ""
                                   }`
                                 : "Disabled"
@@ -919,7 +1173,7 @@ export default function TeacherEventsPage() {
                             Event details
                           </p>
                           <p className="text-sm leading-6 text-campus-text-secondary">
-                            {selectedEvent?.details || "No event description provided."}
+                            {selectedEventReview?.details || "No event description provided."}
                           </p>
                         </CardBody>
                       </Card>
@@ -1038,7 +1292,14 @@ export default function TeacherEventsPage() {
                         </Button>
                       </div>
 
-                      {selectedParticipants.length === 0 ? (
+                      {selectedEventDetailsLoading ? (
+                        <TeacherEmptyState
+                          title="Loading live participants"
+                          description="Syncing the latest teacher-visible attendance records for this event."
+                          icon={Clock3}
+                          compact
+                        />
+                      ) : selectedParticipants.length === 0 ? (
                         <TeacherEmptyState
                           title="No participants found"
                           description="No teacher-visible attendance records are connected to this event yet."

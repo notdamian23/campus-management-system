@@ -26,11 +26,6 @@ const teacherNavItems: NavItem[] = [
     icon: "event",
     label: "Events",
   },
-  {
-    href: "/teacher/documents",
-    icon: "description",
-    label: "Documents",
-  },
 ];
 
 export default function TeacherLayout({ children }: { children: ReactNode }) {

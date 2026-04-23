@@ -2,7 +2,6 @@ import type {
   TeacherAttendanceStatus,
   TeacherEvent,
   TeacherFile,
-  TeacherFileKind,
   TeacherLifecycle,
 } from "./TeacherPortalProvider";
 
@@ -114,10 +113,6 @@ export function getTeacherAttendanceTone(
   return "blue";
 }
 
-export function getTeacherFileTone(kind: TeacherFileKind): TeacherTone {
-  return kind === "images" ? "amber" : "blue";
-}
-
 export function teacherAudienceLabel(
   event: Pick<TeacherEvent, "course" | "yearLevel" | "targetStudent">,
 ) {
@@ -136,10 +131,6 @@ export function teacherAudienceLabel(
   }
 
   return parts.length > 0 ? parts.join(" | ") : "All students";
-}
-
-export function teacherFileKindLabel(kind: TeacherFileKind) {
-  return kind === "images" ? "Image" : "Document";
 }
 
 export function isTeacherImageFile(

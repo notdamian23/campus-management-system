@@ -11,16 +11,21 @@ import {
   DrawerContent,
   DrawerHeader,
 } from "@heroui/drawer";
+import {
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+} from "@heroui/modal";
 import { ScrollShadow } from "@heroui/scroll-shadow";
+import { Select, SelectItem } from "@heroui/select";
+import { Tab, Tabs } from "@heroui/tabs";
 import type { LucideIcon } from "lucide-react";
 import {
   CheckCircle2,
-  Download,
-  FileImage,
-  FileText,
   FolderKanban,
   GraduationCap,
-  ImageIcon,
   School,
   TriangleAlert,
   UserRound,
@@ -30,21 +35,15 @@ import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import type {
   TeacherAttendanceStatus,
   TeacherEvent,
-  TeacherFile,
   TeacherStudent,
 } from "./TeacherPortalProvider";
-import { TeacherActivityChipGroup, TeacherEmptyState } from "./TeacherShared";
-import { downloadTeacherFile } from "./teacher-feedback";
+import { TeacherEmptyState } from "./TeacherShared";
 import {
   capitalizeTeacherLabel,
-  formatTeacherBytes,
   formatTeacherDateTime,
   getTeacherAttendanceTone,
-  getTeacherFileTone,
   getTeacherLifecycleTone,
   getTeacherToneClasses,
-  isTeacherImageFile,
-  teacherFileKindLabel,
 } from "./teacher-helpers";
 
 type StudentAttendanceItem = {
@@ -53,12 +52,62 @@ type StudentAttendanceItem = {
   updatedAtMs: number;
 };
 
+type StudentVisibleEventItem = {
+  event: TeacherEvent;
+  outcome: TeacherAttendanceStatus;
+  updatedAtMs: number;
+};
+
+type StudentActivityTab = "profile" | "attendance" | "events";
+type VisibleEventsOutcomeFilter = "all" | "present" | "missed";
+
 type TeacherStudentDetailProps = {
   student: TeacherStudent | null;
-  trackedEvents: TeacherEvent[];
+  trackedEvents: StudentVisibleEventItem[];
   attendanceItems: StudentAttendanceItem[];
+  attendancePagination?: ReactNode;
+  eventsPagination?: ReactNode;
   className?: string;
 };
+
+type TeacherStudentActivityModalProps = TeacherStudentDetailProps & {
+  activeTab: StudentActivityTab;
+  onActiveTabChange: (tab: StudentActivityTab) => void;
+  hasVisibleEvents: boolean;
+  visibleEventsOutcomeFilter: VisibleEventsOutcomeFilter;
+  onVisibleEventsOutcomeFilterChange: (
+    filter: VisibleEventsOutcomeFilter,
+  ) => void;
+  isMobile: boolean;
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+};
+
+const studentActivityTabsClassNames = {
+  tabList: "grid w-full grid-cols-3 rounded-2xl bg-slate-100 p-1",
+  cursor: "rounded-[14px] bg-white shadow-sm",
+  tab: "min-h-11 w-full min-w-0 rounded-[14px] px-2",
+  tabContent: "truncate text-xs font-medium sm:text-sm",
+};
+
+const visibleEventOutcomeOptions: Array<{
+  key: VisibleEventsOutcomeFilter;
+  label: string;
+}> = [
+  { key: "all", label: "All" },
+  { key: "present", label: "Present" },
+  { key: "missed", label: "Missed" },
+];
+
+function isStudentActivityTab(value: string): value is StudentActivityTab {
+  return value === "profile" || value === "attendance" || value === "events";
+}
+
+function isVisibleEventsOutcomeFilter(
+  value: string,
+): value is VisibleEventsOutcomeFilter {
+  return value === "all" || value === "present" || value === "missed";
+}
 
 function getTeacherEventSchedule(
   event: Pick<TeacherEvent, "date" | "eventDate" | "scheduledTime" | "timeEnd">,
@@ -74,6 +123,8 @@ export function TeacherStudentDetailPanel({
   student,
   trackedEvents,
   attendanceItems,
+  attendancePagination,
+  eventsPagination,
   className,
 }: TeacherStudentDetailProps) {
   return (
@@ -89,6 +140,8 @@ export function TeacherStudentDetailPanel({
           student={student}
           trackedEvents={trackedEvents}
           attendanceItems={attendanceItems}
+          attendancePagination={attendancePagination}
+          eventsPagination={eventsPagination}
         />
       </CardBody>
     </Card>
@@ -99,6 +152,8 @@ export function TeacherStudentDrawer({
   student,
   trackedEvents,
   attendanceItems,
+  attendancePagination,
+  eventsPagination,
   isOpen,
   onOpenChange,
 }: TeacherStudentDetailProps & {
@@ -131,6 +186,8 @@ export function TeacherStudentDrawer({
                   student={student}
                   trackedEvents={trackedEvents}
                   attendanceItems={attendanceItems}
+                  attendancePagination={attendancePagination}
+                  eventsPagination={eventsPagination}
                 />
               </ScrollShadow>
               <div className="border-t border-border/70 p-4">
@@ -146,10 +203,123 @@ export function TeacherStudentDrawer({
   );
 }
 
+export function TeacherStudentActivityModal({
+  student,
+  trackedEvents,
+  attendanceItems,
+  activeTab,
+  onActiveTabChange,
+  hasVisibleEvents,
+  visibleEventsOutcomeFilter,
+  onVisibleEventsOutcomeFilterChange,
+  attendancePagination,
+  eventsPagination,
+  isMobile,
+  isOpen,
+  onOpenChange,
+}: TeacherStudentActivityModalProps) {
+  return (
+    <Modal
+      isOpen={isOpen && Boolean(student)}
+      onOpenChange={onOpenChange}
+      scrollBehavior="inside"
+      size={isMobile ? "full" : "5xl"}
+    >
+      <ModalContent className="sm:max-w-[1080px]">
+        {(onClose) => (
+          <>
+            <ModalHeader className="flex flex-col gap-1 border-b border-border/70">
+              <p className="text-lg font-semibold text-campus-text-primary">
+                Student Activity
+              </p>
+              <p className="text-sm font-normal text-campus-text-secondary">
+                {student?.studentName || "Review teacher-visible activity"}
+              </p>
+            </ModalHeader>
+            <ModalBody className="space-y-5 p-5">
+              <Tabs
+                aria-label="Student activity sections"
+                selectedKey={activeTab}
+                onSelectionChange={(key) => {
+                  const nextTab = String(key);
+                  if (isStudentActivityTab(nextTab)) {
+                    onActiveTabChange(nextTab);
+                  }
+                }}
+                fullWidth
+                classNames={studentActivityTabsClassNames}
+              >
+                <Tab key="profile" title="Profile">
+                  <div className="pt-3">
+                    {student ? <StudentProfileSection student={student} /> : null}
+                  </div>
+                </Tab>
+
+                <Tab key="attendance" title="Recent Attendance">
+                  <div className="pt-3">
+                    <StudentAttendanceSection
+                      attendanceItems={attendanceItems}
+                      attendancePagination={attendancePagination}
+                    />
+                  </div>
+                </Tab>
+
+                <Tab key="events" title="Visible Events">
+                  <div className="space-y-4 pt-3">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <SectionHeading
+                        title="Visible events"
+                        description="Filter events by this student's teacher-visible outcome."
+                      />
+                      <Select
+                        aria-label="Filter visible events by outcome"
+                        disallowEmptySelection
+                        items={visibleEventOutcomeOptions}
+                        selectedKeys={new Set([visibleEventsOutcomeFilter])}
+                        onSelectionChange={(keys) => {
+                          if (keys === "all") return;
+                          const selected = Array.from(keys)[0];
+                          if (
+                            typeof selected === "string" &&
+                            isVisibleEventsOutcomeFilter(selected)
+                          ) {
+                            onVisibleEventsOutcomeFilterChange(selected);
+                          }
+                        }}
+                        className="w-full sm:max-w-[180px]"
+                      >
+                        {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                      </Select>
+                    </div>
+
+                    <StudentEventsSection
+                      trackedEvents={trackedEvents}
+                      eventsPagination={eventsPagination}
+                      hasVisibleEvents={hasVisibleEvents}
+                      visibleEventsOutcomeFilter={visibleEventsOutcomeFilter}
+                    />
+                  </div>
+                </Tab>
+              </Tabs>
+            </ModalBody>
+            <ModalFooter className="border-t border-border/70">
+              <Button variant="flat" onPress={onClose}>
+                Close
+              </Button>
+            </ModalFooter>
+          </>
+        )}
+      </ModalContent>
+    </Modal>
+  );
+}
+
 function TeacherStudentDetailContent({
   student,
   trackedEvents,
   attendanceItems,
+  attendancePagination,
+  eventsPagination,
 }: TeacherStudentDetailProps) {
   if (!student) {
     return (
@@ -166,354 +336,198 @@ function TeacherStudentDetailContent({
 
   return (
     <div className="space-y-5 p-5">
-      <div className="space-y-3">
-        <div className="flex items-start gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-50 text-primary-700">
-            <UserRound size={18} />
-          </div>
-          <div className="min-w-0">
-            <p className="text-lg font-semibold text-campus-text-primary">
-              {student.studentName}
-            </p>
-            <p className="text-sm text-campus-text-secondary">
-              {student.schoolId}
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <MiniInfoCard
-            icon={GraduationCap}
-            label="Course"
-            value={student.course}
-          />
-          <MiniInfoCard icon={School} label="Year" value={student.year} />
-        </div>
-
-        <TeacherActivityChipGroup
-          items={[
-            { label: "Tracked", value: student.trackedEventIds.length, tone: "blue" },
-            { label: "Present", value: student.presentCount, tone: "green" },
-            { label: "Missed", value: student.absentCount, tone: "red" },
-            { label: "Records", value: student.recordedCount, tone: "slate" },
-          ]}
-        />
-      </div>
-
-      <section className="space-y-3">
-        <SectionHeading
-          title="Recent attendance"
-          description="Latest teacher-visible attendance outcomes."
-        />
-        {attendanceItems.length === 0 ? (
-          <TeacherEmptyState
-            title="No attendance history yet"
-            description="This student has no teacher-visible attendance records right now."
-            icon={CheckCircle2}
-            tone="green"
-            compact
-          />
-        ) : (
-          <div className="space-y-3">
-            {attendanceItems.map((item) => {
-              const toneClasses = getTeacherToneClasses(
-                getTeacherAttendanceTone(item.status),
-              );
-              const StatusIcon =
-                item.status === "Absent" ? TriangleAlert : CheckCircle2;
-              const schedule = getTeacherEventSchedule(item.event);
-
-              return (
-                <Card
-                  key={`${item.event.id}-${item.status}-${item.updatedAtMs}`}
-                  shadow="none"
-                  className="border border-border/70 bg-slate-50/70"
-                >
-                  <CardBody className="gap-3 p-4">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <p className="font-semibold text-campus-text-primary">
-                          {item.event.title}
-                        </p>
-                        <p className="text-sm text-campus-text-secondary">
-                          {schedule.scheduleLabel}
-                        </p>
-                        <p className="text-xs text-campus-text-secondary">
-                          {item.event.location}
-                        </p>
-                      </div>
-                      <Chip size="sm" className={toneClasses.chip}>
-                        <span className="inline-flex items-center gap-1.5">
-                          <StatusIcon size={14} />
-                          {item.status}
-                        </span>
-                      </Chip>
-                    </div>
-                    <p className="text-xs text-campus-text-secondary">
-                      Updated {formatTeacherDateTime(item.updatedAtMs)}
-                    </p>
-                  </CardBody>
-                </Card>
-              );
-            })}
-          </div>
-        )}
-      </section>
-
-      <section className="space-y-3">
-        <SectionHeading
-          title="Visible events"
-          description="Events currently connected to this student's teacher-visible activity."
-        />
-        {trackedEvents.length === 0 ? (
-          <TeacherEmptyState
-            title="No visible events yet"
-            description="Teacher-visible event activity for this student will appear here."
-            icon={FolderKanban}
-            compact
-          />
-        ) : (
-          <div className="space-y-3">
-            {trackedEvents.map((event) => {
-              const lifecycleClasses = getTeacherToneClasses(
-                getTeacherLifecycleTone(event.lifecycle),
-              );
-              const schedule = getTeacherEventSchedule(event);
-
-              return (
-                <Card
-                  key={event.id}
-                  shadow="none"
-                  className="border border-border/70 bg-slate-50/70"
-                >
-                  <CardBody className="gap-3 p-4">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <p className="font-semibold text-campus-text-primary">
-                          {event.title}
-                        </p>
-                        <p className="text-sm text-campus-text-secondary">
-                          {schedule.scheduleLabel}
-                        </p>
-                        <p className="text-xs text-campus-text-secondary">
-                          {event.location}
-                        </p>
-                      </div>
-                      <Chip size="sm" className={lifecycleClasses.chip}>
-                        {capitalizeTeacherLabel(event.lifecycle)}
-                      </Chip>
-                    </div>
-
-                    <TeacherActivityChipGroup
-                      items={[
-                        { label: "Present", value: event.presentCount, tone: "green" },
-                        { label: "Missed", value: event.absentCount, tone: "red" },
-                        {
-                          label: "Files",
-                          value: event.documentCount + event.imageCount,
-                          tone: "purple",
-                        },
-                      ]}
-                    />
-                  </CardBody>
-                </Card>
-              );
-            })}
-          </div>
-        )}
-      </section>
+      <StudentProfileSection student={student} />
+      <StudentAttendanceSection
+        attendanceItems={attendanceItems}
+        attendancePagination={attendancePagination}
+      />
+      <StudentEventsSection
+        trackedEvents={trackedEvents}
+        eventsPagination={eventsPagination}
+        hasVisibleEvents={trackedEvents.length > 0}
+        visibleEventsOutcomeFilter="all"
+      />
     </div>
   );
 }
 
-type TeacherFileDetailProps = {
-  file: TeacherFile | null;
-  event: TeacherEvent | null;
-  className?: string;
-};
-
-export function TeacherFileDetailsPanel({
-  file,
-  event,
-  className,
-}: TeacherFileDetailProps) {
+function StudentProfileSection({ student }: { student: TeacherStudent }) {
   return (
-    <Card
-      shadow="none"
-      className={clsx(
-        "border border-border/70 bg-white/95 shadow-[var(--shadow-soft)]",
-        className,
-      )}
-    >
-      <CardBody className="p-0">
-        <TeacherFileDetailContent file={file} event={event} />
-      </CardBody>
-    </Card>
+    <section className="space-y-4">
+      <div className="flex items-start gap-3 rounded-[24px] border border-border/70 bg-slate-50/70 p-4">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-50 text-primary-700">
+          <UserRound size={18} />
+        </div>
+        <div className="min-w-0">
+          <p className="text-lg font-semibold text-campus-text-primary">
+            {student.studentName}
+          </p>
+          <p className="text-sm text-campus-text-secondary">
+            {student.schoolId}
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <MiniInfoCard icon={School} label="School ID" value={student.schoolId} />
+        <MiniInfoCard
+          icon={GraduationCap}
+          label="Course"
+          value={student.course}
+        />
+        <MiniInfoCard icon={School} label="Year" value={student.year} />
+      </div>
+
+    </section>
   );
 }
 
-export function TeacherFileDetailsDrawer({
-  file,
-  event,
-  isOpen,
-  onOpenChange,
-}: TeacherFileDetailProps & {
-  isOpen: boolean;
-  onOpenChange: (open: boolean) => void;
+function StudentAttendanceSection({
+  attendanceItems,
+  attendancePagination,
+}: {
+  attendanceItems: StudentAttendanceItem[];
+  attendancePagination?: ReactNode;
 }) {
   return (
-    <Drawer
-      isOpen={isOpen && Boolean(file)}
-      onOpenChange={onOpenChange}
-      placement="bottom"
-      className="xl:hidden"
-    >
-      <DrawerContent className="max-h-[92dvh]">
-        {(onClose) => (
-          <>
-            <DrawerHeader className="border-b border-border/70">
-              <div className="space-y-1">
-                <p className="text-lg font-semibold text-campus-text-primary">
-                  {file?.name || "File details"}
-                </p>
-                <p className="text-sm text-campus-text-secondary">
-                  Review metadata and download the selected file.
-                </p>
-              </div>
-            </DrawerHeader>
-            <DrawerBody className="p-0">
-              <ScrollShadow className="max-h-[calc(92dvh-80px)]">
-                <TeacherFileDetailContent file={file} event={event} />
-              </ScrollShadow>
-              <div className="border-t border-border/70 p-4">
-                <Button className="w-full" variant="flat" onPress={onClose}>
-                  Close
-                </Button>
-              </div>
-            </DrawerBody>
-          </>
-        )}
-      </DrawerContent>
-    </Drawer>
+    <section className="space-y-3">
+      <SectionHeading
+        title="Recent attendance"
+        description="Latest teacher-visible attendance outcomes."
+      />
+      {attendanceItems.length === 0 ? (
+        <TeacherEmptyState
+          title="No attendance history yet"
+          description="This student has no teacher-visible attendance records right now."
+          icon={CheckCircle2}
+          tone="green"
+          compact
+        />
+      ) : (
+        <div className="space-y-3">
+          {attendanceItems.map((item) => {
+            const toneClasses = getTeacherToneClasses(
+              getTeacherAttendanceTone(item.status),
+            );
+            const StatusIcon =
+              item.status === "Absent" ? TriangleAlert : CheckCircle2;
+            const schedule = getTeacherEventSchedule(item.event);
+
+            return (
+              <Card
+                key={`${item.event.id}-${item.status}-${item.updatedAtMs}`}
+                shadow="none"
+                className="border border-border/70 bg-slate-50/70"
+              >
+                <CardBody className="gap-3 p-4">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-campus-text-primary">
+                        {item.event.title}
+                      </p>
+                      <p className="text-sm text-campus-text-secondary">
+                        {schedule.scheduleLabel}
+                      </p>
+                      <p className="text-xs text-campus-text-secondary">
+                        {item.event.location}
+                      </p>
+                    </div>
+                    <Chip size="sm" className={toneClasses.chip}>
+                      <span className="inline-flex items-center gap-1.5">
+                        <StatusIcon size={14} />
+                        {item.status}
+                      </span>
+                    </Chip>
+                  </div>
+                  <p className="text-xs text-campus-text-secondary">
+                    Updated {formatTeacherDateTime(item.updatedAtMs)}
+                  </p>
+                </CardBody>
+              </Card>
+            );
+          })}
+          {attendancePagination}
+        </div>
+      )}
+    </section>
   );
 }
 
-function TeacherFileDetailContent({
-  file,
-  event,
-}: TeacherFileDetailProps) {
-  if (!file) {
+function StudentEventsSection({
+  trackedEvents,
+  eventsPagination,
+  hasVisibleEvents,
+  visibleEventsOutcomeFilter,
+}: {
+  trackedEvents: StudentVisibleEventItem[];
+  eventsPagination?: ReactNode;
+  hasVisibleEvents: boolean;
+  visibleEventsOutcomeFilter: VisibleEventsOutcomeFilter;
+}) {
+  if (!hasVisibleEvents) {
     return (
-      <div className="p-5">
-        <TeacherEmptyState
-          title="Select a file to review"
-          description="Choose any document or image to inspect its metadata and download it."
-          icon={FileText}
-          compact
-        />
-      </div>
+      <TeacherEmptyState
+        title="No visible events yet"
+        description="Teacher-visible event activity for this student will appear here."
+        icon={FolderKanban}
+        compact
+      />
     );
   }
 
-  const previewableImage = isTeacherImageFile(file);
-  const typeTone = getTeacherToneClasses(getTeacherFileTone(file.kind));
+  if (trackedEvents.length === 0) {
+    const filterLabel =
+      visibleEventsOutcomeFilter === "present" ? "present" : "missed";
+
+    return (
+      <TeacherEmptyState
+        title="No matching visible events"
+        description={`This student has no ${filterLabel} visible events in the current filter.`}
+        icon={FolderKanban}
+        compact
+      />
+    );
+  }
 
   return (
-    <div className="space-y-5 p-5">
-      <div className="space-y-3">
-        <div className="flex items-start gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-50 text-primary-700">
-            {previewableImage ? <FileImage size={18} /> : <FileText size={18} />}
-          </div>
-          <div className="min-w-0">
-            <p className="break-words text-lg font-semibold text-campus-text-primary">
-              {file.name}
-            </p>
-            <p className="text-sm text-campus-text-secondary">
-              {event?.title || "Unknown event"}
-            </p>
-          </div>
-        </div>
+    <div className="space-y-3">
+      {trackedEvents.map((item) => {
+        const event = item.event;
+        const lifecycleClasses = getTeacherToneClasses(
+          getTeacherLifecycleTone(event.lifecycle),
+        );
+        const schedule = getTeacherEventSchedule(event);
 
-        <TeacherActivityChipGroup
-          items={[
-            {
-              label: "Type",
-              value: teacherFileKindLabel(file.kind),
-              tone: file.kind === "images" ? "amber" : "blue",
-            },
-            { label: "Size", value: formatTeacherBytes(file.size), tone: "purple" },
-          ]}
-        />
-      </div>
-
-      <div className="overflow-hidden rounded-[24px] border border-border/70 bg-slate-50/70">
-        {previewableImage && file.downloadURL ? (
-          // Using a regular img keeps Firebase-hosted previews working without
-          // requiring additional Next.js remote image configuration.
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={file.downloadURL}
-            alt={file.name}
-            className="h-56 w-full object-cover"
-          />
-        ) : (
-          <div className="flex h-56 flex-col items-center justify-center gap-3 px-4 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-3xl bg-slate-100 text-slate-700">
-              {file.kind === "images" ? (
-                <ImageIcon size={24} />
-              ) : (
-                <FileText size={24} />
-              )}
-            </div>
-            <div className="space-y-1">
-              <p className="font-medium text-campus-text-primary">
-                Preview unavailable
-              </p>
-              <p className="max-w-xs text-sm text-campus-text-secondary">
-                This file type does not support inline preview in the teacher workspace.
-              </p>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="space-y-3">
-        <DetailRow label="Event" value={event?.title || "Unknown event"} />
-        <DetailRow
-          label="File type"
-          value={
-            <Chip size="sm" className={typeTone.chip}>
-              {teacherFileKindLabel(file.kind)}
-            </Chip>
-          }
-        />
-        <DetailRow
-          label="Uploaded"
-          value={formatTeacherDateTime(file.createdAtMs)}
-        />
-        <DetailRow label="Size" value={formatTeacherBytes(file.size)} />
-        <DetailRow
-          label="Content type"
-          value={file.contentType || "Unknown"}
-        />
-      </div>
-
-      <Button
-        color="primary"
-        className="w-full"
-        startContent={<Download size={16} />}
-        onPress={() =>
-          downloadTeacherFile({
-            url: file.downloadURL,
-            name: file.name,
-            sourceLabel: teacherFileKindLabel(file.kind).toLowerCase(),
-          })
-        }
-        isDisabled={!file.downloadURL}
-      >
-        Download file
-      </Button>
+        return (
+          <Card
+            key={event.id}
+            shadow="none"
+            className="border border-border/70 bg-slate-50/70"
+          >
+            <CardBody className="gap-3 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <p className="font-semibold text-campus-text-primary">
+                    {event.title}
+                  </p>
+                  <p className="text-sm text-campus-text-secondary">
+                    {schedule.scheduleLabel}
+                  </p>
+                  <p className="text-xs text-campus-text-secondary">
+                    {event.location}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 sm:justify-end">
+                  <Chip size="sm" className={lifecycleClasses.chip}>
+                    {capitalizeTeacherLabel(event.lifecycle)}
+                  </Chip>
+                </div>
+              </div>
+            </CardBody>
+          </Card>
+        );
+      })}
+      {eventsPagination}
     </div>
   );
 }
@@ -545,14 +559,4 @@ function SectionHeading({
       </p>
     </div>
   );
-}
-
-function DetailRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: ReactNode;
-}) {
-  return <CampusDetailTile label={label} value={value} />;
 }

@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "@heroui/button";
 import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
-import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import {
   ClipboardCheck,
@@ -15,15 +14,12 @@ import {
 } from "lucide-react";
 import type { CampusTableColumn } from "@/components/ui";
 import {
-  TeacherActivityChipGroup,
   TeacherDataTable,
-  TeacherDetailPanelSkeleton,
   TeacherFilterBar,
   TeacherFilterBarSkeleton,
   TeacherPageHeader,
   TeacherStatsGrid,
-  TeacherStudentDetailPanel,
-  TeacherStudentDrawer,
+  TeacherStudentActivityModal,
   useIsBelowBreakpoint,
   useTeacherPageErrorToast,
   useTeacherPortal,
@@ -31,6 +27,11 @@ import {
 import { CampusMetricSkeleton } from "@/components/ui";
 
 const STUDENTS_PER_PAGE = 8;
+const RECENT_ATTENDANCE_PER_PAGE = 4;
+const VISIBLE_EVENTS_PER_PAGE = 4;
+
+type StudentActivityTab = "profile" | "attendance" | "events";
+type VisibleEventsOutcomeFilter = "all" | "present" | "missed";
 
 type TeacherStudentRow = {
   uid: string;
@@ -38,17 +39,12 @@ type TeacherStudentRow = {
   studentName: string;
   course: string;
   year: string;
-  trackedEventIds: string[];
-  presentCount: number;
-  absentCount: number;
-  recordedCount: number;
 };
 
 const teacherStudentColumns: CampusTableColumn<TeacherStudentRow>[] = [
   { key: "student", label: "Student" },
   { key: "course", label: "Course" },
   { key: "year", label: "Year" },
-  { key: "activity", label: "Activity" },
   { key: "actions", label: "Actions", align: "end", className: "text-right" },
 ];
 
@@ -57,19 +53,134 @@ type SelectOption = {
   label: string;
 };
 
+type PaginatedView<T> = {
+  items: T[];
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  startItem: number;
+  endItem: number;
+};
+
+function getTotalPages(totalItems: number, pageSize: number) {
+  return Math.max(1, Math.ceil(totalItems / pageSize));
+}
+
+function clampPage(page: number, totalPages: number) {
+  return Math.min(Math.max(page, 1), totalPages);
+}
+
+function getPageSlice(totalItems: number, page: number, pageSize: number) {
+  const totalPages = getTotalPages(totalItems, pageSize);
+  const safePage = clampPage(page, totalPages);
+  const startIndex = (safePage - 1) * pageSize;
+  const endIndex = Math.min(startIndex + pageSize, totalItems);
+
+  return {
+    endIndex,
+    endItem: endIndex,
+    page: safePage,
+    startIndex,
+    startItem: totalItems === 0 ? 0 : startIndex + 1,
+    totalPages,
+  };
+}
+
+function paginateItems<T>(
+  items: T[],
+  page: number,
+  pageSize: number,
+): PaginatedView<T> {
+  const pageSlice = getPageSlice(items.length, page, pageSize);
+
+  return {
+    ...pageSlice,
+    items: items.slice(pageSlice.startIndex, pageSlice.endIndex),
+    totalItems: items.length,
+  };
+}
+
+type TeacherPaginationControlsProps = {
+  ariaLabel: string;
+  itemLabel: string;
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  startItem: number;
+  endItem: number;
+  onPageChange: (page: number) => void;
+  showWhenSinglePage?: boolean;
+};
+
+function TeacherPaginationControls({
+  ariaLabel,
+  itemLabel,
+  page,
+  totalPages,
+  totalItems,
+  startItem,
+  endItem,
+  onPageChange,
+  showWhenSinglePage = false,
+}: TeacherPaginationControlsProps) {
+  if (totalItems === 0 || (totalPages <= 1 && !showWhenSinglePage)) return null;
+
+  return (
+    <div className="flex flex-col gap-3 rounded-[22px] border border-border/70 bg-white/90 px-3 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+      <p className="text-xs font-medium text-campus-text-secondary">
+        Showing {startItem}-{endItem} of {totalItems} {itemLabel}
+      </p>
+      <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap sm:justify-end">
+        <Button
+          size="sm"
+          variant="bordered"
+          className="min-h-9 min-w-[6.5rem] flex-1 px-3 sm:flex-none"
+          aria-label={`Previous ${ariaLabel} page`}
+          isDisabled={page <= 1}
+          onPress={() => onPageChange(Math.max(page - 1, 1))}
+        >
+          Previous
+        </Button>
+        <Chip
+          variant="flat"
+          className="min-h-9 min-w-[7rem] flex-1 justify-center px-3 text-center font-semibold text-campus-text-secondary sm:flex-none"
+        >
+          Page {page} of {totalPages}
+        </Chip>
+        <Button
+          size="sm"
+          variant="bordered"
+          className="min-h-9 min-w-[6.5rem] flex-1 px-3 sm:flex-none"
+          aria-label={`Next ${ariaLabel} page`}
+          isDisabled={page >= totalPages}
+          onPress={() => onPageChange(Math.min(page + 1, totalPages))}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function TeacherStudentsPage() {
   const { events, students, loading, error } = useTeacherPortal();
-  const isCompactView = useIsBelowBreakpoint(1280);
+  const isMobileActivityModal = useIsBelowBreakpoint(640);
 
   useTeacherPageErrorToast(error, "teacher student records");
 
   const [searchText, setSearchText] = useState("");
   const [courseFilter, setCourseFilter] = useState("");
   const [yearFilter, setYearFilter] = useState("");
-  const [page, setPage] = useState(1);
-  const [selectedStudentId, setSelectedStudentId] = useState<string | null>(
-    null,
-  );
+  const [studentPage, setStudentPage] = useState(1);
+  const [recentAttendancePage, setRecentAttendancePage] = useState(1);
+  const [visibleEventsPage, setVisibleEventsPage] = useState(1);
+  const [activeStudentActivityTab, setActiveStudentActivityTab] =
+    useState<StudentActivityTab>("profile");
+  const [visibleEventsOutcomeFilter, setVisibleEventsOutcomeFilter] =
+    useState<VisibleEventsOutcomeFilter>("all");
+  const [activeStudentId, setActiveStudentId] = useState<string | null>(null);
+  const [isStudentActivityModalOpen, setIsStudentActivityModalOpen] =
+    useState(false);
 
   const courseOptions = useMemo<SelectOption[]>(
     () => [
@@ -121,19 +232,14 @@ export default function TeacherStudentsPage() {
     });
   }, [courseFilter, searchText, students, yearFilter]);
 
-  const totalPages = Math.max(
-    1,
-    Math.ceil(filteredStudents.length / STUDENTS_PER_PAGE),
+  const studentPageData = useMemo(
+    () => paginateItems(filteredStudents, studentPage, STUDENTS_PER_PAGE),
+    [filteredStudents, studentPage],
   );
 
-  const paginatedStudents = useMemo(() => {
-    const start = (page - 1) * STUDENTS_PER_PAGE;
-    return filteredStudents.slice(start, start + STUDENTS_PER_PAGE);
-  }, [filteredStudents, page]);
-
-  const selectedStudent = useMemo(
-    () => students.find((student) => student.uid === selectedStudentId) ?? null,
-    [selectedStudentId, students],
+  const activeStudent = useMemo(
+    () => students.find((student) => student.uid === activeStudentId) ?? null,
+    [activeStudentId, students],
   );
 
   const eventMap = useMemo(
@@ -141,30 +247,17 @@ export default function TeacherStudentsPage() {
     [events],
   );
 
-  const selectedStudentEvents = useMemo(() => {
-    if (!selectedStudent) return [];
+  const activeStudentEvents = useMemo(() => {
+    if (!activeStudent) return [];
 
-    return selectedStudent.trackedEventIds
-      .map((eventId) => eventMap.get(eventId))
-      .filter((event): event is (typeof events)[number] => Boolean(event))
-      .sort((a, b) => {
-        const aMs = a.eventDate?.getTime() ?? a.createdAtMs;
-        const bMs = b.eventDate?.getTime() ?? b.createdAtMs;
-        return bMs - aMs;
-      });
-  }, [eventMap, selectedStudent]);
-
-  const selectedStudentAttendance = useMemo(() => {
-    if (!selectedStudent) return [];
-
-    return selectedStudent.attendanceRecords
+    return activeStudent.attendanceRecords
       .map((record) => {
         const event = eventMap.get(record.eventId);
         if (!event) return null;
 
         return {
           event,
-          status: record.status,
+          outcome: record.status,
           updatedAtMs: record.updatedAtMs,
         };
       })
@@ -172,13 +265,59 @@ export default function TeacherStudentsPage() {
         (
           item,
         ): item is {
-          event: (typeof selectedStudentEvents)[number];
-          status: "Present" | "Absent" | "Recorded";
+          event: (typeof events)[number];
+          outcome: "Present" | "Absent" | "Recorded";
           updatedAtMs: number;
         } => Boolean(item),
       )
+      .sort((a, b) => {
+        const aMs = a.event.eventDate?.getTime() ?? a.event.createdAtMs;
+        const bMs = b.event.eventDate?.getTime() ?? b.event.createdAtMs;
+        return bMs - aMs;
+      });
+  }, [activeStudent, eventMap]);
+
+  const filteredActiveStudentEvents = useMemo(() => {
+    if (visibleEventsOutcomeFilter === "present") {
+      return activeStudentEvents.filter((item) => item.outcome === "Present");
+    }
+
+    if (visibleEventsOutcomeFilter === "missed") {
+      return activeStudentEvents.filter((item) => item.outcome === "Absent");
+    }
+
+    return activeStudentEvents;
+  }, [activeStudentEvents, visibleEventsOutcomeFilter]);
+
+  const activeStudentAttendance = useMemo(() => {
+    return activeStudentEvents
+      .map((item) => ({
+        event: item.event,
+        status: item.outcome,
+        updatedAtMs: item.updatedAtMs,
+      }))
       .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-  }, [eventMap, selectedStudent]);
+  }, [activeStudentEvents]);
+
+  const recentAttendancePageData = useMemo(
+    () =>
+      paginateItems(
+        activeStudentAttendance,
+        recentAttendancePage,
+        RECENT_ATTENDANCE_PER_PAGE,
+      ),
+    [activeStudentAttendance, recentAttendancePage],
+  );
+
+  const visibleEventsPageData = useMemo(
+    () =>
+      paginateItems(
+        filteredActiveStudentEvents,
+        visibleEventsPage,
+        VISIBLE_EVENTS_PER_PAGE,
+      ),
+    [filteredActiveStudentEvents, visibleEventsPage],
+  );
 
   const totalMissed = useMemo(
     () => students.reduce((sum, student) => sum + student.absentCount, 0),
@@ -199,36 +338,58 @@ export default function TeacherStudentsPage() {
   );
 
   useEffect(() => {
-    setPage(1);
+    setStudentPage(1);
   }, [courseFilter, searchText, yearFilter]);
 
   useEffect(() => {
-    setPage((prev) => Math.min(prev, totalPages));
-  }, [totalPages]);
+    setStudentPage((prev) => clampPage(prev, studentPageData.totalPages));
+  }, [studentPageData.totalPages]);
 
   useEffect(() => {
-    if (filteredStudents.length === 0) {
-      setSelectedStudentId(null);
-      return;
-    }
+    setActiveStudentActivityTab("profile");
+    setRecentAttendancePage(1);
+    setVisibleEventsPage(1);
+    setVisibleEventsOutcomeFilter("all");
+  }, [activeStudentId]);
 
-    if (isCompactView) {
-      if (
-        selectedStudentId &&
-        !filteredStudents.some((student) => student.uid === selectedStudentId)
-      ) {
-        setSelectedStudentId(null);
-      }
-      return;
-    }
+  useEffect(() => {
+    setVisibleEventsPage(1);
+  }, [visibleEventsOutcomeFilter]);
 
-    if (
-      !selectedStudentId ||
-      !filteredStudents.some((student) => student.uid === selectedStudentId)
-    ) {
-      setSelectedStudentId(filteredStudents[0].uid);
+  useEffect(() => {
+    setRecentAttendancePage((prev) =>
+      clampPage(prev, recentAttendancePageData.totalPages),
+    );
+  }, [recentAttendancePageData.totalPages]);
+
+  useEffect(() => {
+    setVisibleEventsPage((prev) =>
+      clampPage(prev, visibleEventsPageData.totalPages),
+    );
+  }, [visibleEventsPageData.totalPages]);
+
+  useEffect(() => {
+    if (activeStudentId && !activeStudent) {
+      setIsStudentActivityModalOpen(false);
+      setActiveStudentId(null);
     }
-  }, [filteredStudents, isCompactView, selectedStudentId]);
+  }, [activeStudent, activeStudentId]);
+
+  const openStudentActivity = (studentId: string) => {
+    setActiveStudentId(studentId);
+    setActiveStudentActivityTab("profile");
+    setRecentAttendancePage(1);
+    setVisibleEventsPage(1);
+    setVisibleEventsOutcomeFilter("all");
+    setIsStudentActivityModalOpen(true);
+  };
+
+  const handleStudentActivityModalChange = (open: boolean) => {
+    setIsStudentActivityModalOpen(open);
+    if (!open) {
+      setActiveStudentId(null);
+    }
+  };
 
   return (
     <div className="space-y-5 sm:space-y-6">
@@ -322,128 +483,116 @@ export default function TeacherStudentsPage() {
         </TeacherFilterBar>
       )}
 
-      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.5fr)_minmax(340px,0.95fr)]">
-        <div className="space-y-4">
-          <TeacherDataTable
-            ariaLabel="Teacher student activity records"
-            columns={teacherStudentColumns}
-            items={paginatedStudents}
-            getRowKey={(student) => student.uid}
-            emptyTitle="No students found"
-            emptyDescription="Try another name, ID, course, or year filter to widen the teacher-visible results."
-            selectionMode="single"
-            selectedKeys={selectedStudentId ? new Set([selectedStudentId]) : new Set([])}
-            onSelectionChange={(keys) => {
-              if (keys === "all") return;
-              const selected = Array.from(keys)[0];
-              setSelectedStudentId(typeof selected === "string" ? selected : null);
-            }}
-            isLoading={loading}
-            renderCell={(student, columnKey) => {
-              if (columnKey === "student") {
-                return (
-                  <div className="space-y-1">
-                    <p className="font-semibold text-campus-text-primary">
-                      {student.studentName}
-                    </p>
-                    <p className="text-xs text-campus-text-secondary">
-                      {student.schoolId}
-                    </p>
-                  </div>
-                );
-              }
+      <div className="space-y-4">
+        <TeacherDataTable
+          ariaLabel="Teacher student activity records"
+          columns={teacherStudentColumns}
+          items={studentPageData.items}
+          getRowKey={(student) => student.uid}
+          emptyTitle="No students found"
+          emptyDescription="Try another name, ID, course, or year filter to widen the teacher-visible results."
+          isLoading={loading}
+          renderCell={(student, columnKey) => {
+            if (columnKey === "student") {
+              return (
+                <div className="space-y-1">
+                  <p className="font-semibold text-campus-text-primary">
+                    {student.studentName}
+                  </p>
+                  <p className="text-xs text-campus-text-secondary">
+                    {student.schoolId}
+                  </p>
+                </div>
+              );
+            }
 
-              if (columnKey === "course") {
-                return (
-                  <Chip size="sm" className="bg-blue-100 text-blue-700">
-                    {student.course}
-                  </Chip>
-                );
-              }
+            if (columnKey === "course") {
+              return (
+                <Chip size="sm" className="bg-blue-100 text-blue-700">
+                  {student.course}
+                </Chip>
+              );
+            }
 
-              if (columnKey === "year") {
-                return (
-                  <Chip size="sm" className="bg-slate-100 text-slate-700">
-                    {student.year}
-                  </Chip>
-                );
-              }
+            if (columnKey === "year") {
+              return (
+                <Chip size="sm" className="bg-slate-100 text-slate-700">
+                  {student.year}
+                </Chip>
+              );
+            }
 
-              if (columnKey === "activity") {
-                return (
-                  <TeacherActivityChipGroup
-                    items={[
-                      {
-                        label: "Tracked",
-                        value: student.trackedEventIds.length,
-                        tone: "blue",
-                      },
-                      { label: "Present", value: student.presentCount, tone: "green" },
-                      { label: "Missed", value: student.absentCount, tone: "red" },
-                    ]}
-                  />
-                );
-              }
+            if (columnKey === "actions") {
+              return (
+                <div className="flex justify-end">
+                  <Button
+                    color="primary"
+                    variant="flat"
+                    size="sm"
+                    onPress={() => openStudentActivity(student.uid)}
+                  >
+                    Review activity
+                  </Button>
+                </div>
+              );
+            }
 
-              if (columnKey === "actions") {
-                const isSelected = selectedStudentId === student.uid;
+            return null;
+          }}
+        />
 
-                return (
-                  <div className="flex justify-end">
-                    <Button
-                      color="primary"
-                      variant={isSelected ? "flat" : "light"}
-                      size="sm"
-                      onPress={() => setSelectedStudentId(student.uid)}
-                    >
-                      {isCompactView ? "View student" : "Review activity"}
-                    </Button>
-                  </div>
-                );
-              }
-
-              return null;
-            }}
+        {!loading ? (
+          <TeacherPaginationControls
+            ariaLabel="student list"
+            itemLabel="students"
+            page={studentPageData.page}
+            totalPages={studentPageData.totalPages}
+            totalItems={studentPageData.totalItems}
+            startItem={studentPageData.startItem}
+            endItem={studentPageData.endItem}
+            onPageChange={setStudentPage}
           />
-
-          {!loading && filteredStudents.length > STUDENTS_PER_PAGE ? (
-            <div className="flex justify-center sm:justify-end">
-              <Pagination
-                showControls
-                page={page}
-                total={totalPages}
-                onChange={(nextPage) => setPage(nextPage)}
-              />
-            </div>
-          ) : null}
-        </div>
-
-        {loading ? (
-          <div className="hidden xl:block">
-            <TeacherDetailPanelSkeleton />
-          </div>
-        ) : (
-          <div className="hidden xl:block">
-            <TeacherStudentDetailPanel
-              student={selectedStudent}
-              trackedEvents={selectedStudentEvents}
-              attendanceItems={selectedStudentAttendance}
-              className="xl:sticky xl:top-6"
-            />
-          </div>
-        )}
+        ) : null}
       </div>
 
-      <TeacherStudentDrawer
-        student={selectedStudent}
-        trackedEvents={selectedStudentEvents}
-        attendanceItems={selectedStudentAttendance}
-        isOpen={isCompactView && Boolean(selectedStudent)}
-        onOpenChange={(open) => {
-          if (!open) {
-            setSelectedStudentId(null);
-          }
-        }}
+      <TeacherStudentActivityModal
+        student={activeStudent}
+        activeTab={activeStudentActivityTab}
+        onActiveTabChange={setActiveStudentActivityTab}
+        trackedEvents={visibleEventsPageData.items}
+        hasVisibleEvents={activeStudentEvents.length > 0}
+        visibleEventsOutcomeFilter={visibleEventsOutcomeFilter}
+        onVisibleEventsOutcomeFilterChange={setVisibleEventsOutcomeFilter}
+        attendanceItems={recentAttendancePageData.items}
+        attendancePagination={
+          <TeacherPaginationControls
+            ariaLabel="recent attendance"
+            itemLabel="attendance records"
+            page={recentAttendancePageData.page}
+            totalPages={recentAttendancePageData.totalPages}
+            totalItems={recentAttendancePageData.totalItems}
+            startItem={recentAttendancePageData.startItem}
+            endItem={recentAttendancePageData.endItem}
+            onPageChange={setRecentAttendancePage}
+            showWhenSinglePage
+          />
+        }
+        eventsPagination={
+          <TeacherPaginationControls
+            ariaLabel="visible events"
+            itemLabel="visible events"
+            page={visibleEventsPageData.page}
+            totalPages={visibleEventsPageData.totalPages}
+            totalItems={visibleEventsPageData.totalItems}
+            startItem={visibleEventsPageData.startItem}
+            endItem={visibleEventsPageData.endItem}
+            onPageChange={setVisibleEventsPage}
+            showWhenSinglePage
+          />
+        }
+        isMobile={isMobileActivityModal}
+        isOpen={isStudentActivityModalOpen}
+        onOpenChange={handleStudentActivityModalChange}
       />
     </div>
   );
