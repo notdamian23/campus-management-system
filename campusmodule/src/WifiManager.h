@@ -28,6 +28,7 @@ class WifiManager {
   ~WifiManager();
 
   void begin();
+  void service();
   bool beginConnect(String &error, uint32_t timeoutMs);
   WifiConnectResult pollConnect(String &error);
   void cancelConnect();

@@ -13,6 +13,8 @@ constexpr byte kDnsPort = 53;
 IPAddress kPortalIp(192, 168, 4, 1);
 IPAddress kPortalMask(255, 255, 255, 0);
 constexpr char kWifiNamespace[] = "campuswifi";
+constexpr uint32_t kPortalHeartbeatMs = 2000;
+constexpr uint32_t kWifiConnectWarnMs = 2000;
 
 String trimCopy(const String &value) {
   String output = value;
@@ -35,6 +37,16 @@ void WifiManager::begin() {
   WiFi.setSleep(false);
 }
 
+void WifiManager::service() {
+  if (dns_ != nullptr) {
+    dns_->processNextRequest();
+  }
+  if (server_ != nullptr) {
+    server_->handleClient();
+  }
+  yield();
+}
+
 bool WifiManager::beginConnect(String &error, uint32_t timeoutMs) {
   error = "";
   if (WiFi.status() == WL_CONNECTED) {
@@ -55,6 +67,8 @@ bool WifiManager::beginConnect(String &error, uint32_t timeoutMs) {
   WiFi.setSleep(false);
   WiFi.disconnect(false, false);
   delay(50);
+  Serial.printf("[WIFI] begin connect ssid=%s timeoutMs=%lu\n", ssid.c_str(),
+                static_cast<unsigned long>(timeoutMs));
   WiFi.begin(ssid.c_str(), password.c_str());
   connectPending_ = true;
   connectStartedAt_ = millis();
@@ -79,6 +93,9 @@ WifiConnectResult WifiManager::pollConnect(String &error) {
 
   if ((millis() - connectStartedAt_) >= connectTimeoutMs_) {
     error = statusText(WiFi.status());
+    Serial.printf("[WIFI][WARN] reconnect timeout ms=%lu status=%s\n",
+                  static_cast<unsigned long>(millis() - connectStartedAt_),
+                  error.c_str());
     WiFi.disconnect(false, false);
     connectPending_ = false;
     return WifiConnectResult::Failed;
@@ -154,12 +171,18 @@ WifiSetupResult WifiManager::runSetupPortal(DisplayManager &display,
   }
 
   const uint32_t startedAt = millis();
+  uint32_t lastHeartbeatAt = startedAt;
+  Serial.printf("[WIFI][PORTAL] start timeoutMs=%lu ap=%s ip=%s\n",
+                static_cast<unsigned long>(timeoutMs), portalApSsid_.c_str(),
+                portalApIp_.c_str());
   while ((millis() - startedAt) < timeoutMs) {
-    if (dns_ != nullptr) {
-      dns_->processNextRequest();
-    }
-    if (server_ != nullptr) {
-      server_->handleClient();
+    service();
+
+    if ((millis() - lastHeartbeatAt) >= kPortalHeartbeatMs) {
+      lastHeartbeatAt = millis();
+      Serial.printf("[WIFI][PORTAL] alive status=%s ms=%lu\n",
+                    portalStatus_.isEmpty() ? "-" : portalStatus_.c_str(),
+                    static_cast<unsigned long>(lastHeartbeatAt));
     }
 
     if (portalSaved_) {
@@ -193,6 +216,8 @@ WifiSetupResult WifiManager::runSetupPortal(DisplayManager &display,
   }
 
   message = "Setup timeout";
+  Serial.printf("[WIFI][PORTAL][WARN] timeout ms=%lu\n",
+                static_cast<unsigned long>(millis() - startedAt));
   stopPortal();
   return WifiSetupResult::TimedOut;
 }
@@ -246,10 +271,20 @@ bool WifiManager::connectUsing(const String &ssid, const String &password,
     if (status == WL_CONNECTED) {
       return true;
     }
+    if ((millis() - startedAt) >= kWifiConnectWarnMs &&
+        ((millis() - startedAt) % kWifiConnectWarnMs) < 250UL) {
+      Serial.printf("[WIFI][PORTAL] connect pending ssid=%s ms=%lu status=%s\n",
+                    ssid.c_str(),
+                    static_cast<unsigned long>(millis() - startedAt),
+                    statusText(status).c_str());
+    }
     delay(250);
   }
 
   error = statusText(WiFi.status());
+  Serial.printf("[WIFI][PORTAL][WARN] connect timeout ssid=%s ms=%lu status=%s\n",
+                ssid.c_str(), static_cast<unsigned long>(millis() - startedAt),
+                error.c_str());
   WiFi.disconnect(false, false);
   return false;
 }

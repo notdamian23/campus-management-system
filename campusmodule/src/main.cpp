@@ -84,9 +84,15 @@ constexpr uint32_t kUiActionGapMs = 140;
 constexpr uint32_t kShortMessageMs = 1200;
 constexpr uint32_t kMediumMessageMs = 1500;
 constexpr uint32_t kLongMessageMs = 1800;
-constexpr uint32_t kDebugIntervalMs = 30000;
+constexpr uint32_t kLoopHeartbeatMs = 2000;
+constexpr uint32_t kLoopTraceSampleMs = 2000;
+constexpr uint32_t kLoopSectionWarnMs = 250;
+constexpr uint32_t kDisplayRenderWarnMs = 120;
 constexpr uint32_t kFingerRemovalTimeoutMs = 3000;
 constexpr uint32_t kAutoSyncQuietPeriodMs = 5000;
+constexpr uint32_t kAutoSyncBootDelayMs = 30000;
+constexpr uint32_t kPendingSyncSnapshotMs = 2000;
+constexpr uint32_t kCleanupFetchWarnMs = 500;
 constexpr uint32_t kMaxAutoSyncBackoffMs = 15UL * 60UL * 1000UL;
 constexpr size_t kEnrollmentQueuePageSize = 6;
 
@@ -162,6 +168,13 @@ struct SyncController {
   String lastFailureStage;
 };
 
+struct PendingSyncSnapshot {
+  bool valid = false;
+  size_t attendanceCount = 0;
+  size_t enrollmentCount = 0;
+  uint32_t refreshedAt = 0;
+};
+
 AppScreen g_screen = AppScreen::Menu;
 TimedMessage g_message;
 SyncController g_sync;
@@ -170,12 +183,15 @@ uint32_t g_lastAutoSyncAttemptAt = 0;
 uint32_t g_autoSyncBackoffMs = CampusConfig::kAutoSyncIntervalMs;
 uint32_t g_lastAttendancePollAt = 0;
 uint32_t g_fingerRemovalDeadlineAt = 0;
-uint32_t g_lastDebugLogAt = 0;
+uint32_t g_lastLoopHeartbeatAt = 0;
+uint32_t g_lastLoopTraceAt = 0;
+uint32_t g_bootStartedAt = 0;
 bool g_displayDirty = true;
 bool g_waitingForFingerRemoval = false;
 size_t g_lastAttendancePromptUnsyncedCount = static_cast<size_t>(-1);
 String g_lastFingerprintState = "boot";
 AttendanceCaptureMode g_attendanceCaptureMode = AttendanceCaptureMode::None;
+PendingSyncSnapshot g_pendingSyncSnapshot;
 
 void bootYield() {
   yield();
@@ -226,6 +242,32 @@ bool isFingerprintRosterValidatedForSession(const String &sessionId,
 bool ensureFingerprintRosterReadyForEnrollment(const String &sessionId);
 bool refreshFingerprintRosterForSessionWhileOnline(const String &sessionId,
                                                    String &error);
+
+void invalidatePendingSyncSnapshot() {
+  g_pendingSyncSnapshot = PendingSyncSnapshot{};
+}
+
+void refreshPendingSyncSnapshot(bool force = false) {
+  const uint32_t now = millis();
+  if (!force && g_pendingSyncSnapshot.valid &&
+      (now - g_pendingSyncSnapshot.refreshedAt) < kPendingSyncSnapshotMs) {
+    return;
+  }
+
+  const uint32_t startedAt = millis();
+  g_pendingSyncSnapshot.attendanceCount = g_storage.unsyncedAttendanceCount();
+  g_pendingSyncSnapshot.enrollmentCount = g_storage.unsyncedEnrollmentCount();
+  g_pendingSyncSnapshot.refreshedAt = millis();
+  g_pendingSyncSnapshot.valid = true;
+
+  const uint32_t elapsed = g_pendingSyncSnapshot.refreshedAt - startedAt;
+  if (elapsed >= kLoopSectionWarnMs) {
+    Serial.printf("[SD][WARN] pending sync snapshot ms=%lu attendance=%u enrollment=%u\n",
+                  static_cast<unsigned long>(elapsed),
+                  static_cast<unsigned>(g_pendingSyncSnapshot.attendanceCount),
+                  static_cast<unsigned>(g_pendingSyncSnapshot.enrollmentCount));
+  }
+}
 
 String trim16(const String &value) {
   String output = value;
@@ -1326,6 +1368,7 @@ bool hasOfflineEnrollmentQueue() {
 
 void loadStoredEnrollmentSession() {
   g_currentEnrollmentSession = g_storage.loadCurrentEnrollmentSession();
+  invalidatePendingSyncSnapshot();
   g_cachedPendingStudents.clear();
   g_enrollmentQueueStats = EnrollmentQueueStats{};
   g_enrollmentQueuePageOffset = 0;
@@ -1644,10 +1687,16 @@ void renderCurrentScreen() {
     return;
   }
 
+  const uint32_t startedAt = millis();
   g_displayDirty = false;
   if (g_message.active) {
     g_display.showLines(g_message.line1, g_message.line2, g_message.line3,
                         g_message.line4);
+    const uint32_t elapsed = millis() - startedAt;
+    if (elapsed >= kDisplayRenderWarnMs) {
+      Serial.printf("[DISPLAY][WARN] redraw slow screen=%s ms=%lu\n",
+                    screenName(g_screen), static_cast<unsigned long>(elapsed));
+    }
     return;
   }
 
@@ -1683,6 +1732,12 @@ void renderCurrentScreen() {
       renderSyncProgress();
       break;
   }
+
+  const uint32_t elapsed = millis() - startedAt;
+  if (elapsed >= kDisplayRenderWarnMs) {
+    Serial.printf("[DISPLAY][WARN] redraw slow screen=%s ms=%lu\n",
+                  screenName(g_screen), static_cast<unsigned long>(elapsed));
+  }
 }
 
 void startFingerRemovalWait() {
@@ -1706,8 +1761,9 @@ void updateFingerRemovalWait() {
 }
 
 bool hasPendingSyncWork() {
-  return g_storage.unsyncedAttendanceCount() > 0 ||
-         g_storage.unsyncedEnrollmentCount() > 0;
+  refreshPendingSyncSnapshot();
+  return g_pendingSyncSnapshot.attendanceCount > 0 ||
+         g_pendingSyncSnapshot.enrollmentCount > 0;
 }
 
 String syncFailureStageLabel() {
@@ -1818,6 +1874,7 @@ String syncFailureDetail(const String &error) {
 }
 
 void finishSyncSuccess() {
+  invalidatePendingSyncSnapshot();
   const size_t retainedAttendance = g_storage.unsyncedAttendanceCount();
   const size_t retainedEnrollments = g_storage.unsyncedEnrollmentCount();
   Serial.printf("[SYNC] completed mode=%s E=%u A=%u D=%u R=%u\n",
@@ -1864,6 +1921,7 @@ void finishSyncSuccess() {
 }
 
 void failSync(const String &error) {
+  invalidatePendingSyncSnapshot();
   const String message = error.isEmpty() ? String("Sync failed") : error;
   g_sync.lastError = message;
   g_sync.lastFailureStage = syncFailureStageLabel();
@@ -1925,7 +1983,7 @@ void startSync(SyncMode mode, bool keepWifiConnected) {
 
   if (!g_wifi.hasCredentials()) {
     if (isInteractiveSyncMode(mode)) {
-      showTimedMessage("Wi-Fi not set", "Use Wi-Fi Setup", kMediumMessageMs);
+      showTimedMessage("Wi-Fi Setup", "Required", kMediumMessageMs);
       g_feedback.warning();
     }
     return;
@@ -2111,9 +2169,16 @@ void tickSync() {
 
       if (!g_sync.cleanupQueueLoaded) {
         String error;
+        const uint32_t fetchStartedAt = millis();
         if (!g_backend.fetchCleanupQueue(g_sync.cleanupQueue, error)) {
           failSync(error);
           return;
+        }
+        const uint32_t fetchElapsed = millis() - fetchStartedAt;
+        if (fetchElapsed >= kCleanupFetchWarnMs) {
+          Serial.printf("[SYNC][CLEANUP][WARN] fetch slow ms=%lu items=%u\n",
+                        static_cast<unsigned long>(fetchElapsed),
+                        static_cast<unsigned>(g_sync.cleanupQueue.size()));
         }
         if (!syncModeAllowsAs608Wipe(g_sync.mode)) {
           g_sync.cleanupQueue.erase(
@@ -2271,11 +2336,19 @@ void maybeStartAutoSync() {
     return;
   }
 
+  if ((millis() - g_bootStartedAt) < kAutoSyncBootDelayMs) {
+    return;
+  }
+
   if ((millis() - g_lastUiActionAt) < kAutoSyncQuietPeriodMs) {
     return;
   }
 
-  if (!hasPendingSyncWork() || !g_wifi.hasCredentials()) {
+  if (!g_wifi.hasCredentials()) {
+    return;
+  }
+
+  if (!hasPendingSyncWork()) {
     return;
   }
 
@@ -3535,28 +3608,21 @@ void handleSyncScreenAction(ButtonAction action) {
 }
 
 void logHeartbeat() {
-  if ((millis() - g_lastDebugLogAt) < kDebugIntervalMs) {
+  if ((millis() - g_lastLoopHeartbeatAt) < kLoopHeartbeatMs) {
     return;
   }
 
-  g_lastDebugLogAt = millis();
+  g_lastLoopHeartbeatAt = millis();
   Serial.printf(
-      "[DBG] heap=%u minHeap=%u wifi=%s screen=%s fp=%s attMode=%s timeoutFinal=%s "
-      "pendingA=%u pendingE=%u sdReady=%s sdWrite=%s syncMode=%s syncPhase=%s\n",
-      static_cast<unsigned>(ESP.getFreeHeap()),
-      static_cast<unsigned>(ESP.getMinFreeHeap()), g_wifi.statusText().c_str(),
-      screenName(g_screen), g_lastFingerprintState.c_str(),
-      attendanceModeLabel(g_attendanceCaptureMode).c_str(),
-      isTimeOutFinalizedForCurrentEvent() ? "yes" : "no",
-      static_cast<unsigned>(g_storage.unsyncedAttendanceCount()),
-      static_cast<unsigned>(g_storage.unsyncedEnrollmentCount()),
-      g_storage.isSdReady() ? "yes" : "no",
-      g_storage.lastSdWriteSucceeded() ? "ok" : "fail",
-      syncModeName(g_sync.mode), syncPhaseName(g_sync.phase));
+      "[LOOP] alive screen=%s wifi=%s fp=%s heap=%u ms=%lu\n",
+      screenName(g_screen), g_wifi.statusText().c_str(),
+      g_lastFingerprintState.c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned long>(g_lastLoopHeartbeatAt));
 }
 }  // namespace
 
 void setup() {
+  g_bootStartedAt = millis();
   ets_printf("[BOOT] setup start\n");
   Serial.begin(115200);
   delay(200);
@@ -3613,7 +3679,7 @@ void setup() {
   bootYield();
 
   if (!g_wifi.hasCredentials()) {
-    showTimedMessage("Wi-Fi not set", "Use Wi-Fi Setup", kShortMessageMs);
+    showTimedMessage("Wi-Fi Setup", "Required", kLongMessageMs);
   }
 
   Serial.println("[BOOT] paired context load start");
@@ -3626,6 +3692,25 @@ void setup() {
 }
 
 void loop() {
+  const bool emitLoopTrace =
+      (millis() - g_lastLoopTraceAt) >= kLoopTraceSampleMs;
+  if (emitLoopTrace) {
+    g_lastLoopTraceAt = millis();
+  }
+
+  auto runLoopSection = [&](const char *name, auto fn) {
+    if (emitLoopTrace) {
+      Serial.printf("[LOOP] %s start\n", name);
+    }
+    const uint32_t startedAt = millis();
+    fn();
+    const uint32_t elapsed = millis() - startedAt;
+    if (emitLoopTrace || elapsed >= kLoopSectionWarnMs) {
+      Serial.printf("[LOOP] %s done ms=%lu\n", name,
+                    static_cast<unsigned long>(elapsed));
+    }
+  };
+
   g_feedback.update();
   updateTimedMessage();
   updateFingerRemovalWait();
@@ -3638,12 +3723,11 @@ void loop() {
     }
   }
 
-  tickSync();
-  maybeStartAutoSync();
+  runLoopSection("buttons", [&]() {
+    if (g_message.active) {
+      return;
+    }
 
-  renderCurrentScreen();
-
-  if (!g_message.active) {
     const ButtonAction action = pollUiAction();
     switch (g_screen) {
       case AppScreen::Menu:
@@ -3677,8 +3761,13 @@ void loop() {
         handleSyncScreenAction(action);
         break;
     }
-  }
+  });
+
+  runLoopSection("wifi", [&]() { g_wifi.service(); });
+  runLoopSection("sync", [&]() { tickSync(); });
+  runLoopSection("autosync", [&]() { maybeStartAutoSync(); });
+  runLoopSection("display", [&]() { renderCurrentScreen(); });
 
   logHeartbeat();
-  delay(5);
+  delay(2);
 }

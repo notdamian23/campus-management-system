@@ -50,6 +50,7 @@ constexpr size_t kEnrollmentQueueFieldCount = 12;
 constexpr size_t kEnrollmentResultFieldCount = 12;
 constexpr size_t kPairedEventStudentFieldCount = 8;
 constexpr size_t kPairedEventRecordedFieldCount = 1;
+constexpr uint32_t kSdReadWarnMs = 250;
 
 void logJsonLoadIssue(const char *stage, const char *path,
                       const DeserializationError &error, size_t fileSize,
@@ -71,6 +72,18 @@ void serviceStorageLoop(size_t index) {
   if ((index % 16U) == 0U) {
     yield();
   }
+}
+
+void logSlowSdRead(const char *stage, uint32_t startedAt, size_t rows = 0) {
+  const uint32_t elapsed = millis() - startedAt;
+  if (elapsed < kSdReadWarnMs) {
+    return;
+  }
+
+  Serial.printf("[SD][WARN] stage=%s ms=%lu rows=%u\n",
+                stage != nullptr ? stage : "unknown",
+                static_cast<unsigned long>(elapsed),
+                static_cast<unsigned>(rows));
 }
 
 bool parseBoolValue(JsonVariantConst value, bool fallback = false) {
@@ -627,9 +640,14 @@ String pairedEventRecordedCsvRow(const String &studentUid) {
 bool readBoundedLine(File &file, String &line, bool &truncated) {
   line = "";
   truncated = false;
+  size_t charCount = 0;
 
   while (file.available()) {
     const char current = static_cast<char>(file.read());
+    ++charCount;
+    if ((charCount % 64U) == 0U) {
+      yield();
+    }
     if (current == '\r') {
       continue;
     }
@@ -1336,7 +1354,17 @@ EventInfo eventFromJson(JsonObjectConst object,
 
 bool StorageManager::begin() {
   prefsReady_ = prefs_.begin("campus", false);
-  littleFsReady_ = LittleFS.begin(true);
+  littleFsReady_ = LittleFS.begin(false);
+  if (!littleFsReady_) {
+    Serial.println("[LITTLEFS] mount failed; formatting");
+    LittleFS.format();
+    littleFsReady_ = LittleFS.begin(false);
+    if (littleFsReady_) {
+      Serial.println("[LITTLEFS] formatted and mounted");
+    } else {
+      Serial.println("[LITTLEFS] unavailable; continuing with SD only");
+    }
+  }
   lastSdWriteSucceeded_ = !CampusConfig::kUseSd;
 
   if (littleFsReady_) {
@@ -2532,10 +2560,13 @@ bool StorageManager::loadEnrollmentQueuePageFromSd(
     return false;
   }
 
+  const uint32_t startedAt = millis();
   size_t matchedRows = 0;
+  size_t rowIndex = 0;
   String line;
   bool truncated = false;
   while (readBoundedLine(file, line, truncated)) {
+    serviceStorageLoop(rowIndex++);
     if (truncated || line.isEmpty()) {
       continue;
     }
@@ -2566,6 +2597,7 @@ bool StorageManager::loadEnrollmentQueuePageFromSd(
   }
 
   file.close();
+  logSlowSdRead("load_enrollment_queue_page", startedAt, matchedRows);
   return true;
 }
 
@@ -2589,9 +2621,12 @@ EnrollmentQueueStats StorageManager::getEnrollmentQueueStatsFromSd() const {
   stats.queueExists = true;
   stats.fileSize = static_cast<size_t>(file.size());
 
+  const uint32_t startedAt = millis();
+  size_t rowIndex = 0;
   String line;
   bool truncated = false;
   while (readBoundedLine(file, line, truncated)) {
+    serviceStorageLoop(rowIndex++);
     if (truncated || line.isEmpty()) {
       continue;
     }
@@ -2616,6 +2651,7 @@ EnrollmentQueueStats StorageManager::getEnrollmentQueueStatsFromSd() const {
   }
 
   file.close();
+  logSlowSdRead("enrollment_queue_stats", startedAt, stats.totalRows);
   return stats;
 }
 
@@ -2904,9 +2940,12 @@ std::vector<StudentInfo> StorageManager::loadUnsyncedEnrollmentResultsFromSd(
     return students;
   }
 
+  const uint32_t startedAt = millis();
+  size_t rowIndex = 0;
   String line;
   bool truncated = false;
   while (readBoundedLine(file, line, truncated)) {
+    serviceStorageLoop(rowIndex++);
     if (truncated || line.isEmpty()) {
       continue;
     }
@@ -2928,6 +2967,7 @@ std::vector<StudentInfo> StorageManager::loadUnsyncedEnrollmentResultsFromSd(
   }
 
   file.close();
+  logSlowSdRead("load_unsynced_enrollment_results", startedAt, students.size());
   return students;
 }
 
@@ -3810,10 +3850,13 @@ size_t StorageManager::unsyncedEnrollmentCount() const {
     if (storage->ensureSdReady() && SD.exists(kSdEnrollmentResultsPath)) {
       File file = SD.open(kSdEnrollmentResultsPath, FILE_READ);
       if (file) {
+        const uint32_t startedAt = millis();
         size_t count = 0;
+        size_t rowIndex = 0;
         String line;
         bool truncated = false;
         while (readBoundedLine(file, line, truncated)) {
+          serviceStorageLoop(rowIndex++);
           if (truncated || line.isEmpty()) {
             continue;
           }
@@ -3829,6 +3872,7 @@ size_t StorageManager::unsyncedEnrollmentCount() const {
           }
         }
         file.close();
+        logSlowSdRead("unsynced_enrollment_count", startedAt, count);
         if (count > 0) {
           return count;
         }

@@ -42,6 +42,7 @@ constexpr size_t kPairedEventContextPageSize = 20;
 constexpr size_t kPairedEventContextMaxPages = 128;
 constexpr uint32_t kTlsLargestFreeBlockWarningBytes = 24U * 1024U;
 constexpr uint32_t kSecureClientCooldownMs = 150;
+constexpr uint32_t kHttpRequestWarnMs = 2000;
 constexpr uint8_t kPairedEventTlsConnectAttempts = 2;
 
 struct RequestTarget {
@@ -51,6 +52,26 @@ struct RequestTarget {
   uint16_t port = 443;
   bool https = true;
   bool valid = false;
+};
+
+struct HttpRequestTimingGuard {
+  explicit HttpRequestTimingGuard(const String &path, int *statusCode)
+      : path(path), statusCode(statusCode), startedAt(millis()) {}
+
+  ~HttpRequestTimingGuard() {
+    const uint32_t elapsed = millis() - startedAt;
+    if (elapsed < kHttpRequestWarnMs) {
+      return;
+    }
+
+    Serial.printf("[HTTP][WARN] slow request path=%s code=%d ms=%lu\n",
+                  path.c_str(), statusCode != nullptr ? *statusCode : 0,
+                  static_cast<unsigned long>(elapsed));
+  }
+
+  String path;
+  int *statusCode = nullptr;
+  uint32_t startedAt = 0;
 };
 
 String buildUrl(const String &path) {
@@ -2089,6 +2110,7 @@ bool BackendClient::requestJson(const char *method, const String &path,
                                 bool allowRetry, uint8_t maxAttempts,
                                 size_t recordCount, size_t maxResponseBytes,
                                 const char *responseTooLargeError) {
+  HttpRequestTimingGuard requestTiming(path, &lastHttpStatusCode_);
   const RequestTarget target = buildRequestTarget(path);
   lastRequestUrl_ = target.url;
   lastRequestPayloadSize_ = body.length();
