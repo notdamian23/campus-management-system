@@ -59,6 +59,7 @@ class StorageManager {
   std::vector<StudentInfo> loadUnsyncedEnrollmentResultsFromSd(size_t limit) const;
   bool markEnrollmentResultSyncedOnSd(const String &sessionId,
                                       const String &studentUid);
+  bool clearEnrollmentResultsQueue();
 
   std::vector<StudentInfo> loadPendingStudents() const;
   bool savePendingStudents(const std::vector<StudentInfo> &students);

@@ -931,6 +931,20 @@ bool studentKeysMatch(const StudentInfo &left, const StudentInfo &right) {
   return false;
 }
 
+bool studentKeysOverlap(const StudentInfo &left, const StudentInfo &right) {
+  if (!left.studentUid.isEmpty() && !right.studentUid.isEmpty() &&
+      left.studentUid == right.studentUid) {
+    return true;
+  }
+
+  if (!left.schoolId.isEmpty() && !right.schoolId.isEmpty() &&
+      left.schoolId == right.schoolId) {
+    return true;
+  }
+
+  return false;
+}
+
 int parseCsvTemplateId(const String &value) {
   const int templateId = value.toInt();
   return templateId > 0 ? templateId : -1;
@@ -2453,14 +2467,18 @@ bool StorageManager::saveCurrentEnrollmentSession(
 }
 
 bool StorageManager::clearCurrentEnrollmentSession() {
-  if (!littleFsReady_) {
-    return false;
+  bool cleared = true;
+  if (littleFsReady_) {
+    if (LittleFS.exists(kEnrollmentSessionPath)) {
+      cleared = LittleFS.remove(kEnrollmentSessionPath);
+    }
+    if (LittleFS.exists(kPendingStudentsPath)) {
+      cleared = LittleFS.remove(kPendingStudentsPath) && cleared;
+    }
   }
 
-  bool cleared = true;
-  if (LittleFS.exists(kEnrollmentSessionPath)) {
-    cleared = LittleFS.remove(kEnrollmentSessionPath);
-  }
+  pendingStudentsCache_.clear();
+  pendingStudentsLoaded_ = true;
 
   if (CampusConfig::kUseSd && ensureSdReady()) {
     if (SD.exists(kSdEnrollmentQueueTempPath)) {
@@ -2471,6 +2489,28 @@ bool StorageManager::clearCurrentEnrollmentSession() {
     }
   }
 
+  return cleared;
+}
+
+bool StorageManager::clearEnrollmentResultsQueue() {
+  bool cleared = true;
+
+  if (CampusConfig::kUseSd && ensureSdReady()) {
+    if (SD.exists(kSdEnrollmentResultsTempPath)) {
+      SD.remove(kSdEnrollmentResultsTempPath);
+    }
+    if (SD.exists(kSdEnrollmentResultsPath)) {
+      cleared = SD.remove(kSdEnrollmentResultsPath) && cleared;
+    }
+  }
+
+  if (littleFsReady_ && LittleFS.exists(kEnrollmentSyncQueuePath)) {
+    cleared = LittleFS.remove(kEnrollmentSyncQueuePath) && cleared;
+  }
+
+  enrollmentSyncQueueCache_.clear();
+  enrollmentSyncQueueLoaded_ = true;
+  lastSdWriteSucceeded_ = cleared;
   return cleared;
 }
 
@@ -2704,6 +2744,19 @@ bool StorageManager::updateEnrollmentStudentRowOnSd(const StudentInfo &student) 
     return false;
   }
 
+  StudentInfo updatedStudent = student;
+  if (updatedStudent.templateId <= 0) {
+    updatedStudent.templateId = -1;
+  }
+  CampusEligibility::normalizeStudent(updatedStudent);
+  if (updatedStudent.sessionId.isEmpty()) {
+    Serial.printf(
+        "[ENROLL][SESSION_MISMATCH] queue update rejected uid=%s schoolId=%s\n",
+        updatedStudent.studentUid.c_str(), updatedStudent.schoolId.c_str());
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
   SD.mkdir(kSdEnrollmentDir);
   File source = SD.open(kSdEnrollmentQueuePath, FILE_READ);
   if (!source) {
@@ -2718,12 +2771,6 @@ bool StorageManager::updateEnrollmentStudentRowOnSd(const StudentInfo &student) 
     lastSdWriteSucceeded_ = false;
     return false;
   }
-
-  StudentInfo updatedStudent = student;
-  if (updatedStudent.templateId <= 0) {
-    updatedStudent.templateId = -1;
-  }
-  CampusEligibility::normalizeStudent(updatedStudent);
 
   if (!writeCsvLine(temp, enrollmentQueueCsvHeader())) {
     source.close();
@@ -2749,6 +2796,19 @@ bool StorageManager::updateEnrollmentStudentRowOnSd(const StudentInfo &student) 
     }
 
     StudentInfo row = enrollmentQueueStudentFromFields(fields, parsedFields);
+    if (row.isValid() && studentKeysOverlap(row, updatedStudent) &&
+        !studentKeysMatch(row, updatedStudent)) {
+      source.close();
+      temp.close();
+      SD.remove(kSdEnrollmentQueueTempPath);
+      Serial.printf(
+          "[ENROLL][SESSION_MISMATCH] queue row rejected uid=%s schoolId=%s "
+          "expected=%s actual=%s\n",
+          updatedStudent.studentUid.c_str(), updatedStudent.schoolId.c_str(),
+          updatedStudent.sessionId.c_str(), row.sessionId.c_str());
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
     if (row.isValid() && studentKeysMatch(row, updatedStudent)) {
       if (updatedStudent.sessionId.isEmpty()) {
         updatedStudent.sessionId = row.sessionId;
@@ -2784,13 +2844,16 @@ bool StorageManager::updateEnrollmentStudentRowOnSd(const StudentInfo &student) 
   }
 
   if (!replaced) {
-    if (!writeCsvLine(temp, enrollmentQueueCsvRow(updatedStudent))) {
-      source.close();
-      temp.close();
-      SD.remove(kSdEnrollmentQueueTempPath);
-      lastSdWriteSucceeded_ = false;
-      return false;
-    }
+    source.close();
+    temp.close();
+    SD.remove(kSdEnrollmentQueueTempPath);
+    Serial.printf(
+        "[ENROLL][SESSION_MISMATCH] queue row missing uid=%s schoolId=%s "
+        "session=%s\n",
+        updatedStudent.studentUid.c_str(), updatedStudent.schoolId.c_str(),
+        updatedStudent.sessionId.c_str());
+    lastSdWriteSucceeded_ = false;
+    return false;
   }
 
   source.close();
@@ -2803,14 +2866,49 @@ bool StorageManager::updateEnrollmentStudentRowOnSd(const StudentInfo &student) 
     return false;
   }
 
-  Serial.printf("[ENROLL][QUEUE] update row student=%s template=%d\n",
-                updatedStudent.studentUid.c_str(), updatedStudent.templateId);
+  Serial.printf(
+      "[ENROLL][SD_UPDATE] uid=%s schoolId=%s session=%s template=%d\n",
+      updatedStudent.studentUid.c_str(), updatedStudent.schoolId.c_str(),
+      updatedStudent.sessionId.c_str(), updatedStudent.templateId);
   lastSdWriteSucceeded_ = true;
   return true;
 }
 
 bool StorageManager::appendEnrollmentResultToSd(const StudentInfo &student) {
   if (!ensureSdReady()) {
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  StudentInfo updatedStudent = student;
+  if (updatedStudent.templateId <= 0) {
+    updatedStudent.templateId = -1;
+  }
+  CampusEligibility::normalizeStudent(updatedStudent);
+  if (updatedStudent.sessionId.isEmpty() || updatedStudent.studentUid.isEmpty() ||
+      updatedStudent.schoolId.isEmpty() || updatedStudent.templateId <= 0 ||
+      updatedStudent.fingerprintDeviceId.isEmpty() ||
+      updatedStudent.enrolledAtIso.isEmpty()) {
+    Serial.printf(
+        "[ENROLL][SESSION_MISMATCH] result rejected session=%s uid=%s "
+        "schoolId=%s template=%d device=%s enrolledAt=%s\n",
+        updatedStudent.sessionId.c_str(), updatedStudent.studentUid.c_str(),
+        updatedStudent.schoolId.c_str(), updatedStudent.templateId,
+        updatedStudent.fingerprintDeviceId.c_str(),
+        updatedStudent.enrolledAtIso.c_str());
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  StudentInfo queueStudent;
+  if (!findEnrollmentStudentInSd(updatedStudent.studentUid, queueStudent) ||
+      queueStudent.sessionId.isEmpty() ||
+      queueStudent.sessionId != updatedStudent.sessionId) {
+    Serial.printf(
+        "[ENROLL][SESSION_MISMATCH] result queue rejected uid=%s schoolId=%s "
+        "expected=%s actual=%s\n",
+        updatedStudent.studentUid.c_str(), updatedStudent.schoolId.c_str(),
+        updatedStudent.sessionId.c_str(), queueStudent.sessionId.c_str());
     lastSdWriteSucceeded_ = false;
     return false;
   }
@@ -2823,12 +2921,6 @@ bool StorageManager::appendEnrollmentResultToSd(const StudentInfo &student) {
     lastSdWriteSucceeded_ = false;
     return false;
   }
-
-  StudentInfo updatedStudent = student;
-  if (updatedStudent.templateId <= 0) {
-    updatedStudent.templateId = -1;
-  }
-  CampusEligibility::normalizeStudent(updatedStudent);
 
   if (!writeCsvLine(temp, enrollmentResultCsvHeader())) {
     temp.close();
@@ -2917,8 +3009,13 @@ bool StorageManager::appendEnrollmentResultToSd(const StudentInfo &student) {
     return false;
   }
 
-  Serial.printf("[ENROLL][RESULT] queued student=%s template=%d\n",
-                updatedStudent.studentUid.c_str(), updatedStudent.templateId);
+  Serial.printf(
+      "[ENROLL][RESULT_QUEUE_APPEND] session=%s uid=%s schoolId=%s "
+      "template=%d device=%s enrolledAt=%s\n",
+      updatedStudent.sessionId.c_str(), updatedStudent.studentUid.c_str(),
+      updatedStudent.schoolId.c_str(), updatedStudent.templateId,
+      updatedStudent.fingerprintDeviceId.c_str(),
+      updatedStudent.enrolledAtIso.c_str());
   lastSdWriteSucceeded_ = true;
   return true;
 }
@@ -3815,10 +3912,8 @@ bool StorageManager::ensureEnrollmentSyncQueueLoaded() const {
 }
 
 std::vector<StudentInfo> StorageManager::loadUnsyncedEnrollments() const {
-  const std::vector<StudentInfo> sdResults =
-      loadUnsyncedEnrollmentResultsFromSd(1);
-  if (!sdResults.empty()) {
-    return sdResults;
+  if (CampusConfig::kUseSd) {
+    return loadUnsyncedEnrollmentResultsFromSd(1);
   }
 
   ensureEnrollmentSyncQueueLoaded();
@@ -3873,11 +3968,10 @@ size_t StorageManager::unsyncedEnrollmentCount() const {
         }
         file.close();
         logSlowSdRead("unsynced_enrollment_count", startedAt, count);
-        if (count > 0) {
-          return count;
-        }
+        return count;
       }
     }
+    return 0;
   }
 
   ensureEnrollmentSyncQueueLoaded();
@@ -4392,6 +4486,12 @@ bool StorageManager::updateEnrollmentArtifacts(const StudentInfo &student) {
 
   const bool sdQueueAvailable =
       CampusConfig::kUseSd && ensureSdReady() && SD.exists(kSdEnrollmentQueuePath);
+  if (CampusConfig::kUseSd && !sdQueueAvailable) {
+    Serial.printf("[ENROLL][SESSION_MISMATCH] artifacts rejected uid=%s schoolId=%s session=%s reason=sd_queue_missing\n",
+                  student.studentUid.c_str(), student.schoolId.c_str(),
+                  student.sessionId.c_str());
+    return false;
+  }
 
   bool syncQueueSaved = true;
   if (sdQueueAvailable) {

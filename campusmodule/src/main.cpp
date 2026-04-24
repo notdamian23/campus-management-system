@@ -43,6 +43,8 @@ int g_attendanceModeIndex = 0;
 int g_syncRecordsMenuIndex = 0;
 int g_timeOutConfirmIndex = 1;
 int g_clearPairConfirmIndex = 1;
+int g_clearEnrollmentConfirmIndex = 1;
+int g_forceClearEnrollmentConfirmIndex = 1;
 std::vector<EventInfo> g_cachedAvailableEvents;
 std::vector<StudentInfo> g_cachedPendingStudents;
 std::vector<StudentInfo> g_cachedPairedStudents;
@@ -52,17 +54,34 @@ EnrollmentQueueStats g_enrollmentQueueStats;
 size_t g_enrollmentQueuePageOffset = 0;
 bool g_enrollmentQueuePagedFromSd = false;
 bool g_pairedEventRecoveredFromAttendance = false;
+bool g_enrollmentStudentBackToMode = false;
 
 constexpr const char *kMenuItems[] = {
     "Pair Event",
+    "Pair Enrollment Session",
+    "Enrollment Mode",
     "Enroll Student",
     "Attendance Mode",
     "Sync Records",
     "Export Backup",
     "Clear Paired Event",
+    "Clear Paired Enrollment Session",
     "Wi-Fi Setup",
 };
 constexpr size_t kMenuItemCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
+
+enum class MainMenuItem : uint8_t {
+  PairEvent = 0,
+  PairEnrollmentSession,
+  EnrollmentMode,
+  EnrollStudent,
+  AttendanceMode,
+  SyncRecords,
+  ExportBackup,
+  ClearPairedEvent,
+  ClearPairedEnrollmentSession,
+  WifiSetup,
+};
 constexpr const char *kAttendanceModeItems[] = {
     "Time in",
     "Time out",
@@ -100,11 +119,14 @@ enum class AppScreen : uint8_t {
   Menu,
   PairEventSelection,
   EnrollmentSessionSelection,
+  EnrollmentMode,
   EnrollmentStudentSelection,
   AttendanceMenu,
   SyncRecordsMenu,
   TimeOutConfirmation,
   ClearPairConfirmation,
+  ClearEnrollmentConfirmation,
+  ForceClearEnrollmentConfirmation,
   AttendanceScan,
   SyncProgress,
 };
@@ -229,8 +251,15 @@ const char *resetReasonName(esp_reset_reason_t reason) {
 void showTimedMessage(const String &line1, const String &line2, uint32_t holdMs,
                       const String &line3 = "", const String &line4 = "");
 void loadStoredPairedEventContext();
+void loadStoredEnrollmentSession();
 bool loadEnrollmentQueuePage(size_t offset);
 bool hasOfflineEnrollmentQueue();
+bool ensureEnrollmentSessionReady(bool requireQueue);
+bool validateEnrollmentStudentSession(const StudentInfo &student, bool showError = true);
+void beginPairEnrollmentSessionFlow();
+void enterEnrollmentMode();
+void beginEnrollStudentFlow(bool fromMode = false);
+void enterClearEnrollmentSessionFlow();
 bool recoverPairedEventFromAttendance(EventInfo &event);
 void addBackupEventCandidate(const AttendanceRecord &record,
                              std::vector<EventInfo> &events);
@@ -864,6 +893,8 @@ const char *screenName(AppScreen screen) {
       return "pair";
     case AppScreen::EnrollmentSessionSelection:
       return "enroll-session";
+    case AppScreen::EnrollmentMode:
+      return "enroll-mode";
     case AppScreen::EnrollmentStudentSelection:
       return "enroll-student";
     case AppScreen::AttendanceMenu:
@@ -874,6 +905,10 @@ const char *screenName(AppScreen screen) {
       return "timeout-confirm";
     case AppScreen::ClearPairConfirmation:
       return "clear-pair-confirm";
+    case AppScreen::ClearEnrollmentConfirmation:
+      return "clear-enroll-confirm";
+    case AppScreen::ForceClearEnrollmentConfirmation:
+      return "force-clear-enroll";
     case AppScreen::AttendanceScan:
       return "attendance-scan";
     case AppScreen::SyncProgress:
@@ -1359,6 +1394,11 @@ bool hasOfflineEnrollmentQueue() {
     return false;
   }
 
+  if (CampusConfig::kUseSd) {
+    return g_enrollmentQueueStats.queueExists &&
+           g_enrollmentQueueStats.totalRows > 0;
+  }
+
   if (g_enrollmentQueuePagedFromSd) {
     return g_enrollmentQueueStats.pendingRows > 0;
   }
@@ -1376,15 +1416,21 @@ void loadStoredEnrollmentSession() {
 
   if (g_currentEnrollmentSession.isValid()) {
     if (!loadEnrollmentQueuePage(0)) {
-      g_cachedPendingStudents = g_storage.loadPendingStudents();
-    } else {
-      Serial.printf(
-          "[ENROLL][QUEUE] loaded SD queue pending=%u enrolledPendingSync=%u "
-          "synced=%u\n",
-          static_cast<unsigned>(g_enrollmentQueueStats.pendingRows),
-          static_cast<unsigned>(g_enrollmentQueueStats.enrolledPendingSyncRows),
-          static_cast<unsigned>(g_enrollmentQueueStats.syncedRows));
+      if (!CampusConfig::kUseSd) {
+        g_cachedPendingStudents = g_storage.loadPendingStudents();
+      }
     }
+
+    Serial.printf(
+        "[ENROLL][QUEUE] loaded session=%s sdReady=%s queueExists=%s total=%u "
+        "pending=%u enrolledPendingSync=%u synced=%u\n",
+        g_currentEnrollmentSession.sessionId.c_str(),
+        g_enrollmentQueueStats.sdReady ? "yes" : "no",
+        g_enrollmentQueueStats.queueExists ? "yes" : "no",
+        static_cast<unsigned>(g_enrollmentQueueStats.totalRows),
+        static_cast<unsigned>(g_enrollmentQueueStats.pendingRows),
+        static_cast<unsigned>(g_enrollmentQueueStats.enrolledPendingSyncRows),
+        static_cast<unsigned>(g_enrollmentQueueStats.syncedRows));
   }
 
   if (g_currentEnrollmentSession.isValid() && !hasOfflineEnrollmentQueue() &&
@@ -1396,6 +1442,47 @@ void loadStoredEnrollmentSession() {
     g_enrollmentQueuePageOffset = 0;
     g_enrollmentQueuePagedFromSd = false;
   }
+}
+
+bool ensureEnrollmentSessionReady(bool requireQueue) {
+  loadStoredEnrollmentSession();
+  if (!g_currentEnrollmentSession.isValid()) {
+    showTimedMessage("Pair enrollment", "first", kLongMessageMs);
+    g_feedback.warning();
+    return false;
+  }
+
+  if (!requireQueue) {
+    return true;
+  }
+
+  if (!g_enrollmentQueueStats.sdReady || !g_enrollmentQueueStats.queueExists ||
+      !loadEnrollmentQueuePage(0)) {
+    showTimedMessage("Enrollment queue", "missing", kLongMessageMs,
+                     "Pair session again", "");
+    g_feedback.warning();
+    return false;
+  }
+
+  return true;
+}
+
+bool validateEnrollmentStudentSession(const StudentInfo &student, bool showError) {
+  const String currentSessionId = g_currentEnrollmentSession.sessionId;
+  if (!student.isValid() || currentSessionId.isEmpty() || student.sessionId.isEmpty() ||
+      student.sessionId != currentSessionId) {
+    Serial.printf(
+        "[ENROLL][SESSION_MISMATCH] current=%s studentSession=%s uid=%s schoolId=%s\n",
+        currentSessionId.c_str(), student.sessionId.c_str(),
+        student.studentUid.c_str(), student.schoolId.c_str());
+    if (showError) {
+      showTimedMessage("Session mismatch", "", kMediumMessageMs);
+      g_feedback.error();
+    }
+    return false;
+  }
+
+  return true;
 }
 
 String eventSubtitle(const EventInfo &event) {
@@ -1587,6 +1674,21 @@ void renderEnrollmentSessionSelection() {
       static_cast<int>(g_cachedEnrollmentSessions.size()));
 }
 
+void renderEnrollmentMode() {
+  if (!g_currentEnrollmentSession.isValid()) {
+    renderMenu();
+    return;
+  }
+
+  const String line2 = trim16(g_currentEnrollmentSession.sessionId);
+  const String line3 = "T:" + String(g_enrollmentQueueStats.totalRows) + " P:" +
+                       String(g_enrollmentQueueStats.pendingRows);
+  const String line4 = "E:" +
+                       String(g_enrollmentQueueStats.enrolledPendingSyncRows) +
+                       " S:" + String(g_enrollmentQueueStats.syncedRows) + " SEL";
+  g_display.showLines("Enrollment Mode", line2, line3, line4);
+}
+
 void renderEnrollmentStudentSelection() {
   if (g_cachedPendingStudents.empty()) {
     g_display.show("Queue Empty", "Nothing to enroll");
@@ -1635,6 +1737,24 @@ void renderClearPairConfirmation() {
   const String line4 = g_clearPairConfirmIndex == 0 ? ">Yes            No"
                                                     : " Yes           >No";
   g_display.showLines("Clear Paired Event", title, "Keeps attendance", line4);
+}
+
+void renderClearEnrollmentConfirmation() {
+  const String title = g_currentEnrollmentSession.isValid()
+                           ? trim16(g_currentEnrollmentSession.sessionId)
+                           : "Stale session data";
+  const String line4 = g_clearEnrollmentConfirmIndex == 0 ? ">Yes            No"
+                                                          : " Yes           >No";
+  g_display.showLines("Clear Enroll Pair", title, "Keeps results queue", line4);
+}
+
+void renderForceClearEnrollmentConfirmation() {
+  const String line3 =
+      "Unsynced:" + String(g_storage.unsyncedEnrollmentCount());
+  const String line4 = g_forceClearEnrollmentConfirmIndex == 0
+                           ? ">Force        Back"
+                           : " Force       >Back";
+  g_display.showLines("Sync enrollment", "first", line3, line4);
 }
 
 void renderAttendancePrompt() {
@@ -1710,6 +1830,9 @@ void renderCurrentScreen() {
     case AppScreen::EnrollmentSessionSelection:
       renderEnrollmentSessionSelection();
       break;
+    case AppScreen::EnrollmentMode:
+      renderEnrollmentMode();
+      break;
     case AppScreen::EnrollmentStudentSelection:
       renderEnrollmentStudentSelection();
       break;
@@ -1724,6 +1847,12 @@ void renderCurrentScreen() {
       break;
     case AppScreen::ClearPairConfirmation:
       renderClearPairConfirmation();
+      break;
+    case AppScreen::ClearEnrollmentConfirmation:
+      renderClearEnrollmentConfirmation();
+      break;
+    case AppScreen::ForceClearEnrollmentConfirmation:
+      renderForceClearEnrollmentConfirmation();
       break;
     case AppScreen::AttendanceScan:
       renderAttendancePrompt();
@@ -2067,7 +2196,7 @@ void tickSync() {
       Serial.printf("[ENROLL][SYNC] loading result batch limit=%u\n", 1U);
       logDetailedMemory("before enrollment sync upload");
       const std::vector<StudentInfo> pendingEnrollments =
-          g_storage.loadUnsyncedEnrollments();
+          g_storage.loadUnsyncedEnrollmentResultsFromSd(1);
       if (pendingEnrollments.empty()) {
         g_sync.phase = nextSyncPhaseAfterEnrollment(
             g_sync.mode, g_sync.contextRefreshNeeded, g_pairedEvent.isValid());
@@ -2494,51 +2623,78 @@ void confirmSelectedPairEvent() {
   g_feedback.success();
 }
 
-void beginEnrollmentFlow() {
+void beginPairEnrollmentSessionFlow() {
+  Serial.println("[ENROLL_PAIR][START]");
+  if (!allowInteractiveOnlineTask()) {
+    return;
+  }
+
+  if (!connectForOnlineTask("Pair Enroll")) {
+    return;
+  }
+
+  String error;
+  const bool fetched =
+      g_backend.fetchEnrollmentSessions(g_cachedEnrollmentSessions, error);
+  disconnectAfterOnlineTask();
+
+  if (!fetched) {
+    showTimedMessage("Fetch Failed", trim16(error), kMediumMessageMs);
+    g_feedback.error();
+    return;
+  }
+
+  if (g_cachedEnrollmentSessions.empty()) {
+    showTimedMessage("No Sessions", "Create online", kMediumMessageMs);
+    g_feedback.warning();
+    return;
+  }
+
+  g_enrollmentSessionIndex = 0;
+  setScreen(AppScreen::EnrollmentSessionSelection);
+}
+
+void enterEnrollmentMode() {
+  if (!ensureEnrollmentSessionReady(true)) {
+    return;
+  }
+
+  Serial.printf("[ENROLL_MODE][OPEN] session=%s\n",
+                g_currentEnrollmentSession.sessionId.c_str());
+  Serial.printf(
+      "[ENROLL_MODE][QUEUE_STATS] session=%s total=%u pending=%u "
+      "enrolledPendingSync=%u synced=%u\n",
+      g_currentEnrollmentSession.sessionId.c_str(),
+      static_cast<unsigned>(g_enrollmentQueueStats.totalRows),
+      static_cast<unsigned>(g_enrollmentQueueStats.pendingRows),
+      static_cast<unsigned>(g_enrollmentQueueStats.enrolledPendingSyncRows),
+      static_cast<unsigned>(g_enrollmentQueueStats.syncedRows));
+  setScreen(AppScreen::EnrollmentMode);
+}
+
+void beginEnrollStudentFlow(bool fromMode) {
   if (!g_fingerprint.isReady()) {
     showTimedMessage("Enroll Blocked", "Scanner offline", kMediumMessageMs);
     g_feedback.error();
     return;
   }
 
-  if (!allowInteractiveOnlineTask()) {
+  if (!ensureEnrollmentSessionReady(true)) {
     return;
   }
 
-  loadStoredEnrollmentSession();
-  const bool hasOfflineSession = hasOfflineEnrollmentQueue();
-
-  if (g_wifi.hasCredentials() && connectForOnlineTask("Enroll Student")) {
-    String error;
-    const bool fetched =
-        g_backend.fetchEnrollmentSessions(g_cachedEnrollmentSessions, error);
-    disconnectAfterOnlineTask();
-
-    if (!fetched) {
-      if (!hasOfflineSession) {
-        showTimedMessage("Fetch Failed", trim16(error), kMediumMessageMs);
-        g_feedback.error();
-        return;
-      }
-    } else if (!g_cachedEnrollmentSessions.empty()) {
-      g_enrollmentSessionIndex = 0;
-      setScreen(AppScreen::EnrollmentSessionSelection);
-      return;
-    }
-  } else if (!hasOfflineSession) {
-    return;
-  }
-
-  if (!g_currentEnrollmentSession.isValid()) {
-    showTimedMessage("No Session", "Create online sess", kMediumMessageMs);
-    return;
-  }
-
-  if (!hasOfflineEnrollmentQueue()) {
+  if (g_cachedPendingStudents.empty()) {
     showTimedMessage("Queue Empty", "Nothing to enroll", kMediumMessageMs);
+    g_feedback.warning();
+    setScreen(fromMode ? AppScreen::EnrollmentMode : AppScreen::Menu);
     return;
   }
 
+  Serial.printf("[ENROLL][OFFLINE_READY] session=%s pending=%u total=%u\n",
+                g_currentEnrollmentSession.sessionId.c_str(),
+                static_cast<unsigned>(g_enrollmentQueueStats.pendingRows),
+                static_cast<unsigned>(g_enrollmentQueueStats.totalRows));
+  g_enrollmentStudentBackToMode = fromMode;
   g_pendingStudentIndex = 0;
   setScreen(AppScreen::EnrollmentStudentSelection);
 }
@@ -2553,7 +2709,7 @@ void confirmSelectedEnrollmentSession() {
     return;
   }
 
-  if (!connectForOnlineTask("Enroll Student")) {
+  if (!connectForOnlineTask("Pair Enroll")) {
     return;
   }
 
@@ -2563,6 +2719,8 @@ void confirmSelectedEnrollmentSession() {
   const EnrollmentSessionInfo &selectedSession =
       g_cachedEnrollmentSessions[clampIndex(g_enrollmentSessionIndex,
                                             g_cachedEnrollmentSessions)];
+  Serial.printf("[ENROLL_PAIR][SESSION_SELECTED] session=%s\n",
+                selectedSession.sessionId.c_str());
 
   const bool paired = g_backend.pairEnrollmentSession(selectedSession.sessionId, session,
                                                       error);
@@ -2591,74 +2749,61 @@ void confirmSelectedEnrollmentSession() {
     return;
   }
 
-  g_currentEnrollmentSession = session;
+  Serial.printf("[ENROLL_PAIR][DOWNLOAD_SUCCESS] session=%s students=%u\n",
+                session.sessionId.c_str(),
+                static_cast<unsigned>(downloadedStudents.size()));
+
   if (!g_storage.saveCurrentEnrollmentSession(session)) {
-    Serial.println("[ENROLL][QUEUE] failed to save current session metadata");
+    showTimedMessage("Save Failed", "Storage error", kMediumMessageMs);
+    g_feedback.error();
+    return;
   }
+
   logDetailedMemory("before enrollment queue save");
-  const bool queueSavedToSd =
-      g_storage.saveEnrollmentQueueToSd(session, downloadedStudents);
+  const bool queueSavedToSd = g_storage.saveEnrollmentQueueToSd(session, downloadedStudents);
   logDetailedMemory("after enrollment queue save");
-
-  bool usingSdQueue = false;
-  if (queueSavedToSd) {
-    g_storage.savePendingStudents({});
-    std::vector<StudentInfo>().swap(g_cachedPendingStudents);
-    usingSdQueue = loadEnrollmentQueuePage(0);
-  }
-
-  if (!usingSdQueue) {
-    if (!queueSavedToSd) {
-      Serial.println("[ENROLL][QUEUE] SD unavailable, falling back to LittleFS");
-    }
-    g_enrollmentQueuePagedFromSd = false;
-    g_enrollmentQueueStats = EnrollmentQueueStats{};
-    g_enrollmentQueuePageOffset = 0;
-    g_cachedPendingStudents = downloadedStudents;
-    g_storage.savePendingStudents(downloadedStudents);
-  } else {
-    std::vector<StudentInfo>().swap(downloadedStudents);
-  }
-
-  if (g_cachedPendingStudents.empty()) {
-    showTimedMessage("Queue Empty", "Nothing to enroll", kMediumMessageMs);
-    g_feedback.warning();
+  if (!queueSavedToSd) {
+    g_storage.clearCurrentEnrollmentSession();
+    showTimedMessage("Queue Save Failed", "Check SD card", kLongMessageMs);
+    g_feedback.error();
     return;
   }
 
+  g_storage.savePendingStudents({});
+  g_currentEnrollmentSession = session;
+  loadStoredEnrollmentSession();
+  Serial.printf("[ENROLL_PAIR][QUEUE_SAVED] session=%s total=%u pending=%u\n",
+                session.sessionId.c_str(),
+                static_cast<unsigned>(g_enrollmentQueueStats.totalRows),
+                static_cast<unsigned>(g_enrollmentQueueStats.pendingRows));
+
+  setScreen(AppScreen::Menu);
   if (!rosterReady && !isFingerprintRosterValidatedForSession(session.sessionId)) {
-    Serial.printf(
-        "[ENROLL][ROSTER] session=%s ready=no error=%s\n",
-        session.sessionId.c_str(), rosterError.c_str());
-    showTimedMessage("Roster Required",
-                     trim16(rosterError.isEmpty() ? "Refresh roster"
-                                                  : rosterError),
-                     kLongMessageMs, trim16(session.sessionId), "");
+    Serial.printf("[ENROLL][ROSTER] session=%s ready=no error=%s\n",
+                  session.sessionId.c_str(), rosterError.c_str());
+    showTimedMessage("Enrollment Paired", "Queue Saved", kLongMessageMs,
+                     "Refresh roster", "before offline");
     g_feedback.warning();
-    setScreen(AppScreen::Menu);
-    return;
-  }
-
-  g_pendingStudentIndex = 0;
-  setScreen(AppScreen::EnrollmentStudentSelection);
-  if (usingSdQueue) {
-    showTimedMessage("Session Ready", trim16(session.sessionId), kShortMessageMs,
-                     "SD queue ready", "");
   } else {
-    showTimedMessage("SD unavailable", "Limited queue", kMediumMessageMs,
+    showTimedMessage("Enrollment Paired", "Queue Saved", kMediumMessageMs,
                      trim16(session.sessionId), "");
+    g_feedback.success();
   }
 }
 
 void enrollSelectedStudent() {
   if (g_cachedPendingStudents.empty()) {
     showTimedMessage("Queue Empty", "Nothing to enroll", kMediumMessageMs);
-    setScreen(AppScreen::Menu);
+    setScreen(g_enrollmentStudentBackToMode ? AppScreen::EnrollmentMode
+                                            : AppScreen::Menu);
     return;
   }
 
   g_pendingStudentIndex = clampIndex(g_pendingStudentIndex, g_cachedPendingStudents);
   StudentInfo student = g_cachedPendingStudents[g_pendingStudentIndex];
+  if (!validateEnrollmentStudentSession(student)) {
+    return;
+  }
   if (student.templateId > 0 || student.enrollmentStatus == "enrolled" ||
       student.syncStatus == "synced") {
     showTimedMessage("Already Enrolled", student.schoolId, kShortMessageMs);
@@ -2762,6 +2907,9 @@ void enrollSelectedStudent() {
 
   const TimeSnapshot snapshot = g_time.now();
   student.sessionId = g_currentEnrollmentSession.sessionId;
+  if (!validateEnrollmentStudentSession(student)) {
+    return;
+  }
   student.templateId = templateId;
   student.enrollmentSynced = false;
   student.fingerprintStatus = "enrolled";
@@ -3199,6 +3347,28 @@ void enterClearPairedEventConfirmation() {
   setScreen(AppScreen::ClearPairConfirmation);
 }
 
+void enterClearEnrollmentSessionFlow() {
+  loadStoredEnrollmentSession();
+  if (!g_currentEnrollmentSession.isValid()) {
+    showTimedMessage("Pair enrollment", "first", kLongMessageMs);
+    g_feedback.warning();
+    return;
+  }
+
+  const size_t unsyncedCount = g_storage.unsyncedEnrollmentCount();
+  if (unsyncedCount > 0) {
+    Serial.printf("[ENROLL_CLEAR][BLOCKED_UNSYNCED] session=%s count=%u\n",
+                  g_currentEnrollmentSession.sessionId.c_str(),
+                  static_cast<unsigned>(unsyncedCount));
+    g_forceClearEnrollmentConfirmIndex = 1;
+    setScreen(AppScreen::ForceClearEnrollmentConfirmation);
+    return;
+  }
+
+  g_clearEnrollmentConfirmIndex = 1;
+  setScreen(AppScreen::ClearEnrollmentConfirmation);
+}
+
 void runWifiSetup() {
   if (!allowInteractiveOnlineTask()) {
     return;
@@ -3249,26 +3419,35 @@ void handleMenuAction(ButtonAction action) {
     return;
   }
 
-  switch (g_menuIndex) {
-    case 0:
+  switch (static_cast<MainMenuItem>(g_menuIndex)) {
+    case MainMenuItem::PairEvent:
       beginPairEventFlow();
       break;
-    case 1:
-      beginEnrollmentFlow();
+    case MainMenuItem::PairEnrollmentSession:
+      beginPairEnrollmentSessionFlow();
       break;
-    case 2:
+    case MainMenuItem::EnrollmentMode:
+      enterEnrollmentMode();
+      break;
+    case MainMenuItem::EnrollStudent:
+      beginEnrollStudentFlow(false);
+      break;
+    case MainMenuItem::AttendanceMode:
       enterAttendanceMode();
       break;
-    case 3:
+    case MainMenuItem::SyncRecords:
       enterSyncRecordsMenu();
       break;
-    case 4:
+    case MainMenuItem::ExportBackup:
       runExportBackup();
       break;
-    case 5:
+    case MainMenuItem::ClearPairedEvent:
       enterClearPairedEventConfirmation();
       break;
-    case 6:
+    case MainMenuItem::ClearPairedEnrollmentSession:
+      enterClearEnrollmentSessionFlow();
+      break;
+    case MainMenuItem::WifiSetup:
       runWifiSetup();
       break;
     default:
@@ -3397,10 +3576,22 @@ void handleEnrollmentSessionAction(ButtonAction action) {
   }
 }
 
+void handleEnrollmentModeAction(ButtonAction action) {
+  if (action == ButtonAction::Back) {
+    setScreen(AppScreen::Menu);
+    return;
+  }
+
+  if (action == ButtonAction::Select) {
+    beginEnrollStudentFlow(true);
+  }
+}
+
 void handleEnrollmentStudentAction(ButtonAction action) {
   if (g_cachedPendingStudents.empty()) {
     showTimedMessage("Queue Empty", "Nothing to enroll", kMediumMessageMs);
-    setScreen(AppScreen::Menu);
+    setScreen(g_enrollmentStudentBackToMode ? AppScreen::EnrollmentMode
+                                            : AppScreen::Menu);
     return;
   }
 
@@ -3463,7 +3654,8 @@ void handleEnrollmentStudentAction(ButtonAction action) {
   }
 
   if (action == ButtonAction::Back) {
-    setScreen(AppScreen::Menu);
+    setScreen(g_enrollmentStudentBackToMode ? AppScreen::EnrollmentMode
+                                            : AppScreen::Menu);
     return;
   }
 
@@ -3588,6 +3780,99 @@ void handleClearPairConfirmationAction(ButtonAction action) {
   showTimedMessage("Pairing Cleared", "Attendance kept", kLongMessageMs,
                    "Local logs intact", "");
   g_feedback.success();
+  setScreen(AppScreen::Menu);
+}
+
+void handleClearEnrollmentConfirmationAction(ButtonAction action) {
+  if (action == ButtonAction::Up || action == ButtonAction::Down) {
+    g_clearEnrollmentConfirmIndex = g_clearEnrollmentConfirmIndex == 0 ? 1 : 0;
+    markDisplayDirty();
+    return;
+  }
+
+  if (action == ButtonAction::Back) {
+    setScreen(AppScreen::Menu);
+    return;
+  }
+
+  if (action != ButtonAction::Select) {
+    return;
+  }
+
+  if (g_clearEnrollmentConfirmIndex == 1) {
+    setScreen(AppScreen::Menu);
+    return;
+  }
+
+  if (g_storage.unsyncedEnrollmentCount() > 0) {
+    Serial.printf("[ENROLL_CLEAR][BLOCKED_UNSYNCED] session=%s count=%u\n",
+                  g_currentEnrollmentSession.sessionId.c_str(),
+                  static_cast<unsigned>(g_storage.unsyncedEnrollmentCount()));
+    g_forceClearEnrollmentConfirmIndex = 1;
+    setScreen(AppScreen::ForceClearEnrollmentConfirmation);
+    return;
+  }
+
+  if (!g_storage.clearCurrentEnrollmentSession()) {
+    showTimedMessage("Clear Failed", "Storage error", kMediumMessageMs);
+    g_feedback.error();
+    setScreen(AppScreen::Menu);
+    return;
+  }
+
+  g_currentEnrollmentSession = EnrollmentSessionInfo{};
+  g_cachedPendingStudents.clear();
+  g_enrollmentQueueStats = EnrollmentQueueStats{};
+  g_enrollmentQueuePageOffset = 0;
+  g_enrollmentQueuePagedFromSd = false;
+  g_enrollmentStudentBackToMode = false;
+  Serial.println("[ENROLL_CLEAR][DONE] mode=safe");
+  showTimedMessage("Enrollment Cleared", "Queue removed", kLongMessageMs,
+                   "Templates kept", "");
+  g_feedback.success();
+  setScreen(AppScreen::Menu);
+}
+
+void handleForceClearEnrollmentConfirmationAction(ButtonAction action) {
+  if (action == ButtonAction::Up || action == ButtonAction::Down) {
+    g_forceClearEnrollmentConfirmIndex =
+        g_forceClearEnrollmentConfirmIndex == 0 ? 1 : 0;
+    markDisplayDirty();
+    return;
+  }
+
+  if (action == ButtonAction::Back) {
+    setScreen(AppScreen::Menu);
+    return;
+  }
+
+  if (action != ButtonAction::Select) {
+    return;
+  }
+
+  if (g_forceClearEnrollmentConfirmIndex == 1) {
+    setScreen(AppScreen::Menu);
+    return;
+  }
+
+  if (!g_storage.clearCurrentEnrollmentSession() ||
+      !g_storage.clearEnrollmentResultsQueue()) {
+    showTimedMessage("Clear Failed", "Storage error", kMediumMessageMs);
+    g_feedback.error();
+    setScreen(AppScreen::Menu);
+    return;
+  }
+
+  g_currentEnrollmentSession = EnrollmentSessionInfo{};
+  g_cachedPendingStudents.clear();
+  g_enrollmentQueueStats = EnrollmentQueueStats{};
+  g_enrollmentQueuePageOffset = 0;
+  g_enrollmentQueuePagedFromSd = false;
+  g_enrollmentStudentBackToMode = false;
+  Serial.println("[ENROLL_CLEAR][DONE] mode=force");
+  showTimedMessage("Enrollment Cleared", "Unsynced dropped", kLongMessageMs,
+                   "Templates kept", "");
+  g_feedback.warning();
   setScreen(AppScreen::Menu);
 }
 
@@ -3739,6 +4024,9 @@ void loop() {
       case AppScreen::EnrollmentSessionSelection:
         handleEnrollmentSessionAction(action);
         break;
+      case AppScreen::EnrollmentMode:
+        handleEnrollmentModeAction(action);
+        break;
       case AppScreen::EnrollmentStudentSelection:
         handleEnrollmentStudentAction(action);
         break;
@@ -3753,6 +4041,12 @@ void loop() {
         break;
       case AppScreen::ClearPairConfirmation:
         handleClearPairConfirmationAction(action);
+        break;
+      case AppScreen::ClearEnrollmentConfirmation:
+        handleClearEnrollmentConfirmationAction(action);
+        break;
+      case AppScreen::ForceClearEnrollmentConfirmation:
+        handleForceClearEnrollmentConfirmationAction(action);
         break;
       case AppScreen::AttendanceScan:
         handleAttendanceScanAction(action);
