@@ -189,13 +189,17 @@ struct CleanupQueueItem {
   String studentUid;
   String schoolId;
   String targetDeviceId;
+  String clearMode;
+  bool markEnrollmentSessionRowsStale = false;
   String reason;
 };
 
 struct CleanupQueueResult {
   String cleanupId;
   bool processed = false;
+  bool success = true;
   String message;
+  String error;
 };
 
 enum class FingerprintScanStatus : uint8_t {

@@ -51,6 +51,28 @@ constexpr size_t kEnrollmentResultFieldCount = 12;
 constexpr size_t kPairedEventStudentFieldCount = 8;
 constexpr size_t kPairedEventRecordedFieldCount = 1;
 
+void logJsonLoadIssue(const char *stage, const char *path,
+                      const DeserializationError &error, size_t fileSize,
+                      size_t capacity) {
+  Serial.printf(
+      "[STORAGE][JSON] stage=%s path=%s error=%s code=%d bytes=%u cap=%u\n",
+      stage != nullptr ? stage : "unknown", path != nullptr ? path : "-",
+      error.c_str(), static_cast<int>(error.code()),
+      static_cast<unsigned>(fileSize), static_cast<unsigned>(capacity));
+}
+
+void logStorageOpenIssue(const char *stage, const char *path) {
+  Serial.printf("[STORAGE] stage=%s path=%s open failed\n",
+                stage != nullptr ? stage : "unknown",
+                path != nullptr ? path : "-");
+}
+
+void serviceStorageLoop(size_t index) {
+  if ((index % 16U) == 0U) {
+    yield();
+  }
+}
+
 bool parseBoolValue(JsonVariantConst value, bool fallback = false) {
   if (value.isNull()) {
     return fallback;
@@ -111,12 +133,16 @@ bool loadObjectDocument(fs::FS &fs, const char *path, DynamicJsonDocument &doc) 
 
   File file = fs.open(path, FILE_READ);
   if (!file) {
+    logStorageOpenIssue("load_object", path);
+    doc.to<JsonObject>();
     return false;
   }
 
+  const size_t fileSize = static_cast<size_t>(file.size());
   const DeserializationError error = deserializeJson(doc, file);
   file.close();
   if (error) {
+    logJsonLoadIssue("load_object", path, error, fileSize, doc.capacity());
     doc.to<JsonObject>();
     return false;
   }
@@ -494,12 +520,16 @@ bool loadArrayDocument(fs::FS &fs, const char *path, DynamicJsonDocument &doc) {
 
   File file = fs.open(path, FILE_READ);
   if (!file) {
+    logStorageOpenIssue("load_array", path);
+    doc.to<JsonArray>();
     return false;
   }
 
+  const size_t fileSize = static_cast<size_t>(file.size());
   const DeserializationError error = deserializeJson(doc, file);
   file.close();
   if (error) {
+    logJsonLoadIssue("load_array", path, error, fileSize, doc.capacity());
     doc.to<JsonArray>();
     return false;
   }
@@ -1131,6 +1161,24 @@ void markStudentNeedsReenrollment(StudentInfo &student) {
   }
 }
 
+void markStudentFingerprintCleared(StudentInfo &student) {
+  student.templateId = -1;
+  student.fingerprintStatus = "needs_reenrollment";
+  student.fingerprintDeviceId = "";
+  student.enrollmentSynced = false;
+  student.enrolledAtIso = "";
+  if (student.syncStatus.isEmpty() || student.syncStatus == "synced" ||
+      student.syncStatus == "enrolled") {
+    student.syncStatus = "pending";
+  }
+  if (student.enrollmentStatus == "synced" || student.enrollmentStatus == "enrolled") {
+    student.enrollmentStatus = "pending";
+  }
+  if (student.remarks.isEmpty()) {
+    student.remarks = "AS608 wipe; re-enrollment required";
+  }
+}
+
 void normalizeEventSchedule(EventInfo &event) {
   if (!event.scheduledTimeEnd.isEmpty()) {
     return;
@@ -1327,6 +1375,7 @@ bool StorageManager::mountSdCard() {
 
   sdReady_ = false;
   for (uint32_t frequency : kSdMountFrequencies) {
+    yield();
     SD.end();
     delay(10);
 
@@ -1335,6 +1384,7 @@ bool StorageManager::mountSdCard() {
                   Pins::kSdSck, Pins::kSdMiso, Pins::kSdMosi);
 
     if (!SD.begin(Pins::kSdCs, SPI, frequency)) {
+      yield();
       continue;
     }
 
@@ -1344,6 +1394,7 @@ bool StorageManager::mountSdCard() {
                     static_cast<unsigned long>(frequency));
       SD.end();
       delay(10);
+      yield();
       continue;
     }
 
@@ -1407,13 +1458,17 @@ bool StorageManager::ensurePairedEventContextLoaded() const {
   File file = LittleFS.open(kPairedEventContextPath, FILE_READ);
   if (!file) {
     pairedEventContextStatus_ = "paired_event_context_corrupt";
+    logStorageOpenIssue("paired_context", kPairedEventContextPath);
     return false;
   }
 
+  const size_t fileSize = static_cast<size_t>(file.size());
   const DeserializationError error = deserializeJson(doc, file);
   file.close();
   if (error) {
     pairedEventContextStatus_ = "paired_event_context_corrupt";
+    logJsonLoadIssue("paired_context", kPairedEventContextPath, error, fileSize,
+                     doc.capacity());
     return false;
   }
 
@@ -1455,7 +1510,9 @@ bool StorageManager::ensurePairedEventContextLoaded() const {
 
   JsonArray studentArray = doc["students"].as<JsonArray>();
   pairedStudentsCache_.reserve(studentArray.size());
+  size_t studentIndex = 0;
   for (JsonObjectConst item : studentArray) {
+    serviceStorageLoop(studentIndex++);
     const StudentInfo student = studentFromJson(item);
     if (student.isValid()) {
       pairedStudentsCache_.push_back(student);
@@ -1464,7 +1521,9 @@ bool StorageManager::ensurePairedEventContextLoaded() const {
 
   JsonArray recordedArray = doc["recordedStudentIds"].as<JsonArray>();
   remoteRecordedStudentIdsCache_.reserve(recordedArray.size());
+  size_t recordedIndex = 0;
   for (JsonVariantConst item : recordedArray) {
+    serviceStorageLoop(recordedIndex++);
     const char *rawStudentUid = item.as<const char *>();
     const String studentUid =
         rawStudentUid != nullptr ? String(rawStudentUid) : String("");
@@ -2337,12 +2396,16 @@ EnrollmentSessionInfo StorageManager::loadCurrentEnrollmentSession() const {
   DynamicJsonDocument doc(kEnrollmentSessionDocSize);
   File file = LittleFS.open(kEnrollmentSessionPath, FILE_READ);
   if (!file) {
+    logStorageOpenIssue("enrollment_session", kEnrollmentSessionPath);
     return session;
   }
 
+  const size_t fileSize = static_cast<size_t>(file.size());
   const DeserializationError error = deserializeJson(doc, file);
   file.close();
   if (error) {
+    logJsonLoadIssue("enrollment_session", kEnrollmentSessionPath, error,
+                     fileSize, doc.capacity());
     return session;
   }
 
@@ -2998,7 +3061,9 @@ bool StorageManager::ensurePendingStudentsLoaded() const {
   JsonArrayConst array = doc.as<JsonArrayConst>();
   pendingStudentsCache_.reserve(array.size());
   bool pruned = false;
+  size_t index = 0;
   for (JsonObjectConst item : array) {
+    serviceStorageLoop(index++);
     const StudentInfo student = studentFromJson(item);
     if (isStudentStillPendingEnrollment(student)) {
       pendingStudentsCache_.push_back(student);
@@ -3048,7 +3113,9 @@ bool StorageManager::ensureFingerprintMappingsLoaded() const {
 
   JsonArrayConst array = doc.as<JsonArrayConst>();
   fingerprintMappingsCache_.reserve(array.size());
+  size_t index = 0;
   for (JsonObjectConst item : array) {
+    serviceStorageLoop(index++);
     const StudentInfo student = studentFromJson(item);
     if (student.isValid()) {
       fingerprintMappingsCache_.push_back(student);
@@ -3221,10 +3288,231 @@ FingerprintTemplateOwnership StorageManager::resolveTemplateOwnershipFromSd(
   return ownership;
 }
 
+bool StorageManager::clearEnrollmentFingerprintsOnSd(String &error) {
+  error = "";
+  if (!CampusConfig::kUseSd) {
+    return true;
+  }
+
+  if (!ensureSdReady()) {
+    error = "SD unavailable";
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  auto rewriteEnrollmentFile = [&](const char *sourcePath, const char *tempPath,
+                                   bool resultFile) -> bool {
+    if (!SD.exists(sourcePath)) {
+      return true;
+    }
+
+    File source = SD.open(sourcePath, FILE_READ);
+    if (!source) {
+      error = "SD file open failed";
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+
+    SD.remove(tempPath);
+    File temp = SD.open(tempPath, FILE_WRITE);
+    if (!temp) {
+      source.close();
+      error = "SD temp file open failed";
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+
+    const bool wroteHeader = writeCsvLine(
+        temp, resultFile ? enrollmentResultCsvHeader() : enrollmentQueueCsvHeader());
+    if (!wroteHeader) {
+      source.close();
+      temp.close();
+      SD.remove(tempPath);
+      error = "SD header write failed";
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+
+    String line;
+    bool truncated = false;
+    while (readBoundedLine(source, line, truncated)) {
+      if (truncated || line.isEmpty()) {
+        continue;
+      }
+
+      String fields[kEnrollmentResultFieldCount];
+      const size_t parsedFields = splitCsvLine(
+          line, fields,
+          resultFile ? kEnrollmentResultFieldCount : kEnrollmentQueueFieldCount);
+
+      if (isEnrollmentQueueHeader(fields, parsedFields)) {
+        continue;
+      }
+
+      StudentInfo row = resultFile
+                            ? enrollmentResultStudentFromFields(fields, parsedFields)
+                            : enrollmentQueueStudentFromFields(fields, parsedFields);
+      if (row.isValid()) {
+        if (row.templateId > 0 || !row.fingerprintDeviceId.isEmpty()) {
+          markStudentFingerprintCleared(row);
+        }
+        const bool saved = writeCsvLine(
+            temp, resultFile ? enrollmentResultCsvRow(row)
+                             : enrollmentQueueCsvRow(row));
+        if (!saved) {
+          source.close();
+          temp.close();
+          SD.remove(tempPath);
+          error = "SD queue rewrite failed";
+          lastSdWriteSucceeded_ = false;
+          return false;
+        }
+        continue;
+      }
+
+      if (!writeCsvLine(temp, line)) {
+        source.close();
+        temp.close();
+        SD.remove(tempPath);
+        error = "SD queue passthrough failed";
+        lastSdWriteSucceeded_ = false;
+        return false;
+      }
+    }
+
+    source.close();
+    temp.close();
+
+    SD.remove(sourcePath);
+    if (!SD.rename(tempPath, sourcePath)) {
+      SD.remove(tempPath);
+      error = "SD queue replace failed";
+      lastSdWriteSucceeded_ = false;
+      return false;
+    }
+
+    lastSdWriteSucceeded_ = true;
+    return true;
+  };
+
+  return rewriteEnrollmentFile(kSdEnrollmentQueuePath, kSdEnrollmentQueueTempPath,
+                               false) &&
+         rewriteEnrollmentFile(kSdEnrollmentResultsPath,
+                               kSdEnrollmentResultsTempPath, true);
+}
+
+bool StorageManager::clearFingerprintRosterArtifacts(String &error) {
+  error = "";
+  bool ok = true;
+
+  if (littleFsReady_ && LittleFS.exists(kFingerprintRosterMetaPath) &&
+      !LittleFS.remove(kFingerprintRosterMetaPath)) {
+    error = "Roster metadata clear failed";
+    ok = false;
+  }
+
+  if (!CampusConfig::kUseSd) {
+    lastSdWriteSucceeded_ = ok;
+    return ok;
+  }
+
+  if (!ensureSdReady()) {
+    error = "SD unavailable";
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+
+  if (SD.exists(kSdFingerprintRosterPath) && !SD.remove(kSdFingerprintRosterPath)) {
+    error = "Fingerprint roster clear failed";
+    lastSdWriteSucceeded_ = false;
+    return false;
+  }
+  if (SD.exists(kSdFingerprintRosterTempPath)) {
+    SD.remove(kSdFingerprintRosterTempPath);
+  }
+
+  lastSdWriteSucceeded_ = ok;
+  return ok;
+}
+
+bool StorageManager::clearFingerprintDataAfterFullWipe(String &error) {
+  error = "";
+  if (!littleFsReady_) {
+    error = "Storage unavailable";
+    return false;
+  }
+
+  ensureFingerprintMappingsLoaded();
+  ensurePendingStudentsLoaded();
+  ensureEnrollmentSyncQueueLoaded();
+  ensurePairedEventContextLoaded();
+
+  fingerprintMappingsCache_.clear();
+
+  bool pendingChanged = false;
+  for (auto &student : pendingStudentsCache_) {
+    if (student.templateId > 0 || !student.fingerprintDeviceId.isEmpty()) {
+      markStudentFingerprintCleared(student);
+      pendingChanged = true;
+    }
+  }
+
+  bool syncQueueChanged = false;
+  for (auto &student : enrollmentSyncQueueCache_) {
+    if (student.templateId > 0 || !student.fingerprintDeviceId.isEmpty()) {
+      markStudentFingerprintCleared(student);
+      syncQueueChanged = true;
+    }
+  }
+
+  bool pairedChanged = false;
+  for (auto &student : pairedStudentsCache_) {
+    if (student.templateId > 0 || !student.fingerprintDeviceId.isEmpty()) {
+      markStudentFingerprintCleared(student);
+      pairedChanged = true;
+    }
+  }
+
+  if (!writeFingerprintMappings(fingerprintMappingsCache_)) {
+    error = "Fingerprint map save failed";
+    return false;
+  }
+  if (pendingChanged && !writePendingStudents(pendingStudentsCache_)) {
+    error = "Pending queue save failed";
+    return false;
+  }
+  if (syncQueueChanged &&
+      !writeStudentList(kEnrollmentSyncQueuePath, enrollmentSyncQueueCache_)) {
+    error = "Enrollment sync queue save failed";
+    return false;
+  }
+  if (pairedChanged && pairedEventCache_.isValid() &&
+      !writePairedEventContext(pairedEventCache_, pairedStudentsCache_,
+                               remoteRecordedStudentIdsCache_)) {
+    error = "Paired event cache save failed";
+    return false;
+  }
+  if (!clearEnrollmentFingerprintsOnSd(error)) {
+    return false;
+  }
+  if (!clearFingerprintRosterArtifacts(error)) {
+    return false;
+  }
+
+  return true;
+}
+
 bool StorageManager::applyCleanupQueueItem(const CleanupQueueItem &item,
                                            String &error) {
   if (!littleFsReady_) {
     error = "Storage unavailable";
+    return false;
+  }
+
+  if (item.type != "deleteTemplateIfUnused") {
+    error = "Unsupported cleanup command";
+    Serial.printf("[CLEANUP] rejected unsupported type=%s cleanupId=%s\n",
+                  item.type.c_str(), item.cleanupId.c_str());
     return false;
   }
 
@@ -3468,12 +3756,16 @@ bool StorageManager::ensureEnrollmentSyncQueueLoaded() const {
 
   DynamicJsonDocument doc(kPendingDocSize);
   if (!loadArrayDocument(LittleFS, kEnrollmentSyncQueuePath, doc)) {
-    return false;
+    Serial.printf("[STORAGE][JSON] path=%s continuing with empty queue\n",
+                  kEnrollmentSyncQueuePath);
+    return true;
   }
 
   JsonArrayConst array = doc.as<JsonArrayConst>();
   enrollmentSyncQueueCache_.reserve(array.size());
+  size_t index = 0;
   for (JsonObjectConst item : array) {
+    serviceStorageLoop(index++);
     const StudentInfo student = studentFromJson(item);
     if (student.isValid()) {
       enrollmentSyncQueueCache_.push_back(student);
@@ -3617,7 +3909,9 @@ bool StorageManager::ensureAttendanceLoaded() const {
 
   JsonArrayConst array = doc.as<JsonArrayConst>();
   attendanceRecordsCache_.reserve(array.size());
+  size_t index = 0;
   for (JsonObjectConst item : array) {
+    serviceStorageLoop(index++);
     const AttendanceRecord record = attendanceFromJson(item);
     if (!record.recordId.isEmpty()) {
       attendanceRecordsCache_.push_back(record);

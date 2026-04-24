@@ -6,18 +6,25 @@
 FingerprintManager::FingerprintManager() : serial_(2), finger_(&serial_) {}
 
 bool FingerprintManager::begin(String &error) {
+  error = "";
+  Serial.printf("[FP][BOOT] begin rx=%d tx=%d\n", Pins::kFingerprintRx,
+                Pins::kFingerprintTx);
   serial_.begin(57600, SERIAL_8N1, Pins::kFingerprintRx, Pins::kFingerprintTx);
+  serial_.setTimeout(250);
   finger_.begin(57600);
+  yield();
   delay(120);
 
   if (!finger_.verifyPassword()) {
     error = "AS608 not found";
     ready_ = false;
+    Serial.printf("[FP][BOOT] verifyPassword failed error=%s\n", error.c_str());
     return false;
   }
 
   finger_.getParameters();
   ready_ = true;
+  Serial.println("[FP][BOOT] sensor ready");
   return true;
 }
 
@@ -109,6 +116,21 @@ bool FingerprintManager::deleteTemplate(uint16_t templateId, String &error) {
   }
 
   const uint8_t status = finger_.deleteModel(templateId);
+  if (status != FINGERPRINT_OK) {
+    error = decodeError(status);
+    return false;
+  }
+
+  return true;
+}
+
+bool FingerprintManager::clearDatabase(String &error) {
+  if (!ready_) {
+    error = "Scanner offline";
+    return false;
+  }
+
+  const uint8_t status = finger_.emptyDatabase();
   if (status != FINGERPRINT_OK) {
     error = decodeError(status);
     return false;

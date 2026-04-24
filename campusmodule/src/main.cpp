@@ -1,8 +1,11 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <esp_rom_sys.h>
+#include <esp_system.h>
 #include <time.h>
 #include <Wire.h>
 
+#include <algorithm>
 #include <vector>
 
 #include <CampusEligibility.h>
@@ -173,6 +176,39 @@ bool g_waitingForFingerRemoval = false;
 size_t g_lastAttendancePromptUnsyncedCount = static_cast<size_t>(-1);
 String g_lastFingerprintState = "boot";
 AttendanceCaptureMode g_attendanceCaptureMode = AttendanceCaptureMode::None;
+
+void bootYield() {
+  yield();
+  delay(1);
+}
+
+const char *resetReasonName(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:
+      return "power_on";
+    case ESP_RST_EXT:
+      return "external_reset";
+    case ESP_RST_SW:
+      return "software_reset";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "interrupt_watchdog";
+    case ESP_RST_TASK_WDT:
+      return "task_watchdog";
+    case ESP_RST_WDT:
+      return "watchdog";
+    case ESP_RST_DEEPSLEEP:
+      return "deep_sleep";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_SDIO:
+      return "sdio";
+    case ESP_RST_UNKNOWN:
+    default:
+      return "unknown";
+  }
+}
 
 void showTimedMessage(const String &line1, const String &line2, uint32_t holdMs,
                       const String &line3 = "", const String &line4 = "");
@@ -890,6 +926,10 @@ bool syncModeIncludesCleanupQueue(SyncMode mode) {
          mode == SyncMode::Full;
 }
 
+bool syncModeAllowsAs608Wipe(SyncMode mode) {
+  return mode == SyncMode::CleanupQueue || mode == SyncMode::Full;
+}
+
 bool syncModeIncludesContextRefresh(SyncMode mode) {
   return mode == SyncMode::Auto || mode == SyncMode::EnrollmentOnly ||
          mode == SyncMode::PairedEventData || mode == SyncMode::CleanupQueue ||
@@ -1134,7 +1174,12 @@ bool recoverPairedEventFromAttendance(EventInfo &event) {
 
   String latestEventId;
   uint64_t latestEpoch = 0;
-  for (const auto &record : records) {
+  for (size_t index = 0; index < records.size(); ++index) {
+    if ((index % 16U) == 0U) {
+      yield();
+    }
+
+    const auto &record = records[index];
     if (record.synced || record.syncRejected || record.eventId.isEmpty()) {
       continue;
     }
@@ -2070,6 +2115,15 @@ void tickSync() {
           failSync(error);
           return;
         }
+        if (!syncModeAllowsAs608Wipe(g_sync.mode)) {
+          g_sync.cleanupQueue.erase(
+              std::remove_if(
+                  g_sync.cleanupQueue.begin(), g_sync.cleanupQueue.end(),
+                  [](const CleanupQueueItem &item) {
+                    return item.type == "clear_as608_database";
+                  }),
+              g_sync.cleanupQueue.end());
+        }
         g_sync.cleanupQueueLoaded = true;
       }
 
@@ -2084,23 +2138,63 @@ void tickSync() {
       g_sync.cleanupQueue.erase(g_sync.cleanupQueue.begin());
 
       String cleanupError;
-      if (!g_storage.applyCleanupQueueItem(item, cleanupError)) {
-        failSync(cleanupError);
-        return;
-      }
-
-      if (item.type == "deleteTemplateIfUnused") {
-        String deleteError;
-        if (!g_fingerprint.deleteTemplate(item.templateId, deleteError)) {
-          failSync(deleteError);
-          return;
-        }
-      }
-
       CleanupQueueResult result;
       result.cleanupId = item.cleanupId;
       result.processed = true;
+      result.success = true;
       result.message = "Applied on device";
+
+      if (item.type == "clear_as608_database") {
+        if (!syncModeAllowsAs608Wipe(g_sync.mode)) {
+          failSync("AS608 wipe requires Cleanup Queue or Full Sync");
+          return;
+        }
+
+        Serial.printf(
+            "[FP_WIPE][MODULE_START] cleanupId=%s device=%s reason=%s clearMode=%s "
+            "markStale=%s\n",
+            item.cleanupId.c_str(), item.targetDeviceId.c_str(),
+            item.reason.c_str(), item.clearMode.c_str(),
+            item.markEnrollmentSessionRowsStale ? "yes" : "no");
+
+        if (!g_fingerprint.clearDatabase(cleanupError)) {
+          Serial.printf(
+              "[FP_WIPE][AS608_EMPTY_DATABASE_FAILED] cleanupId=%s error=%s\n",
+              item.cleanupId.c_str(), cleanupError.c_str());
+          result.success = false;
+          result.message = "AS608 empty database failed";
+          result.error = cleanupError;
+        } else if (!g_storage.clearFingerprintDataAfterFullWipe(cleanupError)) {
+          Serial.printf(
+              "[FP_WIPE][AS608_EMPTY_DATABASE_FAILED] cleanupId=%s error=%s\n",
+              item.cleanupId.c_str(), cleanupError.c_str());
+          result.success = false;
+          result.message = "AS608 cleared but local fingerprint cleanup failed";
+          result.error = cleanupError;
+        } else {
+          Serial.printf(
+              "[FP_WIPE][AS608_EMPTY_DATABASE_SUCCESS] cleanupId=%s\n",
+              item.cleanupId.c_str());
+          loadStoredPairedEventContext();
+          loadStoredEnrollmentSession();
+          g_sync.contextRefreshNeeded = true;
+          result.message = "AS608 database cleared on device";
+        }
+      } else {
+        if (!g_storage.applyCleanupQueueItem(item, cleanupError)) {
+          failSync(cleanupError);
+          return;
+        }
+
+        if (item.type == "deleteTemplateIfUnused") {
+          String deleteError;
+          if (!g_fingerprint.deleteTemplate(item.templateId, deleteError)) {
+            failSync(deleteError);
+            return;
+          }
+        }
+      }
+
       std::vector<CleanupQueueResult> ackResults = {result};
       String ackError;
       if (!g_backend.acknowledgeCleanupQueue(ackResults, ackError)) {
@@ -2108,13 +2202,16 @@ void tickSync() {
         return;
       }
 
-      loadStoredPairedEventContext();
-      loadStoredEnrollmentSession();
-      g_sync.contextRefreshNeeded = true;
+      if (item.type != "clear_as608_database") {
+        loadStoredPairedEventContext();
+        loadStoredEnrollmentSession();
+        g_sync.contextRefreshNeeded = true;
+      }
       ++g_sync.cleanupProcessed;
-      Serial.printf("[SYNC][CLEANUP] cleanupId=%s type=%s template=%d schoolId=%s\n",
-                    item.cleanupId.c_str(), item.type.c_str(), item.templateId,
-                    item.schoolId.c_str());
+      Serial.printf(
+          "[SYNC][CLEANUP] cleanupId=%s type=%s template=%d schoolId=%s success=%s\n",
+          item.cleanupId.c_str(), item.type.c_str(), item.templateId,
+          item.schoolId.c_str(), result.success ? "yes" : "no");
       markDisplayDirty();
       return;
     }
@@ -3460,33 +3557,68 @@ void logHeartbeat() {
 }  // namespace
 
 void setup() {
+  ets_printf("[BOOT] setup start\n");
   Serial.begin(115200);
   delay(200);
+  Serial.println("[BOOT] serial ready");
+  const esp_reset_reason_t resetReason = esp_reset_reason();
+  Serial.printf("[BOOT] reset reason=%s (%d)\n", resetReasonName(resetReason),
+                static_cast<int>(resetReason));
 
   Wire.begin(Pins::kI2cSda, Pins::kI2cScl);
+  bootYield();
 
   g_buttons.begin();
   g_feedback.begin();
-  g_storage.begin();
-  g_wifi.begin();
-  g_time.begin(g_storage);
+  bootYield();
 
-  g_display.begin();
-  g_display.show("CAMPUS Module", "Booting...");
+  Serial.println("[BOOT] storage begin start");
+  const bool storageReady = g_storage.begin();
+  Serial.printf("[BOOT] storage begin done ready=%s\n",
+                storageReady ? "yes" : "no");
+  bootYield();
 
-  if (!g_wifi.hasCredentials()) {
-    showTimedMessage("Wi-Fi not set", "Use Wi-Fi Setup", kShortMessageMs);
+  Serial.println("[BOOT] display begin start");
+  const bool displayReady = g_display.begin();
+  Serial.printf("[BOOT] display begin done ready=%s\n",
+                displayReady ? "yes" : "no");
+  if (displayReady) {
+    g_display.show("CAMPUS Module", "Booting...");
   }
+  bootYield();
 
+  Serial.println("[BOOT] fingerprint begin start");
   String fingerprintError;
-  if (!g_fingerprint.begin(fingerprintError)) {
+  const bool fingerprintReady = g_fingerprint.begin(fingerprintError);
+  Serial.printf("[BOOT] fingerprint begin done ready=%s error=%s\n",
+                fingerprintReady ? "yes" : "no",
+                fingerprintError.isEmpty() ? "-" : fingerprintError.c_str());
+  if (!fingerprintReady) {
+    Serial.printf("[BOOT] fingerprint offline: %s\n", fingerprintError.c_str());
     showTimedMessage("Scanner Error", trim16(fingerprintError), kMediumMessageMs);
     setFingerprintState("offline");
   } else {
     setFingerprintState("ready");
   }
+  bootYield();
 
+  Serial.println("[BOOT] wifi begin start");
+  g_wifi.begin();
+  Serial.println("[BOOT] wifi begin done");
+  bootYield();
+
+  Serial.println("[BOOT] time begin start");
+  g_time.begin(g_storage);
+  Serial.println("[BOOT] time begin done");
+  bootYield();
+
+  if (!g_wifi.hasCredentials()) {
+    showTimedMessage("Wi-Fi not set", "Use Wi-Fi Setup", kShortMessageMs);
+  }
+
+  Serial.println("[BOOT] paired context load start");
   loadStoredPairedEventContext();
+  Serial.println("[BOOT] paired context load done");
   markDisplayDirty();
   Serial.printf("[BOOT] device=%s wifi=%s freeHeap=%u\n",
                 g_storage.deviceId().c_str(), g_wifi.statusText().c_str(),

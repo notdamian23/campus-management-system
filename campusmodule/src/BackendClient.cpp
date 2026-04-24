@@ -172,6 +172,23 @@ bool isTlsMemoryFailure(int errorCode, const char *detail) {
          normalized.indexOf("alloc") >= 0;
 }
 
+bool isClearAs608CleanupType(const String &type) {
+  return type.equalsIgnoreCase("clear_as608_database");
+}
+
+bool isDeleteTemplateCleanupType(const String &type) {
+  return type.equalsIgnoreCase("deleteTemplateIfUnused");
+}
+
+bool isSupportedCleanupType(const String &type) {
+  return isClearAs608CleanupType(type) || isDeleteTemplateCleanupType(type);
+}
+
+bool cleanupTargetMatchesLocalDevice(const String &targetDeviceId) {
+  return targetDeviceId.isEmpty() ||
+         targetDeviceId.equalsIgnoreCase(CampusConfig::kDeviceId);
+}
+
 bool parseBoolValue(JsonVariantConst value, bool fallback = false) {
   if (value.isNull()) {
     return fallback;
@@ -1715,19 +1732,68 @@ bool BackendClient::fetchCleanupQueue(std::vector<CleanupQueueItem> &items,
         String(item["uid"] | item["studentUid"] | item["studentId"] | "");
     cleanupItem.schoolId = String(item["schoolId"] | "");
     cleanupItem.targetDeviceId = String(item["targetDeviceId"] | "");
+    cleanupItem.clearMode = String(item["clearMode"] | "");
+    cleanupItem.markEnrollmentSessionRowsStale =
+        parseBoolValue(item["markEnrollmentSessionRowsStale"], false);
     cleanupItem.reason = String(item["reason"] | "");
-    if (!cleanupItem.cleanupId.isEmpty() && cleanupItem.templateId > 0 &&
-        !cleanupItem.type.isEmpty()) {
-      items.push_back(cleanupItem);
+
+    cleanupItem.cleanupId.trim();
+    cleanupItem.type.trim();
+    cleanupItem.studentUid.trim();
+    cleanupItem.schoolId.trim();
+    cleanupItem.targetDeviceId.trim();
+    cleanupItem.clearMode.trim();
+    cleanupItem.reason.trim();
+
+    if (isClearAs608CleanupType(cleanupItem.type)) {
+      cleanupItem.type = "clear_as608_database";
+      if (cleanupItem.clearMode.isEmpty()) {
+        cleanupItem.clearMode = "full_sensor_and_firebase_after_ack";
+      }
+    } else if (isDeleteTemplateCleanupType(cleanupItem.type)) {
+      cleanupItem.type = "deleteTemplateIfUnused";
     }
+
+    if (cleanupItem.cleanupId.isEmpty() || cleanupItem.type.isEmpty()) {
+      Serial.println("[CLEANUP] skipped malformed item missing id/type");
+      continue;
+    }
+
+    if (!isSupportedCleanupType(cleanupItem.type)) {
+      Serial.printf("[CLEANUP] skipped unsupported type=%s cleanupId=%s\n",
+                    cleanupItem.type.c_str(), cleanupItem.cleanupId.c_str());
+      continue;
+    }
+
+    if (!cleanupTargetMatchesLocalDevice(cleanupItem.targetDeviceId)) {
+      Serial.printf("[CLEANUP] skipped foreign target cleanupId=%s device=%s\n",
+                    cleanupItem.cleanupId.c_str(),
+                    cleanupItem.targetDeviceId.c_str());
+      continue;
+    }
+
+    const bool requiresTemplateId = !isClearAs608CleanupType(cleanupItem.type);
+    if (requiresTemplateId && cleanupItem.templateId <= 0) {
+      Serial.printf("[CLEANUP] skipped malformed item cleanupId=%s type=%s template=%d\n",
+                    cleanupItem.cleanupId.c_str(), cleanupItem.type.c_str(),
+                    cleanupItem.templateId);
+      continue;
+    }
+
+    items.push_back(cleanupItem);
+    yield();
   }
 
   Serial.printf("[CLEANUP] queue code=%d items=%u\n", lastHttpStatusCode_,
                 static_cast<unsigned>(items.size()));
   for (const auto &item : items) {
-    Serial.printf("[CLEANUP] item type=%s templateId=%d schoolId=%s uid=%s\n",
-                  item.type.c_str(), item.templateId, item.schoolId.c_str(),
-                  item.studentUid.c_str());
+    Serial.printf(
+        "[CLEANUP] item type=%s templateId=%d schoolId=%s uid=%s device=%s "
+        "clearMode=%s markStale=%s\n",
+        item.type.c_str(), item.templateId, item.schoolId.c_str(),
+        item.studentUid.c_str(), item.targetDeviceId.c_str(),
+        item.clearMode.c_str(),
+        item.markEnrollmentSessionRowsStale ? "yes" : "no");
   }
 
   return true;
@@ -1745,13 +1811,20 @@ bool BackendClient::acknowledgeCleanupQueue(
                                  "cleanupAck payload", error)) {
     return false;
   }
-  JsonArray array = payload.createNestedArray("processedIds");
+  JsonArray array = payload.createNestedArray("results");
   size_t processedIds = 0;
   for (const auto &result : results) {
     if (!result.processed || result.cleanupId.isEmpty()) {
       continue;
     }
-    array.add(result.cleanupId);
+    JsonObject entry = array.createNestedObject();
+    entry["cleanupId"] = result.cleanupId;
+    entry["processed"] = result.processed;
+    entry["success"] = result.success;
+    entry["message"] = result.message;
+    if (!result.error.isEmpty()) {
+      entry["error"] = result.error;
+    }
     ++processedIds;
   }
 

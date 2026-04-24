@@ -17,6 +17,7 @@ import {
 import {Select, SelectItem} from "@heroui/select";
 import {Skeleton} from "@heroui/skeleton";
 import {Spinner} from "@heroui/spinner";
+import {Switch} from "@heroui/switch";
 import {
   Table,
   TableBody,
@@ -36,11 +37,14 @@ import {
 } from "lucide-react";
 import {auth} from "@/lib/firebase";
 import {
+  adminClearFirebaseFingerprintMappingsOnly,
   adminBuildFingerprintMappingsFromProfiles,
   adminListFingerprintCleanupMappings,
   adminManageFingerprintCleanup,
+  adminQueueFullFingerprintWipe,
   getCampusFunctions,
   type FingerprintCleanupAction,
+  type FingerprintFullWipeCommandStatus,
   type FingerprintCleanupReport,
   type FingerprintCleanupReportMapping,
   type FingerprintCleanupSource,
@@ -59,6 +63,11 @@ type PendingAction =
       templateId: number;
       fingerprintDeviceId: string;
     };
+type WipeModalMode = "full" | "firebase-only" | null;
+
+const DEFAULT_FINGERPRINT_DEVICE_ID = "campus-portable-01";
+const FULL_WIPE_CONFIRMATION = "CLEAR AS608";
+const FIREBASE_ONLY_CONFIRMATION = "CLEAR FIREBASE ONLY";
 
 const statusOptions: Array<{key: StatusFilter; label: string}> = [
   {key: "all", label: "All statuses"},
@@ -111,6 +120,16 @@ function actionLabel(action: FingerprintCleanupAction) {
   return "Keep This Student";
 }
 
+function wipeStatusChipColor(status: FingerprintFullWipeCommandStatus) {
+  if (status === "completed") return "success";
+  if (status === "failed") return "danger";
+  return "warning";
+}
+
+function wipeModalConfirmationText(mode: WipeModalMode) {
+  return mode === "full" ? FULL_WIPE_CONFIRMATION : FIREBASE_ONLY_CONFIRMATION;
+}
+
 function SummarySkeleton() {
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
@@ -146,6 +165,11 @@ export default function AdminFingerprintCleanupPage() {
   const [actionLoadingKey, setActionLoadingKey] = useState("");
   const [buildModalOpen, setBuildModalOpen] = useState(false);
   const [buildMappingsLoading, setBuildMappingsLoading] = useState(false);
+  const [wipeModalMode, setWipeModalMode] = useState<WipeModalMode>(null);
+  const [wipeReason, setWipeReason] = useState("");
+  const [wipeConfirmationText, setWipeConfirmationText] = useState("");
+  const [markHistoricalRowsStale, setMarkHistoricalRowsStale] = useState(false);
+  const [wipeLoading, setWipeLoading] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
@@ -326,6 +350,27 @@ export default function AdminFingerprintCleanupPage() {
     report?.emptyMessage ?
       report.emptyMessage :
       "No fingerprint template IDs were found yet. Sync or enroll fingerprints first.";
+  const fullWipeCommand = report?.fullWipeCommand ?? null;
+  const hasPendingFullWipe = fullWipeCommand?.status === "pending";
+  const activeWipeConfirmationText = wipeModalConfirmationText(wipeModalMode);
+  const wipeConfirmationMatches =
+    wipeModalMode !== null &&
+    wipeConfirmationText.trim() === activeWipeConfirmationText;
+
+  function resetWipeModal() {
+    setWipeModalMode(null);
+    setWipeReason("");
+    setWipeConfirmationText("");
+    setMarkHistoricalRowsStale(false);
+    setWipeLoading(false);
+  }
+
+  function openWipeModal(mode: Exclude<WipeModalMode, null>) {
+    setWipeModalMode(mode);
+    setWipeReason("");
+    setWipeConfirmationText("");
+    setMarkHistoricalRowsStale(false);
+  }
 
   async function runAction() {
     if (!pendingAction) {
@@ -417,6 +462,82 @@ export default function AdminFingerprintCleanupPage() {
     }
   }
 
+  async function submitWipeAction() {
+    if (!wipeModalMode) {
+      return;
+    }
+
+    if (!wipeConfirmationMatches) {
+      campusToast.warning({
+        title: "Confirmation text mismatch",
+        description: `Type exactly ${activeWipeConfirmationText} to continue.`,
+        dedupeKey: `admin:fingerprint-cleanup:wipe-confirmation:${wipeModalMode}`,
+      });
+      return;
+    }
+
+    setWipeLoading(true);
+    try {
+      if (wipeModalMode === "full") {
+        const result = await adminQueueFullFingerprintWipe(
+          getCampusFunctions(),
+          {
+            deviceId: DEFAULT_FINGERPRINT_DEVICE_ID,
+            reason: wipeReason.trim(),
+            markEnrollmentSessionRowsStale: markHistoricalRowsStale,
+          },
+        );
+
+        if (result.alreadyPending) {
+          campusToast.warning({
+            title: "AS608 wipe already queued",
+            description: result.message,
+            dedupeKey: `admin:fingerprint-cleanup:wipe-pending:${result.commandId}`,
+          });
+        } else {
+          campusToast.success({
+            title: "AS608 wipe queued",
+            description: result.message,
+            dedupeKey: `admin:fingerprint-cleanup:wipe-queued:${result.commandId}`,
+          });
+        }
+      } else {
+        const result = await adminClearFirebaseFingerprintMappingsOnly(
+          getCampusFunctions(),
+          {
+            deviceId: DEFAULT_FINGERPRINT_DEVICE_ID,
+            reason: wipeReason.trim(),
+            markEnrollmentSessionRowsStale: markHistoricalRowsStale,
+          },
+        );
+
+        campusToast.success({
+          title: "Firebase mappings cleared",
+          description: result.message,
+          dedupeKey:
+            `admin:fingerprint-cleanup:firebase-only:${result.profilesCleared}:${result.studentsCleared}:${result.fingerprintTemplateDocsCleared}`,
+        });
+      }
+
+      resetWipeModal();
+      await loadReport();
+    } catch (error: unknown) {
+      campusToast.error({
+        title:
+          wipeModalMode === "full" ?
+            "AS608 wipe request failed" :
+            "Firebase-only clear failed",
+        description:
+          error instanceof Error ?
+            error.message :
+            "Fingerprint wipe failed.",
+        dedupeKey: `admin:fingerprint-cleanup:wipe-error:${wipeModalMode ?? "unknown"}`,
+      });
+    } finally {
+      setWipeLoading(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <Card shadow="sm" className="border border-[#e8ddd5] bg-white">
@@ -427,8 +548,8 @@ export default function AdminFingerprintCleanupPage() {
                 <Chip variant="flat" color="danger">
                   Admin Only
                 </Chip>
-                <Chip variant="flat">
-                  No full wipe
+                <Chip variant="flat" color="warning">
+                  Dangerous actions available
                 </Chip>
               </div>
               <div>
@@ -436,20 +557,57 @@ export default function AdminFingerprintCleanupPage() {
                   Fingerprint Cleanup
                 </h1>
                 <p className="mt-2 max-w-3xl text-sm text-campus-text-secondary sm:text-base">
-                  Review stale, duplicate, and missing fingerprint mappings safely.
-                  This tool only queues targeted cleanup for the ESP32 and never
-                  clears the whole AS608 database.
+                  Review stale, duplicate, and missing fingerprint mappings, or
+                  queue a full AS608 wipe for the portable module. Firebase
+                  fingerprint mappings are only cleared automatically after the
+                  ESP32 confirms that the sensor database was emptied.
                 </p>
               </div>
             </div>
 
             <div className="flex flex-wrap gap-2">
               <Button
+                color="danger"
+                onPress={() => {
+                  openWipeModal("full");
+                }}
+                isDisabled={
+                  refreshing ||
+                  loading ||
+                  wipeLoading ||
+                  buildMappingsLoading ||
+                  hasPendingFullWipe
+                }
+              >
+                Clear AS608 + Firebase Fingerprints
+              </Button>
+              <Button
+                variant="bordered"
+                color="warning"
+                onPress={() => {
+                  openWipeModal("firebase-only");
+                }}
+                isDisabled={
+                  refreshing ||
+                  loading ||
+                  wipeLoading ||
+                  buildMappingsLoading ||
+                  hasPendingFullWipe
+                }
+              >
+                Clear Firebase mappings only
+              </Button>
+              <Button
                 variant="bordered"
                 onPress={() => {
                   setBuildModalOpen(true);
                 }}
-                isDisabled={refreshing || loading || buildMappingsLoading}
+                isDisabled={
+                  refreshing ||
+                  loading ||
+                  buildMappingsLoading ||
+                  wipeLoading
+                }
               >
                 Build mappings from profiles
               </Button>
@@ -462,7 +620,7 @@ export default function AdminFingerprintCleanupPage() {
                 onPress={() => {
                   void loadReport(true);
                 }}
-                isDisabled={refreshing || loading}
+                isDisabled={refreshing || loading || wipeLoading}
               >
                 Refresh Fingerprint List
               </Button>
@@ -562,6 +720,41 @@ export default function AdminFingerprintCleanupPage() {
               title="Fallback records are still in use"
               description="Showing profile and student fallback mappings because the canonical fingerprintTemplates records are empty or incomplete. Use Build mappings from profiles to create admin cleanup records without touching the AS608 sensor."
             />
+          ) : null}
+
+          {!loading && fullWipeCommand ? (
+            <Alert
+              color={wipeStatusChipColor(fullWipeCommand.status)}
+              variant="flat"
+              title={
+                fullWipeCommand.status === "pending" ?
+                  "AS608 wipe command pending" :
+                fullWipeCommand.status === "completed" ?
+                  "AS608 wipe completed" :
+                  "AS608 wipe failed"
+              }
+              description={
+                fullWipeCommand.status === "pending" ?
+                  `Waiting for module ${fullWipeCommand.targetDeviceId || DEFAULT_FINGERPRINT_DEVICE_ID} to run Cleanup Queue or Full Sync. Firebase mappings will clear only after the device confirms the AS608 wipe.` :
+                fullWipeCommand.status === "completed" ?
+                  `Completed on ${formatDateTime(fullWipeCommand.completedAtMs || fullWipeCommand.processedAtMs)} for ${fullWipeCommand.targetDeviceId || DEFAULT_FINGERPRINT_DEVICE_ID}. Active canonical mappings should now be zero until students are re-enrolled.` :
+                  `${fullWipeCommand.error || "The module reported a failure while clearing the AS608 database."} Use Clear Firebase mappings only if the sensor has already been cleared manually.`
+              }
+            />
+          ) : null}
+
+          {!loading && fullWipeCommand ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-2xl border bg-[#faf7f3] px-4 py-3 text-sm text-campus-text-secondary">
+              <Chip color={wipeStatusChipColor(fullWipeCommand.status)} variant="flat" size="sm">
+                {fullWipeCommand.status}
+              </Chip>
+              <span>Device: {fullWipeCommand.targetDeviceId || DEFAULT_FINGERPRINT_DEVICE_ID}</span>
+              <span>Queued: {formatDateTime(fullWipeCommand.createdAtMs)}</span>
+              <span>Mode: {fullWipeCommand.clearMode}</span>
+              {fullWipeCommand.markEnrollmentSessionRowsStale ? (
+                <span>Historical session rows stale</span>
+              ) : null}
+            </div>
           ) : null}
         </CardBody>
       </Card>
@@ -1021,6 +1214,114 @@ export default function AdminFingerprintCleanupPage() {
                   isLoading={Boolean(actionLoadingKey)}
                 >
                   {pendingActionLabel}
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      <Modal
+        isOpen={wipeModalMode !== null}
+        onOpenChange={(open) => {
+          if (!open && !wipeLoading) {
+            resetWipeModal();
+          }
+        }}
+        size="lg"
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>
+                {wipeModalMode === "full" ?
+                  "Clear AS608 + Firebase Fingerprints" :
+                  "Clear Firebase mappings only"}
+              </ModalHeader>
+              <ModalBody className="space-y-4">
+                <div className="rounded-2xl border bg-[#fff7ed] px-4 py-3 text-sm text-campus-text-secondary">
+                  <p className="font-semibold text-campus-text-primary">
+                    Target device: {DEFAULT_FINGERPRINT_DEVICE_ID}
+                  </p>
+                  <p className="mt-1">
+                    {wipeModalMode === "full" ?
+                      "The browser cannot clear the AS608 directly. This action queues a module command and Firebase stays intact until the ESP32 confirms success." :
+                      "This does not clear AS608 templates. Use only if the sensor has already been cleared manually."}
+                  </p>
+                </div>
+
+                {wipeModalMode === "full" ? (
+                  <ul className="list-disc space-y-2 pl-5 text-sm text-campus-text-secondary">
+                    <li>This deletes all templates stored inside the AS608 sensor.</li>
+                    <li>This clears `fingerprintTemplateId`, `templateId`, `fingerprintStatus`, and `hasFingerprint` mappings from Firebase profile and student records after device acknowledgment.</li>
+                    <li>Students must be re-enrolled after this finishes.</li>
+                    <li>Attendance may not work until re-enrollment is completed.</li>
+                    <li>This does not delete student accounts.</li>
+                    <li>This does not delete attendance records.</li>
+                  </ul>
+                ) : (
+                  <ul className="list-disc space-y-2 pl-5 text-sm text-campus-text-secondary">
+                    <li>Firebase fingerprint mappings will be cleared immediately.</li>
+                    <li>AS608 templates are not touched by this action.</li>
+                    <li>Use this only after the sensor database has already been cleared manually.</li>
+                    <li>This does not delete student accounts.</li>
+                    <li>This does not delete attendance records.</li>
+                  </ul>
+                )}
+
+                <Switch
+                  size="sm"
+                  isSelected={markHistoricalRowsStale}
+                  onValueChange={setMarkHistoricalRowsStale}
+                  classNames={{
+                    label: "text-sm text-campus-text-primary",
+                  }}
+                >
+                  Also mark all previous synced enrollment session rows as stale
+                </Switch>
+
+                <Input
+                  label="Reason"
+                  placeholder="Explain why this wipe is needed"
+                  value={wipeReason}
+                  onValueChange={setWipeReason}
+                />
+
+                <Input
+                  label={`Type ${activeWipeConfirmationText} to continue`}
+                  placeholder={activeWipeConfirmationText}
+                  value={wipeConfirmationText}
+                  onValueChange={setWipeConfirmationText}
+                />
+
+                <p className="text-xs text-campus-text-secondary">
+                  {wipeModalMode === "full" ?
+                    "The command will stay pending until the module runs Cleanup Queue or Full Sync and confirms that the AS608 database was emptied." :
+                    "This is the unsafe fallback path for cases where the AS608 has already been cleared outside the web app."}
+                </p>
+              </ModalBody>
+              <ModalFooter className="justify-between">
+                <Button
+                  variant="bordered"
+                  onPress={() => {
+                    resetWipeModal();
+                    onClose();
+                  }}
+                  isDisabled={wipeLoading}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  color={wipeModalMode === "firebase-only" ? "warning" : "danger"}
+                  onPress={() => {
+                    void submitWipeAction();
+                  }}
+                  isLoading={wipeLoading}
+                  isDisabled={!wipeConfirmationMatches}
+                >
+                  {wipeModalMode === "full" ?
+                    "Queue full wipe" :
+                    "Clear Firebase mappings"}
                 </Button>
               </ModalFooter>
             </>

@@ -17,6 +17,7 @@ const db = admin.firestore();
 const REGION = "asia-southeast1";
 const STUDENT_SCHOOL_ID_INDEX_COLLECTION = "studentSchoolIds";
 const STUDENT_SCHOOL_ID_RESERVATION_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_FINGERPRINT_WIPE_DEVICE_ID = "campus-portable-01";
 
 type BulkImportContext = {
   data: Record<string, unknown>;
@@ -97,7 +98,28 @@ type FingerprintCleanupReportSource =
 type FingerprintCleanupQueueType =
   | "removeMapping"
   | "deleteTemplateIfUnused"
-  | "markNeedsReenrollment";
+  | "markNeedsReenrollment"
+  | "clear_as608_database";
+type FingerprintFullWipeCommandStatus = "pending" | "completed" | "failed";
+type FingerprintFullWipeClearMode =
+  | "full_sensor_and_firebase_after_ack"
+  | "firebase_only_manual_sensor_clear";
+type FingerprintFullWipeCommandSummary = {
+  commandId: string;
+  commandType: "clear_as608_database";
+  status: FingerprintFullWipeCommandStatus;
+  clearMode: FingerprintFullWipeClearMode;
+  targetDeviceId: string;
+  reason: string;
+  createdByUid: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  processedAtMs: number;
+  completedAtMs: number;
+  failedAtMs: number;
+  error: string;
+  markEnrollmentSessionRowsStale: boolean;
+};
 type FingerprintCleanupReportMapping = {
   rowId: string;
   templateId: number;
@@ -144,6 +166,7 @@ type FingerprintCleanupReport = {
   fallbackUsed: boolean;
   emptyMessage: string;
   mappings: FingerprintCleanupReportMapping[];
+  fullWipeCommand: FingerprintFullWipeCommandSummary | null;
 };
 type MutableFingerprintCleanupMapping = {
   rowId: string;
@@ -191,6 +214,25 @@ type FingerprintCleanupBuildMappingsResponse = {
   updatedCount: number;
   skippedCount: number;
   totalProfileMappings: number;
+  message: string;
+};
+type FingerprintFullWipeQueueResponse = {
+  ok: boolean;
+  commandId: string;
+  status: FingerprintFullWipeCommandStatus;
+  targetDeviceId: string;
+  message: string;
+  alreadyPending?: boolean;
+  markEnrollmentSessionRowsStale: boolean;
+};
+type FirebaseFingerprintWipeSummary = {
+  fingerprintTemplateDocsCleared: number;
+  profilesCleared: number;
+  studentsCleared: number;
+  enrollmentSessionStudentsMarkedStale: number;
+};
+type FingerprintFirebaseOnlyWipeResponse = FirebaseFingerprintWipeSummary & {
+  ok: boolean;
   message: string;
 };
 
@@ -1380,7 +1422,313 @@ function emptyFingerprintCleanupReport(
       overrides?.emptyMessage ??
       "No fingerprint mappings found yet. Existing AS608 templates may still be on the device, but the web app has no mapping records. Run module sync or build mappings from profiles.",
     mappings: overrides?.mappings ?? [],
+    fullWipeCommand: overrides?.fullWipeCommand ?? null,
   };
+}
+
+function normalizeFingerprintWipeCommandStatus(
+  value: unknown,
+): FingerprintFullWipeCommandStatus {
+  const normalized = normalizeLower(value);
+  if (normalized === "completed") {
+    return "completed";
+  }
+  if (normalized === "failed") {
+    return "failed";
+  }
+  return "pending";
+}
+
+function normalizeFingerprintWipeClearMode(
+  value: unknown,
+): FingerprintFullWipeClearMode {
+  return normalizeLower(value) === "firebase_only_manual_sensor_clear" ?
+    "firebase_only_manual_sensor_clear" :
+    "full_sensor_and_firebase_after_ack";
+}
+
+function buildFingerprintFullWipeCommandSummary(
+  commandId: string,
+  data: FirebaseFirestore.DocumentData,
+): FingerprintFullWipeCommandSummary {
+  return {
+    commandId,
+    commandType: "clear_as608_database",
+    status: normalizeFingerprintWipeCommandStatus(data.status),
+    clearMode: normalizeFingerprintWipeClearMode(data.clearMode),
+    targetDeviceId:
+      normalizeText(data.targetDeviceId) || DEFAULT_FINGERPRINT_WIPE_DEVICE_ID,
+    reason: normalizeText(data.reason),
+    createdByUid:
+      normalizeText(data.createdByUid) || normalizeText(data.createdBy),
+    createdAtMs: toMillis(data.createdAt),
+    updatedAtMs: toMillis(data.updatedAt),
+    processedAtMs: toMillis(data.processedAt),
+    completedAtMs: toMillis(data.completedAt),
+    failedAtMs: toMillis(data.failedAt),
+    error:
+      normalizeText(data.error) ||
+      normalizeText(data.processedError) ||
+      normalizeText(data.processedMessage),
+    markEnrollmentSessionRowsStale: data.markEnrollmentSessionRowsStale === true,
+  };
+}
+
+function isPendingFingerprintWipeCommand(
+  data: FirebaseFirestore.DocumentData | undefined,
+): boolean {
+  const normalizedStatus = normalizeFingerprintWipeCommandStatus(data?.status);
+  return normalizedStatus === "pending" && data?.processed !== true;
+}
+
+async function getLatestFingerprintFullWipeCommandSummary(): Promise<FingerprintFullWipeCommandSummary | null> {
+  const snapshot = await db.collection("moduleCleanupQueue").get();
+  let latest: FingerprintFullWipeCommandSummary | null = null;
+
+  snapshot.docs.forEach((doc) => {
+    const data = doc.data() ?? {};
+    if (normalizeLower(data.type) !== "clear_as608_database") {
+      return;
+    }
+
+    const summary = buildFingerprintFullWipeCommandSummary(doc.id, data);
+    const currentSortMs =
+      summary.createdAtMs ||
+      summary.updatedAtMs ||
+      summary.processedAtMs ||
+      summary.completedAtMs ||
+      summary.failedAtMs;
+    const latestSortMs = latest ?
+      latest.createdAtMs ||
+      latest.updatedAtMs ||
+      latest.processedAtMs ||
+      latest.completedAtMs ||
+      latest.failedAtMs :
+      -1;
+
+    if (
+      !latest ||
+      currentSortMs > latestSortMs ||
+      (currentSortMs === latestSortMs && summary.commandId > latest.commandId)
+    ) {
+      latest = summary;
+    }
+  });
+
+  return latest;
+}
+
+function templateDocMatchesFingerprintWipeTarget(
+  templateDocId: string,
+  data: FirebaseFirestore.DocumentData,
+  targetDeviceId: string,
+): boolean {
+  const normalizedTarget = normalizeLower(targetDeviceId);
+  if (!normalizedTarget) {
+    return true;
+  }
+
+  const candidateDeviceIds = [
+    normalizeText(data.fingerprintDeviceId),
+    normalizeText(data.sensorId),
+    extractFingerprintDeviceIdFromDocId(templateDocId),
+  ]
+    .map((value) => normalizeLower(value))
+    .filter(Boolean);
+
+  if (candidateDeviceIds.length === 0) {
+    return true;
+  }
+
+  return candidateDeviceIds.includes(normalizedTarget);
+}
+
+function documentHasActiveFingerprintMapping(
+  data: FirebaseFirestore.DocumentData,
+): boolean {
+  if (data.hasFingerprint === true) {
+    return true;
+  }
+
+  if (extractFingerprintTemplateId(data) > 0) {
+    return true;
+  }
+
+  const fingerprintStatus = normalizeLower(extractFingerprintStatus(data));
+  return fingerprintStatus === "active" ||
+    fingerprintStatus === "enrolled" ||
+    fingerprintStatus === "synced";
+}
+
+function buildFingerprintFirebaseClearPatch(): Record<string, unknown> {
+  return {
+    hasFingerprint: false,
+    needsReenrollment: true,
+    fingerprintStatus: "pending",
+    fingerprintTemplateId: admin.firestore.FieldValue.delete(),
+    templateId: admin.firestore.FieldValue.delete(),
+    fingerprintDeviceId: admin.firestore.FieldValue.delete(),
+    fingerprintEnrolledAt: admin.firestore.FieldValue.delete(),
+    latestEnrollmentSessionId: admin.firestore.FieldValue.delete(),
+    updatedAt: serverTimestamp(),
+  };
+}
+
+function buildEnrollmentSessionFingerprintStalePatch(
+  clearMode: FingerprintFullWipeClearMode,
+  reason: string,
+): Record<string, unknown> {
+  const staleReason =
+    clearMode === "firebase_only_manual_sensor_clear" ?
+      "Historical fingerprint row marked stale after Firebase-only fingerprint clear." :
+      "Historical fingerprint row marked stale after AS608 fingerprint wipe.";
+
+  return {
+    status: "stale",
+    syncStatus: "stale",
+    fingerprintStatus: "pending",
+    needsReenrollment: true,
+    staleAt: serverTimestamp(),
+    staleReason: reason || staleReason,
+    updatedAt: serverTimestamp(),
+  };
+}
+
+async function executeFirebaseFingerprintWipe(input: {
+  targetDeviceId: string;
+  clearMode: FingerprintFullWipeClearMode;
+  reason: string;
+  actorUid: string;
+  markEnrollmentSessionRowsStale: boolean;
+}): Promise<FirebaseFingerprintWipeSummary> {
+  const targetDeviceId =
+    normalizeText(input.targetDeviceId) || DEFAULT_FINGERPRINT_WIPE_DEVICE_ID;
+  const clearMode = normalizeFingerprintWipeClearMode(input.clearMode);
+  const reason = normalizeText(input.reason);
+  const markEnrollmentSessionRowsStale =
+    input.markEnrollmentSessionRowsStale === true;
+  const summary: FirebaseFingerprintWipeSummary = {
+    fingerprintTemplateDocsCleared: 0,
+    profilesCleared: 0,
+    studentsCleared: 0,
+    enrollmentSessionStudentsMarkedStale: 0,
+  };
+
+  functionsLogger.info("[FP_WIPE][FIREBASE_CLEAR_START]", {
+    actorUid: normalizeText(input.actorUid),
+    targetDeviceId,
+    clearMode,
+    reason,
+    markEnrollmentSessionRowsStale,
+  });
+
+  const [templateSnapshot, profileSnapshot, studentSnapshot, sessionSnapshot] =
+    await Promise.all([
+      db.collection("fingerprintTemplates").get(),
+      db.collection("profiles").get(),
+      db.collection("students").get(),
+      markEnrollmentSessionRowsStale ?
+        db.collection("enrollmentSessions").get() :
+        Promise.resolve(null),
+    ]);
+
+  let batch = db.batch();
+  let operationsInBatch = 0;
+  const flushBatch = async () => {
+    if (operationsInBatch === 0) {
+      return;
+    }
+    await batch.commit();
+    batch = db.batch();
+    operationsInBatch = 0;
+  };
+
+  const clearPatch = buildFingerprintFirebaseClearPatch();
+  for (const templateDoc of templateSnapshot.docs) {
+    if (!templateDocMatchesFingerprintWipeTarget(
+      templateDoc.id,
+      templateDoc.data() ?? {},
+      targetDeviceId,
+    )) {
+      continue;
+    }
+
+    batch.delete(templateDoc.ref);
+    summary.fingerprintTemplateDocsCleared += 1;
+    operationsInBatch += 1;
+    if (operationsInBatch >= 400) {
+      await flushBatch();
+    }
+  }
+
+  for (const profileDoc of profileSnapshot.docs) {
+    if (!documentHasActiveFingerprintMapping(profileDoc.data() ?? {})) {
+      continue;
+    }
+
+    batch.set(profileDoc.ref, clearPatch, {merge: true});
+    summary.profilesCleared += 1;
+    operationsInBatch += 1;
+    if (operationsInBatch >= 400) {
+      await flushBatch();
+    }
+  }
+
+  for (const studentDoc of studentSnapshot.docs) {
+    if (!documentHasActiveFingerprintMapping(studentDoc.data() ?? {})) {
+      continue;
+    }
+
+    batch.set(studentDoc.ref, clearPatch, {merge: true});
+    summary.studentsCleared += 1;
+    operationsInBatch += 1;
+    if (operationsInBatch >= 400) {
+      await flushBatch();
+    }
+  }
+
+  if (markEnrollmentSessionRowsStale && sessionSnapshot) {
+    const stalePatch = buildEnrollmentSessionFingerprintStalePatch(
+      clearMode,
+      reason,
+    );
+    const sessionDocs = sessionSnapshot.docs;
+    for (let index = 0; index < sessionDocs.length; index += 20) {
+      const sessionChunk = sessionDocs.slice(index, index + 20);
+      const studentSnapshots = await Promise.all(
+        sessionChunk.map((sessionDoc) => sessionDoc.ref.collection("students").get()),
+      );
+
+      for (const studentSnapshot of studentSnapshots) {
+        for (const sessionStudentDoc of studentSnapshot.docs) {
+          const sessionStudentData = sessionStudentDoc.data() ?? {};
+          if (extractFingerprintTemplateId(sessionStudentData) <= 0) {
+            continue;
+          }
+
+          batch.set(sessionStudentDoc.ref, stalePatch, {merge: true});
+          summary.enrollmentSessionStudentsMarkedStale += 1;
+          operationsInBatch += 1;
+          if (operationsInBatch >= 400) {
+            await flushBatch();
+          }
+        }
+      }
+    }
+  }
+
+  await flushBatch();
+
+  functionsLogger.info("[FP_WIPE][FIREBASE_CLEAR_DONE]", {
+    actorUid: normalizeText(input.actorUid),
+    targetDeviceId,
+    clearMode,
+    reason,
+    markEnrollmentSessionRowsStale,
+    ...summary,
+  });
+
+  return summary;
 }
 
 function resolveFingerprintRecordName(
@@ -1623,11 +1971,18 @@ function isFingerprintMappingPotentiallyActive(
 }
 
 async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport> {
-  const [templateSnapshot, profileSnapshot, studentSnapshot, sessionSnapshot] = await Promise.all([
+  const [
+    templateSnapshot,
+    profileSnapshot,
+    studentSnapshot,
+    sessionSnapshot,
+    fullWipeCommand,
+  ] = await Promise.all([
     db.collection("fingerprintTemplates").get(),
     db.collection("profiles").get(),
     db.collection("students").get(),
     db.collection("enrollmentSessions").get(),
+    getLatestFingerprintFullWipeCommandSummary(),
   ]);
 
   const profileDataById = new Map<string, FirebaseFirestore.DocumentData>();
@@ -2243,6 +2598,7 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
     return emptyFingerprintCleanupReport({
       source,
       fallbackUsed: templateSnapshot.empty,
+      fullWipeCommand,
     });
   }
 
@@ -2275,6 +2631,7 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
     fallbackUsed: templateSnapshot.empty,
     emptyMessage: "",
     mappings: resolvedMappings,
+    fullWipeCommand,
   };
 }
 
@@ -4177,6 +4534,62 @@ function buildQueuePayload(
   };
 }
 
+function buildFullFingerprintWipeQueuePayload(input: {
+  actorUid: string;
+  reason: string;
+  targetDeviceId: string;
+  markEnrollmentSessionRowsStale: boolean;
+}): Record<string, unknown> {
+  return {
+    type: "clear_as608_database",
+    targetDeviceId: input.targetDeviceId,
+    reason: input.reason,
+    clearMode: "full_sensor_and_firebase_after_ack",
+    markEnrollmentSessionRowsStale: input.markEnrollmentSessionRowsStale,
+    createdBy: input.actorUid,
+    createdByUid: input.actorUid,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    processed: false,
+    processedAt: null,
+    status: "pending",
+    error: null,
+  };
+}
+
+async function findPendingFingerprintWipeCommand(
+  targetDeviceId: string,
+): Promise<FingerprintFullWipeCommandSummary | null> {
+  const snapshot = await db.collection("moduleCleanupQueue").get();
+  let pendingCommand: FingerprintFullWipeCommandSummary | null = null;
+
+  snapshot.docs.forEach((doc) => {
+    const data = doc.data() ?? {};
+    if (normalizeLower(data.type) !== "clear_as608_database") {
+      return;
+    }
+
+    const summary = buildFingerprintFullWipeCommandSummary(doc.id, data);
+    if (
+      normalizeLower(summary.targetDeviceId) !== normalizeLower(targetDeviceId) ||
+      !isPendingFingerprintWipeCommand(data)
+    ) {
+      return;
+    }
+
+    if (
+      !pendingCommand ||
+      summary.createdAtMs > pendingCommand.createdAtMs ||
+      (summary.createdAtMs === pendingCommand.createdAtMs &&
+        summary.commandId > pendingCommand.commandId)
+    ) {
+      pendingCommand = summary;
+    }
+  });
+
+  return pendingCommand;
+}
+
 async function queueFingerprintCleanupInstruction(
   batch: FirebaseFirestore.WriteBatch,
   type: FingerprintCleanupQueueType,
@@ -4420,6 +4833,8 @@ export const adminListFingerprintCleanupMappings = onCall({region: REGION}, asyn
         duplicateTemplateRows: report.duplicateTemplateRows,
         fallbackUsed: report.fallbackUsed,
         source: report.source,
+        fullWipeCommandStatus: report.fullWipeCommand?.status ?? "none",
+        fullWipeTargetDeviceId: report.fullWipeCommand?.targetDeviceId ?? "",
       });
 
       await db.collection("logs").add({
@@ -4435,6 +4850,8 @@ export const adminListFingerprintCleanupMappings = onCall({region: REGION}, asyn
         missingCanonicalMappings: report.missingCanonicalMappings,
         source: report.source,
         fallbackUsed: report.fallbackUsed,
+        fullWipeCommandStatus: report.fullWipeCommand?.status ?? null,
+        fullWipeTargetDeviceId: report.fullWipeCommand?.targetDeviceId ?? null,
         createdAt: serverTimestamp(),
       }).catch((logError) => {
         authLogger.warn("adminListFingerprintCleanupMappings log write failed", {
@@ -4609,7 +5026,7 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
     const action = normalizeText(body.action);
     const actorUid = normalizeText(request.auth?.uid);
     const actorProfileSnap = await db.doc(`profiles/${actorUid}`).get();
-    const actorSchoolId = actorProfileSnap.exists ?
+    const actorSchoolId = actorProfileSnap?.exists ?
       normalizeText(actorProfileSnap.data()?.schoolId) :
       "";
     const templateId = toPositiveNumber(body.templateId);
@@ -4816,6 +5233,150 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
       queueCount,
       message,
     } satisfies FingerprintCleanupActionResponse;
+  });
+
+export const adminQueueFullFingerprintWipe = onCall({region: REGION}, async (request) => {
+    await requireAdmin(request);
+
+    const body = asRecord(request.data);
+    const actorUid = normalizeText(request.auth?.uid);
+    const actorProfileSnap = actorUid ? await db.doc(`profiles/${actorUid}`).get() : null;
+    const actorSchoolId = actorProfileSnap?.exists ?
+      normalizeText(actorProfileSnap.data()?.schoolId) :
+      "";
+    const targetDeviceId =
+      normalizeText(body.deviceId) || DEFAULT_FINGERPRINT_WIPE_DEVICE_ID;
+    const reason =
+      normalizeText(body.reason) ||
+      "Admin requested full AS608 + Firebase fingerprint wipe.";
+    const markEnrollmentSessionRowsStale =
+      body.markEnrollmentSessionRowsStale === true;
+
+    functionsLogger.info("[FP_WIPE][ADMIN_REQUEST]", {
+      actorUid,
+      actorSchoolId,
+      targetDeviceId,
+      clearMode: "full_sensor_and_firebase_after_ack",
+      reason,
+      markEnrollmentSessionRowsStale,
+    });
+
+    const existingPending = await findPendingFingerprintWipeCommand(targetDeviceId);
+    if (existingPending) {
+      return {
+        ok: true,
+        commandId: existingPending.commandId,
+        status: existingPending.status,
+        targetDeviceId: existingPending.targetDeviceId,
+        message:
+          "An AS608 wipe command is already pending. Run Cleanup Queue or Full Sync on the module to finish it.",
+        alreadyPending: true,
+        markEnrollmentSessionRowsStale:
+          existingPending.markEnrollmentSessionRowsStale,
+      } satisfies FingerprintFullWipeQueueResponse;
+    }
+
+    const cleanupRef = db.collection("moduleCleanupQueue").doc();
+    await cleanupRef.set(buildFullFingerprintWipeQueuePayload({
+      actorUid,
+      reason,
+      targetDeviceId,
+      markEnrollmentSessionRowsStale,
+    }));
+
+    functionsLogger.info("[FP_WIPE][COMMAND_QUEUED]", {
+      commandId: cleanupRef.id,
+      actorUid,
+      actorSchoolId,
+      targetDeviceId,
+      clearMode: "full_sensor_and_firebase_after_ack",
+      reason,
+      markEnrollmentSessionRowsStale,
+    });
+
+    await db.collection("logs").add({
+      action: "ADMIN_QUEUE_FULL_FINGERPRINT_WIPE",
+      actorUid,
+      actorSchoolId,
+      commandId: cleanupRef.id,
+      targetDeviceId,
+      clearMode: "full_sensor_and_firebase_after_ack",
+      reason,
+      markEnrollmentSessionRowsStale,
+      createdAt: serverTimestamp(),
+    });
+
+    return {
+      ok: true,
+      commandId: cleanupRef.id,
+      status: "pending",
+      targetDeviceId,
+      message:
+        "AS608 wipe command queued. Run Cleanup Queue or Full Sync on the module to clear the sensor before Firebase mappings are removed.",
+      markEnrollmentSessionRowsStale,
+    } satisfies FingerprintFullWipeQueueResponse;
+  });
+
+export const adminClearFirebaseFingerprintMappingsOnly = onCall({region: REGION}, async (request) => {
+    await requireAdmin(request);
+
+    const body = asRecord(request.data);
+    const actorUid = normalizeText(request.auth?.uid);
+    const actorProfileSnap = actorUid ? await db.doc(`profiles/${actorUid}`).get() : null;
+    const actorSchoolId = actorProfileSnap?.exists ?
+      normalizeText(actorProfileSnap.data()?.schoolId) :
+      "";
+    const targetDeviceId =
+      normalizeText(body.deviceId) || DEFAULT_FINGERPRINT_WIPE_DEVICE_ID;
+    const reason =
+      normalizeText(body.reason) ||
+      "Admin cleared Firebase fingerprint mappings after manual AS608 sensor wipe.";
+    const markEnrollmentSessionRowsStale =
+      body.markEnrollmentSessionRowsStale === true;
+
+    const existingPending = await findPendingFingerprintWipeCommand(targetDeviceId);
+    if (existingPending) {
+      throw new HttpsError(
+        "failed-precondition",
+        "An AS608 wipe command is already pending for this device. Let the module finish it before clearing Firebase only.",
+      );
+    }
+
+    functionsLogger.info("[FP_WIPE][ADMIN_REQUEST]", {
+      actorUid,
+      actorSchoolId,
+      targetDeviceId,
+      clearMode: "firebase_only_manual_sensor_clear",
+      reason,
+      markEnrollmentSessionRowsStale,
+    });
+
+    const summary = await executeFirebaseFingerprintWipe({
+      actorUid,
+      targetDeviceId,
+      clearMode: "firebase_only_manual_sensor_clear",
+      reason,
+      markEnrollmentSessionRowsStale,
+    });
+
+    await db.collection("logs").add({
+      action: "ADMIN_CLEAR_FIREBASE_FINGERPRINT_MAPPINGS_ONLY",
+      actorUid,
+      actorSchoolId,
+      targetDeviceId,
+      clearMode: "firebase_only_manual_sensor_clear",
+      reason,
+      markEnrollmentSessionRowsStale,
+      ...summary,
+      createdAt: serverTimestamp(),
+    });
+
+    return {
+      ok: true,
+      ...summary,
+      message:
+        `Firebase fingerprint mappings cleared. Profiles ${summary.profilesCleared}, students ${summary.studentsCleared}, template docs ${summary.fingerprintTemplateDocsCleared}.`,
+    } satisfies FingerprintFirebaseOnlyWipeResponse;
   });
 
 export const ecListStudents = onCall({region: REGION}, async (request) => {

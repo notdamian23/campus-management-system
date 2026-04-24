@@ -70,6 +70,7 @@ class StorageManager {
   FingerprintTemplateOwnership resolveTemplateOwnership(int templateId) const;
   FingerprintTemplateOwnership resolveTemplateOwnershipFromSd(int templateId) const;
   bool applyCleanupQueueItem(const CleanupQueueItem &item, String &error);
+  bool clearFingerprintDataAfterFullWipe(String &error);
   int nextFreeTemplateId(uint16_t startId, uint16_t endId) const;
   std::vector<StudentInfo> loadUnsyncedEnrollments() const;
   size_t unsyncedEnrollmentCount() const;
@@ -135,6 +136,8 @@ class StorageManager {
                                     const String &studentUid) const;
   bool appendRemoteAttendanceRecordedOnSd(const String &eventId,
                                           const String &studentUid);
+  bool clearEnrollmentFingerprintsOnSd(String &error);
+  bool clearFingerprintRosterArtifacts(String &error);
 
   mutable Preferences prefs_;
   bool prefsReady_ = false;

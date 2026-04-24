@@ -179,19 +179,34 @@ type EnrollmentSessionStudent = {
 type CleanupQueueItemType =
   | "removeMapping"
   | "deleteTemplateIfUnused"
-  | "markNeedsReenrollment";
+  | "markNeedsReenrollment"
+  | "clear_as608_database";
 type CleanupQueueItem = {
   cleanupId: string;
   type: CleanupQueueItemType;
   templateId: number;
   uid: string;
   schoolId: string;
+  targetDeviceId: string;
+  clearMode: string;
+  markEnrollmentSessionRowsStale: boolean;
   reason: string;
 };
 type CleanupQueueResult = {
   cleanupId: string;
   processed: boolean;
+  success?: boolean;
   message: string;
+  error?: string;
+};
+type FingerprintWipeClearMode =
+  | "full_sensor_and_firebase_after_ack"
+  | "firebase_only_manual_sensor_clear";
+type FirebaseFingerprintWipeSummary = {
+  fingerprintTemplateDocsCleared: number;
+  profilesCleared: number;
+  studentsCleared: number;
+  enrollmentSessionStudentsMarkedStale: number;
 };
 
 type DeviceHandler = (
@@ -4096,6 +4111,235 @@ export const ecCloseFingerprintEnrollmentSession = functions
     };
   });
 
+function normalizeFingerprintWipeClearMode(
+  value: unknown
+): FingerprintWipeClearMode {
+  return normalizeLower(value) === "firebase_only_manual_sensor_clear" ?
+    "firebase_only_manual_sensor_clear" :
+    "full_sensor_and_firebase_after_ack";
+}
+
+function templateDocMatchesFingerprintWipeTarget(
+  templateDocId: string,
+  data: FirebaseFirestore.DocumentData,
+  targetDeviceId: string
+): boolean {
+  const normalizedTarget = normalizeLower(targetDeviceId);
+  if (!normalizedTarget) {
+    return true;
+  }
+
+  const candidateDeviceIds = [
+    normalizeText(data.fingerprintDeviceId),
+    normalizeText(data.sensorId),
+    extractFingerprintDeviceIdCandidates(data)[0] || "",
+    templateDocId.includes("__") ? templateDocId.split("__")[0] || "" : "",
+  ]
+    .map((value) => normalizeLower(value))
+    .filter(Boolean);
+
+  if (candidateDeviceIds.length === 0) {
+    return true;
+  }
+
+  return candidateDeviceIds.includes(normalizedTarget);
+}
+
+function documentHasActiveFingerprintMapping(
+  data: FirebaseFirestore.DocumentData
+): boolean {
+  if (data.hasFingerprint === true) {
+    return true;
+  }
+
+  if (extractTemplateIdCandidates(data).some((templateId) => templateId > 0)) {
+    return true;
+  }
+
+  const fingerprintStatus = normalizeLower(
+    data.fingerprintStatus ?? asRecord(data.fingerprint).status
+  );
+  return fingerprintStatus === "active" ||
+    fingerprintStatus === "enrolled" ||
+    fingerprintStatus === "synced";
+}
+
+function buildFirebaseFingerprintClearPatch(): Record<string, unknown> {
+  return {
+    hasFingerprint: false,
+    needsReenrollment: true,
+    fingerprintStatus: "pending",
+    fingerprintTemplateId: admin.firestore.FieldValue.delete(),
+    templateId: admin.firestore.FieldValue.delete(),
+    fingerprintDeviceId: admin.firestore.FieldValue.delete(),
+    fingerprintEnrolledAt: admin.firestore.FieldValue.delete(),
+    latestEnrollmentSessionId: admin.firestore.FieldValue.delete(),
+    updatedAt: serverTimestamp(),
+  };
+}
+
+function buildEnrollmentSessionFingerprintStalePatch(
+  clearMode: FingerprintWipeClearMode,
+  reason: string
+): Record<string, unknown> {
+  const staleReason =
+    reason ||
+    (
+      clearMode === "firebase_only_manual_sensor_clear" ?
+        "Historical fingerprint row marked stale after Firebase-only fingerprint clear." :
+        "Historical fingerprint row marked stale after AS608 fingerprint wipe."
+    );
+
+  return {
+    status: "stale",
+    syncStatus: "stale",
+    fingerprintStatus: "pending",
+    needsReenrollment: true,
+    staleAt: serverTimestamp(),
+    staleReason,
+    updatedAt: serverTimestamp(),
+  };
+}
+
+async function executeFirebaseFingerprintWipeAfterDeviceAck(input: {
+  deviceId: string;
+  commandId: string;
+  targetDeviceId: string;
+  clearMode: FingerprintWipeClearMode;
+  reason: string;
+  markEnrollmentSessionRowsStale: boolean;
+}): Promise<FirebaseFingerprintWipeSummary> {
+  const targetDeviceId = normalizeText(input.targetDeviceId) || input.deviceId;
+  const clearMode = normalizeFingerprintWipeClearMode(input.clearMode);
+  const reason = normalizeText(input.reason);
+  const markEnrollmentSessionRowsStale =
+    input.markEnrollmentSessionRowsStale === true;
+  const summary: FirebaseFingerprintWipeSummary = {
+    fingerprintTemplateDocsCleared: 0,
+    profilesCleared: 0,
+    studentsCleared: 0,
+    enrollmentSessionStudentsMarkedStale: 0,
+  };
+
+  deviceLogger.info("[FP_WIPE][FIREBASE_CLEAR_START]", {
+    commandId: input.commandId,
+    deviceId: input.deviceId,
+    targetDeviceId,
+    clearMode,
+    reason,
+    markEnrollmentSessionRowsStale,
+  });
+
+  const [templateSnapshot, profileSnapshot, studentSnapshot, sessionSnapshot] =
+    await Promise.all([
+      db.collection("fingerprintTemplates").get(),
+      db.collection("profiles").get(),
+      db.collection("students").get(),
+      markEnrollmentSessionRowsStale ?
+        db.collection("enrollmentSessions").get() :
+        Promise.resolve(null),
+    ]);
+
+  let batch = db.batch();
+  let operationsInBatch = 0;
+  const flushBatch = async () => {
+    if (operationsInBatch === 0) {
+      return;
+    }
+    await batch.commit();
+    batch = db.batch();
+    operationsInBatch = 0;
+  };
+
+  const clearPatch = buildFirebaseFingerprintClearPatch();
+  for (const templateDoc of templateSnapshot.docs) {
+    if (!templateDocMatchesFingerprintWipeTarget(
+      templateDoc.id,
+      templateDoc.data() ?? {},
+      targetDeviceId
+    )) {
+      continue;
+    }
+
+    batch.delete(templateDoc.ref);
+    summary.fingerprintTemplateDocsCleared += 1;
+    operationsInBatch += 1;
+    if (operationsInBatch >= 400) {
+      await flushBatch();
+    }
+  }
+
+  for (const profileDoc of profileSnapshot.docs) {
+    if (!documentHasActiveFingerprintMapping(profileDoc.data() ?? {})) {
+      continue;
+    }
+
+    batch.set(profileDoc.ref, clearPatch, {merge: true});
+    summary.profilesCleared += 1;
+    operationsInBatch += 1;
+    if (operationsInBatch >= 400) {
+      await flushBatch();
+    }
+  }
+
+  for (const studentDoc of studentSnapshot.docs) {
+    if (!documentHasActiveFingerprintMapping(studentDoc.data() ?? {})) {
+      continue;
+    }
+
+    batch.set(studentDoc.ref, clearPatch, {merge: true});
+    summary.studentsCleared += 1;
+    operationsInBatch += 1;
+    if (operationsInBatch >= 400) {
+      await flushBatch();
+    }
+  }
+
+  if (markEnrollmentSessionRowsStale && sessionSnapshot) {
+    const stalePatch = buildEnrollmentSessionFingerprintStalePatch(
+      clearMode,
+      reason
+    );
+
+    for (let index = 0; index < sessionSnapshot.docs.length; index += 20) {
+      const sessionChunk = sessionSnapshot.docs.slice(index, index + 20);
+      const studentSnapshots = await Promise.all(
+        sessionChunk.map((sessionDoc) => sessionDoc.ref.collection("students").get())
+      );
+
+      for (const studentSnapshot of studentSnapshots) {
+        for (const sessionStudentDoc of studentSnapshot.docs) {
+          const data = sessionStudentDoc.data() ?? {};
+          if (toPositiveInt(data.fingerprintTemplateId ?? data.templateId, -1) <= 0) {
+            continue;
+          }
+
+          batch.set(sessionStudentDoc.ref, stalePatch, {merge: true});
+          summary.enrollmentSessionStudentsMarkedStale += 1;
+          operationsInBatch += 1;
+          if (operationsInBatch >= 400) {
+            await flushBatch();
+          }
+        }
+      }
+    }
+  }
+
+  await flushBatch();
+
+  deviceLogger.info("[FP_WIPE][FIREBASE_CLEAR_DONE]", {
+    commandId: input.commandId,
+    deviceId: input.deviceId,
+    targetDeviceId,
+    clearMode,
+    reason,
+    markEnrollmentSessionRowsStale,
+    ...summary,
+  });
+
+  return summary;
+}
+
 async function listPendingCleanupQueueItems(
   deviceId: string,
   limit: number
@@ -4119,11 +4363,21 @@ async function listPendingCleanupQueueItems(
         templateId: toPositiveInt(data.templateId, -1),
         uid: normalizeText(data.uid),
         schoolId: normalizeText(data.schoolId),
+        targetDeviceId,
+        clearMode: normalizeText(data.clearMode),
+        markEnrollmentSessionRowsStale:
+          data.markEnrollmentSessionRowsStale === true,
         reason: normalizeText(data.reason),
       } satisfies CleanupQueueItem;
     })
     .filter((item): item is CleanupQueueItem => {
-      return item !== null && item.templateId > 0 && Boolean(item.type);
+      if (item === null || !item.type) {
+        return false;
+      }
+      if (item.type === "clear_as608_database") {
+        return true;
+      }
+      return item.templateId > 0;
     })
     .sort((left, right) => left.cleanupId.localeCompare(right.cleanupId))
     .slice(0, limit);
@@ -4137,31 +4391,119 @@ async function acknowledgeCleanupQueueResults(
     return 0;
   }
 
-  const batch = db.batch();
+  const validResults = results.filter((result) => result.cleanupId);
+  if (validResults.length === 0) {
+    return 0;
+  }
+
+  const cleanupRefs = validResults.map((result) =>
+    db.doc(`moduleCleanupQueue/${result.cleanupId}`)
+  );
+  const cleanupSnaps = await db.getAll(...cleanupRefs);
   let processedCount = 0;
-  for (const result of results) {
-    if (!result.processed || !result.cleanupId) {
+  for (let index = 0; index < validResults.length; index += 1) {
+    const result = validResults[index];
+    if (!result.processed) {
       continue;
     }
 
-    const cleanupRef = db.doc(`moduleCleanupQueue/${result.cleanupId}`);
-    batch.set(
-      cleanupRef,
-      {
-        processed: true,
-        processedAt: serverTimestamp(),
-        processedByDeviceId: deviceId,
-        processedMessage: result.message,
-        updatedAt: serverTimestamp(),
-      },
-      {merge: true}
-    );
+    const cleanupRef = cleanupRefs[index];
+    const cleanupSnap = cleanupSnaps[index];
+    const cleanupData = cleanupSnap?.exists ? cleanupSnap.data() ?? {} : {};
+    const cleanupType = normalizeText(cleanupData.type) as CleanupQueueItemType;
+    const success = result.success !== false;
+    const updatePayload: Record<string, unknown> = {
+      processed: true,
+      processedAt: serverTimestamp(),
+      processedByDeviceId: deviceId,
+      processedMessage: normalizeText(result.message) || (success ? "processed" : "failed"),
+      updatedAt: serverTimestamp(),
+      status: success ? "completed" : "failed",
+      error:
+        success ?
+          admin.firestore.FieldValue.delete() :
+          normalizeText(result.error || result.message),
+      completedAt:
+        success ?
+          serverTimestamp() :
+          admin.firestore.FieldValue.delete(),
+      failedAt:
+        success ?
+          admin.firestore.FieldValue.delete() :
+          serverTimestamp(),
+    };
+
+    if (cleanupType === "clear_as608_database") {
+      if (!success) {
+        deviceLogger.error("[FP_WIPE][AS608_EMPTY_DATABASE_FAILED]", {
+          commandId: result.cleanupId,
+          deviceId,
+          targetDeviceId:
+            normalizeText(cleanupData.targetDeviceId) || deviceId,
+          message: normalizeText(result.message),
+          error: normalizeText(result.error),
+        });
+        await cleanupRef.set(updatePayload, {merge: true});
+        processedCount += 1;
+        continue;
+      }
+
+      deviceLogger.info("[FP_WIPE][AS608_EMPTY_DATABASE_SUCCESS]", {
+        commandId: result.cleanupId,
+        deviceId,
+        targetDeviceId:
+          normalizeText(cleanupData.targetDeviceId) || deviceId,
+        message: normalizeText(result.message),
+      });
+
+      try {
+        await executeFirebaseFingerprintWipeAfterDeviceAck({
+          commandId: result.cleanupId,
+          deviceId,
+          targetDeviceId:
+            normalizeText(cleanupData.targetDeviceId) || deviceId,
+          clearMode: normalizeFingerprintWipeClearMode(cleanupData.clearMode),
+          reason: normalizeText(cleanupData.reason),
+          markEnrollmentSessionRowsStale:
+            cleanupData.markEnrollmentSessionRowsStale === true,
+        });
+        await cleanupRef.set(updatePayload, {merge: true});
+      } catch (error: unknown) {
+        const message = errorMessage(
+          error,
+          "Firebase fingerprint clear failed after AS608 wipe."
+        );
+        await cleanupRef.set(
+          {
+            processed: true,
+            processedAt: serverTimestamp(),
+            processedByDeviceId: deviceId,
+            processedMessage:
+              normalizeText(result.message) || "AS608 database cleared on device.",
+            updatedAt: serverTimestamp(),
+            status: "failed",
+            error: message,
+            failedAt: serverTimestamp(),
+            completedAt: admin.firestore.FieldValue.delete(),
+          },
+          {merge: true}
+        );
+        deviceLogger.error("Full fingerprint wipe finalization failed", {
+          cleanupId: result.cleanupId,
+          deviceId,
+          error,
+          message,
+        });
+      }
+
+      processedCount += 1;
+      continue;
+    }
+
+    await cleanupRef.set(updatePayload, {merge: true});
     processedCount += 1;
   }
 
-  if (processedCount > 0) {
-    await batch.commit();
-  }
   return processedCount;
 }
 
@@ -4821,6 +5163,9 @@ async function handleCleanupQueueRequest(req: Request, res: Response): Promise<v
         templateId: item.templateId,
         uid: item.uid,
         schoolId: item.schoolId,
+        targetDeviceId: item.targetDeviceId,
+        clearMode: item.clearMode,
+        markEnrollmentSessionRowsStale: item.markEnrollmentSessionRowsStale,
         reason: item.reason,
       })),
     });
@@ -4852,7 +5197,9 @@ async function handleCleanupQueueRequest(req: Request, res: Response): Promise<v
           return {
             cleanupId: normalizeText(result.cleanupId),
             processed: result.processed === true,
+            success: result.success !== false,
             message: normalizeText(result.message),
+            error: normalizeText(result.error),
           } satisfies CleanupQueueResult;
         })
         .filter((result) => result.cleanupId);

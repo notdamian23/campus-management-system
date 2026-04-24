@@ -83,11 +83,13 @@ DisplayManager::~DisplayManager() {
 
 bool DisplayManager::begin() {
   for (const uint8_t address : kCandidateAddresses) {
+    yield();
     Wire.beginTransmission(address);
     if (Wire.endTransmission() == 0) {
       address_ = address;
       break;
     }
+    delay(1);
   }
 
   if (address_ == 0) {
@@ -98,6 +100,7 @@ bool DisplayManager::begin() {
   delete lcd_;
   lcd_ = new LiquidCrystal_I2C(address_, CampusConfig::kLcdColumns,
                                CampusConfig::kLcdRows);
+  yield();
   lcd_->init();
   lcd_->backlight();
   lcd_->clear();
