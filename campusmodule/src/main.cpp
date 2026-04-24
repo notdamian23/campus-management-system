@@ -185,6 +185,11 @@ void addBackupEventCandidate(const AttendanceRecord &record,
 bool upsertCachedPairedStudent(const StudentInfo &student);
 void startFingerRemovalWait();
 bool hasPendingSyncWork();
+bool isFingerprintRosterValidatedForSession(const String &sessionId,
+                                            FingerprintRosterStats *stats = nullptr);
+bool ensureFingerprintRosterReadyForEnrollment(const String &sessionId);
+bool refreshFingerprintRosterForSessionWhileOnline(const String &sessionId,
+                                                   String &error);
 
 String trim16(const String &value) {
   String output = value;
@@ -1371,6 +1376,70 @@ bool connectForOnlineTask(const String &line1) {
   return true;
 }
 
+bool isFingerprintRosterValidatedForSession(const String &sessionId,
+                                            FingerprintRosterStats *stats) {
+  const FingerprintRosterStats currentStats = g_storage.getFingerprintRosterStats();
+  if (stats != nullptr) {
+    *stats = currentStats;
+  }
+
+  if (!currentStats.rosterExists || !currentStats.headerValid) {
+    return false;
+  }
+
+  if (sessionId.isEmpty()) {
+    return true;
+  }
+
+  return g_storage.fingerprintRosterValidatedSessionId() == sessionId;
+}
+
+bool refreshFingerprintRosterForSessionWhileOnline(const String &sessionId,
+                                                   String &error) {
+  FingerprintRosterStats stats;
+  if (!g_backend.downloadFingerprintRoster(g_storage, stats, error, sessionId)) {
+    return false;
+  }
+
+  Serial.printf("[ENROLL][ROSTER] session=%s rows=%u validated=yes\n",
+                sessionId.c_str(), static_cast<unsigned>(stats.totalRows));
+  return true;
+}
+
+bool ensureFingerprintRosterReadyForEnrollment(const String &sessionId) {
+  FingerprintRosterStats stats;
+  if (isFingerprintRosterValidatedForSession(sessionId, &stats)) {
+    return true;
+  }
+
+  String error;
+  if (g_wifi.hasCredentials() && connectForOnlineTask("FP Roster")) {
+    const bool refreshed =
+        refreshFingerprintRosterForSessionWhileOnline(sessionId, error);
+    disconnectAfterOnlineTask();
+    if (refreshed && isFingerprintRosterValidatedForSession(sessionId, &stats)) {
+      return true;
+    }
+  }
+
+  const bool rosterMissing = !stats.rosterExists || !stats.headerValid;
+  const bool rosterStale =
+      !sessionId.isEmpty() &&
+      g_storage.fingerprintRosterValidatedSessionId() != sessionId;
+  Serial.printf(
+      "[ENROLL][ROSTER] blocked session=%s missing=%s stale=%s validated=%s "
+      "error=%s\n",
+      sessionId.c_str(), rosterMissing ? "yes" : "no",
+      rosterStale ? "yes" : "no",
+      g_storage.fingerprintRosterValidatedSessionId().c_str(), error.c_str());
+  showTimedMessage("Roster Required",
+                   rosterMissing ? "Download roster" : "Refresh roster",
+                   kLongMessageMs, sessionId.isEmpty() ? "" : trim16(sessionId),
+                   trim16(error.isEmpty() ? "Run Sync Menu" : error));
+  g_feedback.warning();
+  return false;
+}
+
 bool refreshPairedEventContext(String &error) {
   if (!g_pairedEvent.isValid()) {
     error = "No paired event";
@@ -1907,6 +1976,12 @@ void tickSync() {
       const StudentInfo &student = pendingEnrollments.front();
       ++g_sync.enrollmentAttempts;
       if (!g_backend.submitEnrollment(student, error)) {
+        if (error == "duplicate_owner_conflict") {
+          Serial.printf(
+              "[SYNC][ENROLL_CONFLICT] student=%s template=%d device=%s\n",
+              student.studentUid.c_str(), student.templateId,
+              student.fingerprintDeviceId.c_str());
+        }
         failSync(error);
         return;
       }
@@ -2063,7 +2138,8 @@ void tickSync() {
           g_storage.getFingerprintRosterStats();
       FingerprintRosterStats stats;
       String error;
-      if (!g_backend.downloadFingerprintRoster(g_storage, stats, error)) {
+      if (!g_backend.downloadFingerprintRoster(
+              g_storage, stats, error, g_currentEnrollmentSession.sessionId)) {
         Serial.printf(
             "[ROSTER] download failed reason=%s keepExisting=%s count=%u size=%u\n",
             error.c_str(), previousStats.rosterExists ? "yes" : "no",
@@ -2332,6 +2408,10 @@ void confirmSelectedEnrollmentSession() {
   logDetailedMemory("before enrollment session download");
   const bool downloaded = g_backend.downloadEnrollmentSession(
       session.sessionId, session, downloadedStudents, error);
+  String rosterError;
+  const bool rosterReady = downloaded &&
+                           refreshFingerprintRosterForSessionWhileOnline(
+                               session.sessionId, rosterError);
   disconnectAfterOnlineTask();
   logDetailedMemory("after enrollment session download");
 
@@ -2376,6 +2456,19 @@ void confirmSelectedEnrollmentSession() {
     return;
   }
 
+  if (!rosterReady && !isFingerprintRosterValidatedForSession(session.sessionId)) {
+    Serial.printf(
+        "[ENROLL][ROSTER] session=%s ready=no error=%s\n",
+        session.sessionId.c_str(), rosterError.c_str());
+    showTimedMessage("Roster Required",
+                     trim16(rosterError.isEmpty() ? "Refresh roster"
+                                                  : rosterError),
+                     kLongMessageMs, trim16(session.sessionId), "");
+    g_feedback.warning();
+    setScreen(AppScreen::Menu);
+    return;
+  }
+
   g_pendingStudentIndex = 0;
   setScreen(AppScreen::EnrollmentStudentSelection);
   if (usingSdQueue) {
@@ -2399,6 +2492,13 @@ void enrollSelectedStudent() {
   if (student.templateId > 0 || student.enrollmentStatus == "enrolled" ||
       student.syncStatus == "synced") {
     showTimedMessage("Already Enrolled", student.schoolId, kShortMessageMs);
+    return;
+  }
+
+  const String rosterSessionId =
+      !student.sessionId.isEmpty() ? student.sessionId
+                                   : g_currentEnrollmentSession.sessionId;
+  if (!ensureFingerprintRosterReadyForEnrollment(rosterSessionId)) {
     return;
   }
 
@@ -2437,6 +2537,12 @@ void enrollSelectedStudent() {
       disconnectAfterOnlineTask();
     }
     if (ownership.state == FingerprintOwnershipState::Unique) {
+      Serial.printf(
+          "[ENROLL][DUPLICATE_TEMPLATE_BLOCKED] student=%s template=%d owner=%s "
+          "ownerDevice=%s state=unique\n",
+          student.studentUid.c_str(), existingMatch.templateId,
+          ownership.student.studentUid.c_str(),
+          ownership.student.fingerprintDeviceId.c_str());
       if (ownership.student.studentUid == student.studentUid) {
         showTimedMessage("Already Enrolled", student.schoolId, kLongMessageMs,
                          "Use cleanup", "before replace");
@@ -2449,7 +2555,13 @@ void enrollSelectedStudent() {
       }
     } else {
       showTimedMessage("Cleanup Needed", "Admin review", kLongMessageMs,
-                       "Duplicate or", "stale template");
+                         "Duplicate or", "stale template");
+    }
+    if (ownership.state != FingerprintOwnershipState::Unique) {
+      Serial.printf(
+          "[ENROLL][DUPLICATE_TEMPLATE_BLOCKED] student=%s template=%d state=%d\n",
+          student.studentUid.c_str(), existingMatch.templateId,
+          static_cast<int>(ownership.state));
     }
     g_feedback.warning();
     return;
@@ -2463,6 +2575,9 @@ void enrollSelectedStudent() {
     g_feedback.error();
     return;
   }
+  Serial.printf("[ENROLL][ID_SELECTED] student=%s device=%s template=%d session=%s\n",
+                student.studentUid.c_str(), g_storage.deviceId().c_str(),
+                templateId, rosterSessionId.c_str());
 
   clearTimedMessage();
   g_display.show("Enroll Finger", "Place finger...");

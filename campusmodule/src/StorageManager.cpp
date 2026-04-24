@@ -30,6 +30,7 @@ constexpr char kSdEnrollmentResultsPath[] = "/enrollment/results_queue.csv";
 constexpr char kSdEnrollmentResultsTempPath[] = "/enrollment/results_queue.tmp";
 constexpr char kSdFingerprintRosterPath[] = "/fingerprint_roster.csv";
 constexpr char kSdFingerprintRosterTempPath[] = "/logs/fingerprint_roster.tmp";
+constexpr char kFingerprintRosterMetaPath[] = "/logs/fingerprint_roster_meta.json";
 constexpr char kTempPath[] = "/campus_tmp.json";
 constexpr char kSdAuditPath[] = "/attendance_audit.csv";
 constexpr char kSdExportDir[] = "/exports";
@@ -40,8 +41,10 @@ constexpr size_t kFingerprintDocSize = 16384;
 constexpr size_t kAttendanceDocSize = 65536;
 constexpr size_t kPairedEventContextDocSize = 65536;
 constexpr size_t kEnrollmentSessionDocSize = 4096;
-constexpr size_t kFingerprintRosterFieldCount = 8;
+constexpr size_t kFingerprintRosterFieldCountLegacy = 8;
 constexpr size_t kFingerprintRosterFieldCountExtended = 10;
+constexpr size_t kFingerprintRosterFieldCountCurrent = 12;
+constexpr size_t kFingerprintRosterFieldCountMax = kFingerprintRosterFieldCountCurrent;
 constexpr size_t kFingerprintRosterMaxLineLength = 320;
 constexpr size_t kEnrollmentQueueFieldCount = 12;
 constexpr size_t kEnrollmentResultFieldCount = 12;
@@ -98,6 +101,36 @@ bool parseBoolText(const String &text, bool fallback = false) {
     return false;
   }
   return fallback;
+}
+
+bool loadObjectDocument(fs::FS &fs, const char *path, DynamicJsonDocument &doc) {
+  if (!fs.exists(path)) {
+    doc.to<JsonObject>();
+    return true;
+  }
+
+  File file = fs.open(path, FILE_READ);
+  if (!file) {
+    return false;
+  }
+
+  const DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  if (error) {
+    doc.to<JsonObject>();
+    return false;
+  }
+
+  if (!doc.is<JsonObject>()) {
+    doc.to<JsonObject>();
+  }
+  return true;
+}
+
+bool fingerprintDeviceMatchesLocal(const String &ownerDeviceId,
+                                   const String &localDeviceId) {
+  return ownerDeviceId.isEmpty() || localDeviceId.isEmpty() ||
+         ownerDeviceId == localDeviceId;
 }
 
 String parseStringField(JsonVariantConst value) {
@@ -641,13 +674,13 @@ bool isFingerprintRosterHeader(const String *fields, size_t fieldCount) {
 
 bool parseFingerprintRosterStudent(const String &line, StudentInfo &student,
                                    bool &active, bool &hasFingerprint) {
-  String fields[kFingerprintRosterFieldCountExtended];
+  String fields[kFingerprintRosterFieldCountMax];
   const size_t parsedFields =
-      splitCsvLine(line, fields, kFingerprintRosterFieldCountExtended);
+      splitCsvLine(line, fields, kFingerprintRosterFieldCountMax);
   if (parsedFields == 0 || isFingerprintRosterHeader(fields, parsedFields)) {
     return false;
   }
-  if (parsedFields < kFingerprintRosterFieldCount) {
+  if (parsedFields < kFingerprintRosterFieldCountLegacy) {
     return false;
   }
 
@@ -663,7 +696,13 @@ bool parseFingerprintRosterStudent(const String &line, StudentInfo &student,
   student.studentName = fields[3];
   student.course = fields[4];
   student.yearLevel = fields[5];
-  if (parsedFields >= kFingerprintRosterFieldCountExtended) {
+  if (parsedFields >= kFingerprintRosterFieldCountCurrent) {
+    student.section = fields[6];
+    student.bodScope = fields[7];
+    student.fingerprintDeviceId = fields[8];
+    active = parseBoolText(fields[10], true);
+    hasFingerprint = parseBoolText(fields[11], true);
+  } else if (parsedFields >= kFingerprintRosterFieldCountExtended) {
     student.section = fields[6];
     student.bodScope = fields[7];
     active = parseBoolText(fields[8], true);
@@ -745,9 +784,9 @@ FingerprintRosterStats collectFingerprintRosterStats(fs::FS &fs, const char *pat
       continue;
     }
 
-    String fields[kFingerprintRosterFieldCount];
+    String fields[kFingerprintRosterFieldCountMax];
     const size_t parsedFields =
-        splitCsvLine(line, fields, kFingerprintRosterFieldCount);
+        splitCsvLine(line, fields, kFingerprintRosterFieldCountMax);
     if (parsedFields == 0) {
       continue;
     }
@@ -1033,6 +1072,31 @@ bool isActiveFingerprintOwner(const StudentInfo &student) {
     return false;
   }
 
+  return true;
+}
+
+bool isActiveFingerprintOwnerForDevice(const StudentInfo &student,
+                                       const String &localDeviceId,
+                                       bool requireDeviceMatch = true) {
+  if (!isActiveFingerprintOwner(student)) {
+    return false;
+  }
+  if (!requireDeviceMatch) {
+    return true;
+  }
+  return fingerprintDeviceMatchesLocal(student.fingerprintDeviceId, localDeviceId);
+}
+
+bool markTemplateUsed(uint16_t templateId, uint16_t startId, uint16_t endId,
+                      std::vector<bool> &usedSlots) {
+  if (templateId < startId || templateId > endId ||
+      templateId >= usedSlots.size()) {
+    return false;
+  }
+  if (usedSlots[templateId]) {
+    return false;
+  }
+  usedSlots[templateId] = true;
   return true;
 }
 
@@ -3070,10 +3134,11 @@ FingerprintTemplateOwnership StorageManager::resolveTemplateOwnership(
     int templateId) const {
   ensureFingerprintMappingsLoaded();
   FingerprintTemplateOwnership ownership;
+  const String localDeviceId = deviceId();
   for (const auto &student : fingerprintMappingsCache_) {
     if (student.templateId == templateId) {
       ++ownership.totalMatches;
-      if (!isActiveFingerprintOwner(student)) {
+      if (!isActiveFingerprintOwnerForDevice(student, localDeviceId)) {
         continue;
       }
 
@@ -3106,6 +3171,8 @@ FingerprintTemplateOwnership StorageManager::resolveTemplateOwnershipFromSd(
     return ownership;
   }
 
+  const String localDeviceId = deviceId();
+
   File file = SD.open(kSdFingerprintRosterPath, FILE_READ);
   if (!file) {
     return ownership;
@@ -3129,7 +3196,8 @@ FingerprintTemplateOwnership StorageManager::resolveTemplateOwnershipFromSd(
     }
 
     ++ownership.totalMatches;
-    if (!active || !hasFingerprint || !isActiveFingerprintOwner(student)) {
+    if (!active || !hasFingerprint ||
+        !isActiveFingerprintOwnerForDevice(student, localDeviceId)) {
       continue;
     }
 
@@ -3241,20 +3309,150 @@ bool StorageManager::applyCleanupQueueItem(const CleanupQueueItem &item,
 }
 
 int StorageManager::nextFreeTemplateId(uint16_t startId, uint16_t endId) const {
+  if (startId > endId) {
+    Serial.printf("[FP][NEXT_ID] device=%s start=%u end=%u invalid_range=yes\n",
+                  deviceId().c_str(), static_cast<unsigned>(startId),
+                  static_cast<unsigned>(endId));
+    return -1;
+  }
+
+  const String localDeviceId = deviceId();
+  std::vector<bool> usedSlots(static_cast<size_t>(endId) + 1U, false);
+  size_t localMapUsed = 0;
+  size_t rosterUsed = 0;
+  size_t resultsUsed = 0;
+  size_t sessionRowsUsed = 0;
+
   ensureFingerprintMappingsLoaded();
-  for (uint16_t templateId = startId; templateId <= endId; ++templateId) {
-    bool used = false;
-    for (const auto &student : fingerprintMappingsCache_) {
-      if (student.templateId == templateId) {
-        used = true;
-        break;
-      }
-    }
-    if (!used) {
-      return templateId;
+  for (const auto &student : fingerprintMappingsCache_) {
+    if (isActiveFingerprintOwnerForDevice(student, localDeviceId) &&
+        markTemplateUsed(static_cast<uint16_t>(student.templateId), startId, endId,
+                         usedSlots)) {
+      ++localMapUsed;
     }
   }
-  return -1;
+
+  ensurePendingStudentsLoaded();
+  for (const auto &student : pendingStudentsCache_) {
+    if (isActiveFingerprintOwnerForDevice(student, localDeviceId, false) &&
+        markTemplateUsed(static_cast<uint16_t>(student.templateId), startId, endId,
+                         usedSlots)) {
+      ++sessionRowsUsed;
+    }
+  }
+
+  ensureEnrollmentSyncQueueLoaded();
+  for (const auto &student : enrollmentSyncQueueCache_) {
+    if (isActiveFingerprintOwnerForDevice(student, localDeviceId, false) &&
+        markTemplateUsed(static_cast<uint16_t>(student.templateId), startId, endId,
+                         usedSlots)) {
+      ++sessionRowsUsed;
+    }
+  }
+
+  if (CampusConfig::kUseSd) {
+    StorageManager *storage = const_cast<StorageManager *>(this);
+    if (storage->ensureSdReady()) {
+      if (SD.exists(kSdFingerprintRosterPath)) {
+        File rosterFile = SD.open(kSdFingerprintRosterPath, FILE_READ);
+        if (rosterFile) {
+          String line;
+          bool truncated = false;
+          while (readBoundedLine(rosterFile, line, truncated)) {
+            if (truncated || line.isEmpty()) {
+              continue;
+            }
+
+            StudentInfo student;
+            bool active = false;
+            bool hasFingerprint = false;
+            if (!parseFingerprintRosterStudent(line, student, active, hasFingerprint) ||
+                !active || !hasFingerprint ||
+                !isActiveFingerprintOwnerForDevice(student, localDeviceId)) {
+              continue;
+            }
+
+            if (markTemplateUsed(static_cast<uint16_t>(student.templateId), startId,
+                                 endId, usedSlots)) {
+              ++rosterUsed;
+            }
+          }
+          rosterFile.close();
+        }
+      }
+
+      if (SD.exists(kSdEnrollmentResultsPath)) {
+        File resultsFile = SD.open(kSdEnrollmentResultsPath, FILE_READ);
+        if (resultsFile) {
+          String line;
+          bool truncated = false;
+          while (readBoundedLine(resultsFile, line, truncated)) {
+            if (truncated || line.isEmpty()) {
+              continue;
+            }
+
+            String fields[kEnrollmentResultFieldCount];
+            const size_t parsedFields =
+                splitCsvLine(line, fields, kEnrollmentResultFieldCount);
+            const StudentInfo student =
+                enrollmentResultStudentFromFields(fields, parsedFields);
+            if (!isActiveFingerprintOwnerForDevice(student, localDeviceId) ||
+                !markTemplateUsed(static_cast<uint16_t>(student.templateId), startId,
+                                  endId, usedSlots)) {
+              continue;
+            }
+            ++resultsUsed;
+          }
+          resultsFile.close();
+        }
+      }
+
+      if (SD.exists(kSdEnrollmentQueuePath)) {
+        File queueFile = SD.open(kSdEnrollmentQueuePath, FILE_READ);
+        if (queueFile) {
+          String line;
+          bool truncated = false;
+          while (readBoundedLine(queueFile, line, truncated)) {
+            if (truncated || line.isEmpty()) {
+              continue;
+            }
+
+            String fields[kEnrollmentQueueFieldCount];
+            const size_t parsedFields =
+                splitCsvLine(line, fields, kEnrollmentQueueFieldCount);
+            const StudentInfo student =
+                enrollmentQueueStudentFromFields(fields, parsedFields);
+            if (!isActiveFingerprintOwnerForDevice(student, localDeviceId, false) ||
+                !markTemplateUsed(static_cast<uint16_t>(student.templateId), startId,
+                                  endId, usedSlots)) {
+              continue;
+            }
+            ++sessionRowsUsed;
+          }
+          queueFile.close();
+        }
+      }
+    }
+  }
+
+  int selectedTemplateId = -1;
+  for (uint16_t templateId = startId; templateId <= endId; ++templateId) {
+    if (templateId >= usedSlots.size() || usedSlots[templateId]) {
+      continue;
+    }
+    selectedTemplateId = templateId;
+    break;
+  }
+
+  Serial.printf(
+      "[FP][NEXT_ID] device=%s start=%u end=%u local=%u roster=%u results=%u "
+      "session=%u selected=%d\n",
+      localDeviceId.c_str(), static_cast<unsigned>(startId),
+      static_cast<unsigned>(endId), static_cast<unsigned>(localMapUsed),
+      static_cast<unsigned>(rosterUsed), static_cast<unsigned>(resultsUsed),
+      static_cast<unsigned>(sessionRowsUsed), selectedTemplateId);
+
+  return selectedTemplateId;
 }
 
 bool StorageManager::ensureEnrollmentSyncQueueLoaded() const {
@@ -3743,6 +3941,35 @@ FingerprintRosterStats StorageManager::getFingerprintRosterStats() {
     return FingerprintRosterStats{};
   }
   return collectFingerprintRosterStats(SD, kSdFingerprintRosterPath);
+}
+
+String StorageManager::fingerprintRosterValidatedSessionId() const {
+  if (!littleFsReady_) {
+    return "";
+  }
+
+  DynamicJsonDocument doc(256);
+  if (!loadObjectDocument(LittleFS, kFingerprintRosterMetaPath, doc)) {
+    return "";
+  }
+
+  return String(doc["validatedSessionId"] | "");
+}
+
+bool StorageManager::markFingerprintRosterValidatedSession(
+    const String &sessionId, const FingerprintRosterStats &stats) const {
+  if (!littleFsReady_) {
+    return false;
+  }
+
+  DynamicJsonDocument doc(256);
+  JsonObject object = doc.to<JsonObject>();
+  object["validatedSessionId"] = sessionId;
+  object["totalRows"] = static_cast<unsigned>(stats.totalRows);
+  object["fileSize"] = static_cast<unsigned>(stats.fileSize);
+  object["headerValid"] = stats.headerValid;
+  object["rosterExists"] = stats.rosterExists;
+  return saveDocument(LittleFS, kFingerprintRosterMetaPath, kTempPath, doc);
 }
 
 bool StorageManager::writePendingStudents(

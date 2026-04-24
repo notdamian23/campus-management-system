@@ -90,6 +90,9 @@ class StorageManager {
   bool saveFingerprintRosterToSd(Stream &stream, size_t expectedBytes,
                                  FingerprintRosterStats &stats, String &error);
   FingerprintRosterStats getFingerprintRosterStats();
+  String fingerprintRosterValidatedSessionId() const;
+  bool markFingerprintRosterValidatedSession(
+      const String &sessionId, const FingerprintRosterStats &stats) const;
 
   bool ensureSdReady();
   bool isSdReady() const;

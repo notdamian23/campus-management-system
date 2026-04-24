@@ -231,6 +231,8 @@ export type EcListStudentItem = {
   readyForClearance?: boolean;
   fingerprintStatus?: string;
   fingerprintTemplateId?: number | string | null;
+  fingerprintDeviceId?: string | null;
+  duplicateTemplate?: boolean;
   email?: string;
   createdAtMs?: number | null;
 };
@@ -1420,35 +1422,56 @@ export type FingerprintCleanupMappingStatus =
   | "needs_reenrollment"
   | "duplicate"
   | "deleted"
-  | "missing_profile";
+  | "missing_profile"
+  | "missing_canonical";
+export type FingerprintCleanupSource =
+  | "fingerprint_template"
+  | "profile"
+  | "student_projection"
+  | "enrollment_session";
 export type FingerprintCleanupReportSummary = {
   total: number;
   active: number;
   stale: number;
   duplicate: number;
   needsReenrollment: number;
+  studentsWithFingerprints: number;
+  totalTemplateIdRows: number;
+  canonicalMappings: number;
+  enrollmentSessionOnlyMappings: number;
+  missingCanonicalMappings: number;
+  duplicateTemplateRows: number;
 };
 export type FingerprintCleanupReportSource =
   | "fingerprintTemplates"
   | "profiles_fallback"
+  | "enrollment_sessions"
   | "mixed"
   | "empty";
 export type FingerprintCleanupReportMapping = {
   rowId: string;
   templateId: number;
+  fingerprintDeviceId: string;
   uid: string;
   schoolId: string;
   studentName: string;
   course: string;
   yearLevel: string;
+  section: string;
   profileStatus: string;
   mappingStatus: FingerprintCleanupMappingStatus;
   fingerprintStatus: string;
+  syncStatus: string;
+  sessionId: string;
+  sessionIds: string[];
   lastEnrolledAtMs: number;
   duplicateTemplateCount: number;
   duplicateSchoolIdCount: number;
   duplicateReasons: string[];
-  sources: string[];
+  sources: FingerprintCleanupSource[];
+  hasCanonicalSource: boolean;
+  enrollmentSessionOnly: boolean;
+  missingCanonical: boolean;
   canRemoveStale: boolean;
   canRemoveMapping: boolean;
   canKeepTemplateOwner: boolean;
@@ -1462,6 +1485,11 @@ export type FingerprintCleanupReport = {
   staleMappings: number;
   duplicateMappings: number;
   needsReenrollment: number;
+  studentsWithFingerprints: number;
+  canonicalMappings: number;
+  enrollmentSessionOnlyMappings: number;
+  missingCanonicalMappings: number;
+  duplicateTemplateRows: number;
   source: FingerprintCleanupReportSource;
   fallbackUsed: boolean;
   emptyMessage: string;
@@ -1733,6 +1761,28 @@ function normalizeFingerprintCleanupReport(
       duplicate: Number(summary.duplicate ?? data.duplicateMappings ?? 0) || 0,
       needsReenrollment:
         Number(summary.needsReenrollment ?? data.needsReenrollment ?? 0) || 0,
+      studentsWithFingerprints:
+        Number(
+          summary.studentsWithFingerprints ?? data.studentsWithFingerprints ?? 0,
+        ) || 0,
+      totalTemplateIdRows:
+        Number(summary.totalTemplateIdRows ?? data.totalMappings ?? mappings.length) || 0,
+      canonicalMappings:
+        Number(summary.canonicalMappings ?? data.canonicalMappings ?? 0) || 0,
+      enrollmentSessionOnlyMappings:
+        Number(
+          summary.enrollmentSessionOnlyMappings ??
+            data.enrollmentSessionOnlyMappings ??
+            0,
+        ) || 0,
+      missingCanonicalMappings:
+        Number(
+          summary.missingCanonicalMappings ??
+            data.missingCanonicalMappings ??
+            0,
+        ) || 0,
+      duplicateTemplateRows:
+        Number(summary.duplicateTemplateRows ?? data.duplicateTemplateRows ?? 0) || 0,
     },
     totalMappings: Number(data.totalMappings ?? summary.total ?? mappings.length) || 0,
     activeMappings: Number(data.activeMappings ?? summary.active ?? 0) || 0,
@@ -1740,11 +1790,51 @@ function normalizeFingerprintCleanupReport(
     duplicateMappings: Number(data.duplicateMappings ?? summary.duplicate ?? 0) || 0,
     needsReenrollment:
       Number(data.needsReenrollment ?? summary.needsReenrollment ?? 0) || 0,
+    studentsWithFingerprints:
+      Number(data.studentsWithFingerprints ?? summary.studentsWithFingerprints ?? 0) || 0,
+    canonicalMappings:
+      Number(data.canonicalMappings ?? summary.canonicalMappings ?? 0) || 0,
+    enrollmentSessionOnlyMappings:
+      Number(
+        data.enrollmentSessionOnlyMappings ??
+          summary.enrollmentSessionOnlyMappings ??
+          0,
+      ) || 0,
+    missingCanonicalMappings:
+      Number(
+        data.missingCanonicalMappings ?? summary.missingCanonicalMappings ?? 0,
+      ) || 0,
+    duplicateTemplateRows:
+      Number(data.duplicateTemplateRows ?? summary.duplicateTemplateRows ?? 0) || 0,
     source:
       (typeof data.source === "string" ? data.source : "empty") as FingerprintCleanupReportSource,
     fallbackUsed: data.fallbackUsed === true,
     emptyMessage: typeof data.emptyMessage === "string" ? data.emptyMessage : "",
-    mappings: mappings as FingerprintCleanupReportMapping[],
+    mappings: mappings.map((mapping) => {
+      const row =
+        typeof mapping === "object" && mapping !== null ?
+          (mapping as Record<string, unknown>) :
+          {};
+      return {
+        ...(row as FingerprintCleanupReportMapping),
+        fingerprintDeviceId:
+          typeof row.fingerprintDeviceId === "string" ? row.fingerprintDeviceId : "",
+        section: typeof row.section === "string" ? row.section : "-",
+        syncStatus: typeof row.syncStatus === "string" ? row.syncStatus : "",
+        sessionId: typeof row.sessionId === "string" ? row.sessionId : "",
+        sessionIds:
+          Array.isArray(row.sessionIds) ?
+            row.sessionIds.filter((value): value is string => typeof value === "string") :
+            [],
+        sources:
+          Array.isArray(row.sources) ?
+            row.sources.filter((value): value is FingerprintCleanupSource => typeof value === "string") :
+            [],
+        hasCanonicalSource: row.hasCanonicalSource === true,
+        enrollmentSessionOnly: row.enrollmentSessionOnly === true,
+        missingCanonical: row.missingCanonical === true,
+      };
+    }),
   };
 }
 
@@ -1795,6 +1885,7 @@ export async function adminManageFingerprintCleanup(
   payload: {
     action: FingerprintCleanupAction;
     templateId: number;
+    fingerprintDeviceId?: string;
     uid?: string;
     keepUid?: string;
     reason?: string;
@@ -1803,6 +1894,7 @@ export async function adminManageFingerprintCleanup(
   logAuthEvent("info", "Submitting fingerprint cleanup action", {
     action: payload.action,
     templateId: payload.templateId,
+    fingerprintDeviceId: payload.fingerprintDeviceId ?? null,
     hasUid: Boolean(payload.uid),
     hasKeepUid: Boolean(payload.keepUid),
   });
@@ -1811,6 +1903,7 @@ export async function adminManageFingerprintCleanup(
     {
       action: FingerprintCleanupAction;
       templateId: number;
+      fingerprintDeviceId?: string;
       uid?: string;
       keepUid?: string;
       reason?: string;

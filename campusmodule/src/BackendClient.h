@@ -32,7 +32,8 @@ class BackendClient {
   bool fetchPendingEnrollments(std::vector<StudentInfo> &students, String &error);
   bool submitEnrollment(const StudentInfo &student, String &error);
   bool downloadFingerprintRoster(StorageManager &storage,
-                                 FingerprintRosterStats &stats, String &error);
+                                 FingerprintRosterStats &stats, String &error,
+                                 const String &validatedSessionId = "");
   bool resolveAttendanceOwner(int templateId, const String &eventId,
                               AttendanceOwnerResolution &result, String &error);
   bool syncAttendance(const std::vector<AttendanceRecord> &records,

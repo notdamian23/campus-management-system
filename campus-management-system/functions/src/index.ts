@@ -68,17 +68,30 @@ type FingerprintCleanupMappingStatus =
   | "needs_reenrollment"
   | "duplicate"
   | "deleted"
-  | "missing_profile";
+  | "missing_profile"
+  | "missing_canonical";
+type FingerprintCleanupSource =
+  | "fingerprint_template"
+  | "profile"
+  | "student_projection"
+  | "enrollment_session";
 type FingerprintCleanupReportSummary = {
   total: number;
   active: number;
   stale: number;
   duplicate: number;
   needsReenrollment: number;
+  studentsWithFingerprints: number;
+  totalTemplateIdRows: number;
+  canonicalMappings: number;
+  enrollmentSessionOnlyMappings: number;
+  missingCanonicalMappings: number;
+  duplicateTemplateRows: number;
 };
 type FingerprintCleanupReportSource =
   | "fingerprintTemplates"
   | "profiles_fallback"
+  | "enrollment_sessions"
   | "mixed"
   | "empty";
 type FingerprintCleanupQueueType =
@@ -88,19 +101,27 @@ type FingerprintCleanupQueueType =
 type FingerprintCleanupReportMapping = {
   rowId: string;
   templateId: number;
+  fingerprintDeviceId: string;
   uid: string;
   schoolId: string;
   studentName: string;
   course: string;
   yearLevel: string;
+  section: string;
   profileStatus: string;
   mappingStatus: FingerprintCleanupMappingStatus;
   fingerprintStatus: string;
+  syncStatus: string;
+  sessionId: string;
+  sessionIds: string[];
   lastEnrolledAtMs: number;
   duplicateTemplateCount: number;
   duplicateSchoolIdCount: number;
   duplicateReasons: string[];
-  sources: string[];
+  sources: FingerprintCleanupSource[];
+  hasCanonicalSource: boolean;
+  enrollmentSessionOnly: boolean;
+  missingCanonical: boolean;
   canRemoveStale: boolean;
   canRemoveMapping: boolean;
   canKeepTemplateOwner: boolean;
@@ -114,6 +135,11 @@ type FingerprintCleanupReport = {
   staleMappings: number;
   duplicateMappings: number;
   needsReenrollment: number;
+  studentsWithFingerprints: number;
+  canonicalMappings: number;
+  enrollmentSessionOnlyMappings: number;
+  missingCanonicalMappings: number;
+  duplicateTemplateRows: number;
   source: FingerprintCleanupReportSource;
   fallbackUsed: boolean;
   emptyMessage: string;
@@ -122,24 +148,35 @@ type FingerprintCleanupReport = {
 type MutableFingerprintCleanupMapping = {
   rowId: string;
   templateId: number;
+  fingerprintDeviceId: string;
   uid: string;
   schoolId: string;
   studentName: string;
   course: string;
   yearLevel: string;
+  section: string;
   profileStatus: string;
   profileRole: string;
   fingerprintStatus: string;
+  enrollmentSyncStatus: string;
   lastEnrolledAtMs: number;
+  latestEnrollmentSessionAtMs: number;
+  latestEnrollmentSessionId: string;
   duplicateTemplateCount: number;
   duplicateSchoolIdCount: number;
   duplicateReasons: string[];
   hasProfile: boolean;
   hasStudentProjection: boolean;
   hasTemplateDoc: boolean;
+  hasEnrollmentSession: boolean;
+  hasSyncedEnrollmentSession: boolean;
   templateDocActive: boolean;
   templateDocStatus: string;
-  sourceSet: Set<string>;
+  hasDeletedSourceStatus: boolean;
+  hasStaleSourceStatus: boolean;
+  hasNeedsReenrollmentSourceStatus: boolean;
+  sessionIdSet: Set<string>;
+  sourceSet: Set<FingerprintCleanupSource>;
 };
 type FingerprintCleanupActionResponse = {
   ok: boolean;
@@ -1186,6 +1223,76 @@ function extractFingerprintTemplateId(
   return 0;
 }
 
+function extractFingerprintTemplateIdFromDocId(docId: string): number {
+  const direct = Number(docId);
+  if (Number.isFinite(direct) && direct > 0) {
+    return Math.trunc(direct);
+  }
+
+  const suffix = docId.split("__").pop() ?? "";
+  const parsed = Number(suffix);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.trunc(parsed);
+  }
+
+  return 0;
+}
+
+function extractFingerprintDeviceIdFromDocId(docId: string): string {
+  const normalizedDocId = normalizeText(docId);
+  if (!normalizedDocId || !normalizedDocId.includes("__")) {
+    return "";
+  }
+
+  const parts = normalizedDocId.split("__");
+  if (parts.length < 2) {
+    return "";
+  }
+
+  return normalizeText(parts.slice(0, -1).join("__"));
+}
+
+function extractFingerprintDeviceId(
+  data: FirebaseFirestore.DocumentData | undefined,
+): string {
+  if (!data) {
+    return "";
+  }
+
+  const fingerprint = asRecord(data.fingerprint);
+  return (
+    normalizeText(data.fingerprintDeviceId) ||
+    normalizeText(data.sensorId) ||
+    normalizeText(data.deviceId) ||
+    normalizeText(fingerprint.fingerprintDeviceId) ||
+    normalizeText(fingerprint.sensorId) ||
+    normalizeText(fingerprint.deviceId)
+  );
+}
+
+function normalizeFingerprintDeviceIdForStorage(value: string): string {
+  const normalized = normalizeText(value);
+  return normalizeLower(normalized) === "campus" ? "" : normalized;
+}
+
+function normalizeFingerprintDeviceIdForReport(value: string): string {
+  return normalizeText(value) || "campus";
+}
+
+function extractEnrollmentSessionFingerprintDeviceId(
+  data: FirebaseFirestore.DocumentData | undefined,
+): string {
+  if (!data) {
+    return "";
+  }
+
+  return (
+    extractFingerprintDeviceId(data) ||
+    normalizeText(data.assignedDeviceId) ||
+    normalizeText(data.enrolledByDevice)
+  );
+}
+
 function extractFingerprintStatus(
   data: FirebaseFirestore.DocumentData | undefined,
 ): string {
@@ -1218,6 +1325,16 @@ function extractFingerprintEnrolledAt(
   );
 }
 
+function extractStudentSection(
+  data: FirebaseFirestore.DocumentData | undefined,
+): string {
+  if (!data) {
+    return "";
+  }
+
+  return normalizeText(data.section);
+}
+
 function emptyFingerprintCleanupReport(
   overrides?: Partial<FingerprintCleanupReport>,
 ): FingerprintCleanupReport {
@@ -1227,6 +1344,14 @@ function emptyFingerprintCleanupReport(
     stale: overrides?.summary?.stale ?? 0,
     duplicate: overrides?.summary?.duplicate ?? 0,
     needsReenrollment: overrides?.summary?.needsReenrollment ?? 0,
+    studentsWithFingerprints: overrides?.summary?.studentsWithFingerprints ?? 0,
+    totalTemplateIdRows: overrides?.summary?.totalTemplateIdRows ?? 0,
+    canonicalMappings: overrides?.summary?.canonicalMappings ?? 0,
+    enrollmentSessionOnlyMappings:
+      overrides?.summary?.enrollmentSessionOnlyMappings ?? 0,
+    missingCanonicalMappings:
+      overrides?.summary?.missingCanonicalMappings ?? 0,
+    duplicateTemplateRows: overrides?.summary?.duplicateTemplateRows ?? 0,
   };
 
   return {
@@ -1238,6 +1363,17 @@ function emptyFingerprintCleanupReport(
     duplicateMappings: overrides?.duplicateMappings ?? summary.duplicate,
     needsReenrollment:
       overrides?.needsReenrollment ?? summary.needsReenrollment,
+    studentsWithFingerprints:
+      overrides?.studentsWithFingerprints ?? summary.studentsWithFingerprints,
+    canonicalMappings:
+      overrides?.canonicalMappings ?? summary.canonicalMappings,
+    enrollmentSessionOnlyMappings:
+      overrides?.enrollmentSessionOnlyMappings ??
+      summary.enrollmentSessionOnlyMappings,
+    missingCanonicalMappings:
+      overrides?.missingCanonicalMappings ?? summary.missingCanonicalMappings,
+    duplicateTemplateRows:
+      overrides?.duplicateTemplateRows ?? summary.duplicateTemplateRows,
     source: overrides?.source ?? "empty",
     fallbackUsed: overrides?.fallbackUsed ?? false,
     emptyMessage:
@@ -1262,67 +1398,208 @@ function resolveFingerprintRecordName(
   );
 }
 
-function createFingerprintMappingRowId(templateId: number, uid: string): string {
-  return `${templateId}:${uid || "unknown"}`;
+function sanitizeFingerprintDocIdComponent(value: string): string {
+  return normalizeFingerprintDeviceIdForStorage(value).replace(/\//g, "_");
+}
+
+function fingerprintTemplateDocId(templateId: number, fingerprintDeviceId = ""): string {
+  const normalizedDeviceId = sanitizeFingerprintDocIdComponent(fingerprintDeviceId);
+  return normalizedDeviceId ? `${normalizedDeviceId}__${templateId}` : String(templateId);
+}
+
+function fingerprintSlotKey(templateId: number, fingerprintDeviceId: string): string {
+  return `${normalizeLower(normalizeFingerprintDeviceIdForReport(fingerprintDeviceId))}::${templateId}`;
+}
+
+function createFingerprintMappingRowId(
+  templateId: number,
+  fingerprintDeviceId: string,
+  uid: string,
+): string {
+  return `${fingerprintSlotKey(templateId, fingerprintDeviceId)}:${uid || "unknown"}`;
 }
 
 function getOrCreateFingerprintCleanupMapping(
   mappings: Map<string, MutableFingerprintCleanupMapping>,
   templateId: number,
+  fingerprintDeviceId: string,
   uid: string,
   schoolId: string,
 ): MutableFingerprintCleanupMapping {
   const normalizedUid = uid || schoolId || `template-${templateId}`;
-  const rowId = createFingerprintMappingRowId(templateId, normalizedUid);
+  const resolvedFingerprintDeviceId =
+    normalizeFingerprintDeviceIdForReport(fingerprintDeviceId);
+  const rowId = createFingerprintMappingRowId(
+    templateId,
+    resolvedFingerprintDeviceId,
+    normalizedUid,
+  );
   const existing = mappings.get(rowId);
   if (existing) {
+    if (
+      (!existing.fingerprintDeviceId || existing.fingerprintDeviceId === "campus") &&
+      resolvedFingerprintDeviceId
+    ) {
+      existing.fingerprintDeviceId = resolvedFingerprintDeviceId;
+    }
     if (!existing.schoolId && schoolId) {
       existing.schoolId = schoolId;
     }
     return existing;
   }
 
+  if (resolvedFingerprintDeviceId === "campus") {
+    const explicitDeviceMatch = Array.from(mappings.values()).find((candidate) =>
+      candidate.templateId === templateId &&
+      candidate.uid === normalizedUid &&
+      candidate.fingerprintDeviceId !== "campus",
+    );
+    if (explicitDeviceMatch) {
+      if (!explicitDeviceMatch.schoolId && schoolId) {
+        explicitDeviceMatch.schoolId = schoolId;
+      }
+      return explicitDeviceMatch;
+    }
+  } else {
+    const campusRowId = createFingerprintMappingRowId(
+      templateId,
+      "campus",
+      normalizedUid,
+    );
+    const placeholder = mappings.get(campusRowId);
+    if (placeholder) {
+      mappings.delete(campusRowId);
+      placeholder.rowId = rowId;
+      placeholder.fingerprintDeviceId = resolvedFingerprintDeviceId;
+      if (!placeholder.schoolId && schoolId) {
+        placeholder.schoolId = schoolId;
+      }
+      mappings.set(rowId, placeholder);
+      return placeholder;
+    }
+  }
+
   const created: MutableFingerprintCleanupMapping = {
     rowId,
     templateId,
+    fingerprintDeviceId: resolvedFingerprintDeviceId,
     uid: normalizedUid,
     schoolId: schoolId || normalizedUid,
     studentName: "",
     course: "",
     yearLevel: "",
+    section: "",
     profileStatus: "",
     profileRole: "",
     fingerprintStatus: "",
+    enrollmentSyncStatus: "",
     lastEnrolledAtMs: 0,
+    latestEnrollmentSessionAtMs: 0,
+    latestEnrollmentSessionId: "",
     duplicateTemplateCount: 0,
     duplicateSchoolIdCount: 0,
     duplicateReasons: [],
     hasProfile: false,
     hasStudentProjection: false,
     hasTemplateDoc: false,
+    hasEnrollmentSession: false,
+    hasSyncedEnrollmentSession: false,
     templateDocActive: true,
     templateDocStatus: "",
-    sourceSet: new Set<string>(),
+    hasDeletedSourceStatus: false,
+    hasStaleSourceStatus: false,
+    hasNeedsReenrollmentSourceStatus: false,
+    sessionIdSet: new Set<string>(),
+    sourceSet: new Set<FingerprintCleanupSource>(),
   };
 
   mappings.set(rowId, created);
   return created;
 }
 
+function hasCanonicalFingerprintSource(mapping: MutableFingerprintCleanupMapping): boolean {
+  return mapping.hasTemplateDoc || mapping.hasProfile || mapping.hasStudentProjection;
+}
+
+function trackFingerprintCleanupStatusHints(
+  mapping: MutableFingerprintCleanupMapping,
+  ...values: unknown[]
+): void {
+  values.forEach((value) => {
+    const normalized = normalizeLower(value);
+    if (!normalized) {
+      return;
+    }
+
+    if (
+      normalized === "needs_reenrollment" ||
+      normalized === "needs reenrollment" ||
+      normalized.includes("re-enroll") ||
+      normalized.includes("reenroll")
+    ) {
+      mapping.hasNeedsReenrollmentSourceStatus = true;
+      return;
+    }
+
+    if (normalized === "deleted") {
+      mapping.hasDeletedSourceStatus = true;
+      return;
+    }
+
+    if (
+      normalized === "stale" ||
+      normalized === "inactive" ||
+      normalized === "disabled"
+    ) {
+      mapping.hasStaleSourceStatus = true;
+    }
+  });
+}
+
+function shouldCountFingerprintCleanupDuplicate(
+  mapping: MutableFingerprintCleanupMapping,
+): boolean {
+  return (
+    mapping.templateId > 0 &&
+    !mapping.hasDeletedSourceStatus &&
+    !mapping.hasStaleSourceStatus &&
+    !mapping.hasNeedsReenrollmentSourceStatus
+  );
+}
+
+function resolveFingerprintCleanupSyncStatus(
+  mapping: MutableFingerprintCleanupMapping,
+): string {
+  const normalizedSync = normalizeLower(mapping.enrollmentSyncStatus);
+  if (normalizedSync === "synced") {
+    return "synced";
+  }
+  if (normalizedSync === "enrolled") {
+    return "enrolled";
+  }
+  if (normalizedSync === "failed") {
+    return "failed";
+  }
+
+  return (
+    normalizeText(mapping.enrollmentSyncStatus) ||
+    normalizeText(mapping.fingerprintStatus) ||
+    normalizeText(mapping.templateDocStatus) ||
+    normalizeText(mapping.profileStatus) ||
+    "-"
+  );
+}
+
 function isFingerprintMappingPotentiallyActive(
   mapping: MutableFingerprintCleanupMapping,
 ): boolean {
-  const profileStatus = normalizeLower(mapping.profileStatus);
   const profileRole = normalizeLower(mapping.profileRole);
-  const fingerprintStatus = normalizeLower(
-    mapping.fingerprintStatus || mapping.templateDocStatus,
-  );
 
   if (mapping.templateId <= 0) {
     return false;
   }
 
-  if (!mapping.hasProfile) {
+  if (!hasCanonicalFingerprintSource(mapping)) {
     return false;
   }
 
@@ -1330,16 +1607,11 @@ function isFingerprintMappingPotentiallyActive(
     return false;
   }
 
-  if (profileStatus === "inactive" || profileStatus === "deleted") {
+  if (mapping.hasDeletedSourceStatus || mapping.hasStaleSourceStatus) {
     return false;
   }
 
-  if (
-    fingerprintStatus === "needs_reenrollment" ||
-    fingerprintStatus === "stale" ||
-    fingerprintStatus === "inactive" ||
-    fingerprintStatus === "deleted"
-  ) {
+  if (mapping.hasNeedsReenrollmentSourceStatus) {
     return false;
   }
 
@@ -1351,85 +1623,138 @@ function isFingerprintMappingPotentiallyActive(
 }
 
 async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport> {
-  const [templateSnapshot, profileSnapshot, studentSnapshot] = await Promise.all([
+  const [templateSnapshot, profileSnapshot, studentSnapshot, sessionSnapshot] = await Promise.all([
     db.collection("fingerprintTemplates").get(),
     db.collection("profiles").get(),
     db.collection("students").get(),
+    db.collection("enrollmentSessions").get(),
   ]);
 
+  const profileDataById = new Map<string, FirebaseFirestore.DocumentData>();
+  const studentDataById = new Map<string, FirebaseFirestore.DocumentData>();
+  profileSnapshot.docs.forEach((profileDoc) => {
+    profileDataById.set(profileDoc.id, profileDoc.data() ?? {});
+  });
+  studentSnapshot.docs.forEach((studentDoc) => {
+    studentDataById.set(studentDoc.id, studentDoc.data() ?? {});
+  });
+
   const mappings = new Map<string, MutableFingerprintCleanupMapping>();
-  let needsReenrollment = 0;
+  const sourceCounts: Record<FingerprintCleanupSource, number> = {
+    fingerprint_template: 0,
+    profile: 0,
+    student_projection: 0,
+    enrollment_session: 0,
+  };
+  let enrollmentSessionStudentDocCount = 0;
+
+  const applyIdentityDefaults = (
+    mapping: MutableFingerprintCleanupMapping,
+    data: FirebaseFirestore.DocumentData | undefined,
+  ) => {
+    if (!data) {
+      return;
+    }
+
+    const schoolId =
+      normalizeText(data.schoolId) ||
+      normalizeText(data.studentId) ||
+      normalizeText(data.studentUid);
+    if (!mapping.schoolId && schoolId) {
+      mapping.schoolId = schoolId;
+    }
+
+    const studentName =
+      resolveFingerprintRecordName(data) ||
+      normalizeText(data.studentName) ||
+      normalizeText(data.name) ||
+      normalizeText(data.fullName);
+    if (!mapping.studentName && studentName) {
+      mapping.studentName = studentName;
+    }
+
+    const course =
+      normalizeCourseLabel(data.course) ||
+      normalizeText(data.course);
+    if (!mapping.course && course) {
+      mapping.course = course;
+    }
+
+    const yearLevel = normalizeYear(data.yearLevel ?? data.year);
+    if (!mapping.yearLevel && yearLevel) {
+      mapping.yearLevel = yearLevel;
+    }
+
+    const section = extractStudentSection(data);
+    if (!mapping.section && section) {
+      mapping.section = section;
+    }
+  };
 
   profileSnapshot.docs.forEach((profileDoc) => {
-    const profileData = profileDoc.data() ?? {};
+    const profileData = profileDataById.get(profileDoc.id) ?? {};
     const templateId = extractFingerprintTemplateId(profileData);
+    if (templateId <= 0) {
+      return;
+    }
+
     const fingerprintStatus = extractFingerprintStatus(profileData);
-    if (templateId <= 0 && !fingerprintStatus) {
-      return;
-    }
-
-    if (templateId <= 0 && normalizeLower(fingerprintStatus) === "needs_reenrollment") {
-      needsReenrollment += 1;
-      return;
-    }
-
+    const fingerprintDeviceId = normalizeFingerprintDeviceIdForReport(
+      extractFingerprintDeviceId(profileData),
+    );
     const schoolId = normalizeText(profileData.schoolId) || profileDoc.id;
     const mapping = getOrCreateFingerprintCleanupMapping(
       mappings,
       templateId,
+      fingerprintDeviceId,
       profileDoc.id,
       schoolId,
     );
     mapping.hasProfile = true;
+    mapping.fingerprintDeviceId = normalizeFingerprintDeviceIdForReport(
+      mapping.fingerprintDeviceId || fingerprintDeviceId,
+    );
     mapping.profileStatus = normalizeText(profileData.status) || mapping.profileStatus;
     mapping.profileRole = normalizeText(profileData.role) || mapping.profileRole;
-    mapping.studentName =
-      resolveFingerprintRecordName(profileData) || mapping.studentName || schoolId;
-    mapping.course = normalizeText(profileData.course) || mapping.course || "Unassigned";
-    mapping.yearLevel =
-      normalizeYear(profileData.yearLevel ?? profileData.year) ||
-      mapping.yearLevel ||
-      "Unassigned";
+    applyIdentityDefaults(mapping, profileData);
     mapping.fingerprintStatus = fingerprintStatus || mapping.fingerprintStatus;
     mapping.lastEnrolledAtMs = Math.max(
       mapping.lastEnrolledAtMs,
       toMillis(extractFingerprintEnrolledAt(profileData)),
     );
     mapping.sourceSet.add("profile");
+    sourceCounts.profile += 1;
+    trackFingerprintCleanupStatusHints(
+      mapping,
+      profileData.status,
+      fingerprintStatus,
+    );
   });
 
   studentSnapshot.docs.forEach((studentDoc) => {
-    const studentData = studentDoc.data() ?? {};
+    const studentData = studentDataById.get(studentDoc.id) ?? {};
     const templateId = extractFingerprintTemplateId(studentData);
+    if (templateId <= 0) {
+      return;
+    }
+
     const fingerprintStatus = extractFingerprintStatus(studentData);
-    if (templateId <= 0 && !fingerprintStatus) {
-      return;
-    }
-
-    if (templateId <= 0 && normalizeLower(fingerprintStatus) === "needs_reenrollment") {
-      needsReenrollment += 1;
-      return;
-    }
-
+    const fingerprintDeviceId = normalizeFingerprintDeviceIdForReport(
+      extractFingerprintDeviceId(studentData),
+    );
     const schoolId = normalizeText(studentData.schoolId) || studentDoc.id;
     const mapping = getOrCreateFingerprintCleanupMapping(
       mappings,
       templateId,
+      fingerprintDeviceId,
       studentDoc.id,
       schoolId,
     );
     mapping.hasStudentProjection = true;
-    if (!mapping.studentName) {
-      mapping.studentName =
-        resolveFingerprintRecordName(studentData) || mapping.studentName || schoolId;
-    }
-    if (!mapping.course) {
-      mapping.course = normalizeText(studentData.course) || "Unassigned";
-    }
-    if (!mapping.yearLevel) {
-      mapping.yearLevel =
-        normalizeYear(studentData.yearLevel ?? studentData.year) || "Unassigned";
-    }
+    mapping.fingerprintDeviceId = normalizeFingerprintDeviceIdForReport(
+      mapping.fingerprintDeviceId || fingerprintDeviceId,
+    );
+    applyIdentityDefaults(mapping, studentData);
     if (!mapping.profileStatus) {
       mapping.profileStatus = normalizeText(studentData.status);
     }
@@ -1439,18 +1764,36 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
       toMillis(extractFingerprintEnrolledAt(studentData)),
     );
     mapping.sourceSet.add("student_projection");
+    sourceCounts.student_projection += 1;
+    trackFingerprintCleanupStatusHints(
+      mapping,
+      studentData.status,
+      fingerprintStatus,
+    );
   });
 
   templateSnapshot.docs.forEach((templateDoc) => {
     const templateData = templateDoc.data() ?? {};
     const templateId =
       extractFingerprintTemplateId(templateData) ||
-      toPositiveNumber(templateDoc.id);
+      extractFingerprintTemplateIdFromDocId(templateDoc.id);
     const uid =
       normalizeText(templateData.uid) ||
       normalizeText(templateData.studentUid) ||
       normalizeText(templateData.studentId);
-    const schoolId = normalizeText(templateData.schoolId) || uid || templateDoc.id;
+    const profileData = uid ? profileDataById.get(uid) ?? {} : {};
+    const studentData = uid ? studentDataById.get(uid) ?? {} : {};
+    const fingerprintDeviceId =
+      extractFingerprintDeviceId(templateData) ||
+      extractFingerprintDeviceIdFromDocId(templateDoc.id) ||
+      extractFingerprintDeviceId(profileData) ||
+      extractFingerprintDeviceId(studentData);
+    const schoolId =
+      normalizeText(templateData.schoolId) ||
+      normalizeText(profileData.schoolId) ||
+      normalizeText(studentData.schoolId) ||
+      uid ||
+      templateDoc.id;
     if (templateId <= 0) {
       return;
     }
@@ -1458,23 +1801,19 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
     const mapping = getOrCreateFingerprintCleanupMapping(
       mappings,
       templateId,
+      fingerprintDeviceId,
       uid,
       schoolId,
     );
     mapping.hasTemplateDoc = true;
+    mapping.fingerprintDeviceId = normalizeFingerprintDeviceIdForReport(
+      mapping.fingerprintDeviceId || fingerprintDeviceId,
+    );
     mapping.templateDocActive = templateData.active !== false;
     mapping.templateDocStatus = normalizeText(templateData.status);
-    if (!mapping.studentName) {
-      mapping.studentName =
-        resolveFingerprintRecordName(templateData) || mapping.studentName || schoolId;
-    }
-    if (!mapping.course) {
-      mapping.course = normalizeText(templateData.course) || "Unassigned";
-    }
-    if (!mapping.yearLevel) {
-      mapping.yearLevel =
-        normalizeYear(templateData.yearLevel ?? templateData.year) || "Unassigned";
-    }
+    applyIdentityDefaults(mapping, templateData);
+    applyIdentityDefaults(mapping, profileData);
+    applyIdentityDefaults(mapping, studentData);
     if (!mapping.fingerprintStatus) {
       mapping.fingerprintStatus =
         extractFingerprintStatus(templateData) || mapping.templateDocStatus;
@@ -1489,41 +1828,244 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
       ),
     );
     mapping.sourceSet.add("fingerprint_template");
+    sourceCounts.fingerprint_template += 1;
+    trackFingerprintCleanupStatusHints(
+      mapping,
+      templateData.status,
+      extractFingerprintStatus(templateData),
+      templateData.active === false ? "inactive" : "",
+    );
   });
 
-  const templateCounts = new Map<number, number>();
-  const schoolTemplateSets = new Map<string, Set<number>>();
+  const enrollmentSessionDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+  const enrollmentSessionBatchSize = 20;
+  for (let index = 0; index < sessionSnapshot.docs.length; index += enrollmentSessionBatchSize) {
+    const sessionChunk = sessionSnapshot.docs.slice(index, index + enrollmentSessionBatchSize);
+    const studentSnapshots = await Promise.all(
+      sessionChunk.map((sessionDoc) => sessionDoc.ref.collection("students").get()),
+    );
+    studentSnapshots.forEach((studentSnapshot) => {
+      enrollmentSessionDocs.push(...studentSnapshot.docs);
+    });
+  }
+
+  enrollmentSessionStudentDocCount = enrollmentSessionDocs.length;
+  enrollmentSessionDocs.forEach((studentDoc) => {
+    const data = studentDoc.data() ?? {};
+    const templateId = extractFingerprintTemplateId(data);
+    if (templateId <= 0) {
+      return;
+    }
+
+    const normalizedStudentStatus = normalizeEnrollmentStudentStatus(data.status);
+    const normalizedSyncStatus = normalizeEnrollmentSyncStatus(data.syncStatus);
+    if (
+      normalizedSyncStatus !== "synced" &&
+      normalizedStudentStatus !== "synced" &&
+      normalizedStudentStatus !== "enrolled"
+    ) {
+      return;
+    }
+
+    const sessionId =
+      studentDoc.ref.parent.parent?.id ||
+      normalizeText(data.enrollmentSessionId);
+    const uid =
+      normalizeText(data.studentUid) ||
+      normalizeText(data.studentId) ||
+      studentDoc.id;
+    const profileData = uid ? profileDataById.get(uid) ?? {} : {};
+    const studentData = uid ? studentDataById.get(uid) ?? {} : {};
+    const fingerprintDeviceId = normalizeFingerprintDeviceIdForReport(
+      extractEnrollmentSessionFingerprintDeviceId(data) ||
+        extractFingerprintDeviceId(profileData) ||
+        extractFingerprintDeviceId(studentData),
+    );
+    const schoolId =
+      normalizeText(data.schoolId) ||
+      normalizeText(profileData.schoolId) ||
+      normalizeText(studentData.schoolId) ||
+      uid ||
+      studentDoc.id;
+    const mapping = getOrCreateFingerprintCleanupMapping(
+      mappings,
+      templateId,
+      fingerprintDeviceId,
+      uid,
+      schoolId,
+    );
+
+    mapping.hasEnrollmentSession = true;
+    mapping.hasSyncedEnrollmentSession = true;
+    mapping.fingerprintDeviceId = normalizeFingerprintDeviceIdForReport(
+      mapping.fingerprintDeviceId || fingerprintDeviceId,
+    );
+    mapping.profileStatus =
+      mapping.profileStatus ||
+      normalizeText(profileData.status) ||
+      normalizeText(studentData.status);
+    mapping.profileRole =
+      mapping.profileRole ||
+      normalizeText(profileData.role) ||
+      normalizeText(studentData.role);
+    mapping.fingerprintStatus =
+      mapping.fingerprintStatus ||
+      extractFingerprintStatus(profileData) ||
+      extractFingerprintStatus(studentData);
+    applyIdentityDefaults(mapping, data);
+    applyIdentityDefaults(mapping, profileData);
+    applyIdentityDefaults(mapping, studentData);
+
+    const sessionSyncStatus =
+      normalizedSyncStatus === "synced" ?
+        "synced" :
+      normalizedStudentStatus === "synced" ?
+        "synced" :
+      normalizedStudentStatus === "enrolled" ?
+        "enrolled" :
+        "";
+    if (
+      !mapping.enrollmentSyncStatus ||
+      sessionSyncStatus === "synced" ||
+      (sessionSyncStatus === "enrolled" &&
+        normalizeLower(mapping.enrollmentSyncStatus) !== "synced")
+    ) {
+      mapping.enrollmentSyncStatus = sessionSyncStatus || mapping.enrollmentSyncStatus;
+    }
+
+    const enrolledAtMs = Math.max(
+      toMillis(data.syncedAt),
+      toMillis(data.enrolledAt),
+      toMillis(data.updatedAt),
+      toMillis(data.createdAt),
+    );
+    mapping.lastEnrolledAtMs = Math.max(mapping.lastEnrolledAtMs, enrolledAtMs);
+    if (sessionId) {
+      mapping.sessionIdSet.add(sessionId);
+      if (enrolledAtMs >= mapping.latestEnrollmentSessionAtMs) {
+        mapping.latestEnrollmentSessionAtMs = enrolledAtMs;
+        mapping.latestEnrollmentSessionId = sessionId;
+      }
+    }
+
+    mapping.sourceSet.add("enrollment_session");
+    sourceCounts.enrollment_session += 1;
+    trackFingerprintCleanupStatusHints(
+      mapping,
+      data.status,
+      data.syncStatus,
+      data.remarks,
+    );
+  });
+
+  functionsLogger.info("[FP_CLEANUP][ALL_SOURCE_SCAN]", {
+    fingerprintTemplateDocs: templateSnapshot.size,
+    profileDocs: profileSnapshot.size,
+    studentDocs: studentSnapshot.size,
+    enrollmentSessionDocs: sessionSnapshot.size,
+    enrollmentSessionStudentDocs: enrollmentSessionStudentDocCount,
+    mergedRows: mappings.size,
+  });
+
+  const duplicateSlotCounts = new Map<string, number>();
+  const schoolTemplateSets = new Map<string, Set<string>>();
 
   mappings.forEach((mapping) => {
-    if (mapping.templateId > 0) {
-      templateCounts.set(
-        mapping.templateId,
-        (templateCounts.get(mapping.templateId) ?? 0) + 1,
-      );
+    if (!shouldCountFingerprintCleanupDuplicate(mapping)) {
+      return;
     }
 
-    if (mapping.schoolId && isFingerprintMappingPotentiallyActive(mapping)) {
-      const current = schoolTemplateSets.get(mapping.schoolId) || new Set<number>();
-      current.add(mapping.templateId);
+    const slotKey = fingerprintSlotKey(
+      mapping.templateId,
+      mapping.fingerprintDeviceId,
+    );
+    duplicateSlotCounts.set(
+      slotKey,
+      (duplicateSlotCounts.get(slotKey) ?? 0) + 1,
+    );
+
+    if (mapping.schoolId) {
+      const current = schoolTemplateSets.get(mapping.schoolId) || new Set<string>();
+      current.add(slotKey);
       schoolTemplateSets.set(mapping.schoolId, current);
     }
+  });
+
+  const duplicateSlotSummaries = Array.from(duplicateSlotCounts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([slotKey, count]) => {
+      const owners = Array.from(mappings.values())
+        .filter((mapping) =>
+          shouldCountFingerprintCleanupDuplicate(mapping) &&
+          fingerprintSlotKey(mapping.templateId, mapping.fingerprintDeviceId) === slotKey,
+        )
+        .map((mapping) => ({
+          uid: mapping.uid,
+          schoolId: mapping.schoolId,
+        }))
+        .sort((left, right) => left.schoolId.localeCompare(right.schoolId));
+      const firstOwner = owners[0];
+      const firstMapping = Array.from(mappings.values()).find((mapping) =>
+        shouldCountFingerprintCleanupDuplicate(mapping) &&
+        fingerprintSlotKey(mapping.templateId, mapping.fingerprintDeviceId) === slotKey,
+      );
+      return {
+        slotKey,
+        count,
+        templateId: firstMapping?.templateId ?? 0,
+        fingerprintDeviceId: firstMapping?.fingerprintDeviceId ?? "",
+        owners: owners.map((owner) => owner.uid),
+        schoolIds: owners.map((owner) => owner.schoolId),
+        firstSchoolId: firstOwner?.schoolId ?? "",
+      };
+    })
+    .sort((left, right) => {
+      const deviceCompare = left.fingerprintDeviceId.localeCompare(right.fingerprintDeviceId);
+      if (deviceCompare !== 0) {
+        return deviceCompare;
+      }
+      if (left.templateId !== right.templateId) {
+        return left.templateId - right.templateId;
+      }
+      return left.firstSchoolId.localeCompare(right.firstSchoolId);
+    });
+
+  functionsLogger.info("[FP_CLEANUP][DUPLICATE_TEMPLATE]", {
+    scannedMappings: mappings.size,
+    duplicateGroupCount: duplicateSlotSummaries.length,
+    duplicateOwnerCount: duplicateSlotSummaries.reduce(
+      (total, group) => total + group.count,
+      0,
+    ),
+    duplicates: duplicateSlotSummaries.slice(0, 25),
   });
 
   let activeMappings = 0;
   let staleMappings = 0;
   let duplicateMappings = 0;
+  let needsReenrollment = 0;
+  let canonicalMappings = 0;
+  let enrollmentSessionOnlyMappings = 0;
+  let missingCanonicalMappings = 0;
+  let duplicateTemplateRows = 0;
+  const fingerprintStudentKeys = new Set<string>();
 
   const resolvedMappings = Array.from(mappings.values())
     .filter((mapping) => mapping.templateId > 0)
     .map((mapping) => {
-      const profileStatus = normalizeLower(mapping.profileStatus);
-      const fingerprintStatus = normalizeLower(
-        mapping.fingerprintStatus || mapping.templateDocStatus,
+      const slotKey = fingerprintSlotKey(
+        mapping.templateId,
+        mapping.fingerprintDeviceId,
       );
-      const duplicateTemplateCount = templateCounts.get(mapping.templateId) ?? 0;
+      const duplicateTemplateCount = duplicateSlotCounts.get(slotKey) ?? 0;
       const duplicateSchoolIdCount =
         schoolTemplateSets.get(mapping.schoolId)?.size ?? 0;
       const duplicateReasons: string[] = [];
+      const hasCanonicalSource = hasCanonicalFingerprintSource(mapping);
+      const enrollmentSessionOnly = mapping.hasEnrollmentSession && !hasCanonicalSource;
+      const missingCanonical =
+        mapping.hasSyncedEnrollmentSession && !hasCanonicalSource;
+      const potentiallyActive = isFingerprintMappingPotentiallyActive(mapping);
 
       if (duplicateTemplateCount > 1) {
         duplicateReasons.push("template_shared");
@@ -1532,108 +2074,168 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
         duplicateReasons.push("multiple_templates_for_school");
       }
 
-      const isDeleted =
-        profileStatus === "deleted" || fingerprintStatus === "deleted";
-      const isMissingProfile = !mapping.hasProfile;
-      const needsReenrollmentStatus =
-        fingerprintStatus === "needs_reenrollment";
+      const isDeleted = mapping.hasDeletedSourceStatus;
+      const needsReenrollmentStatus = mapping.hasNeedsReenrollmentSourceStatus;
       const isStale =
         !isDeleted &&
-        !isMissingProfile &&
         (
-          profileStatus === "inactive" ||
-          profileStatus === "disabled" ||
-          fingerprintStatus === "stale" ||
-          fingerprintStatus === "inactive" ||
-          mapping.templateDocActive === false ||
-          !mapping.hasStudentProjection
+          mapping.hasStaleSourceStatus ||
+          mapping.templateDocActive === false
         );
       const isDuplicate = duplicateReasons.length > 0;
 
       let mappingStatus: FingerprintCleanupMappingStatus = "active";
       if (isDeleted) {
         mappingStatus = "deleted";
-      } else if (isMissingProfile) {
-        mappingStatus = "missing_profile";
-      } else if (isDuplicate) {
-        mappingStatus = "duplicate";
-      } else if (needsReenrollmentStatus) {
-        mappingStatus = "needs_reenrollment";
       } else if (isStale) {
         mappingStatus = "stale";
+      } else if (needsReenrollmentStatus) {
+        mappingStatus = "needs_reenrollment";
+      } else if (missingCanonical) {
+        mappingStatus = "missing_canonical";
+      } else if (isDuplicate) {
+        mappingStatus = "duplicate";
       }
 
+      fingerprintStudentKeys.add(mapping.uid || mapping.schoolId || mapping.rowId);
+      if (hasCanonicalSource) {
+        canonicalMappings += 1;
+      }
+      if (enrollmentSessionOnly) {
+        enrollmentSessionOnlyMappings += 1;
+      }
+      if (missingCanonical) {
+        missingCanonicalMappings += 1;
+      }
+      if (duplicateReasons.length > 0) {
+        duplicateTemplateRows += 1;
+      }
       if (mappingStatus === "active") {
         activeMappings += 1;
       }
-      if (
-        mappingStatus === "stale" ||
-        mappingStatus === "deleted" ||
-        mappingStatus === "missing_profile"
-      ) {
+      if (mappingStatus === "stale" || mappingStatus === "deleted") {
         staleMappings += 1;
       }
       if (mappingStatus === "duplicate") {
         duplicateMappings += 1;
       }
-
-      const requiresReenrollment =
-        fingerprintStatus === "needs_reenrollment" ||
-        mappingStatus === "stale" ||
-        mappingStatus === "needs_reenrollment";
-      if (requiresReenrollment) {
+      if (mappingStatus === "needs_reenrollment") {
         needsReenrollment += 1;
       }
+
+      const sessionIds = Array.from(mapping.sessionIdSet).sort((left, right) =>
+        left.localeCompare(right),
+      );
+      const syncStatus = resolveFingerprintCleanupSyncStatus(mapping);
+      const effectiveFingerprintStatus =
+        mapping.fingerprintStatus ||
+        mapping.templateDocStatus ||
+        syncStatus ||
+        (mapping.templateDocActive ? "active" : "stale");
 
       return {
         rowId: mapping.rowId,
         templateId: mapping.templateId,
+        fingerprintDeviceId: mapping.fingerprintDeviceId,
         uid: mapping.uid,
         schoolId: mapping.schoolId,
         studentName: mapping.studentName || mapping.schoolId || mapping.uid,
         course: mapping.course || "Unassigned",
         yearLevel: mapping.yearLevel || "Unassigned",
-        profileStatus: mapping.profileStatus || (mapping.hasProfile ? "Active" : "Missing"),
+        section: mapping.section || "-",
+        profileStatus: mapping.profileStatus || "Unknown",
         mappingStatus,
-        fingerprintStatus:
-          mapping.fingerprintStatus ||
-          mapping.templateDocStatus ||
-          (mapping.templateDocActive ? "active" : "stale"),
+        fingerprintStatus: effectiveFingerprintStatus,
+        syncStatus,
+        sessionId: mapping.latestEnrollmentSessionId || sessionIds[0] || "",
+        sessionIds,
         lastEnrolledAtMs: mapping.lastEnrolledAtMs,
         duplicateTemplateCount,
         duplicateSchoolIdCount,
         duplicateReasons,
         sources: Array.from(mapping.sourceSet).sort(),
+        hasCanonicalSource,
+        enrollmentSessionOnly,
+        missingCanonical,
         canRemoveStale:
           mappingStatus === "stale" ||
-          mappingStatus === "deleted" ||
-          mappingStatus === "missing_profile",
-        canRemoveMapping: true,
+          mappingStatus === "deleted",
+        canRemoveMapping: hasCanonicalSource,
         canKeepTemplateOwner:
-          duplicateTemplateCount > 1 &&
-          isFingerprintMappingPotentiallyActive(mapping),
-        needsReenrollment: requiresReenrollment,
+          duplicateTemplateCount > 1 && potentiallyActive,
+        needsReenrollment: mappingStatus === "needs_reenrollment",
       } satisfies FingerprintCleanupReportMapping;
     })
     .sort((left, right) => {
+      const statusRank: Record<FingerprintCleanupMappingStatus, number> = {
+        missing_canonical: 0,
+        duplicate: 1,
+        needs_reenrollment: 2,
+        stale: 3,
+        deleted: 4,
+        missing_profile: 5,
+        active: 6,
+      };
+      const leftStatusRank = statusRank[left.mappingStatus] ?? 99;
+      const rightStatusRank = statusRank[right.mappingStatus] ?? 99;
+      if (leftStatusRank !== rightStatusRank) {
+        return leftStatusRank - rightStatusRank;
+      }
+      const deviceCompare = left.fingerprintDeviceId.localeCompare(
+        right.fingerprintDeviceId,
+      );
+      if (deviceCompare !== 0) {
+        return deviceCompare;
+      }
       if (left.templateId !== right.templateId) {
         return left.templateId - right.templateId;
       }
       return left.studentName.localeCompare(right.studentName);
     });
 
+  functionsLogger.info("[FP_CLEANUP][SOURCE_COUNTS]", {
+    sourceCounts,
+    canonicalMappings,
+    enrollmentSessionOnlyMappings,
+    missingCanonicalMappings,
+    duplicateTemplateRows,
+    totalRows: resolvedMappings.length,
+  });
+
+  const missingCanonicalRows = resolvedMappings
+    .filter((mapping) => mapping.missingCanonical)
+    .map((mapping) => ({
+      uid: mapping.uid,
+      schoolId: mapping.schoolId,
+      templateId: mapping.templateId,
+      fingerprintDeviceId: mapping.fingerprintDeviceId,
+      sessionId: mapping.sessionId,
+      syncStatus: mapping.syncStatus,
+    }));
+  functionsLogger.info("[FP_CLEANUP][MISSING_CANONICAL]", {
+    count: missingCanonicalRows.length,
+    rows: missingCanonicalRows.slice(0, 25),
+  });
+
   const templateBackedCount = resolvedMappings.filter((mapping) =>
     mapping.sources.includes("fingerprint_template"),
   ).length;
+  const enrollmentSessionBackedCount = resolvedMappings.filter((mapping) =>
+    mapping.sources.includes("enrollment_session"),
+  ).length;
   const fallbackBackedCount = resolvedMappings.filter((mapping) =>
-    !mapping.sources.includes("fingerprint_template"),
+    !mapping.sources.includes("fingerprint_template") &&
+    !mapping.sources.includes("enrollment_session"),
   ).length;
   const source: FingerprintCleanupReportSource =
     resolvedMappings.length === 0 && needsReenrollment === 0 ?
       "empty" :
-      templateBackedCount > 0 && fallbackBackedCount > 0 ?
+      enrollmentSessionBackedCount > 0 && canonicalMappings === 0 ?
+        "enrollment_sessions" :
+      templateBackedCount > 0 &&
+        (fallbackBackedCount > 0 || enrollmentSessionBackedCount > 0) ?
         "mixed" :
-        templateBackedCount > 0 ?
+      templateBackedCount > 0 ?
           "fingerprintTemplates" :
           "profiles_fallback";
 
@@ -1650,14 +2252,25 @@ async function buildFingerprintCleanupReport(): Promise<FingerprintCleanupReport
       total: resolvedMappings.length,
       active: activeMappings,
       stale: staleMappings,
-      duplicate: duplicateMappings,
+      duplicate: duplicateTemplateRows,
       needsReenrollment,
+      studentsWithFingerprints: fingerprintStudentKeys.size,
+      totalTemplateIdRows: resolvedMappings.length,
+      canonicalMappings,
+      enrollmentSessionOnlyMappings,
+      missingCanonicalMappings,
+      duplicateTemplateRows,
     },
     totalMappings: resolvedMappings.length,
     activeMappings,
     staleMappings,
-    duplicateMappings,
+    duplicateMappings: duplicateTemplateRows,
     needsReenrollment,
+    studentsWithFingerprints: fingerprintStudentKeys.size,
+    canonicalMappings,
+    enrollmentSessionOnlyMappings,
+    missingCanonicalMappings,
+    duplicateTemplateRows,
     source,
     fallbackUsed: templateSnapshot.empty,
     emptyMessage: "",
@@ -3535,13 +4148,16 @@ function isValidFingerprintCleanupOwner(
     fingerprintStatus !== "stale";
 }
 
-function fingerprintTemplateRef(templateId: number) {
-  return db.collection("fingerprintTemplates").doc(String(templateId));
+function fingerprintTemplateRef(templateId: number, fingerprintDeviceId = "") {
+  return db
+    .collection("fingerprintTemplates")
+    .doc(fingerprintTemplateDocId(templateId, fingerprintDeviceId));
 }
 
 function buildQueuePayload(
   type: FingerprintCleanupQueueType,
   templateId: number,
+  fingerprintDeviceId: string,
   uid: string,
   schoolId: string,
   reason: string,
@@ -3550,6 +4166,7 @@ function buildQueuePayload(
   return {
     type,
     templateId,
+    targetDeviceId: fingerprintDeviceId,
     uid,
     schoolId,
     reason,
@@ -3564,6 +4181,7 @@ async function queueFingerprintCleanupInstruction(
   batch: FirebaseFirestore.WriteBatch,
   type: FingerprintCleanupQueueType,
   templateId: number,
+  fingerprintDeviceId: string,
   uid: string,
   schoolId: string,
   reason: string,
@@ -3572,7 +4190,15 @@ async function queueFingerprintCleanupInstruction(
   const cleanupRef = db.collection("moduleCleanupQueue").doc();
   batch.set(
     cleanupRef,
-    buildQueuePayload(type, templateId, uid, schoolId, reason, actorUid),
+    buildQueuePayload(
+      type,
+      templateId,
+      fingerprintDeviceId,
+      uid,
+      schoolId,
+      reason,
+      actorUid,
+    ),
   );
 }
 
@@ -3586,9 +4212,13 @@ async function updateFingerprintTemplateDocument(
     studentName: string;
     course: string;
     yearLevel: string;
+    fingerprintDeviceId: string;
   },
 ): Promise<void> {
-  const templateRef = fingerprintTemplateRef(templateId);
+  const templateRef = fingerprintTemplateRef(
+    templateId,
+    keepMapping?.fingerprintDeviceId || fallback.fingerprintDeviceId,
+  );
   if (keepMapping) {
     batch.set(
       templateRef,
@@ -3599,6 +4229,8 @@ async function updateFingerprintTemplateDocument(
         name: keepMapping.studentName,
         course: keepMapping.course,
         yearLevel: keepMapping.yearLevel,
+        fingerprintDeviceId: keepMapping.fingerprintDeviceId,
+        sensorId: keepMapping.fingerprintDeviceId,
         active: true,
         status: "active",
         updatedAt: serverTimestamp(),
@@ -3617,6 +4249,8 @@ async function updateFingerprintTemplateDocument(
       name: fallback.studentName,
       course: fallback.course,
       yearLevel: fallback.yearLevel,
+      fingerprintDeviceId: fallback.fingerprintDeviceId,
+      sensorId: fallback.fingerprintDeviceId,
       active: false,
       status: "needs_reenrollment",
       updatedAt: serverTimestamp(),
@@ -3668,6 +4302,7 @@ async function activateFingerprintMappingForUid(
   batch: FirebaseFirestore.WriteBatch,
   uid: string,
   templateId: number,
+  fingerprintDeviceId: string,
 ): Promise<void> {
   if (!uid || templateId <= 0) {
     return;
@@ -3684,7 +4319,10 @@ async function activateFingerprintMappingForUid(
     templateId,
     fingerprintStatus: "enrolled",
     updatedAt: serverTimestamp(),
-  };
+  } as Record<string, unknown>;
+  if (fingerprintDeviceId) {
+    activationPatch.fingerprintDeviceId = fingerprintDeviceId;
+  }
 
   if (profileSnap.exists) {
     batch.set(profileSnap.ref, activationPatch, {merge: true});
@@ -3748,6 +4386,8 @@ function buildFingerprintTemplateMigrationPayload(
     name: mapping.studentName,
     course: mapping.course,
     yearLevel: mapping.yearLevel,
+    fingerprintDeviceId: mapping.fingerprintDeviceId,
+    sensorId: mapping.fingerprintDeviceId,
     active: isActiveOwner,
     status,
     fingerprintStatus: mapping.fingerprintStatus || (isActiveOwner ? "enrolled" : status),
@@ -3773,6 +4413,11 @@ export const adminListFingerprintCleanupMappings = onCall({region: REGION}, asyn
       authLogger.info("adminListFingerprintCleanupMappings completed", {
         actorUid,
         loadedMappings: report.totalMappings,
+        studentsWithFingerprints: report.studentsWithFingerprints,
+        canonicalMappings: report.canonicalMappings,
+        enrollmentSessionOnlyMappings: report.enrollmentSessionOnlyMappings,
+        missingCanonicalMappings: report.missingCanonicalMappings,
+        duplicateTemplateRows: report.duplicateTemplateRows,
         fallbackUsed: report.fallbackUsed,
         source: report.source,
       });
@@ -3781,8 +4426,13 @@ export const adminListFingerprintCleanupMappings = onCall({region: REGION}, asyn
         action: "ADMIN_LIST_FINGERPRINT_CLEANUP_MAPPINGS",
         actorUid,
         totalMappings: report.totalMappings,
+        studentsWithFingerprints: report.studentsWithFingerprints,
         duplicateMappings: report.duplicateMappings,
+        duplicateTemplateRows: report.duplicateTemplateRows,
         staleMappings: report.staleMappings,
+        canonicalMappings: report.canonicalMappings,
+        enrollmentSessionOnlyMappings: report.enrollmentSessionOnlyMappings,
+        missingCanonicalMappings: report.missingCanonicalMappings,
         source: report.source,
         fallbackUsed: report.fallbackUsed,
         createdAt: serverTimestamp(),
@@ -3820,7 +4470,7 @@ export const adminBuildFingerprintMappingsFromProfiles = onCall({region: REGION}
 
     try {
       const report = await buildFingerprintCleanupReport();
-      const groupedByTemplate = new Map<number, FingerprintCleanupReportMapping[]>();
+      const groupedBySlot = new Map<string, FingerprintCleanupReportMapping[]>();
 
       report.mappings
         .filter((mapping) =>
@@ -3828,12 +4478,16 @@ export const adminBuildFingerprintMappingsFromProfiles = onCall({region: REGION}
           (mapping.sources.includes("profile") || mapping.sources.includes("student_projection")),
         )
         .forEach((mapping) => {
-          const current = groupedByTemplate.get(mapping.templateId) ?? [];
+          const slotKey = fingerprintSlotKey(
+            mapping.templateId,
+            mapping.fingerprintDeviceId,
+          );
+          const current = groupedBySlot.get(slotKey) ?? [];
           current.push(mapping);
-          groupedByTemplate.set(mapping.templateId, current);
+          groupedBySlot.set(slotKey, current);
         });
 
-      if (groupedByTemplate.size === 0) {
+      if (groupedBySlot.size === 0) {
         return {
           ok: true,
           createdCount: 0,
@@ -3847,33 +4501,41 @@ export const adminBuildFingerprintMappingsFromProfiles = onCall({region: REGION}
       let createdCount = 0;
       let updatedCount = 0;
       let skippedCount = 0;
-      let operationsInBatch = 0;
-      let batch = db.batch();
+        let operationsInBatch = 0;
+        let batch = db.batch();
 
-      for (const [templateId, mappings] of groupedByTemplate.entries()) {
-        const preferred = [...mappings].sort(sortFingerprintCleanupOwnerCandidates)[0];
-        const payload = buildFingerprintTemplateMigrationPayload(preferred);
-        const templateRef = fingerprintTemplateRef(templateId);
-        const templateSnap = await templateRef.get();
-        const existingData = templateSnap.data() ?? {};
-        const existingUid = normalizeText(existingData.uid);
-        const existingSchoolId = normalizeText(existingData.schoolId);
-        const existingStatus = normalizeLower(existingData.status);
-        const existingActive = existingData.active !== false;
-        const nextStatus = normalizeLower(payload.status);
-        const nextUid = normalizeText(payload.uid);
-        const nextSchoolId = normalizeText(payload.schoolId);
-        const nextActive = payload.active === true;
+        for (const mappings of groupedBySlot.values()) {
+          const preferred = [...mappings].sort(sortFingerprintCleanupOwnerCandidates)[0];
+          const payload = buildFingerprintTemplateMigrationPayload(preferred);
+          const templateRef = fingerprintTemplateRef(
+            preferred.templateId,
+            preferred.fingerprintDeviceId,
+          );
+          const templateSnap = await templateRef.get();
+          const existingData = templateSnap.data() ?? {};
+          const existingUid = normalizeText(existingData.uid);
+          const existingSchoolId = normalizeText(existingData.schoolId);
+          const existingStatus = normalizeLower(existingData.status);
+          const existingActive = existingData.active !== false;
+          const existingDeviceId =
+            normalizeText(existingData.fingerprintDeviceId) ||
+            normalizeText(existingData.sensorId);
+          const nextStatus = normalizeLower(payload.status);
+          const nextUid = normalizeText(payload.uid);
+          const nextSchoolId = normalizeText(payload.schoolId);
+          const nextActive = payload.active === true;
+          const nextDeviceId = normalizeText(payload.fingerprintDeviceId);
 
-        if (
-          templateSnap.exists &&
-          existingUid === nextUid &&
-          existingSchoolId === nextSchoolId &&
-          existingStatus === nextStatus &&
-          existingActive === nextActive
-        ) {
-          skippedCount += 1;
-          continue;
+          if (
+            templateSnap.exists &&
+            existingUid === nextUid &&
+            existingSchoolId === nextSchoolId &&
+            existingStatus === nextStatus &&
+            existingActive === nextActive &&
+            existingDeviceId === nextDeviceId
+          ) {
+            skippedCount += 1;
+            continue;
         }
 
         batch.set(templateRef, payload, {merge: true});
@@ -3901,7 +4563,7 @@ export const adminBuildFingerprintMappingsFromProfiles = onCall({region: REGION}
         createdCount,
         updatedCount,
         skippedCount,
-        totalProfileMappings: groupedByTemplate.size,
+        totalProfileMappings: groupedBySlot.size,
         createdAt: serverTimestamp(),
       }).catch((logError) => {
         authLogger.warn("adminBuildFingerprintMappingsFromProfiles log write failed", {
@@ -3914,7 +4576,7 @@ export const adminBuildFingerprintMappingsFromProfiles = onCall({region: REGION}
         createdCount,
         updatedCount,
         skippedCount,
-        totalProfileMappings: groupedByTemplate.size,
+        totalProfileMappings: groupedBySlot.size,
         message:
           createdCount > 0 || updatedCount > 0 ?
             `Fingerprint mappings built from profiles. Created ${createdCount}, updated ${updatedCount}, skipped ${skippedCount}.` :
@@ -3951,6 +4613,7 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
       normalizeText(actorProfileSnap.data()?.schoolId) :
       "";
     const templateId = toPositiveNumber(body.templateId);
+    const fingerprintDeviceId = normalizeText(body.fingerprintDeviceId);
     const reason = normalizeText(body.reason) || "Admin fingerprint cleanup";
 
     if (!action) {
@@ -3965,13 +4628,30 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
     }
 
     const report = await buildFingerprintCleanupReport();
-    const templateMappings = report.mappings.filter(
+    const slotMappings = report.mappings.filter(
       (mapping) => mapping.templateId === templateId,
+    );
+    const slotDeviceIds = Array.from(new Set(slotMappings.map((mapping) => mapping.fingerprintDeviceId)));
+    if (!fingerprintDeviceId && slotDeviceIds.length > 1) {
+      throw new HttpsError(
+        "invalid-argument",
+        "fingerprintDeviceId is required when the template exists on multiple devices.",
+      );
+    }
+    const resolvedFingerprintDeviceId =
+      fingerprintDeviceId ||
+      (slotDeviceIds.length === 1 ? slotDeviceIds[0] ?? "" : "");
+    const templateMappings = slotMappings.filter(
+      (mapping) => mapping.fingerprintDeviceId === resolvedFingerprintDeviceId,
     );
 
     if (templateMappings.length === 0) {
       throw new HttpsError("not-found", "Fingerprint mapping not found.");
     }
+
+    const slotLabel = resolvedFingerprintDeviceId ?
+      `${resolvedFingerprintDeviceId} / template ${templateId}` :
+      `template ${templateId}`;
 
     const batch = db.batch();
     let updatedCount = 0;
@@ -3995,7 +4675,12 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
         );
       }
 
-      await activateFingerprintMappingForUid(batch, keepUid, templateId);
+      await activateFingerprintMappingForUid(
+        batch,
+        keepUid,
+        templateId,
+        keepMapping.fingerprintDeviceId,
+      );
       const removedMappings = templateMappings.filter((mapping) => mapping.uid !== keepUid);
       for (const mapping of removedMappings) {
         updatedCount += await clearFingerprintMappingForUid(
@@ -4007,6 +4692,7 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
           batch,
           "removeMapping",
           templateId,
+          mapping.fingerprintDeviceId,
           mapping.uid,
           mapping.schoolId,
           reason,
@@ -4021,12 +4707,13 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
         studentName: keepMapping.studentName,
         course: keepMapping.course,
         yearLevel: keepMapping.yearLevel,
+        fingerprintDeviceId: keepMapping.fingerprintDeviceId,
       });
 
       logAction = "ADMIN_KEEP_FINGERPRINT_TEMPLATE_OWNER";
       logTargetUid = keepMapping.uid;
       logTargetSchoolId = keepMapping.schoolId;
-      message = `Template ${templateId} kept for ${keepMapping.studentName}.`;
+      message = `${slotLabel} kept for ${keepMapping.studentName}.`;
     } else {
       const uid = normalizeText(body.uid);
       const targetMapping = templateMappings.find((mapping) => mapping.uid === uid);
@@ -4055,6 +4742,7 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
         batch,
         queueType,
         templateId,
+        targetMapping.fingerprintDeviceId,
         targetMapping.uid,
         targetMapping.schoolId,
         reason,
@@ -4072,6 +4760,7 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
         studentName: targetMapping.studentName,
         course: targetMapping.course,
         yearLevel: targetMapping.yearLevel,
+        fingerprintDeviceId: targetMapping.fingerprintDeviceId,
       });
 
       if (!remainingOwner) {
@@ -4079,6 +4768,7 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
           batch,
           "deleteTemplateIfUnused",
           templateId,
+          targetMapping.fingerprintDeviceId,
           targetMapping.uid,
           targetMapping.schoolId,
           reason,
@@ -4097,8 +4787,8 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
       logTargetSchoolId = targetMapping.schoolId;
       message =
         action === "markNeedsReenrollment" ?
-          `${targetMapping.studentName} now needs re-enrollment.` :
-          `Fingerprint mapping removed for ${targetMapping.studentName}.`;
+          `${targetMapping.studentName} now needs re-enrollment for ${slotLabel}.` :
+          `Fingerprint mapping removed for ${targetMapping.studentName} on ${slotLabel}.`;
     }
 
     await db.collection("logs").add({
@@ -4108,6 +4798,7 @@ export const adminManageFingerprintCleanup = onCall({region: REGION}, async (req
       targetUid: logTargetUid,
       targetSchoolId: logTargetSchoolId,
       templateId,
+      fingerprintDeviceId: resolvedFingerprintDeviceId,
       reason,
       createdAt: serverTimestamp(),
       metadata: {
@@ -4258,6 +4949,10 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
             normalizeText(studentData.fingerprintStatus) ||
             normalizeText(profileData.fingerprintStatus) ||
             "inactive",
+          fingerprintDeviceId:
+            extractFingerprintDeviceId(studentData) ||
+            extractFingerprintDeviceId(profileData) ||
+            "",
           fingerprintTemplateId:
             toPositiveNumber(
               studentData.fingerprintTemplateId ??
@@ -4269,7 +4964,50 @@ export const ecListStudents = onCall({region: REGION}, async (request) => {
       })
       .filter((student): student is NonNullable<typeof student> => Boolean(student));
 
+    const activeFingerprintSlotCounts = new Map<string, number>();
+    studentIdentityRows.forEach((student) => {
+      const templateId = Number(student.fingerprintTemplateId ?? 0) || 0;
+      const accountStatus = normalizeLower(student.status);
+      const fingerprintStatus = normalizeLower(student.fingerprintStatus);
+      if (
+        templateId <= 0 ||
+        accountStatus === "inactive" ||
+        accountStatus === "deleted" ||
+        fingerprintStatus === "needs_reenrollment" ||
+        fingerprintStatus === "stale" ||
+        fingerprintStatus === "inactive" ||
+        fingerprintStatus === "deleted"
+      ) {
+        return;
+      }
+
+      const slotKey = fingerprintSlotKey(
+        templateId,
+        normalizeText(student.fingerprintDeviceId),
+      );
+      activeFingerprintSlotCounts.set(
+        slotKey,
+        (activeFingerprintSlotCounts.get(slotKey) ?? 0) + 1,
+      );
+    });
+
     const students = studentIdentityRows
+      .map((student) => {
+        const templateId = Number(student.fingerprintTemplateId ?? 0) || 0;
+        const duplicateTemplate =
+          templateId > 0 &&
+          (activeFingerprintSlotCounts.get(
+            fingerprintSlotKey(
+              templateId,
+              normalizeText(student.fingerprintDeviceId),
+            ),
+          ) ?? 0) > 1;
+
+        return {
+          ...student,
+          duplicateTemplate,
+        };
+      })
       .filter((student) => {
         if (!actorIsBod) {
           return true;

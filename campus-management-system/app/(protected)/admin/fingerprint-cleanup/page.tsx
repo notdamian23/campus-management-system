@@ -2,6 +2,7 @@
 
 import {useCallback, useEffect, useMemo, useRef, useState, type Key} from "react";
 import {onAuthStateChanged} from "firebase/auth";
+import {Alert} from "@heroui/alert";
 import {Button} from "@heroui/button";
 import {Card, CardBody, CardHeader} from "@heroui/card";
 import {Chip} from "@heroui/chip";
@@ -42,10 +43,12 @@ import {
   type FingerprintCleanupAction,
   type FingerprintCleanupReport,
   type FingerprintCleanupReportMapping,
+  type FingerprintCleanupSource,
 } from "@/lib/firebase-functions";
 import {campusToast} from "@/lib/toast";
 
 type StatusFilter = "all" | FingerprintCleanupReportMapping["mappingStatus"];
+type SourceFilter = "all" | FingerprintCleanupSource;
 type PendingAction =
   | {
       action: Exclude<FingerprintCleanupAction, "keepStudent">;
@@ -54,11 +57,13 @@ type PendingAction =
   | {
       action: "keepStudent";
       templateId: number;
+      fingerprintDeviceId: string;
     };
 
 const statusOptions: Array<{key: StatusFilter; label: string}> = [
   {key: "all", label: "All statuses"},
   {key: "active", label: "Active"},
+  {key: "missing_canonical", label: "Missing canonical"},
   {key: "stale", label: "Stale"},
   {key: "needs_reenrollment", label: "Needs re-enrollment"},
   {key: "duplicate", label: "Duplicate"},
@@ -76,11 +81,27 @@ function formatDateTime(ms: number) {
 
 function statusChipColor(status: FingerprintCleanupReportMapping["mappingStatus"]) {
   if (status === "active") return "success";
+  if (status === "missing_canonical") return "warning";
   if (status === "duplicate") return "warning";
   if (status === "stale") return "secondary";
   if (status === "needs_reenrollment") return "secondary";
   if (status === "deleted") return "danger";
   return "default";
+}
+
+function syncStatusChipColor(syncStatus: string) {
+  const normalized = syncStatus.trim().toLowerCase();
+  if (normalized === "synced") return "success";
+  if (normalized === "enrolled") return "primary";
+  if (normalized === "failed") return "danger";
+  return "default";
+}
+
+function sourceChipColor(source: FingerprintCleanupSource) {
+  if (source === "fingerprint_template") return "success";
+  if (source === "profile") return "secondary";
+  if (source === "student_projection") return "default";
+  return "primary";
 }
 
 function actionLabel(action: FingerprintCleanupAction) {
@@ -92,8 +113,8 @@ function actionLabel(action: FingerprintCleanupAction) {
 
 function SummarySkeleton() {
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
-      {Array.from({length: 5}).map((_, index) => (
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
+      {Array.from({length: 7}).map((_, index) => (
         <Card key={index} shadow="sm" className="border">
           <CardBody className="space-y-3 p-5">
             <Skeleton className="h-4 w-24 rounded-lg" />
@@ -113,11 +134,12 @@ export default function AdminFingerprintCleanupPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [report, setReport] = useState<FingerprintCleanupReport | null>(null);
   const [search, setSearch] = useState("");
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [courseFilter, setCourseFilter] = useState("all");
   const [yearFilter, setYearFilter] = useState("all");
   const [duplicatesOnly, setDuplicatesOnly] = useState(false);
-  const [staleOnly, setStaleOnly] = useState(false);
+  const [missingCanonicalOnly, setMissingCanonicalOnly] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [actionReason, setActionReason] = useState("");
   const [keepUid, setKeepUid] = useState("");
@@ -214,11 +236,24 @@ export default function AdminFingerprintCleanupPage() {
     return ["all", ...Array.from(values).sort((left, right) => left.localeCompare(right))];
   }, [report]);
 
+  const sourceOptions = useMemo(() => {
+    const values = new Set<FingerprintCleanupSource>();
+    report?.mappings.forEach((mapping) => {
+      mapping.sources.forEach((source) => {
+        values.add(source);
+      });
+    });
+    return ["all", ...Array.from(values).sort((left, right) => left.localeCompare(right))] as SourceFilter[];
+  }, [report]);
+
   const filteredMappings = useMemo(() => {
     const rows = report?.mappings ?? [];
     const needle = search.trim().toLowerCase();
 
     return rows.filter((mapping) => {
+      if (sourceFilter !== "all" && !mapping.sources.includes(sourceFilter)) {
+        return false;
+      }
       if (statusFilter !== "all" && mapping.mappingStatus !== statusFilter) {
         return false;
       }
@@ -231,12 +266,7 @@ export default function AdminFingerprintCleanupPage() {
       if (duplicatesOnly && mapping.duplicateReasons.length === 0) {
         return false;
       }
-      if (
-        staleOnly &&
-        mapping.mappingStatus !== "stale" &&
-        mapping.mappingStatus !== "deleted" &&
-        mapping.mappingStatus !== "missing_profile"
-      ) {
+      if (missingCanonicalOnly && !mapping.missingCanonical) {
         return false;
       }
       if (!needle) {
@@ -247,10 +277,26 @@ export default function AdminFingerprintCleanupPage() {
         mapping.studentName,
         mapping.schoolId,
         mapping.uid,
+        mapping.course,
+        mapping.yearLevel,
+        mapping.section,
         String(mapping.templateId),
+        mapping.fingerprintDeviceId,
+        mapping.sessionId,
+        mapping.syncStatus,
+        ...mapping.sessionIds,
       ].some((value) => value.toLowerCase().includes(needle));
     });
-  }, [courseFilter, duplicatesOnly, report, search, staleOnly, statusFilter, yearFilter]);
+  }, [
+    courseFilter,
+    duplicatesOnly,
+    missingCanonicalOnly,
+    report,
+    search,
+    sourceFilter,
+    statusFilter,
+    yearFilter,
+  ]);
 
   const keepCandidates = useMemo(() => {
     if (!pendingAction || pendingAction.action !== "keepStudent" || !report) {
@@ -258,7 +304,9 @@ export default function AdminFingerprintCleanupPage() {
     }
 
     return report.mappings.filter(
-      (mapping) => mapping.templateId === pendingAction.templateId,
+      (mapping) =>
+        mapping.templateId === pendingAction.templateId &&
+        mapping.fingerprintDeviceId === pendingAction.fingerprintDeviceId,
     );
   }, [pendingAction, report]);
 
@@ -266,17 +314,18 @@ export default function AdminFingerprintCleanupPage() {
     pendingAction ? actionLabel(pendingAction.action) : "";
   const hasActiveFilters =
     Boolean(search.trim()) ||
+    sourceFilter !== "all" ||
     statusFilter !== "all" ||
     courseFilter !== "all" ||
     yearFilter !== "all" ||
     duplicatesOnly ||
-    staleOnly;
+    missingCanonicalOnly;
   const emptyStateMessage =
     hasActiveFilters ?
-      "No fingerprint mappings matched the current filters." :
+      "No fingerprint rows matched the current filters." :
     report?.emptyMessage ?
       report.emptyMessage :
-      "No fingerprint mappings found yet. Sync or enroll fingerprints first.";
+      "No fingerprint template IDs were found yet. Sync or enroll fingerprints first.";
 
   async function runAction() {
     if (!pendingAction) {
@@ -285,7 +334,7 @@ export default function AdminFingerprintCleanupPage() {
 
     const actionKey =
       pendingAction.action === "keepStudent" ?
-        `${pendingAction.action}:${pendingAction.templateId}:${keepUid}` :
+        `${pendingAction.action}:${pendingAction.fingerprintDeviceId}:${pendingAction.templateId}:${keepUid}` :
         `${pendingAction.action}:${pendingAction.mapping.rowId}`;
 
     const payload =
@@ -293,12 +342,14 @@ export default function AdminFingerprintCleanupPage() {
         {
           action: pendingAction.action,
           templateId: pendingAction.templateId,
+          fingerprintDeviceId: pendingAction.fingerprintDeviceId,
           keepUid,
           reason: actionReason.trim(),
         } :
         {
           action: pendingAction.action,
           templateId: pendingAction.mapping.templateId,
+          fingerprintDeviceId: pendingAction.mapping.fingerprintDeviceId,
           uid: pendingAction.mapping.uid,
           reason: actionReason.trim(),
         };
@@ -403,7 +454,7 @@ export default function AdminFingerprintCleanupPage() {
                 Build mappings from profiles
               </Button>
               <Button
-                color="danger"
+                color="primary"
                 variant="flat"
                 startContent={
                   refreshing ? <Spinner size="sm" /> : <RefreshCcw size={16} />
@@ -413,7 +464,7 @@ export default function AdminFingerprintCleanupPage() {
                 }}
                 isDisabled={refreshing || loading}
               >
-                Find Duplicate Fingerprints
+                Refresh Fingerprint List
               </Button>
             </div>
           </div>
@@ -421,53 +472,73 @@ export default function AdminFingerprintCleanupPage() {
           {loading ? (
             <SummarySkeleton />
           ) : (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
               <Card shadow="none" className="border bg-[#faf7f3]">
                 <CardBody className="space-y-2 p-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-campus-text-secondary">
-                    Total mappings
+                    Students with fingerprints
                   </p>
                   <p className="text-3xl font-black text-campus-text-primary">
-                    {report?.totalMappings ?? 0}
+                    {report?.studentsWithFingerprints ?? 0}
                   </p>
                 </CardBody>
               </Card>
               <Card shadow="none" className="border bg-[#f4fbf5]">
                 <CardBody className="space-y-2 p-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-campus-text-secondary">
-                    Active mappings
+                    Total template ID rows
                   </p>
                   <p className="text-3xl font-black text-emerald-700">
-                    {report?.activeMappings ?? 0}
+                    {report?.totalMappings ?? 0}
                   </p>
                 </CardBody>
               </Card>
               <Card shadow="none" className="border bg-[#fdf6f0]">
                 <CardBody className="space-y-2 p-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-campus-text-secondary">
-                    Stale mappings
+                    Canonical mappings
                   </p>
                   <p className="text-3xl font-black text-amber-700">
-                    {report?.staleMappings ?? 0}
+                    {report?.canonicalMappings ?? 0}
                   </p>
                 </CardBody>
               </Card>
               <Card shadow="none" className="border bg-[#fff7ed]">
                 <CardBody className="space-y-2 p-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-campus-text-secondary">
-                    Duplicate mappings
+                    Enrollment-session-only
                   </p>
                   <p className="text-3xl font-black text-orange-700">
-                    {report?.duplicateMappings ?? 0}
+                    {report?.enrollmentSessionOnlyMappings ?? 0}
                   </p>
                 </CardBody>
               </Card>
               <Card shadow="none" className="border bg-[#f8f5ff]">
                 <CardBody className="space-y-2 p-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-campus-text-secondary">
-                    Needs re-enrollment
+                    Missing canonical
                   </p>
                   <p className="text-3xl font-black text-violet-700">
+                    {report?.missingCanonicalMappings ?? 0}
+                  </p>
+                </CardBody>
+              </Card>
+              <Card shadow="none" className="border bg-[#fff1e8]">
+                <CardBody className="space-y-2 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-campus-text-secondary">
+                    Duplicate template IDs
+                  </p>
+                  <p className="text-3xl font-black text-[#b45309]">
+                    {report?.duplicateTemplateRows ?? 0}
+                  </p>
+                </CardBody>
+              </Card>
+              <Card shadow="none" className="border bg-[#f3f1ff]">
+                <CardBody className="space-y-2 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-campus-text-secondary">
+                    Needs re-enrollment
+                  </p>
+                  <p className="text-3xl font-black text-[#6d28d9]">
                     {report?.needsReenrollment ?? 0}
                   </p>
                 </CardBody>
@@ -475,14 +546,22 @@ export default function AdminFingerprintCleanupPage() {
             </div>
           )}
 
+          {!loading && (report?.missingCanonicalMappings ?? 0) > 0 ? (
+            <Alert
+              color="warning"
+              variant="flat"
+              title="Missing canonical mappings detected"
+              description="These students have synced fingerprint template IDs in enrollment sessions but are missing canonical mappings. Build or repair mappings before using them for attendance."
+            />
+          ) : null}
+
           {!loading && report?.fallbackUsed ? (
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              Showing fallback profile-based fingerprint mappings because the
-              canonical `fingerprintTemplates` records are empty or incomplete.
-              Use <span className="font-semibold">Build mappings from profiles</span>{" "}
-              to create the admin cleanup records without touching the AS608
-              sensor.
-            </div>
+            <Alert
+              color="warning"
+              variant="flat"
+              title="Fallback records are still in use"
+              description="Showing profile and student fallback mappings because the canonical fingerprintTemplates records are empty or incomplete. Use Build mappings from profiles to create admin cleanup records without touching the AS608 sensor."
+            />
           ) : null}
         </CardBody>
       </Card>
@@ -491,22 +570,38 @@ export default function AdminFingerprintCleanupPage() {
         <CardHeader className="flex flex-col items-start gap-3 px-5 pt-5">
           <div>
             <p className="text-lg font-semibold text-campus-text-primary">
-              Mapping review
+              All students with fingerprint template IDs
             </p>
             <p className="text-sm text-campus-text-secondary">
-              Search by student, School ID, UID, or template ID, then filter for
-              stale and duplicate mappings that need cleanup.
+              Search every fingerprint source in Firestore, including canonical
+              records and synced enrollment-session exports.
             </p>
           </div>
         </CardHeader>
         <CardBody className="space-y-4 p-5 pt-3">
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.5fr)_220px_220px_220px]">
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.5fr)_200px_220px_220px_200px]">
             <Input
-              placeholder="Search name, School ID, UID, or template ID"
+              placeholder="Search name, School ID, UID, template ID, device ID, or session ID"
               value={search}
               onValueChange={setSearch}
               startContent={<Search size={16} className="text-campus-text-secondary" />}
             />
+            <Select
+              label="Source"
+              selectedKeys={[sourceFilter]}
+              onSelectionChange={(keys) => {
+                const selected = Array.from(keys as Set<Key>)[0];
+                if (typeof selected === "string") {
+                  setSourceFilter(selected as SourceFilter);
+                }
+              }}
+            >
+              {sourceOptions.map((option) => (
+                <SelectItem key={option}>
+                  {option === "all" ? "All sources" : option}
+                </SelectItem>
+              ))}
+            </Select>
             <Select
               label="Mapping status"
               selectedKeys={[statusFilter]}
@@ -564,21 +659,22 @@ export default function AdminFingerprintCleanupPage() {
               Show duplicates only
             </Button>
             <Button
-              variant={staleOnly ? "solid" : "bordered"}
-              color={staleOnly ? "secondary" : "default"}
-              onPress={() => setStaleOnly((current) => !current)}
+              variant={missingCanonicalOnly ? "solid" : "bordered"}
+              color={missingCanonicalOnly ? "warning" : "default"}
+              onPress={() => setMissingCanonicalOnly((current) => !current)}
             >
-              Show stale only
+              Show synced but missing canonical only
             </Button>
             <Button
               variant="light"
               onPress={() => {
                 setSearch("");
+                setSourceFilter("all");
                 setStatusFilter("all");
                 setCourseFilter("all");
                 setYearFilter("all");
                 setDuplicatesOnly(false);
-                setStaleOnly(false);
+                setMissingCanonicalOnly(false);
               }}
             >
               Clear filters
@@ -601,12 +697,15 @@ export default function AdminFingerprintCleanupPage() {
                 }}
               >
                 <TableHeader>
-                  <TableColumn>Template</TableColumn>
                   <TableColumn>Student</TableColumn>
-                  <TableColumn>Course / Year</TableColumn>
-                  <TableColumn>Profile</TableColumn>
-                  <TableColumn>Status</TableColumn>
+                  <TableColumn>Academic</TableColumn>
+                  <TableColumn>Template ID</TableColumn>
+                  <TableColumn>Device ID</TableColumn>
+                  <TableColumn>Sources</TableColumn>
+                  <TableColumn>Session ID</TableColumn>
                   <TableColumn>Last enrolled</TableColumn>
+                  <TableColumn>Sync status</TableColumn>
+                  <TableColumn>Mapping status</TableColumn>
                   <TableColumn>Actions</TableColumn>
                 </TableHeader>
                 <TableBody
@@ -622,20 +721,13 @@ export default function AdminFingerprintCleanupPage() {
                       <TableCell>
                         <div className="space-y-1">
                           <p className="font-semibold text-campus-text-primary">
-                            #{mapping.templateId}
-                          </p>
-                          <p className="text-xs text-campus-text-secondary">
-                            UID: {mapping.uid}
-                          </p>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="space-y-1">
-                          <p className="font-semibold text-campus-text-primary">
                             {mapping.studentName}
                           </p>
                           <p className="text-sm text-campus-text-secondary">
                             {mapping.schoolId}
+                          </p>
+                          <p className="text-xs text-campus-text-secondary">
+                            UID: {mapping.uid}
                           </p>
                         </div>
                       </TableCell>
@@ -645,21 +737,67 @@ export default function AdminFingerprintCleanupPage() {
                           <p className="text-campus-text-secondary">
                             {mapping.yearLevel}
                           </p>
+                          <p className="text-sm text-campus-text-secondary">
+                            Section: {mapping.section || "-"}
+                          </p>
                         </div>
                       </TableCell>
                       <TableCell>
+                        <p className="font-semibold text-campus-text-primary">
+                          #{mapping.templateId}
+                        </p>
+                      </TableCell>
+                      <TableCell>
+                        <p className="text-sm text-campus-text-primary">
+                          {mapping.fingerprintDeviceId || "campus"}
+                        </p>
+                      </TableCell>
+                      <TableCell>
                         <div className="space-y-2">
-                          <Chip variant="flat" size="sm">
-                            {mapping.profileStatus || "Unknown"}
-                          </Chip>
                           <div className="flex flex-wrap gap-1">
                             {mapping.sources.map((source) => (
-                              <Chip key={`${mapping.rowId}:${source}`} size="sm" variant="bordered">
+                              <Chip
+                                key={`${mapping.rowId}:${source}`}
+                                size="sm"
+                                variant="bordered"
+                                color={sourceChipColor(source)}
+                              >
                                 {source}
                               </Chip>
                             ))}
                           </div>
+                          {mapping.profileStatus ? (
+                            <p className="text-xs text-campus-text-secondary">
+                              Account: {mapping.profileStatus}
+                            </p>
+                          ) : null}
                         </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="space-y-1">
+                          <p className="text-sm text-campus-text-primary">
+                            {mapping.sessionId || "-"}
+                          </p>
+                          {mapping.sessionIds.length > 1 ? (
+                            <p className="text-xs text-campus-text-secondary">
+                              +{mapping.sessionIds.length - 1} more
+                            </p>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <span className="text-sm text-campus-text-secondary">
+                          {formatDateTime(mapping.lastEnrolledAtMs)}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <Chip
+                          color={syncStatusChipColor(mapping.syncStatus)}
+                          variant="flat"
+                          size="sm"
+                        >
+                          {mapping.syncStatus || "-"}
+                        </Chip>
                       </TableCell>
                       <TableCell>
                         <div className="space-y-2">
@@ -681,6 +819,16 @@ export default function AdminFingerprintCleanupPage() {
                                 </Chip>
                               </Tooltip>
                             ) : null}
+                            {mapping.missingCanonical ? (
+                              <Chip size="sm" color="warning" variant="bordered">
+                                Missing canonical
+                              </Chip>
+                            ) : null}
+                            {mapping.hasCanonicalSource ? (
+                              <Chip size="sm" color="success" variant="bordered">
+                                Canonical
+                              </Chip>
+                            ) : null}
                             {mapping.needsReenrollment ? (
                               <Chip size="sm" color="secondary" variant="bordered">
                                 Needs re-enrollment
@@ -688,11 +836,6 @@ export default function AdminFingerprintCleanupPage() {
                             ) : null}
                           </div>
                         </div>
-                      </TableCell>
-                      <TableCell>
-                        <span className="text-sm text-campus-text-secondary">
-                          {formatDateTime(mapping.lastEnrolledAtMs)}
-                        </span>
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-wrap gap-2">
@@ -707,6 +850,7 @@ export default function AdminFingerprintCleanupPage() {
                                   setPendingAction({
                                     action: "keepStudent",
                                     templateId: mapping.templateId,
+                                    fingerprintDeviceId: mapping.fingerprintDeviceId,
                                   });
                                   setKeepUid(mapping.uid);
                                   setActionReason("");
@@ -717,7 +861,7 @@ export default function AdminFingerprintCleanupPage() {
                             </Tooltip>
                           ) : null}
                           {mapping.canRemoveStale ? (
-                            <Tooltip content="Remove only stale, deleted, or missing-profile mappings.">
+                            <Tooltip content="Remove only stale or deleted mappings.">
                               <Button
                                 size="sm"
                                 color="warning"
@@ -735,36 +879,47 @@ export default function AdminFingerprintCleanupPage() {
                               </Button>
                             </Tooltip>
                           ) : null}
-                          <Tooltip content="Remove this mapping and queue module cleanup.">
-                            <Button
-                              size="sm"
-                              color="danger"
-                              variant="flat"
-                              startContent={<Trash2 size={14} />}
-                              onPress={() => {
-                                setPendingAction({action: "removeMapping", mapping});
-                                setActionReason("");
-                              }}
-                            >
-                              Remove Mapping
-                            </Button>
-                          </Tooltip>
-                          <Tooltip content="Mark this student for fingerprint re-enrollment.">
-                            <Button
-                              size="sm"
-                              variant="bordered"
-                              startContent={<ShieldAlert size={14} />}
-                              onPress={() => {
-                                setPendingAction({
-                                  action: "markNeedsReenrollment",
-                                  mapping,
-                                });
-                                setActionReason("");
-                              }}
-                            >
-                              Mark for Re-enrollment
-                            </Button>
-                          </Tooltip>
+                          {mapping.canRemoveMapping ? (
+                            <Tooltip content="Remove this mapping and queue module cleanup.">
+                              <Button
+                                size="sm"
+                                color="danger"
+                                variant="flat"
+                                startContent={<Trash2 size={14} />}
+                                onPress={() => {
+                                  setPendingAction({action: "removeMapping", mapping});
+                                  setActionReason("");
+                                }}
+                              >
+                                Remove Mapping
+                              </Button>
+                            </Tooltip>
+                          ) : null}
+                          {mapping.canRemoveMapping ? (
+                            <Tooltip content="Mark this student for fingerprint re-enrollment.">
+                              <Button
+                                size="sm"
+                                variant="bordered"
+                                startContent={<ShieldAlert size={14} />}
+                                onPress={() => {
+                                  setPendingAction({
+                                    action: "markNeedsReenrollment",
+                                    mapping,
+                                  });
+                                  setActionReason("");
+                                }}
+                              >
+                                Mark for Re-enrollment
+                              </Button>
+                            </Tooltip>
+                          ) : null}
+                          {!mapping.canKeepTemplateOwner &&
+                          !mapping.canRemoveStale &&
+                          !mapping.canRemoveMapping ? (
+                            <span className="text-xs text-campus-text-secondary">
+                              Review only
+                            </span>
+                          ) : null}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -794,11 +949,11 @@ export default function AdminFingerprintCleanupPage() {
               <ModalBody className="space-y-4">
                 {pendingAction?.action === "keepStudent" ? (
                   <>
-                    <p className="text-sm text-campus-text-secondary">
-                      Choose the one active student who should keep this template.
-                      All other mappings for the same template will be removed or
-                      marked for re-enrollment.
-                    </p>
+                      <p className="text-sm text-campus-text-secondary">
+                        Choose the one active student who should keep this template.
+                        All other mappings for the same device slot will be removed
+                        or marked for re-enrollment.
+                      </p>
                     <Select
                       label="Student to keep"
                       selectedKeys={keepUid ? [keepUid] : []}
@@ -825,7 +980,8 @@ export default function AdminFingerprintCleanupPage() {
                       {pendingAction?.mapping.studentName}
                     </p>
                     <p className="mt-1 text-sm text-campus-text-secondary">
-                      Template #{pendingAction?.mapping.templateId} -{" "}
+                      Device {pendingAction?.mapping.fingerprintDeviceId || "Unknown"} -
+                      {" "}Template #{pendingAction?.mapping.templateId} -{" "}
                       {pendingAction?.mapping.schoolId}
                     </p>
                   </div>

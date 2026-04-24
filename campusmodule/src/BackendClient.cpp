@@ -1284,13 +1284,28 @@ bool BackendClient::submitEnrollment(const StudentInfo &student, String &error) 
                                  "submitEnrollment response", error)) {
     return false;
   }
-  return requestJson("POST", "/campusDeviceSubmitEnrollment", body, response,
-                     error, true, CampusConfig::kHttpRetryAttempts, 1);
+  if (!requestJson("POST", "/campusDeviceSubmitEnrollment", body, response,
+                   error, true, CampusConfig::kHttpRetryAttempts, 1)) {
+    return false;
+  }
+
+  String status = String(response["status"] | "");
+  status.toLowerCase();
+  if (status == "failed") {
+    error = String(response["error"] | response["message"] | "");
+    if (error.isEmpty()) {
+      error = "Enrollment upload failed";
+    }
+    return false;
+  }
+
+  return true;
 }
 
 bool BackendClient::downloadFingerprintRoster(StorageManager &storage,
                                               FingerprintRosterStats &stats,
-                                              String &error) {
+                                              String &error,
+                                              const String &validatedSessionId) {
   stats = FingerprintRosterStats{};
   const RequestTarget target = buildRequestTarget(kFingerprintRosterPath);
   lastRequestUrl_ = target.url;
@@ -1477,6 +1492,10 @@ bool BackendClient::downloadFingerprintRoster(StorageManager &storage,
 
       cleanupRequest(&https, "after response cleanup");
       logSimpleMemory("after roster download");
+      if (!storage.markFingerprintRosterValidatedSession(validatedSessionId, stats)) {
+        Serial.printf("[ROSTER] validation metadata save failed session=%s\n",
+                      validatedSessionId.c_str());
+      }
       Serial.printf("[ROSTER] saved count=%u size=%u\n",
                     static_cast<unsigned>(stats.totalRows),
                     static_cast<unsigned>(stats.fileSize));
@@ -1524,6 +1543,7 @@ bool BackendClient::resolveAttendanceOwner(int templateId, const String &eventId
     return false;
   }
   payload["templateId"] = templateId;
+  payload["fingerprintDeviceId"] = CampusConfig::kDeviceId;
   payload["eventId"] = eventId;
 
   String body;
@@ -1694,6 +1714,7 @@ bool BackendClient::fetchCleanupQueue(std::vector<CleanupQueueItem> &items,
     cleanupItem.studentUid =
         String(item["uid"] | item["studentUid"] | item["studentId"] | "");
     cleanupItem.schoolId = String(item["schoolId"] | "");
+    cleanupItem.targetDeviceId = String(item["targetDeviceId"] | "");
     cleanupItem.reason = String(item["reason"] | "");
     if (!cleanupItem.cleanupId.isEmpty() && cleanupItem.templateId > 0 &&
         !cleanupItem.type.isEmpty()) {

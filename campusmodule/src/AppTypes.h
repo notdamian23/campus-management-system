@@ -188,6 +188,7 @@ struct CleanupQueueItem {
   int templateId = -1;
   String studentUid;
   String schoolId;
+  String targetDeviceId;
   String reason;
 };
 

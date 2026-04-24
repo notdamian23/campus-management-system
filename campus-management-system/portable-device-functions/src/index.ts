@@ -97,6 +97,7 @@ type EventRegistrationLookup = {
 
 type PortableFingerprintOwnerEntry = {
   templateId: number;
+  fingerprintDeviceId: string;
   studentId: string;
   schoolId: string;
   name: string;
@@ -104,8 +105,15 @@ type PortableFingerprintOwnerEntry = {
   yearLevel: string;
   section: string;
   bodScope: string;
+  duplicateTemplate?: boolean;
   hasFingerprint: boolean;
   active: boolean;
+};
+
+type PortableFingerprintConflict = {
+  templateId: number;
+  fingerprintDeviceId: string;
+  owners: string[];
 };
 
 type DeviceContext = {
@@ -307,8 +315,58 @@ function parseBoolValue(value: unknown, fallback = false): boolean {
   return fallback;
 }
 
-function fingerprintTemplateRef(templateId: number) {
-  return db.doc(`fingerprintTemplates/${templateId}`);
+function sanitizeDocIdComponent(value: string): string {
+  return normalizeText(value).replace(/\//g, "_");
+}
+
+function fingerprintTemplateDocId(templateId: number, fingerprintDeviceId = "") {
+  const normalizedDeviceId = sanitizeDocIdComponent(fingerprintDeviceId);
+  return normalizedDeviceId ? `${normalizedDeviceId}__${templateId}` : String(templateId);
+}
+
+function fingerprintTemplateRef(templateId: number, fingerprintDeviceId = "") {
+  return db.doc(
+    `fingerprintTemplates/${fingerprintTemplateDocId(templateId, fingerprintDeviceId)}`
+  );
+}
+
+function extractFingerprintDeviceIdCandidates(data: Record<string, unknown>): string[] {
+  const fingerprint = asRecord(data.fingerprint);
+  return dedupeStrings(
+    [
+      normalizeText(data.fingerprintDeviceId),
+      normalizeText(data.sensorId),
+      normalizeText(data.deviceId),
+      normalizeText(fingerprint.fingerprintDeviceId),
+      normalizeText(fingerprint.sensorId),
+      normalizeText(fingerprint.deviceId),
+    ].filter(Boolean)
+  );
+}
+
+function resolveFingerprintDeviceId(
+  mergedData: Record<string, unknown>,
+  templateData?: Record<string, unknown>
+): string {
+  return (
+    extractFingerprintDeviceIdCandidates(mergedData)[0] ||
+    extractFingerprintDeviceIdCandidates(templateData ?? {})[0] ||
+    ""
+  );
+}
+
+function fingerprintSlotKey(templateId: number, fingerprintDeviceId: string): string {
+  return `${normalizeLower(fingerprintDeviceId) || "unknown"}::${templateId}`;
+}
+
+function fingerprintDeviceMatchesRequestedSlot(
+  candidateDeviceId: string,
+  requestedDeviceId: string
+): boolean {
+  if (!requestedDeviceId) {
+    return true;
+  }
+  return !candidateDeviceId || candidateDeviceId === requestedDeviceId;
 }
 
 async function upsertFingerprintTemplateOwner(
@@ -327,7 +385,7 @@ async function upsertFingerprintTemplateOwner(
     return;
   }
 
-  await fingerprintTemplateRef(templateId).set(
+  await fingerprintTemplateRef(templateId, payload.deviceId).set(
     {
       templateId,
       uid: payload.uid,
@@ -337,6 +395,7 @@ async function upsertFingerprintTemplateOwner(
       yearLevel: payload.yearLevel,
       active: true,
       status: "active",
+      fingerprintDeviceId: payload.deviceId,
       sensorId: payload.deviceId,
       enrolledAt: payload.enrolledAt,
       updatedAt: serverTimestamp(),
@@ -345,38 +404,82 @@ async function upsertFingerprintTemplateOwner(
   );
 }
 
+async function queryFingerprintTemplateDocuments(
+  templateId: number
+): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  const [numericSnapshot, stringSnapshot] = await Promise.all([
+    db.collection("fingerprintTemplates").where("templateId", "==", templateId).get(),
+    db.collection("fingerprintTemplates").where("templateId", "==", String(templateId)).get(),
+  ]);
+
+  const docs = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
+  [numericSnapshot, stringSnapshot].forEach((snapshot) => {
+    snapshot.docs.forEach((doc) => docs.set(doc.id, doc));
+  });
+  return Array.from(docs.values());
+}
+
 async function findActiveFingerprintTemplateConflict(
   templateId: number,
-  studentId: string
-): Promise<FirebaseFirestore.DocumentData | null> {
+  studentId: string,
+  fingerprintDeviceId: string
+): Promise<PortableFingerprintOwnerEntry | null> {
   if (templateId <= 0) {
     return null;
   }
 
-  const templateSnap = await fingerprintTemplateRef(templateId).get();
-  if (!templateSnap.exists) {
+  const candidatesByStudent = new Map<string, PortableFingerprintOwnerEntry>();
+  const templateDocs = await queryFingerprintTemplateDocuments(templateId);
+  for (const templateDoc of templateDocs) {
+    const templateData = templateDoc.data() ?? {};
+    const ownerId =
+      normalizeText(templateData.uid) ||
+      normalizeText(templateData.studentUid) ||
+      normalizeText(templateData.studentId);
+    if (!ownerId) {
+      continue;
+    }
+
+    const merged = await loadMergedStudentRecord(ownerId);
+    const entry = buildFingerprintOwnerEntry(
+      templateId,
+      ownerId,
+      merged,
+      templateData
+    );
+    if (!entry || !fingerprintDeviceMatchesRequestedSlot(entry.fingerprintDeviceId, fingerprintDeviceId)) {
+      continue;
+    }
+
+    const existing = candidatesByStudent.get(entry.studentId);
+    candidatesByStudent.set(
+      entry.studentId,
+      existing ? mergeFingerprintOwnerEntry(existing, entry) : entry
+    );
+  }
+
+  const fallbackEntries = await findFallbackFingerprintOwnerCandidates(templateId);
+  fallbackEntries
+    .filter((entry) =>
+      fingerprintDeviceMatchesRequestedSlot(entry.fingerprintDeviceId, fingerprintDeviceId)
+    )
+    .forEach((entry) => {
+      const existing = candidatesByStudent.get(entry.studentId);
+      candidatesByStudent.set(
+        entry.studentId,
+        existing ? mergeFingerprintOwnerEntry(existing, entry) : entry
+      );
+    });
+
+  const conflicts = Array.from(candidatesByStudent.values()).filter(
+    (entry) => entry.studentId && entry.studentId !== studentId
+  );
+
+  if (conflicts.length === 0) {
     return null;
   }
 
-  const templateData = templateSnap.data() ?? {};
-  const ownerUid =
-    normalizeText(templateData.uid) ||
-    normalizeText(templateData.studentUid) ||
-    normalizeText(templateData.studentId);
-  if (!ownerUid || ownerUid === studentId) {
-    return null;
-  }
-
-  if (templateData.active === false) {
-    return null;
-  }
-
-  const status = normalizeLower(templateData.status);
-  if (status === "stale" || status === "needs_reenrollment" || status === "deleted") {
-    return null;
-  }
-
-  return templateData;
+  return conflicts[0];
 }
 
 function normalizeBoolean(value: unknown, fallback = false): boolean {
@@ -511,6 +614,7 @@ function buildFingerprintOwnerEntry(
 
   return {
     templateId,
+    fingerprintDeviceId: resolveFingerprintDeviceId(mergedData, templateData),
     studentId,
     schoolId:
       normalizeText(mergedData.schoolId) ||
@@ -554,6 +658,7 @@ function mergeFingerprintOwnerEntry(
 ): PortableFingerprintOwnerEntry {
   return {
     templateId: current.templateId,
+    fingerprintDeviceId: current.fingerprintDeviceId || next.fingerprintDeviceId,
     studentId: current.studentId || next.studentId,
     schoolId: current.schoolId || next.schoolId,
     name: current.name || next.name,
@@ -567,18 +672,19 @@ function mergeFingerprintOwnerEntry(
 }
 
 function addFingerprintOwnerCandidate(
-  candidatesByTemplate: Map<number, Map<string, PortableFingerprintOwnerEntry>>,
+  candidatesBySlot: Map<string, Map<string, PortableFingerprintOwnerEntry>>,
   entry: PortableFingerprintOwnerEntry
 ) {
+  const slotKey = fingerprintSlotKey(entry.templateId, entry.fingerprintDeviceId);
   const existingByStudent =
-    candidatesByTemplate.get(entry.templateId) ??
+    candidatesBySlot.get(slotKey) ??
     new Map<string, PortableFingerprintOwnerEntry>();
   const existing = existingByStudent.get(entry.studentId);
   existingByStudent.set(
     entry.studentId,
     existing ? mergeFingerprintOwnerEntry(existing, entry) : entry
   );
-  candidatesByTemplate.set(entry.templateId, existingByStudent);
+  candidatesBySlot.set(slotKey, existingByStudent);
 }
 
 async function loadMergedStudentRecord(
@@ -653,44 +759,68 @@ async function findFallbackFingerprintOwnerCandidates(
 }
 
 async function resolveFingerprintOwnerByTemplate(
-  templateId: number
+  templateId: number,
+  fingerprintDeviceId: string
 ): Promise<{entry: PortableFingerprintOwnerEntry | null; reason: string}> {
   if (templateId <= 0) {
     return {entry: null, reason: "invalid_template_id"};
   }
 
   const candidatesByStudent = new Map<string, PortableFingerprintOwnerEntry>();
-  const templateSnap = await fingerprintTemplateRef(templateId).get();
-  if (templateSnap.exists) {
-    const templateData = templateSnap.data() ?? {};
-    if (resolveOwnerActiveFlag(templateData)) {
-      const ownerId =
-        normalizeText(templateData.uid) ||
-        normalizeText(templateData.studentUid) ||
-        normalizeText(templateData.studentId);
-      if (ownerId) {
-        const merged = await loadMergedStudentRecord(ownerId);
-        const entry = buildFingerprintOwnerEntry(
-          templateId,
-          ownerId,
-          merged,
-          templateData
-        );
-        if (entry) {
-          candidatesByStudent.set(entry.studentId, entry);
-        }
-      }
+  const templateDocs = await queryFingerprintTemplateDocuments(templateId);
+  for (const templateDoc of templateDocs) {
+    const templateData = templateDoc.data() ?? {};
+    if (!resolveOwnerActiveFlag(templateData)) {
+      continue;
     }
-  }
 
-  const fallbackEntries = await findFallbackFingerprintOwnerCandidates(templateId);
-  fallbackEntries.forEach((entry) => {
+    const ownerId =
+      normalizeText(templateData.uid) ||
+      normalizeText(templateData.studentUid) ||
+      normalizeText(templateData.studentId);
+    if (!ownerId) {
+      continue;
+    }
+
+    const merged = await loadMergedStudentRecord(ownerId);
+    const entry = buildFingerprintOwnerEntry(
+      templateId,
+      ownerId,
+      merged,
+      templateData
+    );
+    if (
+      !entry ||
+      !fingerprintDeviceMatchesRequestedSlot(
+        entry.fingerprintDeviceId,
+        fingerprintDeviceId
+      )
+    ) {
+      continue;
+    }
+
     const existing = candidatesByStudent.get(entry.studentId);
     candidatesByStudent.set(
       entry.studentId,
       existing ? mergeFingerprintOwnerEntry(existing, entry) : entry
     );
-  });
+  }
+
+  const fallbackEntries = await findFallbackFingerprintOwnerCandidates(templateId);
+  fallbackEntries
+    .filter((entry) =>
+      fingerprintDeviceMatchesRequestedSlot(
+        entry.fingerprintDeviceId,
+        fingerprintDeviceId
+      )
+    )
+    .forEach((entry) => {
+      const existing = candidatesByStudent.get(entry.studentId);
+      candidatesByStudent.set(
+        entry.studentId,
+        existing ? mergeFingerprintOwnerEntry(existing, entry) : entry
+      );
+    });
 
   if (candidatesByStudent.size === 0) {
     return {entry: null, reason: "owner_not_found"};
@@ -698,6 +828,7 @@ async function resolveFingerprintOwnerByTemplate(
   if (candidatesByStudent.size > 1) {
     deviceLogger.warn("Duplicate fingerprint owner candidates detected", {
       templateId,
+      fingerprintDeviceId,
       owners: Array.from(candidatesByStudent.keys()),
     });
     return {entry: null, reason: "duplicate_owner_conflict"};
@@ -709,9 +840,29 @@ async function resolveFingerprintOwnerByTemplate(
   };
 }
 
+function comparePortableFingerprintEntries(
+  left: PortableFingerprintOwnerEntry,
+  right: PortableFingerprintOwnerEntry
+): number {
+  const deviceCompare = left.fingerprintDeviceId.localeCompare(
+    right.fingerprintDeviceId
+  );
+  if (deviceCompare !== 0) {
+    return deviceCompare;
+  }
+  if (left.templateId !== right.templateId) {
+    return left.templateId - right.templateId;
+  }
+  const schoolCompare = left.schoolId.localeCompare(right.schoolId);
+  if (schoolCompare !== 0) {
+    return schoolCompare;
+  }
+  return left.name.localeCompare(right.name);
+}
+
 async function buildPortableFingerprintRoster(): Promise<{
   entries: PortableFingerprintOwnerEntry[];
-  conflicts: Array<{templateId: number; owners: string[]}>;
+  conflicts: PortableFingerprintConflict[];
 }> {
   const [templateSnap, profilesSnap, studentsSnap] = await Promise.all([
     db.collection("fingerprintTemplates").get(),
@@ -740,8 +891,8 @@ async function buildPortableFingerprintRoster(): Promise<{
     });
   });
 
-  const candidatesByTemplate =
-    new Map<number, Map<string, PortableFingerprintOwnerEntry>>();
+  const candidatesBySlot =
+    new Map<string, Map<string, PortableFingerprintOwnerEntry>>();
 
   templateSnap.docs.forEach((doc) => {
     const templateData = doc.data() ?? {};
@@ -766,7 +917,7 @@ async function buildPortableFingerprintRoster(): Promise<{
       templateData
     );
     if (entry) {
-      addFingerprintOwnerCandidate(candidatesByTemplate, entry);
+      addFingerprintOwnerCandidate(candidatesBySlot, entry);
     }
   });
 
@@ -774,25 +925,43 @@ async function buildPortableFingerprintRoster(): Promise<{
     extractTemplateIdCandidates(mergedData).forEach((templateId) => {
       const entry = buildFingerprintOwnerEntry(templateId, studentId, mergedData);
       if (entry) {
-        addFingerprintOwnerCandidate(candidatesByTemplate, entry);
+        addFingerprintOwnerCandidate(candidatesBySlot, entry);
       }
     });
   });
 
   const entries: PortableFingerprintOwnerEntry[] = [];
-  const conflicts: Array<{templateId: number; owners: string[]}> = [];
-  Array.from(candidatesByTemplate.entries())
-    .sort((left, right) => left[0] - right[0])
-    .forEach(([templateId, ownersByStudent]) => {
-      const owners = Array.from(ownersByStudent.values());
-      if (owners.length === 1) {
-        entries.push(owners[0]);
+  const conflicts: PortableFingerprintConflict[] = [];
+  Array.from(candidatesBySlot.values())
+    .map((ownersByStudent) =>
+      Array.from(ownersByStudent.values()).sort(comparePortableFingerprintEntries)
+    )
+    .sort((left, right) => {
+      if (left.length === 0 || right.length === 0) {
+        return left.length - right.length;
+      }
+      return comparePortableFingerprintEntries(left[0], right[0]);
+    })
+    .forEach((owners) => {
+      if (owners.length === 0) {
         return;
       }
 
-      conflicts.push({
-        templateId,
-        owners: owners.map((owner) => owner.studentId),
+      const slot = owners[0];
+      const duplicateTemplate = owners.length > 1;
+      if (duplicateTemplate) {
+        conflicts.push({
+          templateId: slot.templateId,
+          fingerprintDeviceId: slot.fingerprintDeviceId,
+          owners: owners.map((owner) => owner.studentId),
+        });
+      }
+
+      owners.forEach((owner) => {
+        entries.push({
+          ...owner,
+          duplicateTemplate,
+        });
       });
     });
 
@@ -2944,6 +3113,7 @@ async function syncEnrollmentResult(
   studentId: string;
   status: EnrollmentResponseStatus;
   message: string;
+  error?: string;
 }> {
   const sessionId =
     normalizeText(record.sessionId) ||
@@ -2987,14 +3157,23 @@ async function syncEnrollmentResult(
   if (!failedUpload) {
     const templateConflict = await findActiveFingerprintTemplateConflict(
       templateId,
-      studentId
+      studentId,
+      device.deviceId
     );
     if (templateConflict) {
+      deviceLogger.warn("[SYNC][ENROLL_CONFLICT]", {
+        deviceId: device.deviceId,
+        templateId,
+        studentId,
+        conflictingStudentId: templateConflict.studentId,
+        conflictingDeviceId: templateConflict.fingerprintDeviceId,
+      });
       return {
         recordId,
         studentId,
         status: "failed",
-        message: `Template ${templateId} is already assigned to another active student.`,
+        message: "Fingerprint template ownership conflict detected.",
+        error: "duplicate_owner_conflict",
       };
     }
   }
@@ -3014,12 +3193,14 @@ async function syncEnrollmentResult(
   const portableStudentRef = db.doc(`students/${studentId}`);
   const profileRef = db.doc(`profiles/${studentId}`);
   const syncLogRef = db.doc(`devices/${device.deviceId}/syncLogs/${recordId}`);
+  const templateOwnerRef = fingerprintTemplateRef(templateId, device.deviceId);
   const recordedTimestamp = resolveRecordedTimestamp(record);
 
   let resultStatus: EnrollmentResponseStatus = "uploaded";
   let resultMessage = failedUpload ?
     "Enrollment marked as failed." :
     "Fingerprint enrollment synced.";
+  let resultError = "";
   let templateOwnerPayload: {
     uid: string;
     schoolId: string;
@@ -3037,12 +3218,14 @@ async function syncEnrollmentResult(
       portableStudentSnap,
       profileSnap,
       syncLogSnap,
+      templateOwnerSnap,
     ] = await transaction.getAll(
       sessionRef,
       sessionStudentRef,
       portableStudentRef,
       profileRef,
-      syncLogRef
+      syncLogRef,
+      templateOwnerRef
     );
 
     if (!freshSessionSnap.exists || !sessionStudentSnap.exists) {
@@ -3077,6 +3260,26 @@ async function syncEnrollmentResult(
       ...sessionStudentData,
       ...record,
     };
+
+    if (!failedUpload && templateOwnerSnap.exists) {
+      const templateOwnerData = templateOwnerSnap.data() ?? {};
+      const ownerId =
+        normalizeText(templateOwnerData.uid) ||
+        normalizeText(templateOwnerData.studentUid) ||
+        normalizeText(templateOwnerData.studentId);
+      const ownerStatus = normalizeLower(templateOwnerData.status);
+      const ownerActive =
+        templateOwnerData.active !== false &&
+        ownerStatus !== "stale" &&
+        ownerStatus !== "needs_reenrollment" &&
+        ownerStatus !== "deleted";
+      if (ownerActive && ownerId && ownerId !== studentId) {
+        resultStatus = "failed";
+        resultMessage = "Fingerprint template ownership conflict detected.";
+        resultError = "duplicate_owner_conflict";
+        return;
+      }
+    }
 
     const sessionStudentPatch: Record<string, unknown> = {
       status: failedUpload ? "failed" : "synced",
@@ -3190,6 +3393,7 @@ async function syncEnrollmentResult(
     studentId,
     status: resultStatus,
     message: resultMessage,
+    error: resultError || undefined,
   };
 }
 
@@ -4138,7 +4342,7 @@ export const campusDeviceDownloadFingerprintRoster = deviceEndpoint(
     res.set("Content-Type", "text/csv; charset=utf-8");
     res.set("X-Campus-Roster-Count", String(entries.length));
     res.write(
-      "templateId,studentId,schoolId,name,course,yearLevel,section,bodScope,active,hasFingerprint\n"
+      "templateId,studentId,schoolId,name,course,yearLevel,section,bodScope,fingerprintDeviceId,duplicateTemplate,active,hasFingerprint\n"
     );
     for (const entry of entries) {
       res.write(
@@ -4151,6 +4355,8 @@ export const campusDeviceDownloadFingerprintRoster = deviceEndpoint(
           csvEscapeCell(entry.yearLevel),
           csvEscapeCell(entry.section),
           csvEscapeCell(entry.bodScope),
+          csvEscapeCell(entry.fingerprintDeviceId),
+          entry.duplicateTemplate ? "true" : "false",
           entry.active ? "true" : "false",
           entry.hasFingerprint ? "true" : "false",
         ].join(",") + "\n"
@@ -4169,6 +4375,8 @@ export const campusDeviceResolveAttendanceOwner = deviceEndpoint(
       body.templateId ?? body.fingerprintTemplateId,
       -1
     );
+    const fingerprintDeviceId =
+      normalizeText(body.fingerprintDeviceId) || device.deviceId;
     const eventId =
       normalizeText(body.eventId) ||
       normalizeText(device.pairingData?.eventId);
@@ -4177,13 +4385,17 @@ export const campusDeviceResolveAttendanceOwner = deviceEndpoint(
       throw new ApiError(400, "templateId must be a positive integer.");
     }
 
-    const resolvedOwner = await resolveFingerprintOwnerByTemplate(templateId);
+    const resolvedOwner = await resolveFingerprintOwnerByTemplate(
+      templateId,
+      fingerprintDeviceId
+    );
     if (!resolvedOwner.entry) {
       sendJson(res, 200, {
         ownerFound: false,
         eventAllowed: false,
         templateId,
         fingerprintTemplateId: templateId,
+        fingerprintDeviceId,
         reason: resolvedOwner.reason,
       });
       return;
@@ -4223,6 +4435,7 @@ export const campusDeviceResolveAttendanceOwner = deviceEndpoint(
     deviceLogger.info("Portable attendance owner resolved", {
       deviceId: device.deviceId,
       templateId,
+      fingerprintDeviceId,
       studentId: resolvedOwner.entry.studentId,
       eventId,
       eventAllowed,
@@ -4235,6 +4448,7 @@ export const campusDeviceResolveAttendanceOwner = deviceEndpoint(
       reason,
       templateId,
       fingerprintTemplateId: resolvedOwner.entry.templateId,
+      fingerprintDeviceId: resolvedOwner.entry.fingerprintDeviceId,
       studentId: resolvedOwner.entry.studentId,
       studentUid: resolvedOwner.entry.studentId,
       schoolId: resolvedOwner.entry.schoolId,
@@ -4464,6 +4678,7 @@ export const campusDeviceSubmitEnrollment = deviceEndpoint(
         studentId: result.studentId,
         fingerprintTemplateId: templateId,
         deviceId: device.deviceId,
+        error: result.error ?? "",
         message: result.message,
       });
       return;
@@ -4479,13 +4694,18 @@ export const campusDeviceSubmitEnrollment = deviceEndpoint(
 
     const templateConflict = await findActiveFingerprintTemplateConflict(
       templateId,
-      studentId
+      studentId,
+      device.deviceId
     );
     if (templateConflict) {
-      throw new ApiError(
-        409,
-        `Template ${templateId} is already assigned to another active student.`
-      );
+      deviceLogger.warn("[ENROLL][DUPLICATE_TEMPLATE_BLOCKED]", {
+        deviceId: device.deviceId,
+        templateId,
+        studentId,
+        conflictingStudentId: templateConflict.studentId,
+        conflictingDeviceId: templateConflict.fingerprintDeviceId,
+      });
+      throw new ApiError(409, "duplicate_owner_conflict");
     }
 
     const profileRef = db.doc(`profiles/${studentId}`);
