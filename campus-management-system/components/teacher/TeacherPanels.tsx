@@ -5,6 +5,7 @@ import clsx from "clsx";
 import { Button } from "@heroui/button";
 import { Card, CardBody } from "@heroui/card";
 import { Chip } from "@heroui/chip";
+import { Input } from "@heroui/input";
 import {
   Drawer,
   DrawerBody,
@@ -27,6 +28,7 @@ import {
   FolderKanban,
   GraduationCap,
   School,
+  Search,
   TriangleAlert,
   UserRound,
 } from "lucide-react";
@@ -54,12 +56,24 @@ type StudentAttendanceItem = {
 
 type StudentVisibleEventItem = {
   event: TeacherEvent;
-  outcome: TeacherAttendanceStatus;
+  outcome: StudentVisibleEventOutcome;
+  timeIn: string;
+  timeOut: string;
   updatedAtMs: number;
 };
 
 type StudentActivityTab = "profile" | "attendance" | "events";
-type VisibleEventsOutcomeFilter = "all" | "present" | "missed";
+type StudentVisibleEventOutcome =
+  | "Present"
+  | "Timed In"
+  | "Missed"
+  | "Upcoming";
+type VisibleEventsOutcomeFilter =
+  | "all"
+  | "present"
+  | "timed_in"
+  | "missed"
+  | "upcoming";
 
 type TeacherStudentDetailProps = {
   student: TeacherStudent | null;
@@ -74,6 +88,8 @@ type TeacherStudentActivityModalProps = TeacherStudentDetailProps & {
   activeTab: StudentActivityTab;
   onActiveTabChange: (tab: StudentActivityTab) => void;
   hasVisibleEvents: boolean;
+  visibleEventsSearch: string;
+  onVisibleEventsSearchChange: (value: string) => void;
   visibleEventsOutcomeFilter: VisibleEventsOutcomeFilter;
   onVisibleEventsOutcomeFilterChange: (
     filter: VisibleEventsOutcomeFilter,
@@ -96,7 +112,9 @@ const visibleEventOutcomeOptions: Array<{
 }> = [
   { key: "all", label: "All" },
   { key: "present", label: "Present" },
+  { key: "timed_in", label: "Timed In" },
   { key: "missed", label: "Missed" },
+  { key: "upcoming", label: "Upcoming" },
 ];
 
 function isStudentActivityTab(value: string): value is StudentActivityTab {
@@ -106,7 +124,13 @@ function isStudentActivityTab(value: string): value is StudentActivityTab {
 function isVisibleEventsOutcomeFilter(
   value: string,
 ): value is VisibleEventsOutcomeFilter {
-  return value === "all" || value === "present" || value === "missed";
+  return (
+    value === "all" ||
+    value === "present" ||
+    value === "timed_in" ||
+    value === "missed" ||
+    value === "upcoming"
+  );
 }
 
 function getTeacherEventSchedule(
@@ -210,6 +234,8 @@ export function TeacherStudentActivityModal({
   activeTab,
   onActiveTabChange,
   hasVisibleEvents,
+  visibleEventsSearch,
+  onVisibleEventsSearchChange,
   visibleEventsOutcomeFilter,
   onVisibleEventsOutcomeFilterChange,
   attendancePagination,
@@ -264,39 +290,52 @@ export function TeacherStudentActivityModal({
                   </div>
                 </Tab>
 
-                <Tab key="events" title="Visible Events">
+                <Tab key="events" title="Events">
                   <div className="space-y-4 pt-3">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="space-y-3">
                       <SectionHeading
-                        title="Visible events"
-                        description="Filter events by this student's teacher-visible outcome."
+                        title="Events"
+                        description="Search and filter this student's teacher-visible events."
                       />
-                      <Select
-                        aria-label="Filter visible events by outcome"
-                        disallowEmptySelection
-                        items={visibleEventOutcomeOptions}
-                        selectedKeys={new Set([visibleEventsOutcomeFilter])}
-                        onSelectionChange={(keys) => {
-                          if (keys === "all") return;
-                          const selected = Array.from(keys)[0];
-                          if (
-                            typeof selected === "string" &&
-                            isVisibleEventsOutcomeFilter(selected)
-                          ) {
-                            onVisibleEventsOutcomeFilterChange(selected);
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_190px]">
+                        <Input
+                          aria-label="Search event name"
+                          value={visibleEventsSearch}
+                          onValueChange={onVisibleEventsSearchChange}
+                          placeholder="Search event name..."
+                          startContent={
+                            <Search
+                              size={16}
+                              className="text-campus-text-secondary"
+                            />
                           }
-                        }}
-                        className="w-full sm:max-w-[180px]"
-                      >
-                        {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
-                      </Select>
+                        />
+                        <Select
+                          aria-label="Filter events by status"
+                          disallowEmptySelection
+                          items={visibleEventOutcomeOptions}
+                          selectedKeys={new Set([visibleEventsOutcomeFilter])}
+                          onSelectionChange={(keys) => {
+                            if (keys === "all") return;
+                            const selected = Array.from(keys)[0];
+                            if (
+                              typeof selected === "string" &&
+                              isVisibleEventsOutcomeFilter(selected)
+                            ) {
+                              onVisibleEventsOutcomeFilterChange(selected);
+                            }
+                          }}
+                          className="w-full"
+                        >
+                          {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
+                        </Select>
+                      </div>
                     </div>
 
                     <StudentEventsSection
                       trackedEvents={trackedEvents}
                       eventsPagination={eventsPagination}
                       hasVisibleEvents={hasVisibleEvents}
-                      visibleEventsOutcomeFilter={visibleEventsOutcomeFilter}
                     />
                   </div>
                 </Tab>
@@ -345,7 +384,6 @@ function TeacherStudentDetailContent({
         trackedEvents={trackedEvents}
         eventsPagination={eventsPagination}
         hasVisibleEvents={trackedEvents.length > 0}
-        visibleEventsOutcomeFilter="all"
       />
     </div>
   );
@@ -457,18 +495,15 @@ function StudentEventsSection({
   trackedEvents,
   eventsPagination,
   hasVisibleEvents,
-  visibleEventsOutcomeFilter,
 }: {
   trackedEvents: StudentVisibleEventItem[];
   eventsPagination?: ReactNode;
   hasVisibleEvents: boolean;
-  visibleEventsOutcomeFilter: VisibleEventsOutcomeFilter;
 }) {
   if (!hasVisibleEvents) {
     return (
       <TeacherEmptyState
-        title="No visible events yet"
-        description="Teacher-visible event activity for this student will appear here."
+        title="No events found for this student."
         icon={FolderKanban}
         compact
       />
@@ -476,13 +511,9 @@ function StudentEventsSection({
   }
 
   if (trackedEvents.length === 0) {
-    const filterLabel =
-      visibleEventsOutcomeFilter === "present" ? "present" : "missed";
-
     return (
       <TeacherEmptyState
-        title="No matching visible events"
-        description={`This student has no ${filterLabel} visible events in the current filter.`}
+        title="No events match the selected filters."
         icon={FolderKanban}
         compact
       />
@@ -496,6 +527,21 @@ function StudentEventsSection({
         const lifecycleClasses = getTeacherToneClasses(
           getTeacherLifecycleTone(event.lifecycle),
         );
+        const outcomeTone =
+          item.outcome === "Present"
+            ? "green"
+            : item.outcome === "Timed In"
+              ? "amber"
+              : item.outcome === "Missed"
+                ? "red"
+                : "blue";
+        const outcomeClasses = getTeacherToneClasses(outcomeTone);
+        const StatusIcon =
+          item.outcome === "Missed"
+            ? TriangleAlert
+            : item.outcome === "Upcoming"
+              ? FolderKanban
+              : CheckCircle2;
         const schedule = getTeacherEventSchedule(event);
 
         return (
@@ -506,18 +552,27 @@ function StudentEventsSection({
           >
             <CardBody className="gap-3 p-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div className="min-w-0">
-                  <p className="font-semibold text-campus-text-primary">
+                <div className="min-w-0 flex-1">
+                  <p className="line-clamp-2 font-semibold text-campus-text-primary">
                     {event.title}
                   </p>
-                  <p className="text-sm text-campus-text-secondary">
+                  <p className="mt-1 text-sm text-campus-text-secondary">
                     {schedule.scheduleLabel}
                   </p>
-                  <p className="text-xs text-campus-text-secondary">
+                  <p className="truncate text-xs text-campus-text-secondary">
                     {event.location}
+                  </p>
+                  <p className="mt-1 truncate text-xs text-campus-text-secondary">
+                    Time in: {item.timeIn} | Time out: {item.timeOut}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2 sm:justify-end">
+                  <Chip size="sm" className={outcomeClasses.chip}>
+                    <span className="inline-flex items-center gap-1.5">
+                      <StatusIcon size={14} />
+                      {item.outcome}
+                    </span>
+                  </Chip>
                   <Chip size="sm" className={lifecycleClasses.chip}>
                     {capitalizeTeacherLabel(event.lifecycle)}
                   </Chip>

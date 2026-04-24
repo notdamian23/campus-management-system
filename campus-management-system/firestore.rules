@@ -1277,7 +1277,7 @@ service cloud.firestore {
       }
 
       match /registrations/{uid} {
-        allow read: if currentIsAdminOrRegularEC() ||
+        allow read: if currentIsAdminOrRegularEC() || currentIsTeacher() ||
           (isSelf(uid) && currentHasStudentIdentity()) ||
           canReadScopedEventParticipant(eventId, uid, resource.data);
         allow create, update, delete: if currentIsAdminOrRegularEC() ||

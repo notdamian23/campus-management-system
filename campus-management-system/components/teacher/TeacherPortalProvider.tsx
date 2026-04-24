@@ -17,6 +17,10 @@ import {
   getOnboardingRedirect,
   resolveCampusProfileName,
 } from "@/lib/campus-auth";
+import {
+  resolveEventLifecycle,
+  type EventScheduleDateInput,
+} from "@/lib/eventSchedule";
 import { formatStudentFullName } from "@/lib/student-name";
 
 export type TeacherAccessState =
@@ -47,14 +51,20 @@ type TeacherEventDoc = {
   yearLevels?: unknown;
   courses?: unknown;
   targetStudent?: string;
+  selectedStudentIds?: unknown;
+  selectedSchoolIds?: unknown;
   details?: string;
   isPreReg?: boolean;
   withPayment?: boolean;
+  paymentRequired?: boolean;
   preRegSlots?: number | null;
   preRegCount?: number;
   attendanceCount?: number;
   presentCount?: number;
   absentCount?: number;
+  status?: string;
+  startAt?: EventScheduleDateInput;
+  endAt?: EventScheduleDateInput;
   imageCount?: number;
   documentCount?: number;
   createdAt?: unknown;
@@ -72,6 +82,12 @@ type TeacherAttendanceDoc = {
   status?: string;
   attendanceStatus?: string;
   present?: boolean;
+  timeIn?: unknown;
+  timeInIso?: string;
+  timeOut?: unknown;
+  timeOutIso?: string;
+  timestamp?: unknown;
+  deviceTimestampIso?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 };
@@ -96,10 +112,15 @@ export type TeacherEvent = {
   timeEnd: string;
   details: string;
   course: string;
+  courses: string[];
   yearLevel: string;
+  yearLevels: string[];
   targetStudent: string;
+  selectedStudentIds: string[];
+  selectedSchoolIds: string[];
   isPreReg: boolean;
   withPayment: boolean;
+  paymentRequired: boolean;
   preRegSlots: number | null;
   preRegCount: number;
   lifecycle: TeacherLifecycle;
@@ -114,7 +135,11 @@ export type TeacherEvent = {
   documentCount: number;
 };
 
-export type TeacherAttendanceStatus = "Present" | "Absent" | "Recorded";
+export type TeacherAttendanceStatus =
+  | "Present"
+  | "Timed In"
+  | "Absent"
+  | "Recorded";
 
 export type TeacherAttendance = {
   id: string;
@@ -125,6 +150,8 @@ export type TeacherAttendance = {
   course: string;
   year: string;
   status: TeacherAttendanceStatus;
+  timeInMs: number;
+  timeOutMs: number;
   createdAtMs: number;
   updatedAtMs: number;
 };
@@ -153,6 +180,8 @@ export type TeacherStudent = {
   attendanceRecords: Array<{
     eventId: string;
     status: TeacherAttendanceStatus;
+    timeInMs: number;
+    timeOutMs: number;
     updatedAtMs: number;
   }>;
   presentCount: number;
@@ -238,88 +267,52 @@ function toNonNegativeNumber(value: unknown) {
     : 0;
 }
 
-function parseDateOnly(input: string) {
-  const value = String(input ?? "").trim();
-  if (!value) return null;
+function normalizeTeacherLifecycleStatus(rawStatus: unknown) {
+  const normalized = normalizeText(rawStatus);
 
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const [y, m, d] = value.split("-").map(Number);
-    const date = new Date(y, m - 1, d);
-    return Number.isNaN(date.getTime()) ? null : date;
+  if (
+    normalized === "completed" ||
+    normalized === "closed" ||
+    normalized === "archived"
+  ) {
+    return "completed" as const;
   }
 
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function parseTime12ToMinutes(timeValue: string) {
-  const value = String(timeValue ?? "").trim();
-  if (!value) return null;
-
-  const match = value.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-  if (!match) return null;
-
-  let hour = Number(match[1]);
-  const minute = Number(match[2]);
-  const meridiem = match[3].toUpperCase();
-
-  if (hour === 12) hour = 0;
-  if (meridiem === "PM") hour += 12;
-
-  return hour * 60 + minute;
-}
-
-function toDateWithMinutes(baseDate: Date, minutes: number) {
-  const date = new Date(baseDate);
-  date.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
-  return date;
-}
-
-function computeLifecycle(
-  date: string,
-  scheduledTime: string,
-  timeEnd: string,
-): TeacherLifecycle {
-  const baseDate = parseDateOnly(date);
-  if (!baseDate) return "upcoming";
-
-  const now = new Date();
-  const startMin = parseTime12ToMinutes(scheduledTime);
-  const endMin = parseTime12ToMinutes(timeEnd);
-
-  if (startMin == null) {
-    const start = new Date(baseDate);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(baseDate);
-    end.setHours(23, 59, 59, 999);
-
-    if (now < start) return "upcoming";
-    if (now > end) return "completed";
-    return "ongoing";
+  if (
+    normalized === "ongoing" ||
+    normalized === "active" ||
+    normalized === "live" ||
+    normalized === "in progress"
+  ) {
+    return "ongoing" as const;
   }
 
-  const start = toDateWithMinutes(baseDate, startMin);
-  if (endMin == null) {
-    if (now < start) return "upcoming";
-    return "completed";
+  if (
+    normalized === "upcoming" ||
+    normalized === "scheduled" ||
+    normalized === "pending"
+  ) {
+    return "upcoming" as const;
   }
 
-  const safeEndMin = endMin >= startMin ? endMin : startMin + 60;
-  const end = toDateWithMinutes(baseDate, safeEndMin);
-
-  if (now < start) return "upcoming";
-  if (now > end) return "completed";
-  return "ongoing";
+  return null;
 }
 
-function toEventDate(date: string, scheduledTime: string) {
-  const baseDate = parseDateOnly(date);
-  if (!baseDate) return null;
+function normalizeLifecycleTimeInput(rawTime: unknown) {
+  const value = String(rawTime ?? "").trim();
+  const normalized = value.toLowerCase().replace(/\./g, "");
 
-  const startMin = parseTime12ToMinutes(scheduledTime);
-  if (startMin == null) return baseDate;
+  if (
+    !value ||
+    normalized === "tba" ||
+    normalized === "time tba" ||
+    normalized === "tbd" ||
+    normalized === "time tbd"
+  ) {
+    return "";
+  }
 
-  return toDateWithMinutes(baseDate, startMin);
+  return value;
 }
 
 function normalizeAttendanceStatus(
@@ -328,6 +321,7 @@ function normalizeAttendanceStatus(
 ): TeacherAttendanceStatus {
   const normalized = normalizeText(rawStatus);
   if (normalized === "present" || normalized === "attended") return "Present";
+  if (normalized === "timed in" || normalized === "time-in") return "Timed In";
   if (normalized === "absent" || normalized === "missed") return "Absent";
   if (typeof rawPresent === "boolean") {
     return rawPresent ? "Present" : "Absent";
@@ -491,6 +485,13 @@ export function TeacherPortalProvider({
                 },
                 schoolId,
               );
+              const timeInMs = toMillis(
+                data.timeInIso ||
+                  data.timeIn ||
+                  data.timestamp ||
+                  data.deviceTimestampIso,
+              );
+              const timeOutMs = toMillis(data.timeOutIso || data.timeOut);
 
               return {
                 id: attendanceDoc.id,
@@ -504,6 +505,8 @@ export function TeacherPortalProvider({
                   data.status ?? data.attendanceStatus,
                   data.present,
                 ),
+                timeInMs,
+                timeOutMs,
                 createdAtMs: toMillis(data.createdAt),
                 updatedAtMs:
                   toMillis(data.updatedAt) || toMillis(data.createdAt),
@@ -673,8 +676,11 @@ export function TeacherPortalProvider({
     return rawEvents
       .map((eventItem) => {
         const data = eventItem.data;
+        const rawScheduledTime = String(
+          data.scheduledTime ?? data.timeStart ?? "",
+        ).trim();
         const scheduledTime =
-          String(data.scheduledTime ?? data.timeStart ?? "").trim() || "TBA";
+          rawScheduledTime || "TBA";
         const timeEnd = String(data.timeEnd ?? "").trim();
         const courseTargets = Array.isArray(data.courses)
           ? data.courses
@@ -693,11 +699,31 @@ export function TeacherPortalProvider({
         const yearLevel =
           String(data.yearLevel ?? "").trim() ||
           (yearTargets.length > 0 ? yearTargets.join(", ") : "All Years");
-        const lifecycle = computeLifecycle(
-          String(data.date ?? "").trim(),
-          scheduledTime,
-          timeEnd,
-        );
+        const selectedStudentIds = Array.isArray(data.selectedStudentIds)
+          ? data.selectedStudentIds
+              .map((item) => String(item ?? "").trim())
+              .filter(Boolean)
+          : [];
+        const selectedSchoolIds = Array.isArray(data.selectedSchoolIds)
+          ? data.selectedSchoolIds
+              .map((item) => String(item ?? "").trim())
+              .filter(Boolean)
+          : [];
+        const eventDateText = String(data.date ?? "").trim();
+        const lifecycleDetails = resolveEventLifecycle({
+          date: data.date,
+          scheduledTime: normalizeLifecycleTimeInput(rawScheduledTime),
+          timeStart: normalizeLifecycleTimeInput(data.timeStart),
+          timeEnd: normalizeLifecycleTimeInput(data.timeEnd),
+          startAt: data.startAt,
+          endAt: data.endAt,
+          status: data.status,
+        });
+        const statusLifecycle = normalizeTeacherLifecycleStatus(data.status);
+        let lifecycle: TeacherLifecycle = lifecycleDetails.lifecycle;
+        if (statusLifecycle === "completed") {
+          lifecycle = "completed";
+        }
         const preRegCount = Math.max(0, Number(data.preRegCount ?? 0));
         const presentCount = shouldLoadPortalActivity
           ? (presentCounts.get(eventItem.id) ?? 0)
@@ -724,20 +750,25 @@ export function TeacherPortalProvider({
           title:
             String(data.title ?? "Untitled Event").trim() || "Untitled Event",
           location: String(data.location ?? "").trim() || "TBA",
-          date: String(data.date ?? "").trim(),
+          date: eventDateText,
           scheduledTime,
           timeEnd,
           details: String(data.details ?? "").trim(),
           course,
+          courses: courseTargets,
           yearLevel,
+          yearLevels: yearTargets,
           targetStudent: String(data.targetStudent ?? "").trim(),
+          selectedStudentIds,
+          selectedSchoolIds,
           isPreReg: data.isPreReg === true,
           withPayment: data.withPayment === true,
+          paymentRequired: data.paymentRequired === true,
           preRegSlots:
             typeof data.preRegSlots === "number" ? data.preRegSlots : null,
           preRegCount,
           lifecycle,
-          eventDate: toEventDate(String(data.date ?? "").trim(), scheduledTime),
+          eventDate: lifecycleDetails.startAt,
           createdAtMs: toMillis(data.createdAt),
           createdBy: data.createdBy ?? null,
           registrationCount: preRegCount,
@@ -818,6 +849,14 @@ export function TeacherPortalProvider({
       );
       if (existingRecord) {
         existingRecord.status = item.status;
+        existingRecord.timeInMs = Math.max(
+          existingRecord.timeInMs,
+          item.timeInMs,
+        );
+        existingRecord.timeOutMs = Math.max(
+          existingRecord.timeOutMs,
+          item.timeOutMs,
+        );
         existingRecord.updatedAtMs = Math.max(
           existingRecord.updatedAtMs,
           item.updatedAtMs,
@@ -826,6 +865,8 @@ export function TeacherPortalProvider({
         student.attendanceRecords.push({
           eventId: item.eventId,
           status: item.status,
+          timeInMs: item.timeInMs,
+          timeOutMs: item.timeOutMs,
           updatedAtMs: item.updatedAtMs,
         });
       }

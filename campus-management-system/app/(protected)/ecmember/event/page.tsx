@@ -131,6 +131,9 @@ import {
   updateCampusEvent,
   logPermissionDeniedAttemptForCurrentUser,
 } from "@/lib/firebase-functions";
+import {
+  downloadAttendanceWorkbook as downloadSharedAttendanceWorkbook,
+} from "@/lib/attendance-export";
 import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import {
   hasStudentIdentityProfile,
@@ -1653,74 +1656,6 @@ function participantStatusSortRank(status: string) {
   return 6;
 }
 
-function buildAttendanceMetadataRows(
-  event: Pick<
-    EventDoc,
-    "title" | "date" | "scheduledTime" | "timeStart" | "timeEnd" | "location"
-  >,
-  generatedAt: string,
-) {
-  return [
-    ["Event Title", String(event.title ?? "").trim() || "-"],
-    ["Date", String(event.date ?? "").trim() || "-"],
-    [
-      "Scheduled Time In / Start Time",
-      String(event.scheduledTime || event.timeStart || "").trim() || "-",
-    ],
-    [
-      "Scheduled Time Out / End Time",
-      String(event.timeEnd || "").trim() || "-",
-    ],
-    ["Location", String(event.location ?? "").trim() || "-"],
-    ["Generated At", generatedAt],
-    [],
-  ];
-}
-
-function buildAttendanceSheetRows(
-  event: Pick<
-    EventDoc,
-    "title" | "date" | "scheduledTime" | "timeStart" | "timeEnd" | "location"
-  >,
-  rows: AttendanceExportRow[],
-  generatedAt: string,
-  includeTimeColumns: boolean,
-) {
-  const metadataRows = buildAttendanceMetadataRows(event, generatedAt);
-  const headerRow = includeTimeColumns
-    ? [
-        "School ID",
-        "Student Name",
-        "Course",
-        "Year",
-        "Attendance Status",
-        "Attendance Time In",
-        "Attendance Time Out",
-      ]
-    : ["School ID", "Student Name", "Course", "Year", "Attendance Status"];
-  const bodyRows = rows.map((row) =>
-    includeTimeColumns
-      ? [
-          row.schoolId,
-          row.studentName,
-          row.course,
-          row.year,
-          row.attendanceStatus,
-          row.attendanceTimeIn,
-          row.attendanceTimeOut,
-        ]
-      : [
-          row.schoolId,
-          row.studentName,
-          row.course,
-          row.year,
-          row.attendanceStatus,
-        ],
-  );
-
-  return [...metadataRows, headerRow, ...bodyRows];
-}
-
 function getEventScheduleDisplay(
   event: Pick<EventDoc, "date" | "scheduledTime" | "timeStart" | "timeEnd">,
 ) {
@@ -2432,64 +2367,11 @@ async function downloadAttendanceWorkbook(
   absentRows: AttendanceExportRow[],
   notPaidRows: AttendanceExportRow[],
 ) {
-  const generatedAt = new Date().toLocaleString();
-  const presentSheetData = buildAttendanceSheetRows(
-    event,
-    presentRows,
-    generatedAt,
-    true,
-  );
-  const absentSheetData = buildAttendanceSheetRows(
-    event,
+  await downloadSharedAttendanceWorkbook(event, presentRows, {
     absentRows,
-    generatedAt,
-    false,
-  );
-  const notPaidSheetData = buildAttendanceSheetRows(
-    event,
     notPaidRows,
-    generatedAt,
-    false,
-  );
-  const XLSX = await import("xlsx");
-  const workbook = XLSX.utils.book_new();
-  const presentSheet = XLSX.utils.aoa_to_sheet(presentSheetData);
-  const absentsSheet = XLSX.utils.aoa_to_sheet(absentSheetData);
-  const notPaidSheet = XLSX.utils.aoa_to_sheet(notPaidSheetData);
-
-  presentSheet["!cols"] = [
-    { wch: 16 },
-    { wch: 30 },
-    { wch: 24 },
-    { wch: 10 },
-    { wch: 18 },
-    { wch: 24 },
-    { wch: 24 },
-  ];
-  absentsSheet["!cols"] = [
-    { wch: 16 },
-    { wch: 30 },
-    { wch: 24 },
-    { wch: 10 },
-    { wch: 18 },
-  ];
-  notPaidSheet["!cols"] = [
-    { wch: 16 },
-    { wch: 30 },
-    { wch: 24 },
-    { wch: 10 },
-    { wch: 18 },
-  ];
-
-  XLSX.utils.book_append_sheet(workbook, presentSheet, "Present");
-  XLSX.utils.book_append_sheet(workbook, absentsSheet, "Absents");
-  XLSX.utils.book_append_sheet(workbook, notPaidSheet, "Not Paid");
-
-  const slug = (event.title || event.id)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  XLSX.writeFile(workbook, `${slug || event.id}-attendance.xlsx`);
+    includeNotPaidSheet: true,
+  });
 }
 
 function getDateTimeMs(date: string, time12?: string) {

@@ -109,6 +109,7 @@ export function getTeacherAttendanceTone(
   status: TeacherAttendanceStatus,
 ): TeacherTone {
   if (status === "Present") return "green";
+  if (status === "Timed In") return "amber";
   if (status === "Absent") return "red";
   return "blue";
 }

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "@heroui/button";
 import { Chip } from "@heroui/chip";
 import { Input } from "@heroui/input";
+import { Pagination } from "@heroui/pagination";
 import { Select, SelectItem } from "@heroui/select";
 import {
   ClipboardCheck,
@@ -25,13 +26,30 @@ import {
   useTeacherPortal,
 } from "@/components/teacher";
 import { CampusMetricSkeleton } from "@/components/ui";
+import {
+  buildAttendanceParticipantRows,
+  type AttendanceExportAttendanceDoc,
+  type AttendanceExportEvent,
+  type AttendanceExportStudent,
+  type AttendanceParticipantStatus,
+} from "@/lib/attendance-export";
+import type {
+  TeacherEvent,
+  TeacherStudent,
+} from "@/components/teacher/TeacherPortalProvider";
 
 const STUDENTS_PER_PAGE = 8;
 const RECENT_ATTENDANCE_PER_PAGE = 4;
 const VISIBLE_EVENTS_PER_PAGE = 4;
 
 type StudentActivityTab = "profile" | "attendance" | "events";
-type VisibleEventsOutcomeFilter = "all" | "present" | "missed";
+type VisibleEventsOutcomeFilter =
+  | "all"
+  | "present"
+  | "timed_in"
+  | "missed"
+  | "upcoming";
+type StudentEventOutcome = "Present" | "Timed In" | "Missed" | "Upcoming";
 
 type TeacherStudentRow = {
   uid: string;
@@ -130,36 +148,152 @@ function TeacherPaginationControls({
       <p className="text-xs font-medium text-campus-text-secondary">
         Showing {startItem}-{endItem} of {totalItems} {itemLabel}
       </p>
-      <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap sm:justify-end">
-        <Button
-          size="sm"
-          variant="bordered"
-          className="min-h-9 min-w-[6.5rem] flex-1 px-3 sm:flex-none"
-          aria-label={`Previous ${ariaLabel} page`}
-          isDisabled={page <= 1}
-          onPress={() => onPageChange(Math.max(page - 1, 1))}
-        >
-          Previous
-        </Button>
-        <Chip
-          variant="flat"
-          className="min-h-9 min-w-[7rem] flex-1 justify-center px-3 text-center font-semibold text-campus-text-secondary sm:flex-none"
-        >
-          Page {page} of {totalPages}
-        </Chip>
-        <Button
-          size="sm"
-          variant="bordered"
-          className="min-h-9 min-w-[6.5rem] flex-1 px-3 sm:flex-none"
-          aria-label={`Next ${ariaLabel} page`}
-          isDisabled={page >= totalPages}
-          onPress={() => onPageChange(Math.min(page + 1, totalPages))}
-        >
-          Next
-        </Button>
+      <div className="flex w-full justify-center sm:w-auto sm:justify-end">
+        <Pagination
+          showControls
+          aria-label={`${ariaLabel} pagination`}
+          page={page}
+          total={totalPages}
+          onChange={onPageChange}
+          classNames={{
+            wrapper: "max-w-full flex-wrap justify-center",
+          }}
+        />
       </div>
     </div>
   );
+}
+
+function teacherEventToAttendanceExportEvent(
+  event: TeacherEvent,
+): AttendanceExportEvent {
+  return {
+    id: event.id,
+    title: event.title,
+    location: event.location,
+    date: event.date,
+    scheduledTime: event.scheduledTime,
+    timeStart: event.scheduledTime,
+    timeEnd: event.timeEnd,
+    course: event.course,
+    courses: event.courses,
+    yearLevel: event.yearLevel,
+    yearLevels: event.yearLevels,
+    targetStudent: event.targetStudent,
+    selectedStudentIds: event.selectedStudentIds,
+    selectedSchoolIds: event.selectedSchoolIds,
+    isPreReg: event.isPreReg,
+    withPayment: event.withPayment,
+    paymentRequired: event.paymentRequired,
+  };
+}
+
+function teacherStudentToAttendanceExportStudent(
+  student: TeacherStudent,
+): AttendanceExportStudent {
+  return {
+    uid: student.uid,
+    schoolId: student.schoolId,
+    studentName: student.studentName,
+    course: student.course,
+    year: student.year,
+    status: "Active",
+    role: "student",
+    searchText:
+      `${student.studentName} ${student.schoolId} ${student.course} ${student.year}`.toLowerCase(),
+  };
+}
+
+function attendanceRecordToExportDoc(
+  student: TeacherStudent,
+  record: TeacherStudent["attendanceRecords"][number],
+): AttendanceExportAttendanceDoc {
+  return {
+    id: record.eventId,
+    uid: student.uid,
+    studentUid: student.uid,
+    schoolId: student.schoolId,
+    studentName: student.studentName,
+    course: student.course,
+    yearLevel: student.year,
+    year: student.year,
+    status: record.status,
+    timeIn: record.timeInMs || undefined,
+    timeOut: record.timeOutMs || undefined,
+    updatedAt: record.updatedAtMs || undefined,
+  };
+}
+
+function toStudentEventOutcome(
+  status: AttendanceParticipantStatus,
+  event: TeacherEvent,
+): StudentEventOutcome {
+  if (status === "Present" || status === "Timed In") {
+    return status;
+  }
+
+  return event.lifecycle === "completed" ? "Missed" : "Upcoming";
+}
+
+function eventOutcomeMatchesFilter(
+  outcome: StudentEventOutcome,
+  filter: VisibleEventsOutcomeFilter,
+) {
+  if (filter === "present") return outcome === "Present";
+  if (filter === "timed_in") return outcome === "Timed In";
+  if (filter === "missed") return outcome === "Missed";
+  if (filter === "upcoming") return outcome === "Upcoming";
+  return true;
+}
+
+function buildStudentEventOutcomes(
+  student: TeacherStudent,
+  events: TeacherEvent[],
+) {
+  const attendanceByEventId = new Map(
+    student.attendanceRecords.map((record) => [record.eventId, record]),
+  );
+  const exportStudent = teacherStudentToAttendanceExportStudent(student);
+
+  return events
+    .map((event) => {
+      const attendanceRecord = attendanceByEventId.get(event.id);
+      const { rows } = buildAttendanceParticipantRows({
+        event: teacherEventToAttendanceExportEvent(event),
+        attendanceRows: attendanceRecord
+          ? [attendanceRecordToExportDoc(student, attendanceRecord)]
+          : [],
+        students: [exportStudent],
+        respectPaymentStatus: false,
+      });
+      const participantRow = rows.find(
+        (row) => row.uid === student.uid || row.schoolId === student.schoolId,
+      );
+
+      if (!participantRow) return null;
+
+      return {
+        event,
+        outcome: toStudentEventOutcome(participantRow.attendanceStatus, event),
+        timeIn: participantRow.timeIn,
+        timeOut: participantRow.timeOut,
+        updatedAtMs:
+          attendanceRecord?.updatedAtMs ||
+          event.eventDate?.getTime() ||
+          event.createdAtMs,
+      };
+    })
+    .filter(
+      (
+        item,
+      ): item is {
+        event: TeacherEvent;
+        outcome: StudentEventOutcome;
+        timeIn: string;
+        timeOut: string;
+        updatedAtMs: number;
+      } => Boolean(item),
+    );
 }
 
 export default function TeacherStudentsPage() {
@@ -176,6 +310,7 @@ export default function TeacherStudentsPage() {
   const [visibleEventsPage, setVisibleEventsPage] = useState(1);
   const [activeStudentActivityTab, setActiveStudentActivityTab] =
     useState<StudentActivityTab>("profile");
+  const [visibleEventsSearch, setVisibleEventsSearch] = useState("");
   const [visibleEventsOutcomeFilter, setVisibleEventsOutcomeFilter] =
     useState<VisibleEventsOutcomeFilter>("all");
   const [activeStudentId, setActiveStudentId] = useState<string | null>(null);
@@ -250,6 +385,34 @@ export default function TeacherStudentsPage() {
   const activeStudentEvents = useMemo(() => {
     if (!activeStudent) return [];
 
+    return buildStudentEventOutcomes(activeStudent, events)
+      .sort((a, b) => {
+        const aMs = a.event.eventDate?.getTime() ?? a.event.createdAtMs;
+        const bMs = b.event.eventDate?.getTime() ?? b.event.createdAtMs;
+        return bMs - aMs;
+      });
+  }, [activeStudent, events]);
+
+  const filteredActiveStudentEvents = useMemo(() => {
+    const search = visibleEventsSearch.trim().toLowerCase();
+
+    return activeStudentEvents.filter((item) => {
+      const matchesSearch =
+        !search ||
+        item.event.title.toLowerCase().includes(search) ||
+        item.event.location.toLowerCase().includes(search);
+      const matchesOutcome = eventOutcomeMatchesFilter(
+        item.outcome,
+        visibleEventsOutcomeFilter,
+      );
+
+      return matchesSearch && matchesOutcome;
+    });
+  }, [activeStudentEvents, visibleEventsOutcomeFilter, visibleEventsSearch]);
+
+  const activeStudentAttendance = useMemo(() => {
+    if (!activeStudent) return [];
+
     return activeStudent.attendanceRecords
       .map((record) => {
         const event = eventMap.get(record.eventId);
@@ -257,7 +420,7 @@ export default function TeacherStudentsPage() {
 
         return {
           event,
-          outcome: record.status,
+          status: record.status,
           updatedAtMs: record.updatedAtMs,
         };
       })
@@ -265,39 +428,13 @@ export default function TeacherStudentsPage() {
         (
           item,
         ): item is {
-          event: (typeof events)[number];
-          outcome: "Present" | "Absent" | "Recorded";
+          event: TeacherEvent;
+          status: TeacherStudent["attendanceRecords"][number]["status"];
           updatedAtMs: number;
         } => Boolean(item),
       )
-      .sort((a, b) => {
-        const aMs = a.event.eventDate?.getTime() ?? a.event.createdAtMs;
-        const bMs = b.event.eventDate?.getTime() ?? b.event.createdAtMs;
-        return bMs - aMs;
-      });
-  }, [activeStudent, eventMap]);
-
-  const filteredActiveStudentEvents = useMemo(() => {
-    if (visibleEventsOutcomeFilter === "present") {
-      return activeStudentEvents.filter((item) => item.outcome === "Present");
-    }
-
-    if (visibleEventsOutcomeFilter === "missed") {
-      return activeStudentEvents.filter((item) => item.outcome === "Absent");
-    }
-
-    return activeStudentEvents;
-  }, [activeStudentEvents, visibleEventsOutcomeFilter]);
-
-  const activeStudentAttendance = useMemo(() => {
-    return activeStudentEvents
-      .map((item) => ({
-        event: item.event,
-        status: item.outcome,
-        updatedAtMs: item.updatedAtMs,
-      }))
       .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-  }, [activeStudentEvents]);
+  }, [activeStudent, eventMap]);
 
   const recentAttendancePageData = useMemo(
     () =>
@@ -319,9 +456,22 @@ export default function TeacherStudentsPage() {
     [filteredActiveStudentEvents, visibleEventsPage],
   );
 
+  const completedEvents = useMemo(
+    () => events.filter((event) => event.lifecycle === "completed"),
+    [events],
+  );
+
   const totalMissed = useMemo(
-    () => students.reduce((sum, student) => sum + student.absentCount, 0),
-    [students],
+    () =>
+      students.reduce(
+        (sum, student) =>
+          sum +
+          buildStudentEventOutcomes(student, completedEvents).filter(
+            (item) => item.outcome === "Missed",
+          ).length,
+        0,
+      ),
+    [completedEvents, students],
   );
   const totalCourses = useMemo(
     () =>
@@ -349,12 +499,13 @@ export default function TeacherStudentsPage() {
     setActiveStudentActivityTab("profile");
     setRecentAttendancePage(1);
     setVisibleEventsPage(1);
+    setVisibleEventsSearch("");
     setVisibleEventsOutcomeFilter("all");
   }, [activeStudentId]);
 
   useEffect(() => {
     setVisibleEventsPage(1);
-  }, [visibleEventsOutcomeFilter]);
+  }, [visibleEventsOutcomeFilter, visibleEventsSearch]);
 
   useEffect(() => {
     setRecentAttendancePage((prev) =>
@@ -380,6 +531,7 @@ export default function TeacherStudentsPage() {
     setActiveStudentActivityTab("profile");
     setRecentAttendancePage(1);
     setVisibleEventsPage(1);
+    setVisibleEventsSearch("");
     setVisibleEventsOutcomeFilter("all");
     setIsStudentActivityModalOpen(true);
   };
@@ -429,7 +581,8 @@ export default function TeacherStudentsPage() {
             {
               label: "Missed Records",
               value: totalMissed,
-              description: "Attendance entries marked absent or missed.",
+              description:
+                "Completed teacher-visible events missed by tracked students.",
               tone: "red",
               icon: TriangleAlert,
             },
@@ -561,6 +714,8 @@ export default function TeacherStudentsPage() {
         onActiveTabChange={setActiveStudentActivityTab}
         trackedEvents={visibleEventsPageData.items}
         hasVisibleEvents={activeStudentEvents.length > 0}
+        visibleEventsSearch={visibleEventsSearch}
+        onVisibleEventsSearchChange={setVisibleEventsSearch}
         visibleEventsOutcomeFilter={visibleEventsOutcomeFilter}
         onVisibleEventsOutcomeFilterChange={setVisibleEventsOutcomeFilter}
         attendanceItems={recentAttendancePageData.items}
@@ -579,8 +734,8 @@ export default function TeacherStudentsPage() {
         }
         eventsPagination={
           <TeacherPaginationControls
-            ariaLabel="visible events"
-            itemLabel="visible events"
+            ariaLabel="events"
+            itemLabel="events"
             page={visibleEventsPageData.page}
             totalPages={visibleEventsPageData.totalPages}
             totalItems={visibleEventsPageData.totalItems}
