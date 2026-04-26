@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
+  addDoc,
   collection,
   doc,
   getDoc,
@@ -9,6 +10,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  serverTimestamp,
   type DocumentData,
   type QuerySnapshot,
 } from "firebase/firestore";
@@ -27,6 +29,7 @@ import { Select, SelectItem } from "@heroui/select";
 import { Spinner } from "@heroui/spinner";
 import { Tab, Tabs } from "@heroui/tabs";
 import {
+  Upload,
   CalendarRange,
   CheckCircle2,
   Clock3,
@@ -57,8 +60,13 @@ import {
 } from "@/lib/attendance-export";
 import { normalizeCourse } from "@/lib/courseOptions";
 import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
-import { db } from "@/lib/firebase";
-import { createEventDocumentDownloadUrl } from "@/lib/firebase-functions";
+import { db, storage } from "@/lib/firebase";
+import {
+  cleanupPendingEventDocumentUpload,
+  createEventDocumentDownloadUrl,
+  createEventDocumentUploadTarget,
+  finalizeEventDocumentUpload,
+} from "@/lib/firebase-functions";
 import { formatStudentFullName } from "@/lib/student-name";
 import { campusToast } from "@/lib/toast";
 import {
@@ -82,6 +90,15 @@ import type {
   TeacherFile,
   TeacherFileKind,
 } from "@/components/teacher/TeacherPortalProvider";
+import {
+  deleteObject,
+  getDownloadURL,
+  ref,
+  uploadBytes,
+  uploadBytesResumable,
+  type StorageReference,
+  type UploadTaskSnapshot,
+} from "firebase/storage";
 
 const EVENTS_PER_PAGE = 6;
 const FILE_PREVIEW_LIMIT = 3;
@@ -110,10 +127,12 @@ type ParticipantStatusFilter = "all" | AttendanceParticipantStatus;
 type TeacherFileDoc = {
   name?: string;
   path?: string;
+  storagePath?: string;
   downloadURL?: string;
   contentType?: string;
   size?: number;
   createdAt?: unknown;
+  status?: unknown;
 };
 
 type SelectOption = {
@@ -127,6 +146,219 @@ const participantStatusOptions: SelectOption[] = [
   { key: "Timed In", label: "Timed In" },
   { key: "Absent", label: "Absent" },
 ];
+
+const ONE_MB_IN_BYTES = 1024 * 1024;
+const MAX_EVENT_FILE_SIZE_BYTES = 10 * ONE_MB_IN_BYTES;
+const MAX_IMAGE_DIMENSION = 2048;
+const IMAGE_COMPRESSION_QUALITY_STEPS = [
+  0.9, 0.82, 0.74, 0.66, 0.58, 0.5, 0.42,
+];
+const IMAGE_COMPRESSION_SCALE_STEPS = [1, 0.9, 0.8, 0.72, 0.64];
+const ALLOWED_EVENT_IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp"]);
+const ALLOWED_EVENT_IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+const EVENT_DOC_EXTENSIONS = new Set(["pdf", "doc", "docx"]);
+const EVENT_DOC_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+const IMAGE_UPLOAD_ACCEPT =
+  "image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp";
+const DOCUMENT_UPLOAD_ACCEPT =
+  ".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+function getFileExtension(filename: string) {
+  const index = filename.lastIndexOf(".");
+  return index >= 0 ? filename.slice(index + 1).toLowerCase() : "";
+}
+
+function isTeacherEventFileActive(data: TeacherFileDoc) {
+  return String(data.status ?? "").trim().toLowerCase() !== "pending-upload";
+}
+
+function isAllowedTeacherEventImage(file: File) {
+  const ext = getFileExtension(file.name);
+  const contentType = String(file.type ?? "").trim().toLowerCase();
+
+  return (
+    contentType.startsWith("image/") &&
+    ALLOWED_EVENT_IMAGE_MIME_TYPES.has(contentType) &&
+    ALLOWED_EVENT_IMAGE_EXTENSIONS.has(ext)
+  );
+}
+
+function isAllowedEventDocument(file: File) {
+  const ext = getFileExtension(file.name);
+  if (EVENT_DOC_EXTENSIONS.has(ext)) return true;
+  return EVENT_DOC_MIME_TYPES.has(String(file.type ?? "").trim().toLowerCase());
+}
+
+function getEventDocumentContentType(file: Pick<File, "name" | "type">) {
+  const normalizedType = String(file.type ?? "").trim().toLowerCase();
+  if (EVENT_DOC_MIME_TYPES.has(normalizedType)) {
+    return normalizedType;
+  }
+
+  const ext = getFileExtension(file.name);
+  if (ext === "pdf") return "application/pdf";
+  if (ext === "doc") return "application/msword";
+  if (ext === "docx") {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+
+  return normalizedType;
+}
+
+function toMegabytesText(bytes: number) {
+  return `${(bytes / ONE_MB_IN_BYTES).toFixed(2)}MB`;
+}
+
+function toCompressedImageName(filename: string) {
+  const index = filename.lastIndexOf(".");
+  const stem = index >= 0 ? filename.slice(0, index) : filename;
+  return `${stem}.jpg`;
+}
+
+function canvasToBlob(
+  canvas: HTMLCanvasElement,
+  type: string,
+  quality: number,
+) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("Unable to compress image."));
+          return;
+        }
+        resolve(blob);
+      },
+      type,
+      quality,
+    );
+  });
+}
+
+function loadImage(file: File) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error(`"${file.name}" is not a readable image.`));
+    };
+
+    image.src = objectUrl;
+  });
+}
+
+async function compressImageForUpload(file: File, maxBytes: number) {
+  const image = await loadImage(file);
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+  if (!sourceWidth || !sourceHeight) {
+    throw new Error(`"${file.name}" has invalid image dimensions.`);
+  }
+
+  const longestEdge = Math.max(sourceWidth, sourceHeight);
+  const baseRatio =
+    longestEdge > MAX_IMAGE_DIMENSION ? MAX_IMAGE_DIMENSION / longestEdge : 1;
+  const baseWidth = Math.max(1, Math.round(sourceWidth * baseRatio));
+  const baseHeight = Math.max(1, Math.round(sourceHeight * baseRatio));
+
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("Image compression is not available in this browser.");
+  }
+
+  let smallestBlob: Blob | null = null;
+
+  for (const scale of IMAGE_COMPRESSION_SCALE_STEPS) {
+    canvas.width = Math.max(1, Math.round(baseWidth * scale));
+    canvas.height = Math.max(1, Math.round(baseHeight * scale));
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    for (const quality of IMAGE_COMPRESSION_QUALITY_STEPS) {
+      const blob = await canvasToBlob(canvas, "image/jpeg", quality);
+      if (!smallestBlob || blob.size < smallestBlob.size) {
+        smallestBlob = blob;
+      }
+
+      if (blob.size <= maxBytes) {
+        return new File([blob], toCompressedImageName(file.name), {
+          type: "image/jpeg",
+          lastModified: Date.now(),
+        });
+      }
+    }
+  }
+
+  if (!smallestBlob) {
+    throw new Error(`Unable to compress "${file.name}".`);
+  }
+
+  return new File([smallestBlob], toCompressedImageName(file.name), {
+    type: "image/jpeg",
+    lastModified: Date.now(),
+  });
+}
+
+async function uploadEventDocumentWithResumable(
+  storageRef: StorageReference,
+  file: File,
+  contentType: string,
+): Promise<UploadTaskSnapshot> {
+  return await new Promise<UploadTaskSnapshot>((resolve, reject) => {
+    const task = uploadBytesResumable(storageRef, file, {
+      contentType: contentType || undefined,
+    });
+
+    task.on(
+      "state_changed",
+      undefined,
+      (error) => reject(error),
+      () => resolve(task.snapshot),
+    );
+  });
+}
+
+function normalizeTeacherUploadError(error: unknown, fallback: string) {
+  if (typeof error === "object" && error !== null) {
+    const message = (error as {message?: unknown}).message;
+    if (typeof message === "string" && message.trim()) {
+      return message.trim();
+    }
+  }
+
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+
+  return fallback;
+}
+
+function isEventCancelled(data: Record<string, unknown>) {
+  return (
+    data.cancelled === true ||
+    String(data.status ?? "").trim().toLowerCase() === "cancelled"
+  );
+}
+
+function eventOwnerTypeValue(data: Record<string, unknown>) {
+  return String(data.ownerType ?? "").trim().toLowerCase() === "bod" ? "bod" : "ec";
+}
 
 function toMillis(value: unknown): number {
   if (typeof value === "object" && value !== null) {
@@ -167,6 +399,9 @@ function mapFileSnapshot(
   return snap.docs
     .map((fileDoc) => {
       const data = fileDoc.data() as TeacherFileDoc;
+      if (!isTeacherEventFileActive(data)) {
+        return null;
+      }
       const fallbackName = kind === "images" ? "Untitled image" : "Untitled file";
 
       return {
@@ -174,7 +409,7 @@ function mapFileSnapshot(
         eventId,
         kind,
         name: String(data.name ?? fallbackName).trim() || fallbackName,
-        path: String(data.path ?? "").trim(),
+        path: String(data.storagePath ?? data.path ?? "").trim(),
         downloadURL: String(data.downloadURL ?? "").trim(),
         contentType: String(data.contentType ?? "").trim(),
         size: Number(data.size ?? 0),
@@ -387,7 +622,7 @@ function getTeacherEventSchedule(
 }
 
 export default function TeacherEventsPage() {
-  const { events, loadingEvents, error } = useTeacherPortal();
+  const { events, loadingEvents, error, profile } = useTeacherPortal();
   const loading = loadingEvents;
   const isCompactView = useIsBelowBreakpoint(1024);
   const isMobileView = useIsBelowBreakpoint(640);
@@ -410,6 +645,8 @@ export default function TeacherEventsPage() {
   const [filesView, setFilesView] = useState<EventFilesView>("images");
   const [imagesModalOpen, setImagesModalOpen] = useState(false);
   const [documentsModalOpen, setDocumentsModalOpen] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [uploadingDocument, setUploadingDocument] = useState(false);
   const [selectedEventFiles, setSelectedEventFiles] = useState<TeacherFile[]>(
     [],
   );
@@ -427,6 +664,8 @@ export default function TeacherEventsPage() {
     useState(false);
   const [selectedEventAttendanceLoading, setSelectedEventAttendanceLoading] =
     useState(false);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const documentInputRef = useRef<HTMLInputElement | null>(null);
 
   const statusOptions: SelectOption[] = [
     { key: "__all_status__", label: "All status" },
@@ -470,6 +709,26 @@ export default function TeacherEventsPage() {
     () => (selectedEvent ? getTeacherEventSchedule(selectedEvent) : null),
     [selectedEvent],
   );
+  const selectedEventUploadsAllowed = Boolean(
+    profile &&
+      selectedEvent &&
+      selectedEvent.lifecycle !== "cancelled",
+  );
+  const selectedEventUploadDisabledReason = useMemo(() => {
+    if (!selectedEvent) {
+      return "The selected event is no longer available.";
+    }
+
+    if (!profile) {
+      return "Your teacher profile is not available right now.";
+    }
+
+    if (selectedEvent.lifecycle === "cancelled") {
+      return "Uploads are disabled for cancelled events.";
+    }
+
+    return "";
+  }, [profile, selectedEvent]);
 
   const selectedParticipantBuild = useMemo(() => {
     if (!selectedEventExportEvent) {
@@ -678,6 +937,253 @@ export default function TeacherEventsPage() {
     }
 
     void downloadTeacherEventDocument(selectedEvent.id, file);
+  }
+
+  async function uploadTeacherEventDocumentFile(eventId: string, file: File) {
+    const contentType = getEventDocumentContentType(file);
+    let uploadTarget: Awaited<
+      ReturnType<typeof createEventDocumentUploadTarget>
+    > | null = null;
+
+    try {
+      uploadTarget = await createEventDocumentUploadTarget({
+        eventId,
+        fileName: file.name,
+        contentType,
+        size: file.size,
+      });
+
+      await uploadEventDocumentWithResumable(
+        ref(storage, uploadTarget.storagePath),
+        file,
+        contentType,
+      );
+
+      await finalizeEventDocumentUpload({
+        eventId,
+        docId: uploadTarget.docId,
+        size: file.size,
+        contentType,
+      });
+    } catch (error) {
+      if (uploadTarget) {
+        await cleanupPendingEventDocumentUpload({
+          eventId,
+          docId: uploadTarget.docId,
+        }).catch(() => undefined);
+      }
+
+      throw error;
+    }
+  }
+
+  async function uploadTeacherEventImageFile(eventId: string, file: File) {
+    if (!profile) {
+      throw new Error("Your teacher profile is not available right now.");
+    }
+
+    const eventSnapshot = await getDoc(doc(db, "events", eventId));
+    if (!eventSnapshot.exists()) {
+      throw new Error("The selected event is no longer available.");
+    }
+
+    const eventData = (eventSnapshot.data() ?? {}) as Record<string, unknown>;
+    if (isEventCancelled(eventData)) {
+      throw new Error("Uploads are disabled for cancelled events.");
+    }
+
+    const compressed = await compressImageForUpload(
+      file,
+      MAX_EVENT_FILE_SIZE_BYTES,
+    );
+    if (compressed.size > MAX_EVENT_FILE_SIZE_BYTES) {
+      throw new Error(
+        `${file.name} is still ${toMegabytesText(compressed.size)} after compression. Max is 10MB.`,
+      );
+    }
+
+    const safeName = compressed.name.replace(/[^\w.\-()+ ]/g, "_");
+    const fileId = `${Date.now()}_${safeName}`;
+    const storagePath = `events/${eventId}/images/${fileId}`;
+    const storageRef = ref(storage, storagePath);
+    let uploadedToStorage = false;
+
+    try {
+      const snapshot = await uploadBytes(storageRef, compressed, {
+        contentType: compressed.type,
+      });
+      uploadedToStorage = true;
+
+      const downloadURL = await getDownloadURL(snapshot.ref);
+      await addDoc(collection(db, "events", eventId, "images"), {
+        eventId,
+        path: storagePath,
+        storagePath,
+        name: compressed.name,
+        originalName: file.name,
+        contentType: compressed.type,
+        size: compressed.size,
+        sizeBytes: compressed.size,
+        downloadURL,
+        status: "active",
+        ownerType: eventOwnerTypeValue(eventData),
+        courseScope: String(eventData.courseScope ?? "").trim(),
+        createdByCourseScope: String(
+          eventData.createdByCourseScope ?? eventData.courseScope ?? "",
+        ).trim(),
+        uploadedByUid: profile.uid,
+        uploadedByRole: "teacher",
+        uploadedByName: profile.teacherName || profile.name || profile.schoolId,
+        uploadedBySchoolId: profile.schoolId,
+        createdBy: profile.uid,
+        createdByUid: profile.uid,
+        ownerUid: profile.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        uploadedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      if (uploadedToStorage) {
+        await deleteObject(storageRef).catch(() => undefined);
+      }
+
+      throw error;
+    }
+  }
+
+  function handleBlockedTeacherUpload() {
+    campusToast.error({
+      title: "Upload unavailable",
+      description:
+        selectedEventUploadDisabledReason || "The selected event cannot accept uploads right now.",
+      dedupeKey: `teacher-event-upload-blocked:${selectedEvent?.id ?? "unknown"}`,
+    });
+  }
+
+  function openImageUploadPicker() {
+    if (!selectedEventUploadsAllowed) {
+      handleBlockedTeacherUpload();
+      return;
+    }
+
+    imageInputRef.current?.click();
+  }
+
+  function openDocumentUploadPicker() {
+    if (!selectedEventUploadsAllowed) {
+      handleBlockedTeacherUpload();
+      return;
+    }
+
+    documentInputRef.current?.click();
+  }
+
+  async function handleImageInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    if (!selectedEvent || !selectedEventUploadsAllowed) {
+      handleBlockedTeacherUpload();
+      return;
+    }
+
+    if (!isAllowedTeacherEventImage(file)) {
+      campusToast.error({
+        title: "Upload failed",
+        description: "Only JPG, JPEG, PNG, and WEBP image files are allowed.",
+        dedupeKey: `teacher-event-image-invalid-type:${selectedEvent.id}`,
+      });
+      return;
+    }
+
+    if (file.size > MAX_EVENT_FILE_SIZE_BYTES) {
+      campusToast.error({
+        title: "Upload failed",
+        description: `Images larger than 10MB are not allowed. Selected file is ${toMegabytesText(file.size)}.`,
+        dedupeKey: `teacher-event-image-too-large:${selectedEvent.id}`,
+      });
+      return;
+    }
+
+    setUploadingImage(true);
+
+    try {
+      await uploadTeacherEventImageFile(selectedEvent.id, file);
+      campusToast.success({
+        title: "Photo uploaded.",
+        description: `${file.name} is now available in Images.`,
+        dedupeKey: `teacher-event-image-uploaded:${selectedEvent.id}:${file.name}`,
+      });
+    } catch (error) {
+      campusToast.error({
+        title: "Upload failed",
+        description: normalizeTeacherUploadError(
+          error,
+          "Failed to upload the selected event photo.",
+        ),
+        dedupeKey: `teacher-event-image-upload-error:${selectedEvent.id}:${file.name}`,
+      });
+    } finally {
+      setUploadingImage(false);
+    }
+  }
+
+  async function handleDocumentInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    if (!selectedEvent || !selectedEventUploadsAllowed) {
+      handleBlockedTeacherUpload();
+      return;
+    }
+
+    if (!isAllowedEventDocument(file)) {
+      campusToast.error({
+        title: "Upload failed",
+        description: "Only PDF, DOC, and DOCX files are allowed.",
+        dedupeKey: `teacher-event-document-invalid-type:${selectedEvent.id}`,
+      });
+      return;
+    }
+
+    if (file.size > MAX_EVENT_FILE_SIZE_BYTES) {
+      campusToast.error({
+        title: "Upload failed",
+        description: `Documents larger than 10MB are not allowed. Selected file is ${toMegabytesText(file.size)}.`,
+        dedupeKey: `teacher-event-document-too-large:${selectedEvent.id}`,
+      });
+      return;
+    }
+
+    setUploadingDocument(true);
+
+    try {
+      await uploadTeacherEventDocumentFile(selectedEvent.id, file);
+      campusToast.success({
+        title: "Document uploaded.",
+        description: `${file.name} is now available in Documents.`,
+        dedupeKey: `teacher-event-document-uploaded:${selectedEvent.id}:${file.name}`,
+      });
+    } catch (error) {
+      campusToast.error({
+        title: "Upload failed",
+        description: normalizeTeacherUploadError(
+          error,
+          "Failed to upload the selected event document.",
+        ),
+        dedupeKey: `teacher-event-document-upload-error:${selectedEvent.id}:${file.name}`,
+      });
+    } finally {
+      setUploadingDocument(false);
+    }
   }
 
   const upcomingCount = useMemo(
@@ -1484,6 +1990,27 @@ export default function TeacherEventsPage() {
 
                   <Tab key="files" title="Files">
                     <div className="space-y-5 pt-3">
+                      <input
+                        ref={imageInputRef}
+                        type="file"
+                        accept={IMAGE_UPLOAD_ACCEPT}
+                        className="hidden"
+                        onChange={handleImageInputChange}
+                      />
+                      <input
+                        ref={documentInputRef}
+                        type="file"
+                        accept={DOCUMENT_UPLOAD_ACCEPT}
+                        className="hidden"
+                        onChange={handleDocumentInputChange}
+                      />
+
+                      {selectedEvent?.lifecycle === "cancelled" ? (
+                        <p className="text-sm text-campus-text-secondary">
+                          Uploads are disabled for cancelled events.
+                        </p>
+                      ) : null}
+
                       <EventFilesTabs
                         activeView={filesView}
                         onViewChange={setFilesView}
@@ -1494,6 +2021,32 @@ export default function TeacherEventsPage() {
                         onOpenImages={() => setImagesModalOpen(true)}
                         onOpenDocuments={() => setDocumentsModalOpen(true)}
                         onDownloadFile={handleTeacherEventFileDownload}
+                        renderImageHeaderActions={() => (
+                          <Button
+                            color="primary"
+                            variant="flat"
+                            startContent={<Upload size={16} />}
+                            className="w-full sm:w-auto"
+                            onPress={openImageUploadPicker}
+                            isDisabled={!selectedEventUploadsAllowed || uploadingImage}
+                            isLoading={uploadingImage}
+                          >
+                            {uploadingImage ? "Uploading photo..." : "Upload Photo"}
+                          </Button>
+                        )}
+                        renderDocumentHeaderActions={() => (
+                          <Button
+                            color="primary"
+                            variant="flat"
+                            startContent={<Upload size={16} />}
+                            className="w-full sm:w-auto"
+                            onPress={openDocumentUploadPicker}
+                            isDisabled={!selectedEventUploadsAllowed || uploadingDocument}
+                            isLoading={uploadingDocument}
+                          >
+                            {uploadingDocument ? "Uploading document..." : "Upload Document"}
+                          </Button>
+                        )}
                       />
                     </div>
                   </Tab>

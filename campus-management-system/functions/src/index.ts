@@ -6433,9 +6433,12 @@ function eventCreatedByUid(data: FirebaseFirestore.DocumentData): string {
   return normalizeText(data.createdByUid || data.createdBy);
 }
 
+type EventDocumentTeacherAction = "read" | "upload" | "cleanup" | "delete";
+
 function resolveEventDocumentAccess(
   actor: EcActorContext,
   eventData: FirebaseFirestore.DocumentData,
+  teacherAction: EventDocumentTeacherAction = "read",
 ): {
   allowed: boolean;
   deniedReason: string;
@@ -6456,7 +6459,46 @@ function resolveEventDocumentAccess(
     courseScopeSlugFromValue(resolvedCourseScope) || null :
     null;
 
-  if (actor.isAdmin || actor.isRegularEc || actor.isTeacher) {
+  if (actor.isAdmin || actor.isRegularEc) {
+    return {
+      allowed: true,
+      deniedReason: "",
+      ownerType,
+      eventCourseScope: scopedCourse,
+      eventCreatedByUid: createdByUid,
+      eventCreatedByCourseScope: createdByCourseScope,
+      courseScope: resolvedCourseScope,
+      courseScopeSlug: resolvedCourseScopeSlug,
+    };
+  }
+
+  if (actor.isTeacher) {
+    if (teacherAction === "delete") {
+      return {
+        allowed: false,
+        deniedReason: "teacher-cannot-delete-event-document",
+        ownerType,
+        eventCourseScope: scopedCourse,
+        eventCreatedByUid: createdByUid,
+        eventCreatedByCourseScope: createdByCourseScope,
+        courseScope: resolvedCourseScope,
+        courseScopeSlug: resolvedCourseScopeSlug,
+      };
+    }
+
+    if (teacherAction === "upload" && isCampusEventCancelled(eventData)) {
+      return {
+        allowed: false,
+        deniedReason: "event-cancelled",
+        ownerType,
+        eventCourseScope: scopedCourse,
+        eventCreatedByUid: createdByUid,
+        eventCreatedByCourseScope: createdByCourseScope,
+        courseScope: resolvedCourseScope,
+        courseScopeSlug: resolvedCourseScopeSlug,
+      };
+    }
+
     return {
       allowed: true,
       deniedReason: "",
@@ -6554,6 +6596,21 @@ function resolveEventDocumentAccess(
   };
 }
 
+function eventDocumentActorName(actor: EcActorContext): string {
+  return (
+    normalizeText(actor.profile.teacherName) ||
+    normalizeText(actor.profile.studentName) ||
+    normalizeText(actor.profile.name) ||
+    normalizeText(actor.profile.fullName) ||
+    normalizeText(actor.profile.displayName) ||
+    normalizeText(actor.profile.schoolId)
+  );
+}
+
+function eventDocumentActorSchoolId(actor: EcActorContext): string {
+  return normalizeText(actor.profile.schoolId);
+}
+
 function canEcActorAccessEventDocument(
   actor: EcActorContext,
   eventData: FirebaseFirestore.DocumentData,
@@ -6641,6 +6698,8 @@ function toEventDocumentListItem(
 
 function eventDocumentDeniedMessage(reason: string): string {
   switch (reason) {
+  case "event-cancelled":
+    return "Uploads are disabled for cancelled events.";
   case "bod-missing-course-scope":
     return "B.O.D. profile is missing a valid course scope.";
   case "bod-cannot-upload-to-ec-event":
@@ -6653,6 +6712,8 @@ function eventDocumentDeniedMessage(reason: string): string {
     return "B.O.D. members can only manage the event documents they uploaded.";
   case "document-course-scope-mismatch":
     return "B.O.D. members can only manage event documents inside their assigned course.";
+  case "teacher-cannot-delete-event-document":
+    return "Teacher accounts cannot delete event documents.";
   default:
     return "You do not have permission to manage documents for this event.";
   }
@@ -10554,7 +10615,7 @@ export const finalizeCampusDocumentUpload = onCall({region: REGION}, async (requ
 
 export const createEventDocumentUploadTarget = onCall({region: REGION}, async (request) => {
     try {
-      const actor = await resolveEcActorContext(request);
+      const actor = await resolveEcActorContext(request, {allowTeacher: true});
       const body = asRecord(request.data);
       const eventId = normalizeText(body.eventId);
       const uploadInput = validateEventDocumentUploadInput(body);
@@ -10570,7 +10631,7 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
       }
 
       const eventData = eventSnapshot.data() ?? {};
-      const access = resolveEventDocumentAccess(actor, eventData);
+      const access = resolveEventDocumentAccess(actor, eventData, "upload");
       const logContext = {
         callerUid: actor.uid,
         callerRole: normalizeCampusRoleValue(actor.profile.role) || null,
@@ -10620,6 +10681,9 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
         createdByUid: actor.uid,
         uploadedBy: actor.uid,
         uploadedByUid: actor.uid,
+        uploadedByRole: actor.role || null,
+        uploadedByName: eventDocumentActorName(actor) || null,
+        uploadedBySchoolId: eventDocumentActorSchoolId(actor) || null,
         courseScope: access.courseScope,
         courseScopeSlug: access.courseScopeSlug,
         createdByCourseScope:
@@ -10784,7 +10848,7 @@ export const listEventDocuments = onCall({region: REGION}, async (request) => {
 
 export const finalizeEventDocumentUpload = onCall({region: REGION}, async (request) => {
     try {
-      const actor = await resolveEcActorContext(request);
+      const actor = await resolveEcActorContext(request, {allowTeacher: true});
       const body = asRecord(request.data);
       const eventId = normalizeText(body.eventId);
       const docId = normalizeText(body.docId);
@@ -10826,7 +10890,7 @@ export const finalizeEventDocumentUpload = onCall({region: REGION}, async (reque
       const pendingStoragePath =
         normalizeText(documentData.storagePath) ||
         normalizeText(documentData.path);
-      const access = resolveEventDocumentAccess(actor, eventData);
+      const access = resolveEventDocumentAccess(actor, eventData, "upload");
       const logContext = {
         callerUid: actor.uid,
         callerRole: normalizeCampusRoleValue(actor.profile.role) || null,
@@ -10872,7 +10936,10 @@ export const finalizeEventDocumentUpload = onCall({region: REGION}, async (reque
         );
       }
 
-      if (actor.isBod && !ecDocumentOwnedByUid(documentData, actor.uid)) {
+      if (
+        (actor.isBod || actor.isTeacher) &&
+        !ecDocumentOwnedByUid(documentData, actor.uid)
+      ) {
         functionsLogger.warn("finalizeEventDocumentUpload denied", {
           ...logContext,
           deniedReason: "metadata-not-owned-by-caller",
@@ -10934,6 +11001,15 @@ export const finalizeEventDocumentUpload = onCall({region: REGION}, async (reque
           contentType: verifiedUpload.contentType,
           size: verifiedUpload.sizeBytes,
           sizeBytes: verifiedUpload.sizeBytes,
+          uploadedByRole: actor.role || normalizeCampusRoleValue(documentData.uploadedByRole) || null,
+          uploadedByName:
+            eventDocumentActorName(actor) ||
+            normalizeText(documentData.uploadedByName) ||
+            null,
+          uploadedBySchoolId:
+            eventDocumentActorSchoolId(actor) ||
+            normalizeText(documentData.uploadedBySchoolId) ||
+            null,
           updatedAt: serverTimestamp(),
           uploadedAt: serverTimestamp(),
         },
@@ -10980,7 +11056,7 @@ export const finalizeEventDocumentUpload = onCall({region: REGION}, async (reque
 
 export const cleanupPendingEventDocumentUpload = onCall({region: REGION}, async (request) => {
     try {
-      const actor = await resolveEcActorContext(request);
+      const actor = await resolveEcActorContext(request, {allowTeacher: true});
       const body = asRecord(request.data);
       const eventId = normalizeText(body.eventId);
       const docId = normalizeText(body.docId);
@@ -11012,7 +11088,7 @@ export const cleanupPendingEventDocumentUpload = onCall({region: REGION}, async 
       const pendingStoragePath =
         normalizeText(documentData.storagePath) ||
         normalizeText(documentData.path);
-      const access = resolveEventDocumentAccess(actor, eventData);
+      const access = resolveEventDocumentAccess(actor, eventData, "cleanup");
       const logContext = {
         callerUid: actor.uid,
         callerRole: normalizeCampusRoleValue(actor.profile.role) || null,
@@ -11038,7 +11114,10 @@ export const cleanupPendingEventDocumentUpload = onCall({region: REGION}, async 
         );
       }
 
-      if (actor.isBod && !ecDocumentOwnedByUid(documentData, actor.uid)) {
+      if (
+        (actor.isBod || actor.isTeacher) &&
+        !ecDocumentOwnedByUid(documentData, actor.uid)
+      ) {
         functionsLogger.warn("cleanupPendingEventDocumentUpload denied", {
           ...logContext,
           deniedReason: "metadata-not-owned-by-caller",

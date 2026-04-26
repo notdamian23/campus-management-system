@@ -96,10 +96,12 @@ type TeacherAttendanceDoc = {
 type TeacherFileDoc = {
   name?: string;
   path?: string;
+  storagePath?: string;
   downloadURL?: string;
   contentType?: string;
   size?: number;
   createdAt?: unknown;
+  status?: unknown;
 };
 
 export type TeacherLifecycle =
@@ -270,6 +272,10 @@ function toNonNegativeNumber(value: unknown) {
   return Number.isFinite(numericValue) && numericValue > 0
     ? Math.trunc(numericValue)
     : 0;
+}
+
+function isTeacherVisibleFile(data: TeacherFileDoc) {
+  return String(data.status ?? "").trim().toLowerCase() !== "pending-upload";
 }
 
 function normalizeTeacherLifecycleStatus(rawStatus: unknown) {
@@ -579,6 +585,9 @@ export function TeacherPortalProvider({
       snap.docs
         .map((fileDoc) => {
           const data = fileDoc.data() as TeacherFileDoc;
+          if (!isTeacherVisibleFile(data)) {
+            return null;
+          }
 
           return {
             id: fileDoc.id,
@@ -590,7 +599,7 @@ export function TeacherPortalProvider({
                   (kind === "images" ? "Untitled image" : "Untitled file"),
               ).trim() ||
               (kind === "images" ? "Untitled image" : "Untitled file"),
-            path: String(data.path ?? "").trim(),
+            path: String(data.storagePath ?? data.path ?? "").trim(),
             downloadURL: String(data.downloadURL ?? "").trim(),
             contentType: String(data.contentType ?? "").trim(),
             size: Number(data.size ?? 0),

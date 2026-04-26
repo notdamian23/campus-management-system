@@ -45,6 +45,7 @@ type EmptyStateCopy = {
 };
 
 type FileActionRenderer = (file: EventDetailFileItem) => ReactNode;
+type HeaderActionRenderer = () => ReactNode;
 
 const fileSortOptions: Array<{ key: EventFileSortMode; label: string }> = [
   { key: "name_asc", label: "Ascending" },
@@ -171,6 +172,8 @@ export function EventFilesTabs({
   onDownloadFile,
   renderImageActions,
   renderDocumentActions,
+  renderImageHeaderActions,
+  renderDocumentHeaderActions,
   showDocuments = true,
   imageEmptyState = defaultImageEmptyState,
   documentEmptyState = defaultDocumentEmptyState,
@@ -186,6 +189,8 @@ export function EventFilesTabs({
   onDownloadFile: (file: EventDetailFileItem) => void;
   renderImageActions?: FileActionRenderer;
   renderDocumentActions?: FileActionRenderer;
+  renderImageHeaderActions?: HeaderActionRenderer;
+  renderDocumentHeaderActions?: HeaderActionRenderer;
   showDocuments?: boolean;
   imageEmptyState?: EmptyStateCopy;
   documentEmptyState?: EmptyStateCopy;
@@ -206,6 +211,7 @@ export function EventFilesTabs({
         onOpenAll={onOpenImages}
         onDownloadFile={onDownloadFile}
         renderActions={renderImageActions}
+        headerActions={renderImageHeaderActions?.()}
       />
     ) : (
       <DocumentPreviewSection
@@ -215,6 +221,7 @@ export function EventFilesTabs({
         onOpenAll={onOpenDocuments}
         onDownloadFile={onDownloadFile}
         renderActions={renderDocumentActions}
+        headerActions={renderDocumentHeaderActions?.()}
       />
     );
 
@@ -503,13 +510,15 @@ function SectionHeader({
   title,
   count,
   onOpenAll,
+  actions,
 }: {
   title: string;
   count: number;
   onOpenAll?: () => void;
+  actions?: ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div className="flex items-center gap-2">
         <h3 className="text-base font-semibold text-campus-text-primary">{title}</h3>
         <Chip size="sm" className="bg-slate-100 text-slate-700">
@@ -517,15 +526,18 @@ function SectionHeader({
         </Chip>
       </div>
 
-      {count > 0 && onOpenAll ? (
-        <Button
-          variant="light"
-          className="h-auto min-w-0 self-start px-0 text-sm font-semibold text-primary-600 data-[hover=true]:bg-transparent sm:self-auto"
-          onPress={onOpenAll}
-        >
-          View all
-        </Button>
-      ) : null}
+      <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
+        {actions ? <div className="w-full sm:w-auto">{actions}</div> : null}
+        {count > 0 && onOpenAll ? (
+          <Button
+            variant="light"
+            className="h-auto min-w-0 self-start px-0 text-sm font-semibold text-primary-600 data-[hover=true]:bg-transparent sm:self-auto"
+            onPress={onOpenAll}
+          >
+            View all
+          </Button>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -537,6 +549,7 @@ function ImagePreviewSection({
   onOpenAll,
   onDownloadFile,
   renderActions,
+  headerActions,
 }: {
   files: EventDetailFileItem[];
   totalCount: number;
@@ -544,10 +557,16 @@ function ImagePreviewSection({
   onOpenAll?: () => void;
   onDownloadFile: (file: EventDetailFileItem) => void;
   renderActions?: FileActionRenderer;
+  headerActions?: ReactNode;
 }) {
   return (
     <div className="space-y-4">
-      <SectionHeader title="Images" count={totalCount} onOpenAll={onOpenAll} />
+      <SectionHeader
+        title="Images"
+        count={totalCount}
+        onOpenAll={onOpenAll}
+        actions={headerActions}
+      />
 
       {totalCount === 0 ? (
         <EventFilesEmptyState
@@ -578,6 +597,7 @@ function DocumentPreviewSection({
   onOpenAll,
   onDownloadFile,
   renderActions,
+  headerActions,
 }: {
   files: EventDetailFileItem[];
   totalCount: number;
@@ -585,6 +605,7 @@ function DocumentPreviewSection({
   onOpenAll?: () => void;
   onDownloadFile: (file: EventDetailFileItem) => void;
   renderActions?: FileActionRenderer;
+  headerActions?: ReactNode;
 }) {
   return (
     <div className="space-y-4">
@@ -592,6 +613,7 @@ function DocumentPreviewSection({
         title="Documents"
         count={totalCount}
         onOpenAll={onOpenAll}
+        actions={headerActions}
       />
 
       {totalCount === 0 ? (

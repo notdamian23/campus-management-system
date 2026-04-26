@@ -194,6 +194,14 @@ service firebase.storage {
       return eventExists(eventId) ? firestore.get(eventPath(eventId)).data : null;
     }
 
+    function eventIsCancelled(eventId) {
+      return eventExists(eventId) &&
+        (
+          eventData(eventId).cancelled == true ||
+          eventData(eventId).status == "cancelled"
+        );
+    }
+
     function ecDocumentExists(docId) {
       return firestore.exists(ecDocumentPath(docId));
     }
@@ -437,6 +445,37 @@ service firebase.storage {
         );
     }
 
+    function canTeacherUploadEventFile(eventId) {
+      return isTeacher() &&
+        eventExists(eventId) &&
+        !eventIsCancelled(eventId) &&
+        canViewEventData(eventData(eventId));
+    }
+
+    function eventImageFileNameHasAllowedExtension(fileName) {
+      return fileName.matches("^.+\\.(jpg|JPG|jpeg|JPEG|png|PNG|webp|WEBP)$");
+    }
+
+    function isAllowedEventImageUploadContentType(fileName, contentType) {
+      return eventImageFileNameHasAllowedExtension(fileName) &&
+        (
+          contentType == "image/jpeg" ||
+          contentType == "image/png" ||
+          contentType == "image/webp"
+        );
+    }
+
+    function isAllowedEventImageContent(fileName) {
+      return request.resource != null &&
+        request.resource.size <= 10 * 1024 * 1024 &&
+        isAllowedEventImageUploadContentType(fileName, request.resource.contentType);
+    }
+
+    function canTeacherCreateEventImageObject(eventId, fileName) {
+      return canTeacherUploadEventFile(eventId) &&
+        isAllowedEventImageContent(fileName);
+    }
+
     function eventDocumentFileNameHasAllowedExtension(fileName) {
       return fileName.matches("^.+\\.(pdf|PDF|doc|DOC|docx|DOCX)$");
     }
@@ -556,6 +595,8 @@ service firebase.storage {
     function canCreateOrUpdatePendingEventDocument(eventId, docId, fileName) {
       return signedIn() &&
         eventExists(eventId) &&
+        !eventIsCancelled(eventId) &&
+        (!isTeacher() || canTeacherUploadEventFile(eventId)) &&
         eventDocumentExists(eventId, docId) &&
         eventDocumentStatus(eventDocumentData(eventId, docId)) == "pending-upload" &&
         eventDocumentOwnedByCurrentUser(eventDocumentData(eventId, docId)) &&
@@ -599,7 +640,9 @@ service firebase.storage {
 
     match /events/{eventId}/images/{fileId} {
       allow read: if eventExists(eventId) && canViewEventData(eventData(eventId));
-      allow write: if canEditEventFiles(eventId);
+      allow create: if canEditEventFiles(eventId) ||
+        canTeacherCreateEventImageObject(eventId, fileId);
+      allow update, delete: if canEditEventFiles(eventId);
     }
 
     match /events/{eventId}/docs/{fileId} {

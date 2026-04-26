@@ -5,10 +5,6 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function profilePath() {
-      return /databases/$(database)/documents/profiles/$(request.auth.uid);
-    }
-
     function userProfilePath(uid) {
       return /databases/$(database)/documents/profiles/$(uid);
     }
@@ -43,14 +39,6 @@ service cloud.firestore {
         null;
     }
 
-    function hasProfile() {
-      return currentProfileData() != null;
-    }
-
-    function profile() {
-      return currentProfileData();
-    }
-
     function profileRole(data) {
       return data != null && data.role is string ? data.role : "";
     }
@@ -77,10 +65,6 @@ service cloud.firestore {
 
     function currentIsTeacher() {
       return currentRole() == "teacher";
-    }
-
-    function isTeacher() {
-      return currentIsTeacher();
     }
 
     function isRegularECMemberRole(value) {
@@ -127,14 +111,6 @@ service cloud.firestore {
       let roleValue = profileRole(data);
 
       return dataHasStudentIdentityWithRole(data, roleValue);
-    }
-
-    function hasStudentSelfIdentity() {
-      return currentHasStudentIdentity();
-    }
-
-    function studentProfileHasIdentity(data) {
-      return dataHasStudentIdentity(data);
     }
 
     function normalizeCourseScopeValue(value) {
@@ -291,15 +267,6 @@ service cloud.firestore {
         valueMatchesCourseScope(data.course, courseScope);
     }
 
-    function courseMatchesCurrentScope(value) {
-      let courseScope = currentCourseScope();
-      return valueMatchesCourseScope(value, courseScope);
-    }
-
-    function studentRecordMatchesCurrentScope(data) {
-      return dataCourseMatchesScope(data, currentCourseScope());
-    }
-
     function bodManageableStudentData(data, courseScope) {
       return data != null &&
         (
@@ -324,22 +291,10 @@ service cloud.firestore {
         dataCourseMatchesScope(data, courseScope);
     }
 
-    function studentProfileHasIdentityAndMatchesCurrentScope(data) {
-      return studentProfileHasIdentityAndMatchesScope(data, currentCourseScope());
-    }
-
-    function isBODProfileData(data) {
-      return isBODProfileDataWithRole(data, profileRole(data));
-    }
-
     function isRegularECProfileDataWithRole(data, roleValue) {
       return data != null &&
         isRegularECMemberRole(roleValue) &&
         (data.ecScope == "all" || !isBODProfileDataWithRole(data, roleValue));
-    }
-
-    function isRegularECProfileData(data) {
-      return isRegularECProfileDataWithRole(data, profileRole(data));
     }
 
     function currentIsBod() {
@@ -358,10 +313,6 @@ service cloud.firestore {
       let roleValue = profileRole(data);
 
       return isRegularECProfileDataWithRole(data, roleValue);
-    }
-
-    function isRegularEC() {
-      return currentIsRegularEC();
     }
 
     function isAdminOrEC() {
@@ -707,6 +658,14 @@ service cloud.firestore {
       return exists(eventPath(eventId));
     }
 
+    function eventIsCancelled(eventId) {
+      return eventExists(eventId) &&
+        (
+          get(eventPath(eventId)).data.cancelled == true ||
+          get(eventPath(eventId)).data.status == "cancelled"
+        );
+    }
+
     function canManageOwnBodEventSubcollectionData(data, courseScope) {
       return eventManagedByBodScope(data, courseScope);
     }
@@ -755,6 +714,90 @@ service cloud.firestore {
             canManageOwnBodEventSubcollectionData(eventDoc(eventId), courseScope)
           )
         );
+    }
+
+    function eventImageStoragePathValue(data) {
+      return data.storagePath is string && data.storagePath != "" ? data.storagePath :
+        (
+          data.path is string &&
+          data.path != ""
+        ) ? data.path :
+        "";
+    }
+
+    function eventImageStoragePathMatchesEvent(eventId, data) {
+      let storagePath = eventImageStoragePathValue(data);
+      return storagePath != "" &&
+        storagePath.matches("^events/" + eventId + "/images/[^/]+$");
+    }
+
+    function isAllowedEventImageContentType(contentType) {
+      return contentType == "image/jpeg" ||
+        contentType == "image/png" ||
+        contentType == "image/webp";
+    }
+
+    function eventImageContentTypeIsAllowed(data) {
+      return data.contentType is string &&
+        isAllowedEventImageContentType(data.contentType);
+    }
+
+    function eventImageSizeWithinLimit(data) {
+      return (
+        data.size is int ||
+        data.size is float
+      ) &&
+        data.size >= 0 &&
+        data.size <= 10 * 1024 * 1024;
+    }
+
+    function eventImageActorFieldsMatchCurrentUser(data) {
+      return data.uploadedByUid is string &&
+        data.uploadedByUid == request.auth.uid &&
+        data.createdByUid is string &&
+        data.createdByUid == request.auth.uid &&
+        data.ownerUid is string &&
+        data.ownerUid == request.auth.uid &&
+        (
+          !(data.createdBy is string) ||
+          data.createdBy == request.auth.uid
+        );
+    }
+
+    function eventImageOwnerTypeMatchesParent(eventId, data) {
+      return data.ownerType is string &&
+        data.ownerType == eventOwnerType(eventDoc(eventId));
+    }
+
+    function teacherEventImageMetadataIsValid(eventId, data) {
+      return data != null &&
+        data.eventId is string &&
+        data.eventId == eventId &&
+        data.name is string &&
+        data.name != "" &&
+        data.downloadURL is string &&
+        data.downloadURL != "" &&
+        data.status == "active" &&
+        data.uploadedByRole == "teacher" &&
+        data.uploadedByName is string &&
+        data.uploadedByName != "" &&
+        data.uploadedBySchoolId is string &&
+        data.uploadedBySchoolId != "" &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp &&
+        eventImageStoragePathMatchesEvent(eventId, data) &&
+        eventImageOwnerTypeMatchesParent(eventId, data) &&
+        eventImageContentTypeIsAllowed(data) &&
+        eventImageSizeWithinLimit(data) &&
+        eventImageActorFieldsMatchCurrentUser(data);
+    }
+
+    function canTeacherCreateEventImageMetadata(eventId, data) {
+      return currentIsTeacher() &&
+        eventExists(eventId) &&
+        !eventIsCancelled(eventId) &&
+        canViewEventData(eventDoc(eventId)) &&
+        teacherEventImageMetadataIsValid(eventId, data);
     }
 
     function eventDocumentStoragePathValue(data) {
@@ -1036,16 +1079,6 @@ service cloud.firestore {
       return signedIn() && exists(selfPaymentAssignmentPath(paymentId));
     }
 
-    function targetProfileCourseMatchesScope(uid) {
-      let courseScope = currentCourseScope();
-      return courseScope != "" &&
-        userProfileExists(uid) &&
-        studentProfileHasIdentityAndMatchesScope(
-          userProfileDoc(uid),
-          courseScope
-        );
-    }
-
     function paymentStudentTargetProfileMatchesScope(uid, courseScope) {
       return courseScope != "" &&
         userProfileExists(uid) &&
@@ -1079,7 +1112,10 @@ service cloud.firestore {
         dataCourseMatchesScope(nextData, courseScope) &&
         (
           !currentExists ||
-          dataCourseMatchesScope(currentData, courseScope)
+          (
+            currentData != null &&
+            dataCourseMatchesScope(currentData, courseScope)
+          )
         ) &&
         bodManageablePaymentData(paymentData, courseScope);
     }
@@ -1250,7 +1286,12 @@ service cloud.firestore {
 
       match /images/{imageId} {
         allow read: if canReadEventSubcollection(eventId);
-        allow create, update, delete: if signedIn() &&
+        allow create: if signedIn() &&
+          (
+            canManageEventSubcollection(eventId) ||
+            canTeacherCreateEventImageMetadata(eventId, request.resource.data)
+          );
+        allow update, delete: if signedIn() &&
           canManageEventSubcollection(eventId);
       }
 
