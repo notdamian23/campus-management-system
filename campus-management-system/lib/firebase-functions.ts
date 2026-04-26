@@ -393,6 +393,12 @@ export type CreateEventDocumentUploadTargetResult = {
   docId: string;
   storagePath: string;
   fileName: string;
+  uid: string;
+  uploadedByUid: string;
+  createdByUid: string;
+  ownerUid: string;
+  uploadedByRole: string;
+  role: string;
   contentType: string;
   size: number;
   status: "pending-upload";
@@ -410,6 +416,12 @@ export type CreateEventImageUploadTargetResult = {
   imageId: string;
   storagePath: string;
   fileName: string;
+  uid: string;
+  uploadedByUid: string;
+  createdByUid: string;
+  ownerUid: string;
+  uploadedByRole: string;
+  role: string;
   contentType: string;
   size: number;
   status: "pending-upload";

@@ -942,7 +942,15 @@ export default function TeacherEventsPage() {
         contentType: requestedContentType,
         size: file.size,
       });
-      console.log("[TEACHER_FILE_UPLOAD][DOC_TARGET]", uploadTarget);
+      console.log("[TEACHER_FILE_UPLOAD][DOC_TARGET]", {
+        ...uploadTarget,
+        currentAuthUid: auth.currentUser?.uid,
+        uploadedByUid: uploadTarget.uploadedByUid,
+        createdByUid: uploadTarget.createdByUid,
+        ownerUid: uploadTarget.ownerUid,
+        uploadedByRole: uploadTarget.uploadedByRole,
+        status: uploadTarget.status,
+      });
 
       const uploadType =
         uploadTarget.contentType ||
@@ -959,14 +967,16 @@ export default function TeacherEventsPage() {
       };
 
       console.log("[TEACHER_FILE_UPLOAD][DOC_UPLOAD]", {
+        currentAuthUid: auth.currentUser?.uid,
         eventId,
+        targetEventId: uploadTarget.eventId,
         docId: uploadTarget.docId,
         storagePath: uploadTarget.storagePath,
+        targetContentType: uploadTarget.contentType,
+        metadataContentType: uploadMetadata.contentType,
         fileName: file.name,
         fileType: file.type,
-        uploadType,
         size: file.size,
-        uid: auth.currentUser?.uid,
         role: profile?.role,
       });
 
@@ -1037,6 +1047,12 @@ export default function TeacherEventsPage() {
         contentType: uploadTarget.contentType,
         size: uploadTarget.size,
         uid: auth.currentUser?.uid,
+        targetUid: uploadTarget.uid,
+        uploadedByUid: uploadTarget.uploadedByUid,
+        createdByUid: uploadTarget.createdByUid,
+        ownerUid: uploadTarget.ownerUid,
+        uploadedByRole: uploadTarget.uploadedByRole,
+        status: uploadTarget.status,
         role: profile?.role,
       });
 
@@ -1050,14 +1066,17 @@ export default function TeacherEventsPage() {
       };
 
       console.log("[TEACHER_FILE_UPLOAD][IMAGE_UPLOAD]", {
+        currentAuthUid: auth.currentUser?.uid,
         eventId,
+        targetEventId: uploadTarget.eventId,
         imageId: uploadTarget.imageId,
         storagePath: uploadTarget.storagePath,
+        targetContentType: uploadTarget.contentType,
+        metadataContentType: uploadMetadata.contentType,
         fileName: uploadFile.name,
         originalType: file.type,
-        uploadType: uploadMetadata.contentType,
+        fileType: uploadFile.type,
         size: uploadFile.size,
-        uid: auth.currentUser?.uid,
         role: profile?.role,
       });
 

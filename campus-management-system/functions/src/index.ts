@@ -6276,6 +6276,30 @@ function eventImageStoredDownloadUrl(
   return normalizeText(data.downloadURL);
 }
 
+function eventUploadPendingMetadataLog(
+  data: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    eventId: normalizeText(data.eventId),
+    path: normalizeText(data.path),
+    storagePath: normalizeText(data.storagePath),
+    status: normalizeCampusDocumentStatus(data.status),
+    name: normalizeText(data.name),
+    fileName: normalizeText(data.fileName),
+    originalName: normalizeText(data.originalName),
+    contentType: normalizeText(data.contentType),
+    size: Number(data.size ?? 0) || 0,
+    sizeBytes: Number(data.sizeBytes ?? 0) || 0,
+    uid: normalizeText(data.uid),
+    ownerUid: normalizeText(data.ownerUid),
+    createdByUid: normalizeText(data.createdByUid),
+    uploadedByUid: normalizeText(data.uploadedByUid),
+    uploadedByRole: normalizeText(data.uploadedByRole),
+    role: normalizeText(data.role),
+    ownerType: normalizeText(data.ownerType),
+  };
+}
+
 function firebaseStorageDownloadUrl(
   bucketName: string,
   storagePath: string,
@@ -10785,9 +10809,12 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
         uploadInput.fileName,
       );
       const timestamp = serverTimestamp();
+      const uploadedByRole =
+        actor.role || normalizeCampusRoleValue(actor.profile.role) || "";
       const pendingMetadata = {
         status: "pending-upload",
         eventId,
+        uid: actor.uid,
         path: storagePath,
         storagePath,
         name: uploadInput.fileName,
@@ -10803,7 +10830,8 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
         createdByUid: actor.uid,
         uploadedBy: actor.uid,
         uploadedByUid: actor.uid,
-        uploadedByRole: actor.role || null,
+        uploadedByRole,
+        role: uploadedByRole,
         uploadedByName: eventDocumentActorName(actor) || null,
         uploadedBySchoolId: eventDocumentActorSchoolId(actor) || null,
         courseScope: access.courseScope,
@@ -10814,6 +10842,13 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
         createdAt: timestamp,
         updatedAt: timestamp,
       };
+
+      functionsLogger.info("createEventDocumentUploadTarget pending metadata write", {
+        ...logContext,
+        generatedDocId: docId,
+        generatedStoragePath: storagePath,
+        pendingMetadata: eventUploadPendingMetadataLog(pendingMetadata),
+      });
 
       await eventRef.collection("docs").doc(docId).set(pendingMetadata, {merge: true});
 
@@ -10841,13 +10876,20 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
         pendingMetadataExists: verificationSnapshot.exists,
         pendingMetadata: {
           eventId: normalizeText(verificationData.eventId),
+          uid: normalizeText(verificationData.uid),
+          path: normalizeText(verificationData.path),
           storagePath:
             normalizeText(verificationData.storagePath) ||
             normalizeText(verificationData.path),
           status: normalizeCampusDocumentStatus(verificationData.status),
+          fileName:
+            normalizeText(verificationData.fileName) ||
+            normalizeText(verificationData.name),
           contentType: normalizeText(verificationData.contentType),
           size:
             Number(verificationData.size ?? verificationData.sizeBytes ?? 0) || 0,
+          sizeBytes:
+            Number(verificationData.sizeBytes ?? verificationData.size ?? 0) || 0,
           createdByUid:
             normalizeText(verificationData.createdByUid) ||
             normalizeText(verificationData.createdBy),
@@ -10856,6 +10898,7 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
             normalizeText(verificationData.uploadedBy),
           ownerUid: normalizeText(verificationData.ownerUid),
           uploadedByRole: normalizeText(verificationData.uploadedByRole),
+          role: normalizeText(verificationData.role),
           ownerType: normalizeText(verificationData.ownerType),
           courseScope: normalizeCourseLabel(verificationData.courseScope) || null,
           courseScopeSlug: normalizeText(verificationData.courseScopeSlug) || null,
@@ -10874,6 +10917,15 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
         docId,
         storagePath,
         fileName: uploadInput.fileName,
+        uid: normalizeText(verificationData.uid) || actor.uid,
+        uploadedByUid:
+          normalizeText(verificationData.uploadedByUid) || actor.uid,
+        createdByUid:
+          normalizeText(verificationData.createdByUid) || actor.uid,
+        ownerUid: normalizeText(verificationData.ownerUid) || actor.uid,
+        uploadedByRole:
+          normalizeText(verificationData.uploadedByRole) || uploadedByRole,
+        role: normalizeText(verificationData.role) || uploadedByRole,
         contentType:
           normalizeText(verificationData.contentType) || uploadInput.contentType,
         size:
@@ -10948,9 +11000,12 @@ export const createEventImageUploadTarget = onCall({region: REGION}, async (requ
         uploadInput.fileName,
       );
       const timestamp = serverTimestamp();
+      const uploadedByRole =
+        actor.role || normalizeCampusRoleValue(actor.profile.role) || "";
       const pendingMetadata = {
         status: "pending-upload",
         eventId,
+        uid: actor.uid,
         path: storagePath,
         storagePath,
         name: uploadInput.fileName,
@@ -10966,7 +11021,8 @@ export const createEventImageUploadTarget = onCall({region: REGION}, async (requ
         createdByUid: actor.uid,
         uploadedBy: actor.uid,
         uploadedByUid: actor.uid,
-        uploadedByRole: actor.role || null,
+        uploadedByRole,
+        role: uploadedByRole,
         uploadedByName: eventDocumentActorName(actor) || null,
         uploadedBySchoolId: eventDocumentActorSchoolId(actor) || null,
         courseScope: access.courseScope,
@@ -10977,6 +11033,13 @@ export const createEventImageUploadTarget = onCall({region: REGION}, async (requ
         createdAt: timestamp,
         updatedAt: timestamp,
       };
+
+      functionsLogger.info("createEventImageUploadTarget pending metadata write", {
+        ...logContext,
+        generatedImageId: imageId,
+        generatedStoragePath: storagePath,
+        pendingMetadata: eventUploadPendingMetadataLog(pendingMetadata),
+      });
 
       await eventRef.collection("images").doc(imageId).set(pendingMetadata, {merge: true});
 
@@ -11004,13 +11067,20 @@ export const createEventImageUploadTarget = onCall({region: REGION}, async (requ
         pendingMetadataExists: verificationSnapshot.exists,
         pendingMetadata: {
           eventId: normalizeText(verificationData.eventId),
+          uid: normalizeText(verificationData.uid),
+          path: normalizeText(verificationData.path),
           storagePath:
             normalizeText(verificationData.storagePath) ||
             normalizeText(verificationData.path),
           status: normalizeCampusDocumentStatus(verificationData.status),
+          fileName:
+            normalizeText(verificationData.fileName) ||
+            normalizeText(verificationData.name),
           contentType: normalizeText(verificationData.contentType),
           size:
             Number(verificationData.size ?? verificationData.sizeBytes ?? 0) || 0,
+          sizeBytes:
+            Number(verificationData.sizeBytes ?? verificationData.size ?? 0) || 0,
           createdByUid:
             normalizeText(verificationData.createdByUid) ||
             normalizeText(verificationData.createdBy),
@@ -11019,6 +11089,7 @@ export const createEventImageUploadTarget = onCall({region: REGION}, async (requ
             normalizeText(verificationData.uploadedBy),
           ownerUid: normalizeText(verificationData.ownerUid),
           uploadedByRole: normalizeText(verificationData.uploadedByRole),
+          role: normalizeText(verificationData.role),
           ownerType: normalizeText(verificationData.ownerType),
           courseScope: normalizeCourseLabel(verificationData.courseScope) || null,
           courseScopeSlug: normalizeText(verificationData.courseScopeSlug) || null,
@@ -11037,6 +11108,15 @@ export const createEventImageUploadTarget = onCall({region: REGION}, async (requ
         imageId,
         storagePath,
         fileName: uploadInput.fileName,
+        uid: normalizeText(verificationData.uid) || actor.uid,
+        uploadedByUid:
+          normalizeText(verificationData.uploadedByUid) || actor.uid,
+        createdByUid:
+          normalizeText(verificationData.createdByUid) || actor.uid,
+        ownerUid: normalizeText(verificationData.ownerUid) || actor.uid,
+        uploadedByRole:
+          normalizeText(verificationData.uploadedByRole) || uploadedByRole,
+        role: normalizeText(verificationData.role) || uploadedByRole,
         contentType:
           normalizeText(verificationData.contentType) || uploadInput.contentType,
         size:

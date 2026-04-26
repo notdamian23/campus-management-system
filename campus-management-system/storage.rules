@@ -396,6 +396,7 @@ service firebase.storage {
     function eventDocumentMetadataOwnerMatchesCurrentUser(data) {
       return data != null &&
         (
+          (data.uid is string && data.uid == request.auth.uid) ||
           (data.createdByUid is string && data.createdByUid == request.auth.uid) ||
           (data.createdBy is string && data.createdBy == request.auth.uid) ||
           (data.uploadedByUid is string && data.uploadedByUid == request.auth.uid) ||
@@ -445,10 +446,10 @@ service firebase.storage {
         );
     }
 
-    function canTeacherUploadEventFile(eventId) {
-      return isTeacher() &&
-        eventExists(eventId) &&
-        !eventIsCancelled(eventId);
+    function teacherUploadEventIsAllowed(eventId) {
+      return eventExists(eventId) &&
+        !eventIsCancelled(eventId) &&
+        canViewEventData(eventData(eventId));
     }
 
     function eventImageFileNameHasAllowedExtension(fileName) {
@@ -470,13 +471,54 @@ service firebase.storage {
         isAllowedEventImageUploadContentType(fileName, request.resource.contentType);
     }
 
-    function canTeacherUploadVisibleEventFile(eventId) {
-      return canTeacherUploadEventFile(eventId) &&
-        canViewEventData(eventData(eventId));
+    function pendingEventUploadOwnedByCurrentUser(data) {
+      return data != null &&
+        (
+          (data.uid is string && data.uid == request.auth.uid) ||
+          data.createdByUid == request.auth.uid ||
+          data.createdBy == request.auth.uid ||
+          data.uploadedByUid == request.auth.uid ||
+          data.uploadedBy == request.auth.uid ||
+          data.ownerUid == request.auth.uid
+        );
     }
 
-    function canUsePendingEventFileUpload() {
-      return isAdmin() || isRegularEC() || isBOD() || isTeacher();
+    function pendingUploadRole(data) {
+      return data != null &&
+        data.uploadedByRole is string &&
+        data.uploadedByRole != "" ?
+        data.uploadedByRole :
+        data != null &&
+          data.role is string &&
+          data.role != "" ?
+          data.role :
+        "";
+    }
+
+    function pendingEventUploadRoleCanUseTarget(data) {
+      let uploadedByRole = pendingUploadRole(data);
+      return uploadedByRole == "teacher" ||
+        uploadedByRole == "admin" ||
+        uploadedByRole == "ecmember" ||
+        uploadedByRole == "ec" ||
+        uploadedByRole == "bod";
+    }
+
+    function canUsePendingEventFileUploadForEvent(eventId, data) {
+      return (
+          isAdmin() ||
+          isRegularEC() ||
+          isBOD() ||
+          isTeacher() ||
+          (
+            pendingEventUploadOwnedByCurrentUser(data) &&
+            pendingEventUploadRoleCanUseTarget(data)
+          )
+        ) &&
+        (
+          !(isTeacher() || pendingUploadRole(data) == "teacher") ||
+          teacherUploadEventIsAllowed(eventId)
+        );
     }
 
     function eventImageDocumentPath(eventId, imageId) {
@@ -536,6 +578,7 @@ service firebase.storage {
     function eventImageOwnedByCurrentUser(data) {
       return data != null &&
         (
+          (data.uid is string && data.uid == request.auth.uid) ||
           data.createdByUid == request.auth.uid ||
           data.createdBy == request.auth.uid ||
           data.uploadedByUid == request.auth.uid ||
@@ -580,10 +623,12 @@ service firebase.storage {
 
     function canCreateOrUpdatePendingEventImage(eventId, imageId, fileName) {
       return signedIn() &&
-        canUsePendingEventFileUpload() &&
         eventExists(eventId) &&
-        (!isTeacher() || canTeacherUploadVisibleEventFile(eventId)) &&
         eventImageDocumentExists(eventId, imageId) &&
+        canUsePendingEventFileUploadForEvent(
+          eventId,
+          eventImageDocumentData(eventId, imageId)
+        ) &&
         eventImageStatus(eventImageDocumentData(eventId, imageId)) == "pending-upload" &&
         eventImageOwnedByCurrentUser(eventImageDocumentData(eventId, imageId)) &&
         eventImageDocumentData(eventId, imageId).eventId == eventId &&
@@ -664,6 +709,7 @@ service firebase.storage {
     function eventDocumentOwnedByCurrentUser(data) {
       return data != null &&
         (
+          (data.uid is string && data.uid == request.auth.uid) ||
           data.createdByUid == request.auth.uid ||
           data.createdBy == request.auth.uid ||
           data.uploadedByUid == request.auth.uid ||
@@ -724,11 +770,13 @@ service firebase.storage {
 
     function canCreateOrUpdatePendingEventDocument(eventId, docId, fileName) {
       return signedIn() &&
-        canUsePendingEventFileUpload() &&
         eventExists(eventId) &&
         !eventIsCancelled(eventId) &&
-        (!isTeacher() || canTeacherUploadVisibleEventFile(eventId)) &&
         eventDocumentExists(eventId, docId) &&
+        canUsePendingEventFileUploadForEvent(
+          eventId,
+          eventDocumentData(eventId, docId)
+        ) &&
         eventDocumentStatus(eventDocumentData(eventId, docId)) == "pending-upload" &&
         eventDocumentOwnedByCurrentUser(eventDocumentData(eventId, docId)) &&
         eventDocumentData(eventId, docId).eventId == eventId &&
