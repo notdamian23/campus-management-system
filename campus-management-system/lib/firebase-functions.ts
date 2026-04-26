@@ -393,6 +393,25 @@ export type CreateEventDocumentUploadTargetResult = {
   docId: string;
   storagePath: string;
   fileName: string;
+  contentType: string;
+  size: number;
+  status: "pending-upload";
+};
+
+export type CreateEventImageUploadTargetPayload = {
+  eventId: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+};
+
+export type CreateEventImageUploadTargetResult = {
+  eventId: string;
+  imageId: string;
+  storagePath: string;
+  fileName: string;
+  contentType: string;
+  size: number;
   status: "pending-upload";
 };
 
@@ -410,6 +429,22 @@ export type FinalizeEventDocumentUploadResult = {
   fileName: string;
   size: number;
   contentType: string;
+  status: "active";
+};
+
+export type FinalizeEventImageUploadPayload = {
+  eventId: string;
+  imageId: string;
+};
+
+export type FinalizeEventImageUploadResult = {
+  eventId: string;
+  imageId: string;
+  storagePath: string;
+  fileName: string;
+  size: number;
+  contentType: string;
+  downloadURL: string;
   status: "active";
 };
 
@@ -445,6 +480,20 @@ export type CleanupPendingEventDocumentUploadPayload = {
 export type CleanupPendingEventDocumentUploadResult = {
   eventId: string;
   docId: string;
+  cleanupAllowed: boolean;
+  cleanupPerformed: boolean;
+  status: "pending-upload" | "active";
+  storagePath: string;
+};
+
+export type CleanupPendingEventImageUploadPayload = {
+  eventId: string;
+  imageId: string;
+};
+
+export type CleanupPendingEventImageUploadResult = {
+  eventId: string;
+  imageId: string;
   cleanupAllowed: boolean;
   cleanupPerformed: boolean;
   status: "pending-upload" | "active";
@@ -1096,6 +1145,23 @@ export async function createEventDocumentUploadTarget(
   return result.data;
 }
 
+export async function createEventImageUploadTarget(
+  payload: CreateEventImageUploadTargetPayload,
+): Promise<CreateEventImageUploadTargetResult> {
+  logAuthEvent("info", "Creating event image upload target via callable", {
+    eventId: payload.eventId,
+    size: payload.size,
+  });
+
+  const callable = httpsCallable<
+    CreateEventImageUploadTargetPayload,
+    CreateEventImageUploadTargetResult
+  >(getCampusFunctions(), "createEventImageUploadTarget");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
 export async function finalizeEventDocumentUpload(
   payload: FinalizeEventDocumentUploadPayload,
 ): Promise<FinalizeEventDocumentUploadResult> {
@@ -1108,6 +1174,23 @@ export async function finalizeEventDocumentUpload(
     FinalizeEventDocumentUploadPayload,
     FinalizeEventDocumentUploadResult
   >(getCampusFunctions(), "finalizeEventDocumentUpload");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function finalizeEventImageUpload(
+  payload: FinalizeEventImageUploadPayload,
+): Promise<FinalizeEventImageUploadResult> {
+  logAuthEvent("info", "Finalizing event image upload via callable", {
+    eventId: payload.eventId,
+    imageId: payload.imageId,
+  });
+
+  const callable = httpsCallable<
+    FinalizeEventImageUploadPayload,
+    FinalizeEventImageUploadResult
+  >(getCampusFunctions(), "finalizeEventImageUpload");
 
   const result = await callable(payload);
   return result.data;
@@ -1141,6 +1224,23 @@ export async function cleanupPendingEventDocumentUpload(
     CleanupPendingEventDocumentUploadPayload,
     CleanupPendingEventDocumentUploadResult
   >(getCampusFunctions(), "cleanupPendingEventDocumentUpload");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function cleanupPendingEventImageUpload(
+  payload: CleanupPendingEventImageUploadPayload,
+): Promise<CleanupPendingEventImageUploadResult> {
+  logAuthEvent("info", "Cleaning up pending event image upload via callable", {
+    eventId: payload.eventId,
+    imageId: payload.imageId,
+  });
+
+  const callable = httpsCallable<
+    CleanupPendingEventImageUploadPayload,
+    CleanupPendingEventImageUploadResult
+  >(getCampusFunctions(), "cleanupPendingEventImageUpload");
 
   const result = await callable(payload);
   return result.data;

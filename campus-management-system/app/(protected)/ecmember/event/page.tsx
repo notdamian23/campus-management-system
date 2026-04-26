@@ -12,7 +12,6 @@ import { FiCalendar, FiChevronDown } from "react-icons/fi";
 import { app, auth, db, storage } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import {
-  addDoc,
   collectionGroup,
   collection,
   deleteDoc,
@@ -90,9 +89,7 @@ import {
 } from "@/components/ecmember";
 import {
   deleteObject,
-  getDownloadURL,
   ref,
-  uploadBytes,
   uploadBytesResumable,
   type StorageReference,
   type UploadTaskSnapshot,
@@ -119,14 +116,17 @@ import {
 import { normalizeCourse, normalizeCourseSlug } from "@/lib/courseOptions";
 import {
   cancelCampusEvent,
+  cleanupPendingEventImageUpload,
   createCampusNotification,
   createCampusEvent,
   createEventDocumentDownloadUrl,
   createEventDocumentUploadTarget,
+  createEventImageUploadTarget,
   deleteCampusEvent,
   deleteEventDocument,
   type EventDocumentListItem,
   finalizeEventDocumentUpload,
+  finalizeEventImageUpload,
   listEventDocuments,
   updateCampusNotification,
   updateCampusEvent,
@@ -3390,10 +3390,12 @@ export default function EventDashboard() {
     const unsubImgs = onSnapshot(imgQ, (snap) => {
       setEventImages((prev) => ({
         ...prev,
-        [expandedEventId]: snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        })),
+        [expandedEventId]: snap.docs
+          .map((d) => ({
+            id: d.id,
+            ...(d.data() as any),
+          }))
+          .filter((file) => String(file.status ?? "").trim() !== "pending-upload"),
       }));
     });
 
@@ -4534,26 +4536,130 @@ export default function EventDashboard() {
       };
     }
 
+    const uploadContentType = "image/jpeg";
     const safeName = file.name.replace(/[^\w.\-()+ ]/g, "_");
-    const fileId = `${Date.now()}_${safeName}`;
-    const path = `events/${eventId}/${kind}/${fileId}`;
-
-    const storageRef = ref(storage, path);
-    const snap = await uploadBytes(storageRef, file, {
-      contentType: file.type,
+    const finalFileName = safeName.toLowerCase().endsWith(".jpg") ?
+      safeName :
+      toCompressedImageName(safeName);
+    const uploadFile = new File([file], finalFileName, {
+      type: uploadContentType,
+      lastModified: Date.now(),
     });
-    const downloadURL = await getDownloadURL(snap.ref);
+    let uploadTarget: Awaited<ReturnType<typeof createEventImageUploadTarget>> | null = null;
+    let imageUploadStage: "TARGET" | "UPLOAD" | "FINALIZE" = "TARGET";
 
-    await addDoc(collection(db, "events", eventId, kind), {
-      path,
-      storagePath: path,
-      name: file.name,
-      contentType: file.type,
-      size: file.size,
-      downloadURL,
-      uploadedByUid: currentUser.uid,
-      createdAt: serverTimestamp(),
-    });
+    try {
+      logEventDocumentStage("[EC_EVENT_IMAGE_UPLOAD][TARGET]", {
+        phase: "start",
+        eventId,
+        fileName: uploadFile.name,
+        contentType: uploadContentType,
+        size: uploadFile.size,
+      });
+      uploadTarget = await withTimeout(
+        createEventImageUploadTarget({
+          eventId,
+          fileName: uploadFile.name,
+          contentType: uploadContentType,
+          size: uploadFile.size,
+        }),
+        EVENT_DOC_UPLOAD_TIMEOUT_MS,
+        "Create event image upload target",
+      );
+      logEventDocumentStage("[EC_EVENT_IMAGE_UPLOAD][TARGET]", {
+        phase: "success",
+        eventId,
+        imageId: uploadTarget.imageId,
+        storagePath: uploadTarget.storagePath,
+        fileName: uploadTarget.fileName,
+        contentType: uploadTarget.contentType,
+        size: uploadTarget.size,
+      });
+
+      imageUploadStage = "UPLOAD";
+      logEventDocumentStage("[EC_EVENT_IMAGE_UPLOAD][UPLOAD]", {
+        phase: "start",
+        eventId,
+        imageId: uploadTarget.imageId,
+        storagePath: uploadTarget.storagePath,
+        fileName: uploadTarget.fileName,
+        size: uploadFile.size,
+      });
+      await uploadEventDocumentWithResumable(
+        ref(storage, uploadTarget.storagePath),
+        uploadFile,
+        uploadTarget.contentType || uploadContentType,
+        EVENT_DOC_UPLOAD_TIMEOUT_MS,
+      );
+      logEventDocumentStage("[EC_EVENT_IMAGE_UPLOAD][UPLOAD]", {
+        phase: "success",
+        eventId,
+        imageId: uploadTarget.imageId,
+        storagePath: uploadTarget.storagePath,
+        fileName: uploadTarget.fileName,
+        size: uploadFile.size,
+      });
+
+      imageUploadStage = "FINALIZE";
+      logEventDocumentStage("[EC_EVENT_IMAGE_UPLOAD][FINALIZE]", {
+        phase: "start",
+        eventId,
+        imageId: uploadTarget.imageId,
+        storagePath: uploadTarget.storagePath,
+      });
+      const finalizedUpload = await withTimeout(
+        finalizeEventImageUpload({
+          eventId,
+          imageId: uploadTarget.imageId,
+        }),
+        EVENT_DOC_UPLOAD_TIMEOUT_MS,
+        "Finalize event image upload",
+      );
+      logEventDocumentStage("[EC_EVENT_IMAGE_UPLOAD][FINALIZE]", {
+        phase: "success",
+        eventId,
+        imageId: uploadTarget.imageId,
+        status: finalizedUpload.status,
+        storagePath: finalizedUpload.storagePath,
+        contentType: finalizedUpload.contentType,
+        size: finalizedUpload.size,
+      });
+    } catch (error) {
+      logEventDocumentStage(
+        `[EC_EVENT_IMAGE_UPLOAD][${imageUploadStage}]`,
+        {
+          phase: "error",
+          eventId,
+          imageId: uploadTarget?.imageId ?? null,
+          storagePath: uploadTarget?.storagePath ?? null,
+          code: toEventUploadErrorCode(error),
+          message: toEventUploadErrorMessage(error, "Failed to upload the event image."),
+        },
+        "error",
+      );
+      if (uploadTarget) {
+        await cleanupPendingEventImageUpload({
+          eventId,
+          imageId: uploadTarget.imageId,
+        }).catch((cleanupError) => {
+          logEventDocumentStage(
+            `[EC_EVENT_IMAGE_UPLOAD][${imageUploadStage}]`,
+            {
+              phase: "cleanup-error",
+              eventId,
+              imageId: uploadTarget?.imageId ?? null,
+              code: toEventUploadErrorCode(cleanupError),
+              message: toEventUploadErrorMessage(
+                cleanupError,
+                "Failed to cleanup the pending event image upload.",
+              ),
+            },
+            "warn",
+          );
+        });
+      }
+      throw error;
+    }
 
     return {};
   }

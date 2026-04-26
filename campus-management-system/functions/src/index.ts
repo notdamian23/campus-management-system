@@ -1,5 +1,6 @@
 import * as admin from "firebase-admin";
 import * as functionsLogger from "firebase-functions/logger";
+import {randomUUID} from "crypto";
 import {HttpsError, onCall, onRequest, type CallableRequest} from "firebase-functions/v2/https";
 import {
   onDocumentCreatedWithAuthContext,
@@ -5869,6 +5870,24 @@ const EVENT_DOCUMENT_ALLOWED_CONTENT_TYPES = new Set([
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ]);
+const EVENT_IMAGE_ALLOWED_CONTENT_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+const EVENT_IMAGE_ALLOWED_EXTENSIONS = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "webp",
+]);
+const FIREBASE_STORAGE_DOWNLOAD_TOKEN_METADATA_KEY = "firebaseStorageDownloadTokens";
+
+type StorageFileMetadata = {
+  size?: string | number;
+  contentType?: string;
+  metadata?: Record<string, string | undefined>;
+};
 
 function normalizeEnrollmentSessionStatus(value: unknown): EnrollmentSessionStatus {
   const normalized = normalizeLower(value);
@@ -6127,6 +6146,51 @@ function validateEventDocumentUploadInput(body: Record<string, unknown>): {
   };
 }
 
+function validateEventImageUploadInput(body: Record<string, unknown>): {
+  originalName: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+} {
+  const originalName = normalizeText(body.fileName);
+  const fileName = sanitizeCampusDocumentFileName(originalName);
+  const extension = getCampusDocumentExtension(fileName);
+  const sizeBytes = Number(body.size);
+  const contentType = normalizeLower(body.contentType);
+
+  if (!originalName || !fileName) {
+    throw new HttpsError("invalid-argument", "A valid image file name is required.");
+  }
+  if (!EVENT_IMAGE_ALLOWED_EXTENSIONS.has(extension)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Only JPG, JPEG, PNG, and WEBP images are allowed.",
+    );
+  }
+  if (!EVENT_IMAGE_ALLOWED_CONTENT_TYPES.has(contentType)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Only JPG, JPEG, PNG, and WEBP images are allowed.",
+    );
+  }
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    throw new HttpsError("invalid-argument", "size must be a positive number.");
+  }
+  if (sizeBytes > CAMPUS_DOCUMENT_MAX_FILE_SIZE_BYTES) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Images larger than 10 MB are not allowed.",
+    );
+  }
+
+  return {
+    originalName,
+    fileName,
+    contentType,
+    sizeBytes,
+  };
+}
+
 function campusDocumentStoragePathForActor(
   actor: EcActorContext,
   docId: string,
@@ -6177,6 +6241,47 @@ function eventDocumentStoragePath(
   fileName: string,
 ): string {
   return `events/${eventId}/docs/${docId}/${fileName}`;
+}
+
+function eventImageStoragePath(
+  eventId: string,
+  imageId: string,
+  fileName: string,
+): string {
+  return `events/${eventId}/images/${imageId}/${fileName}`;
+}
+
+function eventImageStoragePathValue(
+  data: FirebaseFirestore.DocumentData,
+): string {
+  return (
+    normalizeText(data.storagePath) ||
+    normalizeText(data.path)
+  );
+}
+
+function eventImageFileNameValue(
+  data: FirebaseFirestore.DocumentData,
+): string {
+  return (
+    normalizeText(data.fileName) ||
+    normalizeText(data.name) ||
+    normalizeText(data.originalName)
+  );
+}
+
+function eventImageStoredDownloadUrl(
+  data: FirebaseFirestore.DocumentData,
+): string {
+  return normalizeText(data.downloadURL);
+}
+
+function firebaseStorageDownloadUrl(
+  bucketName: string,
+  storagePath: string,
+  token: string,
+): string {
+  return `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(bucketName)}/o/${encodeURIComponent(storagePath)}?alt=media&token=${encodeURIComponent(token)}`;
 }
 
 function safeDecodeUriComponent(value: string): string {
@@ -6716,6 +6821,23 @@ function eventDocumentDeniedMessage(reason: string): string {
     return "Teacher accounts cannot delete event documents.";
   default:
     return "You do not have permission to manage documents for this event.";
+  }
+}
+
+function eventImageDeniedMessage(reason: string): string {
+  switch (reason) {
+  case "event-cancelled":
+    return "Uploads are disabled for cancelled events.";
+  case "bod-missing-course-scope":
+    return "B.O.D. profile is missing a valid course scope.";
+  case "bod-cannot-upload-to-ec-event":
+    return "B.O.D. members cannot upload photos to EC-created events.";
+  case "event-owned-by-other-bod":
+    return "B.O.D. members can only manage photos for events they created.";
+  case "event-course-scope-mismatch":
+    return "B.O.D. members can only manage photos for their own course events.";
+  default:
+    return "You do not have permission to manage photos for this event.";
   }
 }
 
@@ -10723,12 +10845,17 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
             normalizeText(verificationData.storagePath) ||
             normalizeText(verificationData.path),
           status: normalizeCampusDocumentStatus(verificationData.status),
+          contentType: normalizeText(verificationData.contentType),
+          size:
+            Number(verificationData.size ?? verificationData.sizeBytes ?? 0) || 0,
           createdByUid:
             normalizeText(verificationData.createdByUid) ||
             normalizeText(verificationData.createdBy),
           uploadedByUid:
             normalizeText(verificationData.uploadedByUid) ||
             normalizeText(verificationData.uploadedBy),
+          ownerUid: normalizeText(verificationData.ownerUid),
+          uploadedByRole: normalizeText(verificationData.uploadedByRole),
           ownerType: normalizeText(verificationData.ownerType),
           courseScope: normalizeCourseLabel(verificationData.courseScope) || null,
           courseScopeSlug: normalizeText(verificationData.courseScopeSlug) || null,
@@ -10747,6 +10874,14 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
         docId,
         storagePath,
         fileName: uploadInput.fileName,
+        contentType:
+          normalizeText(verificationData.contentType) || uploadInput.contentType,
+        size:
+          Number(
+            verificationData.size ??
+            verificationData.sizeBytes ??
+            uploadInput.sizeBytes,
+          ) || uploadInput.sizeBytes,
         status: "pending-upload" as const,
       };
     } catch (error) {
@@ -10759,6 +10894,169 @@ export const createEventDocumentUploadTarget = onCall({region: REGION}, async (r
         error instanceof Error ?
           error.message :
           "Failed to create an event document upload target.",
+      );
+    }
+  });
+
+export const createEventImageUploadTarget = onCall({region: REGION}, async (request) => {
+    try {
+      const actor = await resolveEcActorContext(request, {allowTeacher: true});
+      const body = asRecord(request.data);
+      const eventId = normalizeText(body.eventId);
+      const uploadInput = validateEventImageUploadInput(body);
+
+      if (!eventId) {
+        throw new HttpsError("invalid-argument", "eventId is required.");
+      }
+
+      const eventRef = db.doc(`events/${eventId}`);
+      const eventSnapshot = await eventRef.get();
+      if (!eventSnapshot.exists) {
+        throw new HttpsError("not-found", "Event not found.");
+      }
+
+      const eventData = eventSnapshot.data() ?? {};
+      const access = resolveEventDocumentAccess(actor, eventData, "upload");
+      const logContext = {
+        callerUid: actor.uid,
+        callerRole: normalizeCampusRoleValue(actor.profile.role) || null,
+        callerCourseScope: actor.courseScope || null,
+        eventId,
+        eventOwnerType: access.ownerType,
+        eventCreatedByUid: access.eventCreatedByUid,
+        eventCourseScope: access.eventCourseScope,
+        eventCreatedByCourseScope: access.eventCreatedByCourseScope,
+      };
+
+      functionsLogger.info("createEventImageUploadTarget access check", logContext);
+
+      if (!access.allowed) {
+        functionsLogger.warn("createEventImageUploadTarget denied", {
+          ...logContext,
+          deniedReason: access.deniedReason,
+        });
+        throw new HttpsError(
+          "permission-denied",
+          eventImageDeniedMessage(access.deniedReason),
+        );
+      }
+
+      const imageId = eventRef.collection("images").doc().id;
+      const storagePath = eventImageStoragePath(
+        eventId,
+        imageId,
+        uploadInput.fileName,
+      );
+      const timestamp = serverTimestamp();
+      const pendingMetadata = {
+        status: "pending-upload",
+        eventId,
+        path: storagePath,
+        storagePath,
+        name: uploadInput.fileName,
+        fileName: uploadInput.fileName,
+        originalName: uploadInput.originalName,
+        contentType: uploadInput.contentType,
+        size: uploadInput.sizeBytes,
+        sizeBytes: uploadInput.sizeBytes,
+        type: "image",
+        ownerType: access.ownerType,
+        ownerUid: actor.uid,
+        createdBy: actor.uid,
+        createdByUid: actor.uid,
+        uploadedBy: actor.uid,
+        uploadedByUid: actor.uid,
+        uploadedByRole: actor.role || null,
+        uploadedByName: eventDocumentActorName(actor) || null,
+        uploadedBySchoolId: eventDocumentActorSchoolId(actor) || null,
+        courseScope: access.courseScope,
+        courseScopeSlug: access.courseScopeSlug,
+        createdByCourseScope:
+          access.eventCreatedByCourseScope || access.courseScope,
+        downloadURL: "",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+
+      await eventRef.collection("images").doc(imageId).set(pendingMetadata, {merge: true});
+
+      const verificationSnapshot = await eventRef.collection("images").doc(imageId).get();
+      if (!verificationSnapshot.exists) {
+        functionsLogger.error("createEventImageUploadTarget pending metadata missing after write", {
+          ...logContext,
+          generatedImageId: imageId,
+          generatedStoragePath: storagePath,
+          targetCreated: false,
+        });
+        throw new HttpsError(
+          "internal",
+          "Upload target metadata was not created. Please try again.",
+        );
+      }
+
+      const verificationData = verificationSnapshot.data() ?? {};
+
+      functionsLogger.info("createEventImageUploadTarget pending metadata verified", {
+        ...logContext,
+        generatedImageId: imageId,
+        generatedStoragePath: storagePath,
+        targetCreated: true,
+        pendingMetadataExists: verificationSnapshot.exists,
+        pendingMetadata: {
+          eventId: normalizeText(verificationData.eventId),
+          storagePath:
+            normalizeText(verificationData.storagePath) ||
+            normalizeText(verificationData.path),
+          status: normalizeCampusDocumentStatus(verificationData.status),
+          contentType: normalizeText(verificationData.contentType),
+          size:
+            Number(verificationData.size ?? verificationData.sizeBytes ?? 0) || 0,
+          createdByUid:
+            normalizeText(verificationData.createdByUid) ||
+            normalizeText(verificationData.createdBy),
+          uploadedByUid:
+            normalizeText(verificationData.uploadedByUid) ||
+            normalizeText(verificationData.uploadedBy),
+          ownerUid: normalizeText(verificationData.ownerUid),
+          uploadedByRole: normalizeText(verificationData.uploadedByRole),
+          ownerType: normalizeText(verificationData.ownerType),
+          courseScope: normalizeCourseLabel(verificationData.courseScope) || null,
+          courseScopeSlug: normalizeText(verificationData.courseScopeSlug) || null,
+        },
+      });
+
+      functionsLogger.info("createEventImageUploadTarget created", {
+        ...logContext,
+        generatedImageId: imageId,
+        generatedStoragePath: storagePath,
+        targetCreated: true,
+      });
+
+      return {
+        eventId,
+        imageId,
+        storagePath,
+        fileName: uploadInput.fileName,
+        contentType:
+          normalizeText(verificationData.contentType) || uploadInput.contentType,
+        size:
+          Number(
+            verificationData.size ??
+            verificationData.sizeBytes ??
+            uploadInput.sizeBytes,
+          ) || uploadInput.sizeBytes,
+        status: "pending-upload" as const,
+      };
+    } catch (error) {
+      functionsLogger.error("createEventImageUploadTarget failed", {error});
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+      throw new HttpsError(
+        "internal",
+        error instanceof Error ?
+          error.message :
+          "Failed to create an event image upload target.",
       );
     }
   });
@@ -11172,6 +11470,356 @@ export const cleanupPendingEventDocumentUpload = onCall({region: REGION}, async 
         error instanceof Error ?
           error.message :
           "Failed to cleanup the pending event document upload.",
+      );
+    }
+  });
+
+export const finalizeEventImageUpload = onCall({region: REGION}, async (request) => {
+    try {
+      const actor = await resolveEcActorContext(request, {allowTeacher: true});
+      const body = asRecord(request.data);
+      const eventId = normalizeText(body.eventId);
+      const imageId = normalizeText(body.imageId);
+
+      if (!eventId) {
+        throw new HttpsError("invalid-argument", "eventId is required.");
+      }
+      if (!imageId) {
+        throw new HttpsError("invalid-argument", "imageId is required.");
+      }
+
+      const eventRef = db.doc(`events/${eventId}`);
+      const imageRef = eventRef.collection("images").doc(imageId);
+      const [eventSnapshot, imageSnapshot] = await Promise.all([
+        eventRef.get(),
+        imageRef.get(),
+      ]);
+
+      if (!eventSnapshot.exists) {
+        functionsLogger.warn("finalizeEventImageUpload missing event", {
+          callerUid: actor.uid,
+          eventId,
+          imageId,
+        });
+        throw new HttpsError("not-found", "Event not found.");
+      }
+      if (!imageSnapshot.exists) {
+        functionsLogger.warn("finalizeEventImageUpload missing pending metadata", {
+          callerUid: actor.uid,
+          eventId,
+          imageId,
+        });
+        throw new HttpsError("not-found", "Pending image metadata not found.");
+      }
+
+      const eventData = eventSnapshot.data() ?? {};
+      const imageData = imageSnapshot.data() ?? {};
+      const pendingStatus = normalizeCampusDocumentStatus(imageData.status);
+      const pendingStoragePath = eventImageStoragePathValue(imageData);
+      const access = resolveEventDocumentAccess(actor, eventData, "upload");
+      const logContext = {
+        callerUid: actor.uid,
+        callerRole: normalizeCampusRoleValue(actor.profile.role) || null,
+        callerCourseScope: actor.courseScope || null,
+        eventId,
+        eventOwnerType: access.ownerType,
+        eventCreatedByUid: access.eventCreatedByUid,
+        eventCourseScope: access.eventCourseScope,
+        eventCreatedByCourseScope: access.eventCreatedByCourseScope,
+        imageId,
+        pendingExists: imageSnapshot.exists,
+        pendingStatus,
+        pendingStoragePath,
+        permissionResult: access.allowed ? "allowed" : "denied",
+      };
+
+      functionsLogger.info("finalizeEventImageUpload access check", logContext);
+
+      if (!access.allowed) {
+        functionsLogger.warn("finalizeEventImageUpload denied", {
+          ...logContext,
+          deniedReason: access.deniedReason,
+        });
+        throw new HttpsError(
+          "permission-denied",
+          eventImageDeniedMessage(access.deniedReason),
+        );
+      }
+
+      if (!isPendingCampusDocument(imageData)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "This event image upload is no longer pending.",
+        );
+      }
+
+      if (
+        (actor.isBod || actor.isTeacher) &&
+        !ecDocumentOwnedByUid(imageData, actor.uid)
+      ) {
+        functionsLogger.warn("finalizeEventImageUpload denied", {
+          ...logContext,
+          deniedReason: "metadata-not-owned-by-caller",
+        });
+        throw new HttpsError(
+          "permission-denied",
+          "You can only finalize event image uploads that you created.",
+        );
+      }
+
+      const storedFileName = eventImageFileNameValue(imageData);
+      const storagePath = eventImageStoragePathValue(imageData);
+      const expectedStoragePath = storedFileName ?
+        eventImageStoragePath(eventId, imageId, storedFileName) :
+        "";
+
+      if (!storedFileName || !storagePath || storagePath !== expectedStoragePath) {
+        throw new HttpsError(
+          "failed-precondition",
+          "The stored event image metadata is invalid.",
+        );
+      }
+
+      const bucket = admin.storage().bucket();
+      const storageFile = bucket.file(storagePath);
+      let storageMetadata: StorageFileMetadata;
+      try {
+        const [metadata] = await storageFile.getMetadata();
+        storageMetadata = metadata as unknown as StorageFileMetadata;
+      } catch (error: unknown) {
+        authLogger.warn("finalizeEventImageUpload storage lookup failed", {
+          actorUid: actor.uid,
+          eventId,
+          imageId,
+          storagePath,
+          error,
+        });
+        throw new HttpsError(
+          "failed-precondition",
+          "The uploaded image could not be found in Storage.",
+        );
+      }
+
+      const verifiedUpload = validateEventImageUploadInput({
+        fileName: storedFileName,
+        contentType:
+          normalizeText(storageMetadata.contentType) ||
+          normalizeText(body.contentType),
+        size: Number(storageMetadata.size ?? body.size),
+      });
+      const existingCustomMetadata = storageMetadata.metadata ?? {};
+      const existingTokens = normalizeText(
+        existingCustomMetadata[FIREBASE_STORAGE_DOWNLOAD_TOKEN_METADATA_KEY],
+      )
+        .split(",")
+        .map((token) => token.trim())
+        .filter(Boolean);
+      const downloadToken = existingTokens[0] || randomUUID();
+
+      if (existingTokens.length === 0) {
+        await storageFile.setMetadata({
+          metadata: {
+            ...existingCustomMetadata,
+            [FIREBASE_STORAGE_DOWNLOAD_TOKEN_METADATA_KEY]: downloadToken,
+          },
+        });
+      }
+
+      const downloadURL = firebaseStorageDownloadUrl(
+        bucket.name,
+        storagePath,
+        downloadToken,
+      );
+
+      await imageRef.set(
+        {
+          status: "active",
+          path: storagePath,
+          storagePath,
+          name: storedFileName,
+          fileName: storedFileName,
+          downloadURL,
+          contentType: verifiedUpload.contentType,
+          size: verifiedUpload.sizeBytes,
+          sizeBytes: verifiedUpload.sizeBytes,
+          uploadedByRole: actor.role || normalizeCampusRoleValue(imageData.uploadedByRole) || null,
+          uploadedByName:
+            eventDocumentActorName(actor) ||
+            normalizeText(imageData.uploadedByName) ||
+            null,
+          uploadedBySchoolId:
+            eventDocumentActorSchoolId(actor) ||
+            normalizeText(imageData.uploadedBySchoolId) ||
+            null,
+          updatedAt: serverTimestamp(),
+          uploadedAt: serverTimestamp(),
+        },
+        {merge: true},
+      );
+
+      const updatedSnapshot = await imageRef.get();
+      const updatedData = updatedSnapshot.data() ?? {};
+
+      functionsLogger.info("finalizeEventImageUpload success", {
+        ...logContext,
+        generatedStoragePath: storagePath,
+        verifiedContentType: verifiedUpload.contentType,
+        verifiedSizeBytes: verifiedUpload.sizeBytes,
+        finalizeSuccess: true,
+      });
+
+      return {
+        eventId,
+        imageId,
+        storagePath,
+        fileName:
+          normalizeText(updatedData.fileName) ||
+          normalizeText(updatedData.name) ||
+          storedFileName,
+        size: Number(updatedData.size ?? updatedData.sizeBytes ?? verifiedUpload.sizeBytes),
+        contentType:
+          normalizeText(updatedData.contentType) || verifiedUpload.contentType,
+        downloadURL:
+          eventImageStoredDownloadUrl(updatedData) || downloadURL,
+        status: normalizeCampusDocumentStatus(updatedData.status),
+      };
+    } catch (error) {
+      functionsLogger.error("finalizeEventImageUpload failed", {error});
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+      throw new HttpsError(
+        "internal",
+        error instanceof Error ?
+          error.message :
+          "Failed to finalize the event image upload.",
+      );
+    }
+  });
+
+export const cleanupPendingEventImageUpload = onCall({region: REGION}, async (request) => {
+    try {
+      const actor = await resolveEcActorContext(request, {allowTeacher: true});
+      const body = asRecord(request.data);
+      const eventId = normalizeText(body.eventId);
+      const imageId = normalizeText(body.imageId);
+
+      if (!eventId) {
+        throw new HttpsError("invalid-argument", "eventId is required.");
+      }
+      if (!imageId) {
+        throw new HttpsError("invalid-argument", "imageId is required.");
+      }
+
+      const eventRef = db.doc(`events/${eventId}`);
+      const imageRef = eventRef.collection("images").doc(imageId);
+      const [eventSnapshot, imageSnapshot] = await Promise.all([
+        eventRef.get(),
+        imageRef.get(),
+      ]);
+
+      if (!eventSnapshot.exists) {
+        throw new HttpsError("not-found", "Event not found.");
+      }
+      if (!imageSnapshot.exists) {
+        throw new HttpsError("not-found", "Pending image metadata not found.");
+      }
+
+      const eventData = eventSnapshot.data() ?? {};
+      const imageData = imageSnapshot.data() ?? {};
+      const pendingStatus = normalizeCampusDocumentStatus(imageData.status);
+      const pendingStoragePath = eventImageStoragePathValue(imageData);
+      const access = resolveEventDocumentAccess(actor, eventData, "cleanup");
+      const logContext = {
+        callerUid: actor.uid,
+        callerRole: normalizeCampusRoleValue(actor.profile.role) || null,
+        callerCourseScope: actor.courseScope || null,
+        eventId,
+        imageId,
+        pendingExists: imageSnapshot.exists,
+        pendingStatus,
+        pendingStoragePath,
+        permissionResult: access.allowed ? "allowed" : "denied",
+      };
+
+      functionsLogger.info("cleanupPendingEventImageUpload access check", logContext);
+
+      if (!access.allowed) {
+        functionsLogger.warn("cleanupPendingEventImageUpload denied", {
+          ...logContext,
+          deniedReason: access.deniedReason,
+        });
+        throw new HttpsError(
+          "permission-denied",
+          eventImageDeniedMessage(access.deniedReason),
+        );
+      }
+
+      if (
+        (actor.isBod || actor.isTeacher) &&
+        !ecDocumentOwnedByUid(imageData, actor.uid)
+      ) {
+        functionsLogger.warn("cleanupPendingEventImageUpload denied", {
+          ...logContext,
+          deniedReason: "metadata-not-owned-by-caller",
+        });
+        throw new HttpsError(
+          "permission-denied",
+          "You can only cleanup event image uploads that you created.",
+        );
+      }
+
+      if (pendingStatus !== "pending-upload" || !pendingStoragePath) {
+        functionsLogger.info("cleanupPendingEventImageUpload skipped", {
+          ...logContext,
+          cleanupAllowed: false,
+          cleanupPerformed: false,
+        });
+        return {
+          eventId,
+          imageId,
+          cleanupAllowed: false,
+          cleanupPerformed: false,
+          status: pendingStatus,
+          storagePath: pendingStoragePath,
+        };
+      }
+
+      if (!pendingStoragePath.startsWith(`events/${eventId}/images/${imageId}/`)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "The stored event image metadata is invalid.",
+        );
+      }
+
+      const storageFile = admin.storage().bucket().file(pendingStoragePath);
+      await storageFile.delete({ignoreNotFound: true});
+      await imageRef.delete();
+
+      functionsLogger.info("cleanupPendingEventImageUpload success", {
+        ...logContext,
+        cleanupAllowed: true,
+        cleanupPerformed: true,
+      });
+
+      return {
+        eventId,
+        imageId,
+        cleanupAllowed: true,
+        cleanupPerformed: true,
+        status: "pending-upload" as const,
+        storagePath: pendingStoragePath,
+      };
+    } catch (error) {
+      functionsLogger.error("cleanupPendingEventImageUpload failed", {error});
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+      throw new HttpsError(
+        "internal",
+        error instanceof Error ?
+          error.message :
+          "Failed to cleanup the pending event image upload.",
       );
     }
   });

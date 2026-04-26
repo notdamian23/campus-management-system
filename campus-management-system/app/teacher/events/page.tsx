@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
-  addDoc,
   collection,
   doc,
   getDoc,
@@ -10,7 +9,6 @@ import {
   onSnapshot,
   orderBy,
   query,
-  serverTimestamp,
   type DocumentData,
   type QuerySnapshot,
 } from "firebase/firestore";
@@ -60,12 +58,15 @@ import {
 } from "@/lib/attendance-export";
 import { normalizeCourse } from "@/lib/courseOptions";
 import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
-import { db, storage } from "@/lib/firebase";
+import { auth, db, storage } from "@/lib/firebase";
 import {
   cleanupPendingEventDocumentUpload,
+  cleanupPendingEventImageUpload,
   createEventDocumentDownloadUrl,
   createEventDocumentUploadTarget,
+  createEventImageUploadTarget,
   finalizeEventDocumentUpload,
+  finalizeEventImageUpload,
 } from "@/lib/firebase-functions";
 import { formatStudentFullName } from "@/lib/student-name";
 import { campusToast } from "@/lib/toast";
@@ -91,11 +92,9 @@ import type {
   TeacherFileKind,
 } from "@/components/teacher/TeacherPortalProvider";
 import {
-  deleteObject,
-  getDownloadURL,
   ref,
-  uploadBytes,
   uploadBytesResumable,
+  type UploadMetadata,
   type StorageReference,
   type UploadTaskSnapshot,
 } from "firebase/storage";
@@ -318,12 +317,10 @@ async function compressImageForUpload(file: File, maxBytes: number) {
 async function uploadEventDocumentWithResumable(
   storageRef: StorageReference,
   file: File,
-  contentType: string,
+  metadata: UploadMetadata,
 ): Promise<UploadTaskSnapshot> {
   return await new Promise<UploadTaskSnapshot>((resolve, reject) => {
-    const task = uploadBytesResumable(storageRef, file, {
-      contentType: contentType || undefined,
-    });
+    const task = uploadBytesResumable(storageRef, file, metadata);
 
     task.on(
       "state_changed",
@@ -347,17 +344,6 @@ function normalizeTeacherUploadError(error: unknown, fallback: string) {
   }
 
   return fallback;
-}
-
-function isEventCancelled(data: Record<string, unknown>) {
-  return (
-    data.cancelled === true ||
-    String(data.status ?? "").trim().toLowerCase() === "cancelled"
-  );
-}
-
-function eventOwnerTypeValue(data: Record<string, unknown>) {
-  return String(data.ownerType ?? "").trim().toLowerCase() === "bod" ? "bod" : "ec";
 }
 
 function toMillis(value: unknown): number {
@@ -940,7 +926,11 @@ export default function TeacherEventsPage() {
   }
 
   async function uploadTeacherEventDocumentFile(eventId: string, file: File) {
-    const contentType = getEventDocumentContentType(file);
+    if (!profile) {
+      throw new Error("Your teacher profile is not available right now.");
+    }
+
+    const requestedContentType = getEventDocumentContentType(file);
     let uploadTarget: Awaited<
       ReturnType<typeof createEventDocumentUploadTarget>
     > | null = null;
@@ -949,21 +939,48 @@ export default function TeacherEventsPage() {
       uploadTarget = await createEventDocumentUploadTarget({
         eventId,
         fileName: file.name,
-        contentType,
+        contentType: requestedContentType,
         size: file.size,
+      });
+      console.log("[TEACHER_FILE_UPLOAD][DOC_TARGET]", uploadTarget);
+
+      const uploadType =
+        uploadTarget.contentType ||
+        requestedContentType ||
+        String(file.type ?? "").trim().toLowerCase() ||
+        getEventDocumentContentType(file);
+      const uploadMetadata: UploadMetadata = {
+        contentType: uploadType,
+        customMetadata: {
+          uploadedByRole: "teacher",
+          eventId,
+          docId: uploadTarget.docId,
+        },
+      };
+
+      console.log("[TEACHER_FILE_UPLOAD][DOC_UPLOAD]", {
+        eventId,
+        docId: uploadTarget.docId,
+        storagePath: uploadTarget.storagePath,
+        fileName: file.name,
+        fileType: file.type,
+        uploadType,
+        size: file.size,
+        uid: auth.currentUser?.uid,
+        role: profile?.role,
       });
 
       await uploadEventDocumentWithResumable(
         ref(storage, uploadTarget.storagePath),
         file,
-        contentType,
+        uploadMetadata,
       );
 
       await finalizeEventDocumentUpload({
         eventId,
         docId: uploadTarget.docId,
-        size: file.size,
-        contentType,
+        size: uploadTarget.size || file.size,
+        contentType: uploadType,
       });
     } catch (error) {
       if (uploadTarget) {
@@ -982,16 +999,6 @@ export default function TeacherEventsPage() {
       throw new Error("Your teacher profile is not available right now.");
     }
 
-    const eventSnapshot = await getDoc(doc(db, "events", eventId));
-    if (!eventSnapshot.exists()) {
-      throw new Error("The selected event is no longer available.");
-    }
-
-    const eventData = (eventSnapshot.data() ?? {}) as Record<string, unknown>;
-    if (isEventCancelled(eventData)) {
-      throw new Error("Uploads are disabled for cancelled events.");
-    }
-
     const compressed = await compressImageForUpload(
       file,
       MAX_EVENT_FILE_SIZE_BYTES,
@@ -1002,49 +1009,82 @@ export default function TeacherEventsPage() {
       );
     }
 
+    const uploadType = "image/jpeg";
     const safeName = compressed.name.replace(/[^\w.\-()+ ]/g, "_");
-    const fileId = `${Date.now()}_${safeName}`;
-    const storagePath = `events/${eventId}/images/${fileId}`;
-    const storageRef = ref(storage, storagePath);
-    let uploadedToStorage = false;
+    const finalFileName = safeName.toLowerCase().endsWith(".jpg") ?
+      safeName :
+      toCompressedImageName(safeName);
+    const uploadFile = new File([compressed], finalFileName, {
+      type: uploadType,
+      lastModified: Date.now(),
+    });
+    let uploadTarget: Awaited<
+      ReturnType<typeof createEventImageUploadTarget>
+    > | null = null;
 
     try {
-      const snapshot = await uploadBytes(storageRef, compressed, {
-        contentType: compressed.type,
-      });
-      uploadedToStorage = true;
-
-      const downloadURL = await getDownloadURL(snapshot.ref);
-      await addDoc(collection(db, "events", eventId, "images"), {
+      uploadTarget = await createEventImageUploadTarget({
         eventId,
-        path: storagePath,
-        storagePath,
-        name: compressed.name,
-        originalName: file.name,
-        contentType: compressed.type,
-        size: compressed.size,
-        sizeBytes: compressed.size,
-        downloadURL,
-        status: "active",
-        ownerType: eventOwnerTypeValue(eventData),
-        courseScope: String(eventData.courseScope ?? "").trim(),
-        createdByCourseScope: String(
-          eventData.createdByCourseScope ?? eventData.courseScope ?? "",
-        ).trim(),
-        uploadedByUid: profile.uid,
-        uploadedByRole: "teacher",
-        uploadedByName: profile.teacherName || profile.name || profile.schoolId,
-        uploadedBySchoolId: profile.schoolId,
-        createdBy: profile.uid,
-        createdByUid: profile.uid,
-        ownerUid: profile.uid,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        uploadedAt: serverTimestamp(),
+        fileName: uploadFile.name,
+        contentType: uploadType,
+        size: uploadFile.size,
+      });
+      console.log("[TEACHER_FILE_UPLOAD][IMAGE_TARGET]", {
+        eventId,
+        imageId: uploadTarget.imageId,
+        storagePath: uploadTarget.storagePath,
+        fileName: uploadTarget.fileName,
+        contentType: uploadTarget.contentType,
+        size: uploadTarget.size,
+        uid: auth.currentUser?.uid,
+        role: profile?.role,
+      });
+
+      const uploadMetadata: UploadMetadata = {
+        contentType: uploadTarget.contentType || uploadType,
+        customMetadata: {
+          uploadedByRole: "teacher",
+          eventId,
+          imageId: uploadTarget.imageId,
+        },
+      };
+
+      console.log("[TEACHER_FILE_UPLOAD][IMAGE_UPLOAD]", {
+        eventId,
+        imageId: uploadTarget.imageId,
+        storagePath: uploadTarget.storagePath,
+        fileName: uploadFile.name,
+        originalType: file.type,
+        uploadType: uploadMetadata.contentType,
+        size: uploadFile.size,
+        uid: auth.currentUser?.uid,
+        role: profile?.role,
+      });
+
+      await uploadEventDocumentWithResumable(
+        ref(storage, uploadTarget.storagePath),
+        uploadFile,
+        uploadMetadata,
+      );
+
+      const finalizedUpload = await finalizeEventImageUpload({
+        eventId,
+        imageId: uploadTarget.imageId,
+      });
+      console.log("[TEACHER_FILE_UPLOAD][IMAGE_FINALIZE]", {
+        eventId,
+        imageId: uploadTarget.imageId,
+        storagePath: finalizedUpload.storagePath,
+        contentType: finalizedUpload.contentType,
+        size: finalizedUpload.size,
+        status: finalizedUpload.status,
       });
     } catch (error) {
-      if (uploadedToStorage) {
-        await deleteObject(storageRef).catch(() => undefined);
+      if (uploadTarget) {
+        await cleanupPendingEventImageUpload({
+          eventId,
+          imageId: uploadTarget.imageId,
+        }).catch(() => undefined);
       }
 
       throw error;

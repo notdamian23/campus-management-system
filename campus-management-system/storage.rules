@@ -448,8 +448,7 @@ service firebase.storage {
     function canTeacherUploadEventFile(eventId) {
       return isTeacher() &&
         eventExists(eventId) &&
-        !eventIsCancelled(eventId) &&
-        canViewEventData(eventData(eventId));
+        !eventIsCancelled(eventId);
     }
 
     function eventImageFileNameHasAllowedExtension(fileName) {
@@ -471,8 +470,132 @@ service firebase.storage {
         isAllowedEventImageUploadContentType(fileName, request.resource.contentType);
     }
 
-    function canTeacherCreateEventImageObject(eventId, fileName) {
-      return canTeacherUploadEventFile(eventId) &&
+    function canUsePendingEventFileUpload() {
+      return isAdmin() || isRegularEC() || isBOD() || isTeacher();
+    }
+
+    function eventImageDocumentPath(eventId, imageId) {
+      return /databases/(default)/documents/events/$(eventId)/images/$(imageId);
+    }
+
+    function eventImageDocumentExists(eventId, imageId) {
+      return firestore.exists(eventImageDocumentPath(eventId, imageId));
+    }
+
+    function eventImageDocumentData(eventId, imageId) {
+      return eventImageDocumentExists(eventId, imageId) ?
+        firestore.get(eventImageDocumentPath(eventId, imageId)).data :
+        null;
+    }
+
+    function eventImageStoragePathValue(data) {
+      return data != null &&
+        data.storagePath is string &&
+        data.storagePath != "" ?
+        data.storagePath :
+        (
+          data != null &&
+          data.path is string &&
+          data.path != ""
+        ) ?
+          data.path :
+          "";
+    }
+
+    function expectedEventImageStoragePath(eventId, imageId, fileName) {
+      return "events/" + eventId + "/images/" + imageId + "/" + fileName;
+    }
+
+    function eventImagePathMatchesObject(data, eventId, imageId, fileName) {
+      let expectedPath = expectedEventImageStoragePath(eventId, imageId, fileName);
+      let storagePath = eventImageStoragePathValue(data);
+      return storagePath != "" && storagePath == expectedPath;
+    }
+
+    function eventImageStatusAllowsRead(data) {
+      return data != null &&
+        (
+          !(data.status is string) ||
+          data.status == "active"
+        );
+    }
+
+    function eventImageStatus(data) {
+      return data != null &&
+        data.status is string &&
+        data.status == "pending-upload" ?
+        "pending-upload" :
+        "active";
+    }
+
+    function eventImageOwnedByCurrentUser(data) {
+      return data != null &&
+        (
+          data.createdByUid == request.auth.uid ||
+          data.createdBy == request.auth.uid ||
+          data.uploadedByUid == request.auth.uid ||
+          data.uploadedBy == request.auth.uid ||
+          data.ownerUid == request.auth.uid
+        );
+    }
+
+    function eventImageStoragePathMatchesUpload(data, eventId, imageId, fileName) {
+      return data != null &&
+        data.storagePath is string &&
+        data.storagePath == expectedEventImageStoragePath(eventId, imageId, fileName);
+    }
+
+    function eventImagePendingContentTypeIsAllowed(data, fileName) {
+      return data != null &&
+        data.contentType is string &&
+        isAllowedEventImageUploadContentType(fileName, data.contentType);
+    }
+
+    function eventImageRequestContentTypeMatchesPending(data, fileName) {
+      return request.resource != null &&
+        data != null &&
+        data.contentType is string &&
+        data.contentType == request.resource.contentType &&
+        isAllowedEventImageUploadContentType(fileName, request.resource.contentType);
+    }
+
+    function canReadEventImageObject(eventId, imageId, fileName) {
+      return signedIn() &&
+        eventExists(eventId) &&
+        eventImageDocumentExists(eventId, imageId) &&
+        eventImagePathMatchesObject(
+          eventImageDocumentData(eventId, imageId),
+          eventId,
+          imageId,
+          fileName
+        ) &&
+        eventImageStatusAllowsRead(eventImageDocumentData(eventId, imageId)) &&
+        canViewEventData(eventData(eventId));
+    }
+
+    function canCreateOrUpdatePendingEventImage(eventId, imageId, fileName) {
+      return signedIn() &&
+        canUsePendingEventFileUpload() &&
+        eventExists(eventId) &&
+        (!isTeacher() || canTeacherUploadEventFile(eventId)) &&
+        eventImageDocumentExists(eventId, imageId) &&
+        eventImageStatus(eventImageDocumentData(eventId, imageId)) == "pending-upload" &&
+        eventImageOwnedByCurrentUser(eventImageDocumentData(eventId, imageId)) &&
+        eventImageDocumentData(eventId, imageId).eventId == eventId &&
+        eventImagePendingContentTypeIsAllowed(
+          eventImageDocumentData(eventId, imageId),
+          fileName
+        ) &&
+        eventImageStoragePathMatchesUpload(
+          eventImageDocumentData(eventId, imageId),
+          eventId,
+          imageId,
+          fileName
+        ) &&
+        eventImageRequestContentTypeMatchesPending(
+          eventImageDocumentData(eventId, imageId),
+          fileName
+        ) &&
         isAllowedEventImageContent(fileName);
     }
 
@@ -537,7 +660,9 @@ service firebase.storage {
       return data != null &&
         (
           data.createdByUid == request.auth.uid ||
+          data.createdBy == request.auth.uid ||
           data.uploadedByUid == request.auth.uid ||
+          data.uploadedBy == request.auth.uid ||
           data.ownerUid == request.auth.uid
         );
     }
@@ -594,6 +719,7 @@ service firebase.storage {
 
     function canCreateOrUpdatePendingEventDocument(eventId, docId, fileName) {
       return signedIn() &&
+        canUsePendingEventFileUpload() &&
         eventExists(eventId) &&
         !eventIsCancelled(eventId) &&
         (!isTeacher() || canTeacherUploadEventFile(eventId)) &&
@@ -640,9 +766,17 @@ service firebase.storage {
 
     match /events/{eventId}/images/{fileId} {
       allow read: if eventExists(eventId) && canViewEventData(eventData(eventId));
-      allow create: if canEditEventFiles(eventId) ||
-        canTeacherCreateEventImageObject(eventId, fileId);
-      allow update, delete: if canEditEventFiles(eventId);
+      allow create, update: if canEditEventFiles(eventId);
+      allow delete: if canEditEventFiles(eventId);
+    }
+
+    match /events/{eventId}/images/{imageId}/{fileName} {
+      allow read: if canReadEventImageObject(eventId, imageId, fileName);
+
+      allow create, update: if canEditEventFiles(eventId) ||
+        canCreateOrUpdatePendingEventImage(eventId, imageId, fileName);
+
+      allow delete: if canEditEventFiles(eventId);
     }
 
     match /events/{eventId}/docs/{fileId} {
@@ -652,7 +786,10 @@ service firebase.storage {
 
     match /events/{eventId}/docs/{docId}/{fileName} {
       allow read: if canReadEventDocumentObject(eventId, docId, fileName);
-      allow create, update: if canCreateOrUpdatePendingEventDocument(eventId, docId, fileName);
+
+      allow create, update: if canEditEventFiles(eventId) ||
+        canCreateOrUpdatePendingEventDocument(eventId, docId, fileName);
+
       allow delete: if canEditEventFiles(eventId);
     }
 

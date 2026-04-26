@@ -37,6 +37,7 @@ export type TeacherProfile = {
   name: string;
   teacherName: string;
   email: string;
+  role: string;
 };
 
 type TeacherEventDoc = {
@@ -413,6 +414,7 @@ export function TeacherPortalProvider({
           name,
           teacherName,
           email: String(data.email ?? "").trim() || user.email || "",
+          role: String(data.role ?? "").trim() || "teacher",
         });
         setAccessState("authorized");
       } catch (nextError: unknown) {
