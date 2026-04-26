@@ -270,7 +270,7 @@ export function TeacherActivityChipGroup({
 
 type TeacherEventSnapshotCardProps = {
   title: string;
-  lifecycle: string;
+  lifecycle: "upcoming" | "ongoing" | "completed" | "cancelled";
   scheduleLabel: string;
   location: string;
   registrationCount?: number;
@@ -295,9 +295,7 @@ export function TeacherEventSnapshotCard({
   action,
   className,
 }: TeacherEventSnapshotCardProps) {
-  const lifecycleTone = getTeacherLifecycleTone(
-    lifecycle as "upcoming" | "ongoing" | "completed",
-  );
+  const lifecycleTone = getTeacherLifecycleTone(lifecycle);
   const lifecycleClasses = getTeacherToneClasses(lifecycleTone);
 
   const summaryItems: Array<{
@@ -445,7 +443,7 @@ export function TeacherDataTable<T extends object>({
 
 export function buildTeacherEventSnapshotFromRecord(event: {
   title: string;
-  lifecycle: "upcoming" | "ongoing" | "completed";
+  lifecycle: "upcoming" | "ongoing" | "completed" | "cancelled";
   eventDate: Date | null;
   date: string;
   scheduledTime: string;

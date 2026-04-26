@@ -101,6 +101,17 @@ export type UpdateCampusEventResult = {
   linkedPaymentId?: string | null;
 };
 
+export type CancelCampusEventPayload = {
+  eventId: string;
+  reason?: string;
+};
+
+export type CancelCampusEventResult = {
+  eventId: string;
+  cancelled: true;
+  notifiedCount: number;
+};
+
 export type CreateCampusNotificationPayload = {
   title: string;
   message: string;
@@ -857,6 +868,23 @@ export async function updateCampusEvent(
     UpdateCampusEventPayload,
     UpdateCampusEventResult
   >(getCampusFunctions(), "updateCampusEvent");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function cancelCampusEvent(
+  payload: CancelCampusEventPayload,
+): Promise<CancelCampusEventResult> {
+  logAuthEvent("info", "Cancelling CAMPUS event via callable", {
+    eventId: payload.eventId,
+    hasReason: Boolean(payload.reason?.trim()),
+  });
+
+  const callable = httpsCallable<
+    CancelCampusEventPayload,
+    CancelCampusEventResult
+  >(getCampusFunctions(), "cancelCampusEvent");
 
   const result = await callable(payload);
   return result.data;

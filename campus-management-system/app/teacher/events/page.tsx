@@ -92,7 +92,7 @@ const teacherEventColumns: CampusTableColumn<{
   id: string;
   title: string;
   location: string;
-  lifecycle: "upcoming" | "ongoing" | "completed";
+  lifecycle: "upcoming" | "ongoing" | "completed" | "cancelled";
   schedule: string;
   audience: string;
 }>[] = [
@@ -432,6 +432,7 @@ export default function TeacherEventsPage() {
     { key: "__all_status__", label: "All status" },
     { key: "upcoming", label: "Upcoming" },
     { key: "ongoing", label: "Ongoing" },
+    { key: "cancelled", label: "Cancelled" },
     { key: "completed", label: "Completed" },
   ];
 
@@ -1165,9 +1166,21 @@ export default function TeacherEventsPage() {
           {() => (
             <>
               <ModalHeader className="flex flex-col gap-1">
-                <span className="text-xl font-semibold text-campus-text-primary">
-                  {selectedEvent?.title || "Event details"}
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xl font-semibold text-campus-text-primary">
+                    {selectedEvent?.title || "Event details"}
+                  </span>
+                  {selectedEvent ? (
+                    <Chip
+                      size="sm"
+                      className={getTeacherToneClasses(
+                        getTeacherLifecycleTone(selectedEvent.lifecycle),
+                      ).chip}
+                    >
+                      {capitalizeTeacherLabel(selectedEvent.lifecycle)}
+                    </Chip>
+                  ) : null}
+                </div>
                 <span className="text-sm font-normal text-campus-text-secondary">
                   {selectedEvent
                     ? `${selectedEventSchedule?.scheduleLabel ?? "Date TBA | Time TBA"} | ${selectedEvent.location}`

@@ -100,6 +100,7 @@ export function formatTeacherBytes(bytes: number) {
 export function getTeacherLifecycleTone(
   lifecycle: TeacherLifecycle,
 ): TeacherTone {
+  if (lifecycle === "cancelled") return "slate";
   if (lifecycle === "completed") return "green";
   if (lifecycle === "ongoing") return "amber";
   return "blue";

@@ -63,6 +63,7 @@ type TeacherEventDoc = {
   presentCount?: number;
   absentCount?: number;
   status?: string;
+  cancelled?: boolean;
   startAt?: EventScheduleDateInput;
   endAt?: EventScheduleDateInput;
   imageCount?: number;
@@ -101,7 +102,11 @@ type TeacherFileDoc = {
   createdAt?: unknown;
 };
 
-export type TeacherLifecycle = "upcoming" | "ongoing" | "completed";
+export type TeacherLifecycle =
+  | "upcoming"
+  | "ongoing"
+  | "completed"
+  | "cancelled";
 
 export type TeacherEvent = {
   id: string;
@@ -269,6 +274,10 @@ function toNonNegativeNumber(value: unknown) {
 
 function normalizeTeacherLifecycleStatus(rawStatus: unknown) {
   const normalized = normalizeText(rawStatus);
+
+  if (normalized === "cancelled") {
+    return "cancelled" as const;
+  }
 
   if (
     normalized === "completed" ||
@@ -718,11 +727,12 @@ export function TeacherPortalProvider({
           startAt: data.startAt,
           endAt: data.endAt,
           status: data.status,
+          cancelled: data.cancelled === true,
         });
         const statusLifecycle = normalizeTeacherLifecycleStatus(data.status);
         let lifecycle: TeacherLifecycle = lifecycleDetails.lifecycle;
-        if (statusLifecycle === "completed") {
-          lifecycle = "completed";
+        if (statusLifecycle === "completed" || statusLifecycle === "cancelled") {
+          lifecycle = statusLifecycle;
         }
         const preRegCount = Math.max(0, Number(data.preRegCount ?? 0));
         const presentCount = shouldLoadPortalActivity

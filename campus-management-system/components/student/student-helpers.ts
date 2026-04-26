@@ -116,6 +116,7 @@ export function getStudentEventTone(status: StudentEventStatus): StudentTone {
 export function getStudentEventLifecycleTone(
   lifecycle: StudentEventLifecycle,
 ): StudentTone {
+  if (lifecycle === "cancelled") return "slate";
   if (lifecycle === "completed") return "green";
   if (lifecycle === "ongoing") return "blue";
   return "amber";

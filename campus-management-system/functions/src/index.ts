@@ -13902,6 +13902,176 @@ function toUniqueIdentifierList(value: unknown): string[] {
   return Array.from(new Set(normalizeIdentifierList(value)));
 }
 
+function parseEventEndMs(date: string, startTime: string, endTime: string): number {
+  const eventStartMs = parseEventStartMs(date, startTime);
+  const eventEndMs = parseEventStartMs(date, endTime);
+
+  if (eventStartMs === Number.MAX_SAFE_INTEGER) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  if (eventEndMs === Number.MAX_SAFE_INTEGER) {
+    return eventStartMs + 60 * 60 * 1000;
+  }
+  if (eventEndMs <= eventStartMs) {
+    return eventStartMs + 60 * 60 * 1000;
+  }
+
+  return eventEndMs;
+}
+
+function isCampusEventCancelled(
+  eventData: FirebaseFirestore.DocumentData,
+): boolean {
+  return eventData.cancelled === true || normalizeLower(eventData.status) === "cancelled";
+}
+
+function resolveCampusEventLifecycle(
+  eventData: FirebaseFirestore.DocumentData,
+  nowMs = Date.now(),
+): "upcoming" | "ongoing" | "completed" | "cancelled" {
+  if (isCampusEventCancelled(eventData)) {
+    return "cancelled";
+  }
+
+  const normalizedStatus = normalizeLower(eventData.status);
+  if (
+    normalizedStatus === "completed" ||
+    normalizedStatus === "closed" ||
+    normalizedStatus === "archived"
+  ) {
+    return "completed";
+  }
+
+  const date = normalizeText(eventData.date);
+  const scheduledTime =
+    normalizeText(eventData.scheduledTime) ||
+    normalizeText(eventData.timeStart);
+  const timeEnd = normalizeText(eventData.timeEnd);
+  const eventStartMs = parseEventStartMs(date, scheduledTime);
+  const eventEndMs = parseEventEndMs(date, scheduledTime, timeEnd);
+
+  if (
+    eventStartMs === Number.MAX_SAFE_INTEGER ||
+    eventEndMs === Number.MAX_SAFE_INTEGER
+  ) {
+    if (
+      normalizedStatus === "ongoing" ||
+      normalizedStatus === "active" ||
+      normalizedStatus === "live" ||
+      normalizedStatus === "in progress"
+    ) {
+      return "ongoing";
+    }
+
+    return "upcoming";
+  }
+
+  if (nowMs < eventStartMs) {
+    return "upcoming";
+  }
+  if (nowMs <= eventEndMs) {
+    return "ongoing";
+  }
+  return "completed";
+}
+
+function assertCanManageCampusEvent(
+  actor: EcActorContext,
+  eventData: FirebaseFirestore.DocumentData,
+  action: "update" | "cancel",
+): void {
+  if (actor.isAdmin || actor.isRegularEc) {
+    return;
+  }
+
+  if (!actor.isBod) {
+    throw new HttpsError(
+      "permission-denied",
+      `Only admin, regular EC, or B.O.D. users can ${action} events.`,
+    );
+  }
+
+  const actionVerb = action === "cancel" ? "cancel" : "update";
+  const existingEventOwnerType =
+    normalizeLower(eventData.ownerType) === "bod" ? "bod" : "ec";
+  const existingEventCourseScope =
+    normalizeCourseLabel(eventData.courseScope) ||
+    normalizeCourseLabel(eventData.course);
+
+  if (existingEventOwnerType !== "bod") {
+    throw new HttpsError(
+      "permission-denied",
+      `B.O.D. members can only ${actionVerb} their own B.O.D.-created events.`,
+    );
+  }
+
+  if (normalizeText(eventData.createdBy) !== actor.uid) {
+    throw new HttpsError(
+      "permission-denied",
+      `B.O.D. members can only ${actionVerb} their own B.O.D.-created events.`,
+    );
+  }
+
+  if (
+    !existingEventCourseScope ||
+    existingEventCourseScope !== actor.courseScope
+  ) {
+    throw new HttpsError(
+      "permission-denied",
+      `B.O.D. members can only ${actionVerb} events from their assigned course.`,
+    );
+  }
+}
+
+async function resolveCampusEventNotificationRecipients(
+  actor: EcActorContext,
+  eventData: FirebaseFirestore.DocumentData,
+): Promise<CampusNotificationRecipient[]> {
+  const candidates = await listCampusStudentRecipientCandidates(
+    actor.courseScope,
+    actor.isBod,
+  );
+  const explicitAudience = hasExplicitSelectedAudience(eventData);
+  const courseTargets = toTargetList(eventData.courses);
+  const yearTargets = toTargetList(eventData.yearLevels);
+  const courseValue =
+    courseTargets.length > 0 ? courseTargets : normalizeText(eventData.course);
+  const yearValue =
+    yearTargets.length > 0 ? yearTargets : normalizeText(eventData.yearLevel);
+
+  return candidates
+    .filter((recipient) => {
+      if (!matchesSelectedAudience(eventData, recipient.uid, recipient.schoolId)) {
+        return false;
+      }
+
+      if (explicitAudience) {
+        return true;
+      }
+
+      if (!matchesTargetList(courseValue, recipient.course, "All Courses")) {
+        return false;
+      }
+
+      if (!matchesTargetList(yearValue, recipient.yearLevel, "All Years")) {
+        return false;
+      }
+
+      return matchesSpecificStudentTarget(
+        eventData.targetStudent,
+        recipient.schoolId,
+        recipient.studentName,
+      );
+    })
+    .sort((left, right) => {
+      const bySchoolId = left.schoolId.localeCompare(right.schoolId);
+      if (bySchoolId !== 0) {
+        return bySchoolId;
+      }
+      return left.studentName.localeCompare(right.studentName);
+    });
+}
+
 export const createCampusEvent = onCall({region: REGION}, async (request) => {
     if (!request.auth?.uid) {
       throw new HttpsError("unauthenticated", "Login required.");
@@ -14578,9 +14748,6 @@ export const updateCampusEvent = onCall({region: REGION}, async (request) => {
         normalizeLower(existingEventData.ownerType) === "bod" ?
           "bod" :
           "ec";
-      const existingEventCourseScope =
-        normalizeCourseLabel(existingEventData.courseScope) ||
-        normalizeCourseLabel(existingEventData.course);
       const actorCourseScope = resolveProfileCourseScope(actorProfile);
       const actorCreatedByRole =
         actorIsAdmin ? "admin" :
@@ -14594,27 +14761,35 @@ export const updateCampusEvent = onCall({region: REGION}, async (request) => {
             "B.O.D. profile is missing a valid course scope.",
           );
         }
+      }
 
-        if (existingEventOwnerType !== "bod") {
-          throw new HttpsError(
-            "permission-denied",
-            "B.O.D. members can only update their own B.O.D.-created events.",
-          );
-        }
+      assertCanManageCampusEvent(
+        {
+          uid: actorUid,
+          profile: actorProfile,
+          role: actorRole,
+          isAdmin: actorIsAdmin,
+          isRegularEc: actorIsRegularEc,
+          isBod: actorIsBod,
+          isTeacher: false,
+          courseScope: actorCourseScope,
+        },
+        existingEventData,
+        "update",
+      );
 
-        if (normalizeText(existingEventData.createdBy) !== actorUid) {
-          throw new HttpsError(
-            "permission-denied",
-            "B.O.D. members can only update their own B.O.D.-created events.",
-          );
-        }
-
-        if (!existingEventCourseScope || existingEventCourseScope !== actorCourseScope) {
-          throw new HttpsError(
-            "permission-denied",
-            "B.O.D. members can only update events from their assigned course.",
-          );
-        }
+      const existingEventLifecycle = resolveCampusEventLifecycle(existingEventData);
+      if (existingEventLifecycle === "completed") {
+        throw new HttpsError(
+          "failed-precondition",
+          "Completed events cannot be edited.",
+        );
+      }
+      if (existingEventLifecycle === "cancelled") {
+        throw new HttpsError(
+          "failed-precondition",
+          "Cancelled events cannot be edited.",
+        );
       }
 
       const isPreReg = body.isPreReg === true;
@@ -15223,6 +15398,200 @@ export const updateCampusEvent = onCall({region: REGION}, async (request) => {
         error instanceof Error && error.message ?
           error.message :
           "Failed to update event.",
+      );
+    }
+  });
+
+export const cancelCampusEvent = onCall({region: REGION}, async (request) => {
+    try {
+      const actor = await resolveEcActorContext(request);
+      const body = asRecord(request.data);
+      const eventId = normalizeText(body.eventId);
+      const reason = normalizeText(body.reason);
+
+      if (!eventId) {
+        throw new HttpsError("invalid-argument", "eventId is required.");
+      }
+
+      const eventRef = db.doc(`events/${eventId}`);
+      const dispatchId = `event_cancelled_${eventId}`;
+      const cancellationState = await db.runTransaction(async (transaction) => {
+        const eventSnap = await transaction.get(eventRef);
+        if (!eventSnap.exists) {
+          throw new HttpsError("not-found", "Event not found.");
+        }
+
+        const eventData = eventSnap.data() ?? {};
+        assertCanManageCampusEvent(actor, eventData, "cancel");
+
+        const lifecycle = resolveCampusEventLifecycle(eventData);
+        if (lifecycle === "completed") {
+          throw new HttpsError(
+            "failed-precondition",
+            "Completed events cannot be cancelled.",
+          );
+        }
+
+        const existingDispatchId =
+          normalizeText(eventData.cancellationNotificationDispatchId) ||
+          dispatchId;
+        const notifiedCountRaw = Number(
+          eventData.cancellationNotifiedCount ?? 0,
+        );
+        const notifiedCount =
+          Number.isFinite(notifiedCountRaw) ?
+            Math.max(0, Math.trunc(notifiedCountRaw)) :
+            0;
+
+        if (isCampusEventCancelled(eventData)) {
+          return {
+            alreadyCancelled: true,
+            dispatchId: existingDispatchId,
+            notifiedCount,
+            notifiedAtMs: toMillis(eventData.cancellationNotifiedAt),
+            eventData,
+          };
+        }
+
+        transaction.set(
+          eventRef,
+          {
+            status: "cancelled",
+            cancelled: true,
+            cancelledAt: serverTimestamp(),
+            cancelledBy: actor.uid,
+            cancelledReason: reason || null,
+            cancellationNotificationDispatchId: existingDispatchId,
+            updatedAt: serverTimestamp(),
+          },
+          {merge: true},
+        );
+
+        return {
+          alreadyCancelled: false,
+          dispatchId: existingDispatchId,
+          notifiedCount: 0,
+          notifiedAtMs: 0,
+          eventData: {
+            ...eventData,
+            status: "cancelled",
+            cancelled: true,
+            cancelledReason: reason || null,
+          },
+        };
+      });
+
+      if (
+        cancellationState.alreadyCancelled &&
+        cancellationState.notifiedAtMs > 0
+      ) {
+        return {
+          eventId,
+          cancelled: true as const,
+          notifiedCount: cancellationState.notifiedCount,
+        };
+      }
+
+      const eventData = cancellationState.eventData ?? {};
+      const recipients = await resolveCampusEventNotificationRecipients(
+        actor,
+        eventData,
+      );
+      const title = normalizeText(eventData.title) || "Event";
+      const date = normalizeText(eventData.date);
+      const scheduledTime =
+        normalizeText(eventData.scheduledTime) ||
+        normalizeText(eventData.timeStart);
+      const venue = normalizeText(eventData.location) || "TBA";
+      const cancellationReason =
+        normalizeText(eventData.cancelledReason) || reason;
+      const message = [
+        `${title} scheduled for ${date || "TBA"} at ${scheduledTime || "TBA"} in ${venue} was cancelled.`,
+        cancellationReason ? `Reason: ${cancellationReason}.` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const writesPerBatch = 450;
+
+      for (let index = 0; index < recipients.length; index += writesPerBatch) {
+        const batch = db.batch();
+        const chunk = recipients.slice(index, index + writesPerBatch);
+
+        chunk.forEach((recipient) => {
+          batch.set(
+            campusNotificationRecipientDocRef(
+              recipient.uid,
+              cancellationState.dispatchId,
+            ),
+            {
+              title: `Event Cancelled: ${title}`,
+              message,
+              date,
+              scheduledTime,
+              type: "announcement",
+              dispatchId: cancellationState.dispatchId,
+              recipientUid: recipient.uid,
+              studentUid: recipient.uid,
+              studentName: recipient.studentName,
+              schoolId: recipient.schoolId,
+              eventId,
+              read: false,
+              status: "sent",
+              createdByUid: actor.uid,
+              createdByRole: actor.isBod ?
+                "bod" :
+                actor.role || "ecmember",
+              ownerType: actor.isBod ? "bod" : "ec",
+              courseScope: actor.courseScope || null,
+              createdByCourseScope: actor.courseScope || null,
+              createdAt: serverTimestamp(),
+            },
+            {merge: true},
+          );
+        });
+
+        await batch.commit();
+      }
+
+      await eventRef.set(
+        {
+          cancellationNotificationDispatchId: cancellationState.dispatchId,
+          cancellationNotifiedAt: serverTimestamp(),
+          cancellationNotifiedCount: recipients.length,
+          updatedAt: serverTimestamp(),
+        },
+        {merge: true},
+      );
+
+      await writeStructuredAuditLog({
+        actorUid: actor.uid,
+        action: "event_cancelled_via_callable",
+        targetType: "event",
+        targetId: eventId,
+        metadata: {
+          ownerType: normalizeText(eventData.ownerType) || "ec",
+          courseScope: normalizeCourseLabel(eventData.courseScope) || null,
+          notifiedCount: recipients.length,
+        },
+      }).catch((error) => {
+        authLogger.warn("cancelCampusEvent audit log write failed", {error});
+      });
+
+      return {
+        eventId,
+        cancelled: true as const,
+        notifiedCount: recipients.length,
+      };
+    } catch (error: unknown) {
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      throw new HttpsError(
+        "internal",
+        error instanceof Error && error.message ?
+          error.message :
+          "Failed to cancel event.",
       );
     }
   });

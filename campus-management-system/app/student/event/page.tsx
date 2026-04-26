@@ -61,7 +61,13 @@ import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
 import { campusToast } from "@/lib/toast";
 
 type EventSortMode = "oldest_to_latest" | "latest_to_oldest";
-type EventStatusFilter = "all" | "upcoming" | "ongoing" | "attended" | "missed";
+type EventStatusFilter =
+  | "all"
+  | "upcoming"
+  | "ongoing"
+  | "cancelled"
+  | "attended"
+  | "missed";
 
 type EventGroup = {
   label: string;
@@ -73,6 +79,9 @@ function matchesStatusFilter(item: StudentEvent, filter: EventStatusFilter) {
   if (filter === "all") return true;
   if (filter === "upcoming") return item.lifecycle === "upcoming";
   if (filter === "ongoing") return item.lifecycle === "ongoing";
+  if (filter === "cancelled") {
+    return item.lifecycle === "cancelled" || item.status === "Cancelled";
+  }
   if (filter === "attended") return item.status === "Attended";
   if (filter === "missed") return item.status === "Missed";
   return false;
@@ -389,6 +398,7 @@ export default function StudentEventsPage() {
             <SelectItem key="all">All events</SelectItem>
             <SelectItem key="upcoming">Upcoming</SelectItem>
             <SelectItem key="ongoing">Ongoing</SelectItem>
+            <SelectItem key="cancelled">Cancelled</SelectItem>
             <SelectItem key="attended">Attended</SelectItem>
             <SelectItem key="missed">Missed</SelectItem>
           </Select>
@@ -649,19 +659,23 @@ function StudentEventDetails({
 }) {
   const [detailTab, setDetailTab] = useState<"overview" | "images">("overview");
   const [imagesModalOpen, setImagesModalOpen] = useState(false);
+  const isCancelledEvent =
+    event.lifecycle === "cancelled" || event.status === "Cancelled";
   const toneClasses = getStudentToneClasses(
     shouldShowStudentEventContextStatus(event.status, event.lifecycle)
       ? getStudentEventTone(event.status)
       : getStudentEventLifecycleTone(event.lifecycle),
   );
-  const canRegister = event.status === "Pre-registration";
+  const canRegister = !isCancelledEvent && event.status === "Pre-registration";
   const canCancel =
+    !isCancelledEvent &&
     event.lifecycle !== "completed" &&
     (registrationStatus === "PRE_REGISTERED" ||
       registrationStatus === "WAITLISTED") &&
     (!event.cancellationDeadlineAtMs ||
       Date.now() <= event.cancellationDeadlineAtMs);
   const showRegistrationActionCard =
+    !isCancelledEvent &&
     event.lifecycle !== "completed" &&
     (registrationStatus === "PRE_REGISTERED" ||
       registrationStatus === "WAITLISTED");
@@ -693,12 +707,12 @@ function StudentEventDetails({
                 <Chip size="sm" className="bg-white/80 text-slate-700">
                   {buildStudentAudienceLabel(event.course, event.yearLevel)}
                 </Chip>
-                {event.isPreReg ? (
+                {event.isPreReg && !isCancelledEvent ? (
                   <Chip size="sm" className="bg-blue-100 text-blue-700">
                     Pre-registration open
                   </Chip>
                 ) : null}
-                {event.withPayment ? (
+                {event.withPayment && !isCancelledEvent ? (
                   <Chip size="sm" className="bg-amber-100 text-amber-700">
                     Payment required
                   </Chip>
@@ -887,6 +901,14 @@ function StudentEventDetails({
                   <Card shadow="none" className="border border-slate-200 bg-slate-50/80">
                     <CardBody className="p-4 text-sm text-slate-700">
                       Your pre-registration was cancelled before attendance verification.
+                    </CardBody>
+                  </Card>
+                ) : null}
+
+                {isCancelledEvent ? (
+                  <Card shadow="none" className="border border-slate-200 bg-slate-50/80">
+                    <CardBody className="p-4 text-sm text-slate-700">
+                      This event was cancelled. Check your notifications for any follow-up from the EC.
                     </CardBody>
                   </Card>
                 ) : null}

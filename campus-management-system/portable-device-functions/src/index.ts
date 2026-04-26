@@ -46,6 +46,7 @@ type PortableEventSummary = {
   scheduledTimeEnd: string;
   location: string;
   status: string;
+  cancelled: boolean;
   targetMode: string;
   yearLevels: string[];
   courses: string[];
@@ -1149,6 +1150,12 @@ function hasEventEnded(event: PortableEventSummary, nowMs = Date.now()): boolean
   return nowMs > eventEndMs;
 }
 
+function isPortableEventCancelledData(
+  data: FirebaseFirestore.DocumentData,
+): boolean {
+  return data.cancelled === true || normalizeLower(data.status) === "cancelled";
+}
+
 function normalizeScheduledWindow(startValue: unknown, endValue: unknown): {
   scheduledTime: string;
   scheduledTimeEnd: string;
@@ -1979,6 +1986,7 @@ function eventSummaryFromSnapshot(
   snap: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot
 ): PortableEventSummary {
   const data = snap.data() ?? {};
+  const cancelled = isPortableEventCancelledData(data);
   const date = normalizeText(data.date);
   const schedule = normalizeScheduledWindow(
     normalizeText(data.scheduledTimeStart) ||
@@ -2059,7 +2067,8 @@ function eventSummaryFromSnapshot(
     scheduledTime: schedule.scheduledTime,
     scheduledTimeEnd: schedule.scheduledTimeEnd,
     location: normalizeText(data.location) || "TBA",
-    status: normalizeText(data.status) || "upcoming",
+    status: cancelled ? "cancelled" : normalizeText(data.status) || "upcoming",
+    cancelled,
     targetMode,
     yearLevels,
     courses,
@@ -2083,7 +2092,12 @@ function eventSummaryFromSnapshot(
 
 function isActiveEvent(event: PortableEventSummary): boolean {
   const status = normalizeLower(event.status);
-  if (status === "completed" || status === "cancelled" || status === "archived") {
+  if (
+    event.cancelled ||
+    status === "completed" ||
+    status === "cancelled" ||
+    status === "archived"
+  ) {
     return false;
   }
 
@@ -2123,6 +2137,9 @@ async function getEventSummary(eventId: string): Promise<PortableEventSummary> {
     rawEventAudienceLogFields(snap.id, data)
   );
   const event = eventSummaryFromSnapshot(snap);
+  if (event.cancelled) {
+    throw new ApiError(400, "Event was cancelled.");
+  }
   if (!isActiveEvent(event)) {
     throw new ApiError(400, "Event is no longer available for pairing.");
   }
@@ -3627,12 +3644,40 @@ async function syncAttendanceRecord(
     };
   }
 
+  const eventRef = db.doc(`events/${eventId}`);
   const attendanceRef = db.doc(`events/${eventId}/attendance/${studentId}`);
   const syncLogRef = db.doc(`syncLogs/${recordId}`);
-  const eventRef = db.doc(`events/${eventId}`);
   const studentRef = db.doc(`students/${studentId}`);
   const profileRef = db.doc(`profiles/${studentId}`);
-  const event = await getEventSummary(eventId);
+  let event: PortableEventSummary;
+  try {
+    event = await getEventSummary(eventId);
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Failed to load event.");
+    if (message === "Event was cancelled.") {
+      await syncLogRef.set(
+        {
+          recordId,
+          eventId,
+          studentId,
+          schoolId,
+          deviceId: device.deviceId,
+          syncStatus: "rejected",
+          message,
+          attemptedAt: admin.firestore.FieldValue.serverTimestamp(),
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+          source: "portable-device",
+        },
+        {merge: true}
+      );
+      return {
+        recordId,
+        status: "rejected",
+        message,
+      };
+    }
+    throw error;
+  }
   const registrationStatus = await findStudentRegistrationStatusForEvent(
     eventId,
     studentId
@@ -3745,6 +3790,29 @@ async function syncAttendanceRecord(
     const eventSnap = await transaction.get(eventRef);
     if (!eventSnap.exists) {
       throw new ApiError(404, "Event not found.");
+    }
+    if (isPortableEventCancelledData(eventSnap.data() ?? {})) {
+      resultStatus = "rejected";
+      resultMessage = "Event was cancelled.";
+
+      transaction.set(
+        syncLogRef,
+        {
+          recordId,
+          eventId,
+          studentId,
+          schoolId: resolvedSchoolId,
+          studentName: resolvedStudentName,
+          deviceId: device.deviceId,
+          syncStatus: "rejected",
+          message: resultMessage,
+          attemptedAt: admin.firestore.FieldValue.serverTimestamp(),
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+          source: "portable-device",
+        },
+        {merge: true}
+      );
+      return;
     }
 
     const attendanceSnap = await transaction.get(attendanceRef);

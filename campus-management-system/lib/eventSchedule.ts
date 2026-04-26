@@ -19,12 +19,17 @@ export type EventScheduleInput = {
   timeEnd?: string | null;
 };
 
-export type EventLifecycle = "upcoming" | "ongoing" | "completed";
+export type EventLifecycle =
+  | "upcoming"
+  | "ongoing"
+  | "completed"
+  | "cancelled";
 
 export type EventLifecycleInput = EventScheduleInput & {
   startAt?: EventScheduleDateInput;
   endAt?: EventScheduleDateInput;
   status?: string | null;
+  cancelled?: boolean | null;
 };
 
 export type EventLifecycleDetails = {
@@ -257,6 +262,10 @@ function buildDateTime(
 function normalizeLifecycleFromStatus(status: string | null | undefined) {
   const normalized = String(status ?? "").trim().toLowerCase();
 
+  if (normalized === "cancelled") {
+    return "cancelled" as const;
+  }
+
   if (
     normalized === "completed" ||
     normalized === "closed" ||
@@ -351,6 +360,18 @@ export function resolveEventLifecycle(
 ): EventLifecycleDetails {
   const { startAt, endAt, usedDefaultEnd } = resolveLifecycleWindow(input);
   const fallbackLifecycle = normalizeLifecycleFromStatus(input.status);
+  const isCancelled = input.cancelled === true || fallbackLifecycle === "cancelled";
+
+  if (isCancelled) {
+    return {
+      lifecycle: "cancelled",
+      startAt,
+      endAt,
+      now,
+      statusFallbackUsed: fallbackLifecycle === "cancelled",
+    };
+  }
+
   let lifecycle: EventLifecycle = fallbackLifecycle ?? "upcoming";
   let statusFallbackUsed = false;
 

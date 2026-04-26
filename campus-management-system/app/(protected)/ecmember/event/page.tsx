@@ -118,6 +118,7 @@ import {
 } from "@/lib/ec-permissions";
 import { normalizeCourse, normalizeCourseSlug } from "@/lib/courseOptions";
 import {
+  cancelCampusEvent,
   createCampusNotification,
   createCampusEvent,
   createEventDocumentDownloadUrl,
@@ -134,7 +135,10 @@ import {
 import {
   downloadAttendanceWorkbook as downloadSharedAttendanceWorkbook,
 } from "@/lib/attendance-export";
-import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
+import {
+  computeEventLifecycle,
+  formatEventScheduleDisplay,
+} from "@/lib/eventSchedule";
 import {
   hasStudentIdentityProfile,
   isStudentAudienceProfile,
@@ -142,7 +146,7 @@ import {
 import { campusToast } from "@/lib/toast";
 import { formatStudentFullName } from "@/lib/student-name";
 
-type EventStatus = "upcoming" | "ongoing" | "completed";
+type EventStatus = "upcoming" | "ongoing" | "completed" | "cancelled";
 const ecEventsLogger = createCampusLogger("EC Events");
 
 type ViewerProfile = CampusProfileDoc & {
@@ -180,7 +184,11 @@ type EventDoc = {
   preRegCount?: number;
   waitlistCount?: number;
 
-  status?: EventStatus;
+  status?: string | null;
+  cancelled?: boolean;
+  cancelledAt?: any;
+  cancelledBy?: string | null;
+  cancelledReason?: string | null;
   createdBy?: string | null;
   createdByPosition?: string | null;
   createdByCourseScope?: string | null;
@@ -664,6 +672,10 @@ type PendingDeleteEvent = {
   id: string;
   title: string;
 };
+type PendingCancelEvent = {
+  id: string;
+  title: string;
+};
 
 type NotificationSummary = {
   id: string;
@@ -824,31 +836,21 @@ function computeStatus(ev: {
   scheduledTime?: string;
   timeStart?: string;
   timeEnd?: string;
+  status?: string | null;
+  cancelled?: boolean;
 }): EventStatus {
-  const startM = parseTime12ToMinutes(ev.scheduledTime || ev.timeStart);
-  const endM = parseTime12ToMinutes(ev.timeEnd);
-  if (startM == null) return "upcoming";
+  return computeEventLifecycle({
+    date: ev.date,
+    scheduledTime: ev.scheduledTime,
+    timeStart: ev.timeStart,
+    timeEnd: ev.timeEnd,
+    status: ev.status,
+    cancelled: ev.cancelled,
+  }) as EventStatus;
+}
 
-  const now = new Date();
-  const [y, mo, d] = ev.date.split("-").map(Number);
-  if (!y || !mo || !d) return "upcoming";
-
-  const eventDate = new Date(y, mo - 1, d);
-
-  const start = new Date(eventDate);
-  start.setHours(Math.floor(startM / 60), startM % 60, 0, 0);
-
-  if (endM == null) {
-    return now < start ? "upcoming" : "completed";
-  }
-
-  const safeEnd = endM >= startM ? endM : startM + 60;
-  const end = new Date(eventDate);
-  end.setHours(Math.floor(safeEnd / 60), safeEnd % 60, 0, 0);
-
-  if (now < start) return "upcoming";
-  if (now >= start && now <= end) return "ongoing";
-  return "completed";
+function canEditEventLifecycle(status: EventStatus | null | undefined) {
+  return status === "upcoming" || status === "ongoing";
 }
 
 type TimeParts = { hour: number; minute: number; ampm: "AM" | "PM" };
@@ -2730,6 +2732,10 @@ export default function EventDashboard() {
   const [pendingDeleteEvent, setPendingDeleteEvent] =
     useState<PendingDeleteEvent | null>(null);
   const [deleteEventSubmitting, setDeleteEventSubmitting] = useState(false);
+  const [pendingCancelEvent, setPendingCancelEvent] =
+    useState<PendingCancelEvent | null>(null);
+  const [cancelEventReason, setCancelEventReason] = useState("");
+  const [cancelEventSubmitting, setCancelEventSubmitting] = useState(false);
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string>("");
   const [uploadWarn, setUploadWarn] = useState<string>("");
@@ -4202,6 +4208,23 @@ export default function EventDashboard() {
     [summary.completed, summary.ongoing, summary.total, summary.upcoming],
   );
   const isEditingEvent = Boolean(editingEventId);
+  const editingEventRecord = useMemo(
+    () => (editingEventId ? events.find((event) => event.id === editingEventId) ?? null : null),
+    [editingEventId, events],
+  );
+  const editingEventStatus = useMemo(
+    () => (editingEventRecord ? computeStatus(editingEventRecord) : null),
+    [editingEventRecord],
+  );
+  const editingEventCancelable = useMemo(
+    () =>
+      Boolean(
+        editingEventRecord &&
+        canEditEventRecord(editingEventRecord) &&
+        canEditEventLifecycle(editingEventStatus),
+      ),
+    [canEditEventRecord, editingEventRecord, editingEventStatus],
+  );
   const isEditingNotification = Boolean(editingNotificationDispatchId);
   const hasSpecificTarget = selectedEventStudents.length > 0;
   const bodSelectedEventStudentsOutOfScope = useMemo(
@@ -4280,6 +4303,7 @@ export default function EventDashboard() {
   };
 
   const statusChip = (status: EventStatus) => {
+    if (status === "cancelled") return "bg-slate-100 text-slate-700";
     if (status === "completed") return "bg-green-100 text-green-700";
     if (status === "ongoing") return "bg-orange-100 text-orange-700";
     return "bg-blue-100 text-blue-700";
@@ -5120,6 +5144,112 @@ export default function EventDashboard() {
     }
   }
 
+  function requestCancelEvent(eventToCancel: EventDoc) {
+    if (roleLoading) {
+      addToast({
+        title: "Please wait",
+        description: "Role check is still in progress.",
+        color: "warning",
+        timeout: 4500,
+      });
+      return;
+    }
+
+    const eventStatus = computeStatus(eventToCancel);
+    if (!isECUser || !canEditEventRecord(eventToCancel)) {
+      addToast({
+        title: "Access denied",
+        description: viewerIsBod ?
+          "B.O.D. members can only cancel their own editable course activities." :
+          "You do not have permission to cancel this event.",
+        color: "danger",
+        timeout: 5000,
+      });
+      return;
+    }
+
+    if (!canEditEventLifecycle(eventStatus)) {
+      addToast({
+        title: "Cancel unavailable",
+        description: "Only upcoming and ongoing events can be cancelled.",
+        color: "warning",
+        timeout: 5000,
+      });
+      return;
+    }
+
+    setCancelEventReason("");
+    setPendingCancelEvent({
+      id: eventToCancel.id,
+      title: String(eventToCancel.title ?? "Event"),
+    });
+  }
+
+  async function confirmCancelEvent() {
+    if (!pendingCancelEvent) return;
+
+    setCancelEventSubmitting(true);
+
+    try {
+      const eventToCancel = events.find((ev) => ev.id === pendingCancelEvent.id);
+      if (!eventToCancel) {
+        throw new Error("The event no longer exists.");
+      }
+
+      if (!canEditEventRecord(eventToCancel)) {
+        throw new Error(
+          viewerIsBod ?
+            "B.O.D. members can only cancel their own editable course activities." :
+            "You do not have permission to cancel this event.",
+        );
+      }
+
+      if (!canEditEventLifecycle(computeStatus(eventToCancel))) {
+        throw new Error("Only upcoming and ongoing events can be cancelled.");
+      }
+
+      const result = await cancelCampusEvent({
+        eventId: eventToCancel.id,
+        reason: cancelEventReason.trim() || undefined,
+      });
+
+      if (editingEventId === eventToCancel.id) {
+        setEditingEventId(null);
+        setShowAddEventForm(false);
+        resetEventComposer();
+      }
+
+      setPendingCancelEvent(null);
+      setCancelEventReason("");
+      await loadEvents();
+      addToast({
+        title: "Event cancelled",
+        description:
+          result.notifiedCount > 0 ?
+            result.notifiedCount === 1 ?
+              `${eventToCancel.title} was cancelled and 1 attendee notification was sent.` :
+              `${eventToCancel.title} was cancelled and ${result.notifiedCount} attendee notifications were sent.` :
+            `${eventToCancel.title} was cancelled.`,
+        color: "success",
+        timeout: 4500,
+      });
+    } catch (error: any) {
+      await logEventPermissionDeniedAttempt(
+        "cancel_event",
+        pendingCancelEvent.id,
+        error,
+      );
+      addToast({
+        title: "Cancellation failed",
+        description: describeCallableError(error, "Failed to cancel event."),
+        color: "danger",
+        timeout: 5500,
+      });
+    } finally {
+      setCancelEventSubmitting(false);
+    }
+  }
+
   const resetNotificationComposer = useCallback(() => {
     setNotifTitle("");
     const nextNotifDate = isoDateToday();
@@ -5786,7 +5916,7 @@ export default function EventDashboard() {
       addToast({
         title: "Access denied",
         description: viewerIsBod ?
-          "B.O.D. members can only edit their own upcoming course activities." :
+          "B.O.D. members can only edit their own editable course activities." :
           "You do not have permission to edit this event.",
         color: "danger",
         timeout: 5000,
@@ -5794,10 +5924,10 @@ export default function EventDashboard() {
       return;
     }
 
-    if (computeStatus(eventToEdit) !== "upcoming") {
+    if (!canEditEventLifecycle(computeStatus(eventToEdit))) {
       addToast({
         title: "Edit unavailable",
-        description: "Only upcoming events can be edited.",
+        description: "Only upcoming and ongoing events can be edited.",
         color: "warning",
         timeout: 5000,
       });
@@ -6046,7 +6176,7 @@ export default function EventDashboard() {
     if (eventBeingEdited && !canEditEventRecord(eventBeingEdited)) {
       return blockSave(
         viewerIsBod ?
-          "B.O.D. members can only edit their own upcoming course activities." :
+          "B.O.D. members can only edit their own editable course activities." :
           "You do not have permission to edit this event.",
       );
     }
@@ -6054,8 +6184,8 @@ export default function EventDashboard() {
     if (isUpdateMode && !location.trim()) {
       return blockSave("Location is required.");
     }
-    if (eventBeingEdited && computeStatus(eventBeingEdited) !== "upcoming") {
-      return blockSave("Only upcoming events can be edited.");
+    if (eventBeingEdited && !canEditEventLifecycle(computeStatus(eventBeingEdited))) {
+      return blockSave("Only upcoming and ongoing events can be edited.");
     }
     if (viewerIsBod && isAllCoursesExplicit) {
       return blockSave(BOD_COURSE_SCOPE_ERROR);
@@ -7760,8 +7890,7 @@ export default function EventDashboard() {
 
           {isEditingEvent && (
             <p className="text-xs text-campus-text-secondary">
-              You can edit all fields for upcoming events, including
-              pre-registration and payment settings.
+              You can edit upcoming and ongoing events. Completed or cancelled events cannot be edited.
             </p>
           )}
 
@@ -7786,6 +7915,22 @@ export default function EventDashboard() {
                   ? "Update Event"
                   : "Save"}
           </Button>
+
+          {isEditingEvent && editingEventRecord && editingEventCancelable && (
+            <div className="space-y-2 pt-2">
+              <Button
+                color="danger"
+                variant="flat"
+                onPress={() => requestCancelEvent(editingEventRecord)}
+                isDisabled={saving || cancelEventSubmitting}
+                className="w-full"
+              >
+                {cancelEventSubmitting && pendingCancelEvent?.id === editingEventRecord.id ?
+                  "Cancelling..." :
+                  "Cancel Event"}
+              </Button>
+            </div>
+          )}
 
           {!roleLoading && !isECUser && (
             <p className="text-xs text-campus-text-secondary">
@@ -8447,6 +8592,7 @@ export default function EventDashboard() {
                       selected === "all" ||
                       selected === "upcoming" ||
                       selected === "ongoing" ||
+                      selected === "cancelled" ||
                       selected === "completed"
                     ) {
                       setStatusFilter(selected);
@@ -8459,6 +8605,7 @@ export default function EventDashboard() {
                   <SelectItem key="all">All Status</SelectItem>
                   <SelectItem key="upcoming">Upcoming</SelectItem>
                   <SelectItem key="ongoing">Ongoing</SelectItem>
+                  <SelectItem key="cancelled">Cancelled</SelectItem>
                   <SelectItem key="completed">Completed</SelectItem>
                 </Select>
 
@@ -8527,6 +8674,8 @@ export default function EventDashboard() {
                   {paginatedEvents.map((ev) => {
                     const liveStatus = computeStatus(ev);
                     const canEditThisEvent = canEditEventRecord(ev);
+                    const canOpenEventEditor =
+                      canEditThisEvent && canEditEventLifecycle(liveStatus);
                     const schedule = getEventScheduleDisplay(ev);
                     const hasSlots =
                       ev.isPreReg && typeof ev.preRegSlots === "number";
@@ -8624,14 +8773,10 @@ export default function EventDashboard() {
                               >
                                 Delete
                               </Button>
-                            ) : (
+                            ) : canOpenEventEditor ? (
                               <Button
                                 size="sm"
-                                variant={
-                                  liveStatus === "upcoming"
-                                    ? "solid"
-                                    : "bordered"
-                                }
+                                variant={liveStatus === "upcoming" ? "solid" : "bordered"}
                                 className={`flex-1 sm:flex-none min-w-[94px] px-4 text-xs font-semibold ${
                                   liveStatus === "upcoming" ? "text-white" : ""
                                 }`}
@@ -8645,16 +8790,14 @@ export default function EventDashboard() {
                                 }
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (liveStatus !== "upcoming") return;
+                                  if (!canEditEventLifecycle(liveStatus)) return;
                                   void handleStartEditUpcomingEvent(ev);
                                 }}
-                                isDisabled={liveStatus !== "upcoming" || !canEditThisEvent}
+                                isDisabled={!canOpenEventEditor}
                               >
-                                {liveStatus === "upcoming"
-                                  ? "Edit"
-                                  : "Edit (later)"}
+                                Edit
                               </Button>
-                            )}
+                            ) : null}
                           </div>
                         </div>
 
@@ -9557,7 +9700,8 @@ export default function EventDashboard() {
                         >
                           Delete
                         </Button>
-                      ) : (
+                      ) : selectedEventStatus &&
+                        canEditEventLifecycle(selectedEventStatus) ? (
                         <Button
                           variant={selectedEventStatus === "upcoming" ? "solid" : "bordered"}
                           className={selectedEventStatus === "upcoming" ? "text-white" : ""}
@@ -9570,14 +9714,14 @@ export default function EventDashboard() {
                               : undefined
                           }
                           onPress={() => {
-                            if (selectedEventStatus !== "upcoming") return;
+                            if (!canEditEventLifecycle(selectedEventStatus)) return;
                             void handleStartEditUpcomingEvent(selectedEvent);
                           }}
-                          isDisabled={selectedEventStatus !== "upcoming" || !selectedEventEditable}
+                          isDisabled={!selectedEventEditable}
                         >
-                          {selectedEventStatus === "upcoming" ? "Edit event" : "Edit later"}
+                          Edit event
                         </Button>
-                      )}
+                      ) : null}
                     </div>
                   </div>
                 </ModalHeader>
@@ -10204,6 +10348,65 @@ export default function EventDashboard() {
                   isLoading={deleteEventSubmitting}
                 >
                   Delete
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      <Modal
+        isOpen={Boolean(pendingCancelEvent)}
+        onOpenChange={(open) => {
+          if (!open && !cancelEventSubmitting) {
+            setPendingCancelEvent(null);
+            setCancelEventReason("");
+          }
+        }}
+        size="md"
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>Cancel event?</ModalHeader>
+              <ModalBody className="space-y-3">
+                <p className="text-base text-campus-text-primary">
+                  This will cancel the event and notify all required attendees.
+                </p>
+                {pendingCancelEvent?.title && (
+                  <p className="text-sm text-campus-text-secondary break-all">
+                    {pendingCancelEvent.title}
+                  </p>
+                )}
+                <Textarea
+                  aria-label="Reason for cancellation"
+                  value={cancelEventReason}
+                  onValueChange={setCancelEventReason}
+                  placeholder="Reason for cancellation (optional)"
+                  minRows={3}
+                  isDisabled={cancelEventSubmitting}
+                />
+              </ModalBody>
+              <ModalFooter className="justify-between">
+                <Button
+                  variant="bordered"
+                  onPress={() => {
+                    setPendingCancelEvent(null);
+                    setCancelEventReason("");
+                    onClose();
+                  }}
+                  isDisabled={cancelEventSubmitting}
+                >
+                  Keep Event
+                </Button>
+                <Button
+                  color="danger"
+                  onPress={() => {
+                    void confirmCancelEvent();
+                  }}
+                  isLoading={cancelEventSubmitting}
+                >
+                  Cancel Event
                 </Button>
               </ModalFooter>
             </>

@@ -184,6 +184,7 @@ type RawEventDoc = {
   startAt: EventScheduleDateInput;
   endAt: EventScheduleDateInput;
   storedStatus: string;
+  cancelled: boolean;
   location: string;
   yearLevel: string;
   course: string;
@@ -885,6 +886,7 @@ export function StudentPortalProvider({
             storedStatus: String(
               (data as { status?: unknown }).status ?? "",
             ).trim(),
+            cancelled: data.cancelled === true,
             location: String(data.location ?? ""),
             yearLevel:
               String(data.yearLevel ?? "").trim() ||
@@ -1406,6 +1408,7 @@ export function StudentPortalProvider({
             startAt: raw.startAt,
             endAt: raw.endAt,
             status: raw.storedStatus,
+            cancelled: raw.cancelled,
           },
           now,
         );
@@ -1429,7 +1432,9 @@ export function StudentPortalProvider({
 
         let status: StudentEventStatus = "Upcoming";
 
-        if (attendanceRaw === "present" || attendanceRaw === "attended") {
+        if (lifecycle === "cancelled") {
+          status = "Cancelled";
+        } else if (attendanceRaw === "present" || attendanceRaw === "attended") {
           status = "Attended";
         } else if (registration?.status === "CANCELLED") {
           status = "Cancelled";
@@ -1539,6 +1544,10 @@ export function StudentPortalProvider({
 
     events.forEach((ev) => {
       const date = ev.eventDate ?? new Date();
+
+      if (ev.status === "Cancelled" || ev.lifecycle === "cancelled") {
+        return;
+      }
 
       if (ev.status === "Upcoming" && ev.lifecycle === "upcoming") {
         pushItem(`event-upcoming:${ev.id}`, {
