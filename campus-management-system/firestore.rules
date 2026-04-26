@@ -728,7 +728,7 @@ service cloud.firestore {
     function eventImageStoragePathMatchesEvent(eventId, data) {
       let storagePath = eventImageStoragePathValue(data);
       return storagePath != "" &&
-        storagePath.matches("^events/" + eventId + "/images/[^/]+$");
+        storagePath.matches("^events/" + eventId + "/images/[^/]+/[^/]+$");
     }
 
     function isAllowedEventImageContentType(contentType) {

@@ -470,6 +470,11 @@ service firebase.storage {
         isAllowedEventImageUploadContentType(fileName, request.resource.contentType);
     }
 
+    function canTeacherUploadVisibleEventFile(eventId) {
+      return canTeacherUploadEventFile(eventId) &&
+        canViewEventData(eventData(eventId));
+    }
+
     function canUsePendingEventFileUpload() {
       return isAdmin() || isRegularEC() || isBOD() || isTeacher();
     }
@@ -577,7 +582,7 @@ service firebase.storage {
       return signedIn() &&
         canUsePendingEventFileUpload() &&
         eventExists(eventId) &&
-        (!isTeacher() || canTeacherUploadEventFile(eventId)) &&
+        (!isTeacher() || canTeacherUploadVisibleEventFile(eventId)) &&
         eventImageDocumentExists(eventId, imageId) &&
         eventImageStatus(eventImageDocumentData(eventId, imageId)) == "pending-upload" &&
         eventImageOwnedByCurrentUser(eventImageDocumentData(eventId, imageId)) &&
@@ -722,7 +727,7 @@ service firebase.storage {
         canUsePendingEventFileUpload() &&
         eventExists(eventId) &&
         !eventIsCancelled(eventId) &&
-        (!isTeacher() || canTeacherUploadEventFile(eventId)) &&
+        (!isTeacher() || canTeacherUploadVisibleEventFile(eventId)) &&
         eventDocumentExists(eventId, docId) &&
         eventDocumentStatus(eventDocumentData(eventId, docId)) == "pending-upload" &&
         eventDocumentOwnedByCurrentUser(eventDocumentData(eventId, docId)) &&
@@ -773,7 +778,12 @@ service firebase.storage {
     match /events/{eventId}/images/{imageId}/{fileName} {
       allow read: if canReadEventImageObject(eventId, imageId, fileName);
 
-      allow create, update: if canEditEventFiles(eventId) ||
+      // Teachers upload only through callable-created pending metadata at
+      // events/{eventId}/images/{imageId}; managers keep their existing path.
+      allow create: if canEditEventFiles(eventId) ||
+        canCreateOrUpdatePendingEventImage(eventId, imageId, fileName);
+
+      allow update: if canEditEventFiles(eventId) ||
         canCreateOrUpdatePendingEventImage(eventId, imageId, fileName);
 
       allow delete: if canEditEventFiles(eventId);
@@ -787,7 +797,12 @@ service firebase.storage {
     match /events/{eventId}/docs/{docId}/{fileName} {
       allow read: if canReadEventDocumentObject(eventId, docId, fileName);
 
-      allow create, update: if canEditEventFiles(eventId) ||
+      // Teachers upload only through callable-created pending metadata at
+      // events/{eventId}/docs/{docId}; delete remains manager-only.
+      allow create: if canEditEventFiles(eventId) ||
+        canCreateOrUpdatePendingEventDocument(eventId, docId, fileName);
+
+      allow update: if canEditEventFiles(eventId) ||
         canCreateOrUpdatePendingEventDocument(eventId, docId, fileName);
 
       allow delete: if canEditEventFiles(eventId);
