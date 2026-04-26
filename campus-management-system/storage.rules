@@ -465,10 +465,14 @@ service firebase.storage {
         );
     }
 
-    function isAllowedEventImageContent(fileName) {
-      return request.resource != null &&
-        request.resource.size <= 10 * 1024 * 1024 &&
-        isAllowedEventImageUploadContentType(fileName, request.resource.contentType);
+    function pendingEventUploadSizeWithinLimit(data) {
+      return data != null &&
+        (
+          data.size is int ||
+          data.size is float
+        ) &&
+        data.size >= 0 &&
+        data.size <= 10 * 1024 * 1024;
     }
 
     function pendingEventUploadOwnedByCurrentUser(data) {
@@ -646,7 +650,7 @@ service firebase.storage {
           eventImageDocumentData(eventId, imageId),
           fileName
         ) &&
-        isAllowedEventImageContent(fileName);
+        pendingEventUploadSizeWithinLimit(eventImageDocumentData(eventId, imageId));
     }
 
     function eventDocumentFileNameHasAllowedExtension(fileName) {
@@ -690,12 +694,6 @@ service firebase.storage {
             )
           )
         );
-    }
-
-    function isAllowedEventDocumentContent(fileName) {
-      return request.resource != null &&
-        request.resource.size <= 10 * 1024 * 1024 &&
-        isAllowedEventDocumentUploadContentType(fileName, request.resource.contentType);
     }
 
     function eventDocumentStatus(data) {
@@ -794,7 +792,7 @@ service firebase.storage {
           eventDocumentData(eventId, docId),
           fileName
         ) &&
-        isAllowedEventDocumentContent(fileName);
+        pendingEventUploadSizeWithinLimit(eventDocumentData(eventId, docId));
     }
 
     match /ec-documents/shared/{docId}/{fileName} {

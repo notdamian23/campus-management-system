@@ -427,6 +427,28 @@ export type CreateEventImageUploadTargetResult = {
   status: "pending-upload";
 };
 
+export type CreateTeacherEventFileUploadUrlPayload = {
+  eventId: string;
+  kind: "image" | "document";
+  fileName: string;
+  contentType: string;
+  size: number;
+};
+
+export type CreateTeacherEventFileUploadUrlResult = {
+  eventId: string;
+  kind: "image" | "document";
+  fileId: string;
+  imageId?: string;
+  docId?: string;
+  storagePath: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+  uploadUrl: string;
+  status: "pending-upload";
+};
+
 export type FinalizeEventDocumentUploadPayload = {
   eventId: string;
   docId: string;
@@ -1169,6 +1191,24 @@ export async function createEventImageUploadTarget(
     CreateEventImageUploadTargetPayload,
     CreateEventImageUploadTargetResult
   >(getCampusFunctions(), "createEventImageUploadTarget");
+
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function createTeacherEventFileUploadUrl(
+  payload: CreateTeacherEventFileUploadUrlPayload,
+): Promise<CreateTeacherEventFileUploadUrlResult> {
+  logAuthEvent("info", "Creating teacher event signed upload URL via callable", {
+    eventId: payload.eventId,
+    kind: payload.kind,
+    size: payload.size,
+  });
+
+  const callable = httpsCallable<
+    CreateTeacherEventFileUploadUrlPayload,
+    CreateTeacherEventFileUploadUrlResult
+  >(getCampusFunctions(), "createTeacherEventFileUploadUrl");
 
   const result = await callable(payload);
   return result.data;

@@ -12,6 +12,8 @@
       "Content-Length",
       "Content-Disposition",
       "x-goog-resumable"
+       "ETag",
+      "x-goog-generation"
     ],
     "maxAgeSeconds": 3600
   }

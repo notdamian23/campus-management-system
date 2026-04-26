@@ -5865,6 +5865,7 @@ const CAMPUS_DOCUMENT_SPREADSHEET_CONTENT_TYPES = new Set([
 ]);
 const CAMPUS_DOCUMENT_SIGNED_UPLOAD_TTL_MS = 10 * 60 * 1000;
 const EVENT_DOCUMENT_SIGNED_DOWNLOAD_TTL_MS = 5 * 60 * 1000;
+const TEACHER_EVENT_FILE_SIGNED_UPLOAD_TTL_MS = 15 * 60 * 1000;
 const EVENT_DOCUMENT_ALLOWED_CONTENT_TYPES = new Set([
   "application/pdf",
   "application/msword",
@@ -5882,6 +5883,7 @@ const EVENT_IMAGE_ALLOWED_EXTENSIONS = new Set([
   "webp",
 ]);
 const FIREBASE_STORAGE_DOWNLOAD_TOKEN_METADATA_KEY = "firebaseStorageDownloadTokens";
+type TeacherEventFileUploadKind = "image" | "document";
 
 type StorageFileMetadata = {
   size?: string | number;
@@ -5992,6 +5994,15 @@ function normalizeCampusDocumentCategory(value: unknown): CampusDocumentCategory
 
 function normalizeCampusDocumentStatus(value: unknown): CampusDocumentStatus {
   return normalizeLower(value) === "pending-upload" ? "pending-upload" : "active";
+}
+
+function normalizeTeacherEventFileUploadKind(
+  value: unknown,
+): TeacherEventFileUploadKind | "" {
+  const normalized = normalizeLower(value);
+  if (normalized === "image") return "image";
+  if (normalized === "document") return "document";
+  return "";
 }
 
 function inferCampusDocumentContentTypeFromFileName(fileName: string): string {
@@ -11137,6 +11148,174 @@ export const createEventImageUploadTarget = onCall({region: REGION}, async (requ
         error instanceof Error ?
           error.message :
           "Failed to create an event image upload target.",
+      );
+    }
+  });
+
+export const createTeacherEventFileUploadUrl = onCall({region: REGION}, async (request) => {
+    try {
+      const actor = await resolveEcActorContext(request, {allowTeacher: true});
+      if (!actor.isTeacher || actor.role !== "teacher") {
+        throw new HttpsError(
+          "permission-denied",
+          "Only teacher accounts can create teacher event upload URLs.",
+        );
+      }
+
+      const body = asRecord(request.data);
+      const eventId = normalizeText(body.eventId);
+      const kind = normalizeTeacherEventFileUploadKind(body.kind);
+
+      if (!eventId) {
+        throw new HttpsError("invalid-argument", "eventId is required.");
+      }
+      if (!kind) {
+        throw new HttpsError(
+          "invalid-argument",
+          "kind must be either image or document.",
+        );
+      }
+
+      const uploadInput = kind === "image" ?
+        validateEventImageUploadInput(body) :
+        validateEventDocumentUploadInput(body);
+      const eventRef = db.doc(`events/${eventId}`);
+      const eventSnapshot = await eventRef.get();
+      if (!eventSnapshot.exists) {
+        throw new HttpsError("not-found", "Event not found.");
+      }
+
+      const eventData = eventSnapshot.data() ?? {};
+      if (isCampusEventCancelled(eventData)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Uploads are disabled for cancelled events.",
+        );
+      }
+
+      const access = resolveEventDocumentAccess(actor, eventData, "read");
+      const logContext = {
+        callerUid: actor.uid,
+        callerRole: normalizeCampusRoleValue(actor.profile.role) || null,
+        eventId,
+        kind,
+        eventOwnerType: access.ownerType,
+        eventCreatedByUid: access.eventCreatedByUid,
+        eventCourseScope: access.eventCourseScope,
+        eventCreatedByCourseScope: access.eventCreatedByCourseScope,
+      };
+
+      functionsLogger.info("createTeacherEventFileUploadUrl access check", logContext);
+
+      if (!access.allowed) {
+        functionsLogger.warn("createTeacherEventFileUploadUrl denied", {
+          ...logContext,
+          deniedReason: access.deniedReason,
+        });
+        throw new HttpsError(
+          "permission-denied",
+          "You do not have permission to view this event.",
+        );
+      }
+
+      const collectionName = kind === "image" ? "images" : "docs";
+      const fileId = eventRef.collection(collectionName).doc().id;
+      const storagePath = kind === "image" ?
+        eventImageStoragePath(eventId, fileId, uploadInput.fileName) :
+        eventDocumentStoragePath(eventId, fileId, uploadInput.fileName);
+      const timestamp = serverTimestamp();
+      const pendingMetadata = {
+        eventId,
+        name: uploadInput.fileName,
+        fileName: uploadInput.fileName,
+        originalName: uploadInput.originalName,
+        path: storagePath,
+        storagePath,
+        contentType: uploadInput.contentType,
+        size: uploadInput.sizeBytes,
+        sizeBytes: uploadInput.sizeBytes,
+        status: "pending-upload",
+        type: kind,
+        uid: actor.uid,
+        uploadedByUid: actor.uid,
+        createdByUid: actor.uid,
+        ownerUid: actor.uid,
+        uploadedBy: actor.uid,
+        createdBy: actor.uid,
+        uploadedByRole: "teacher",
+        role: "teacher",
+        ownerType: access.ownerType,
+        uploadedByName: eventDocumentActorName(actor) || null,
+        uploadedBySchoolId: eventDocumentActorSchoolId(actor) || null,
+        courseScope: access.courseScope,
+        courseScopeSlug: access.courseScopeSlug,
+        createdByCourseScope:
+          access.eventCreatedByCourseScope || access.courseScope,
+        downloadURL: "",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      const pendingRef = eventRef.collection(collectionName).doc(fileId);
+
+      functionsLogger.info("createTeacherEventFileUploadUrl pending metadata write", {
+        ...logContext,
+        fileId,
+        generatedStoragePath: storagePath,
+        pendingMetadata: eventUploadPendingMetadataLog(pendingMetadata),
+      });
+
+      await pendingRef.set(pendingMetadata, {merge: true});
+
+      let uploadUrl = "";
+      try {
+        const [signedUrl] = await admin
+          .storage()
+          .bucket()
+          .file(storagePath)
+          .getSignedUrl({
+            version: "v4",
+            action: "write",
+            expires: Date.now() + TEACHER_EVENT_FILE_SIGNED_UPLOAD_TTL_MS,
+            contentType: uploadInput.contentType,
+          });
+        uploadUrl = signedUrl;
+      } catch (error: unknown) {
+        await pendingRef.delete().catch(() => undefined);
+        throw error;
+      }
+
+      functionsLogger.info("createTeacherEventFileUploadUrl created", {
+        ...logContext,
+        fileId,
+        generatedStoragePath: storagePath,
+        signedUrlCreated: true,
+      });
+
+      const response = {
+        eventId,
+        kind,
+        fileId,
+        storagePath,
+        fileName: uploadInput.fileName,
+        contentType: uploadInput.contentType,
+        size: uploadInput.sizeBytes,
+        uploadUrl,
+        status: "pending-upload" as const,
+      };
+
+      return kind === "image" ?
+        {...response, imageId: fileId} :
+        {...response, docId: fileId};
+    } catch (error) {
+      functionsLogger.error("createTeacherEventFileUploadUrl failed", {error});
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+      throw new HttpsError(
+        "internal",
+        error instanceof Error ?
+          error.message :
+          "Failed to create the teacher event upload URL.",
       );
     }
   });

@@ -58,13 +58,12 @@ import {
 } from "@/lib/attendance-export";
 import { normalizeCourse } from "@/lib/courseOptions";
 import { formatEventScheduleDisplay } from "@/lib/eventSchedule";
-import { auth, db, storage } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
 import {
   cleanupPendingEventDocumentUpload,
   cleanupPendingEventImageUpload,
   createEventDocumentDownloadUrl,
-  createEventDocumentUploadTarget,
-  createEventImageUploadTarget,
+  createTeacherEventFileUploadUrl,
   finalizeEventDocumentUpload,
   finalizeEventImageUpload,
 } from "@/lib/firebase-functions";
@@ -91,13 +90,6 @@ import type {
   TeacherFile,
   TeacherFileKind,
 } from "@/components/teacher/TeacherPortalProvider";
-import {
-  ref,
-  uploadBytesResumable,
-  type UploadMetadata,
-  type StorageReference,
-  type UploadTaskSnapshot,
-} from "firebase/storage";
 
 const EVENTS_PER_PAGE = 6;
 const FILE_PREVIEW_LIMIT = 3;
@@ -133,6 +125,9 @@ type TeacherFileDoc = {
   createdAt?: unknown;
   status?: unknown;
 };
+type TeacherSignedUploadTarget = Awaited<
+  ReturnType<typeof createTeacherEventFileUploadUrl>
+>;
 
 type SelectOption = {
   key: string;
@@ -314,20 +309,57 @@ async function compressImageForUpload(file: File, maxBytes: number) {
   });
 }
 
-async function uploadEventDocumentWithResumable(
-  storageRef: StorageReference,
-  file: File,
-  metadata: UploadMetadata,
-): Promise<UploadTaskSnapshot> {
-  return await new Promise<UploadTaskSnapshot>((resolve, reject) => {
-    const task = uploadBytesResumable(storageRef, file, metadata);
+function teacherSignedUploadFileId(uploadTarget: TeacherSignedUploadTarget) {
+  return uploadTarget.kind === "image" ?
+    uploadTarget.imageId ?? uploadTarget.fileId :
+    uploadTarget.docId ?? uploadTarget.fileId;
+}
 
-    task.on(
-      "state_changed",
-      undefined,
-      (error) => reject(error),
-      () => resolve(task.snapshot),
+async function uploadTeacherEventFileWithSignedUrl(
+  uploadTarget: TeacherSignedUploadTarget,
+  file: File,
+) {
+  const fileId = teacherSignedUploadFileId(uploadTarget);
+  console.log("[TEACHER_FILE_UPLOAD][SIGNED_URL_PUT_START]", {
+    currentAuthUid: auth.currentUser?.uid,
+    eventId: uploadTarget.eventId,
+    kind: uploadTarget.kind,
+    fileId,
+    storagePath: uploadTarget.storagePath,
+    fileName: uploadTarget.fileName,
+    contentType: uploadTarget.contentType,
+    size: file.size,
+  });
+
+  const uploadResponse = await fetch(uploadTarget.uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": uploadTarget.contentType,
+    },
+    body: file,
+  });
+
+  if (!uploadResponse.ok) {
+    const errorBody = await uploadResponse.text().catch(() => "");
+    const errorDetails = errorBody.trim().slice(0, 300);
+    const statusText = uploadResponse.statusText ?
+      ` ${uploadResponse.statusText}` :
+      "";
+    throw new Error(
+      `Signed URL upload failed with HTTP ${uploadResponse.status}${statusText}.` +
+        (errorDetails ? ` ${errorDetails}` : ""),
     );
+  }
+
+  console.log("[TEACHER_FILE_UPLOAD][SIGNED_URL_PUT_SUCCESS]", {
+    currentAuthUid: auth.currentUser?.uid,
+    eventId: uploadTarget.eventId,
+    kind: uploadTarget.kind,
+    fileId,
+    storagePath: uploadTarget.storagePath,
+    contentType: uploadTarget.contentType,
+    size: file.size,
+    status: uploadTarget.status,
   });
 }
 
@@ -931,24 +963,28 @@ export default function TeacherEventsPage() {
     }
 
     const requestedContentType = getEventDocumentContentType(file);
-    let uploadTarget: Awaited<
-      ReturnType<typeof createEventDocumentUploadTarget>
-    > | null = null;
+    let uploadTarget: TeacherSignedUploadTarget | null = null;
 
     try {
-      uploadTarget = await createEventDocumentUploadTarget({
+      uploadTarget = await createTeacherEventFileUploadUrl({
         eventId,
+        kind: "document",
         fileName: file.name,
         contentType: requestedContentType,
         size: file.size,
       });
-      console.log("[TEACHER_FILE_UPLOAD][DOC_TARGET]", {
-        ...uploadTarget,
+      const docId = uploadTarget.docId ?? uploadTarget.fileId;
+      console.log("[TEACHER_FILE_UPLOAD][SIGNED_URL_TARGET]", {
         currentAuthUid: auth.currentUser?.uid,
-        uploadedByUid: uploadTarget.uploadedByUid,
-        createdByUid: uploadTarget.createdByUid,
-        ownerUid: uploadTarget.ownerUid,
-        uploadedByRole: uploadTarget.uploadedByRole,
+        eventId,
+        targetEventId: uploadTarget.eventId,
+        kind: uploadTarget.kind,
+        fileId: uploadTarget.fileId,
+        docId,
+        storagePath: uploadTarget.storagePath,
+        fileName: uploadTarget.fileName,
+        contentType: uploadTarget.contentType,
+        size: uploadTarget.size,
         status: uploadTarget.status,
       });
 
@@ -957,46 +993,40 @@ export default function TeacherEventsPage() {
         requestedContentType ||
         String(file.type ?? "").trim().toLowerCase() ||
         getEventDocumentContentType(file);
-      const uploadMetadata: UploadMetadata = {
-        contentType: uploadType,
-        customMetadata: {
-          uploadedByRole: "teacher",
-          eventId,
-          docId: uploadTarget.docId,
-        },
-      };
 
-      console.log("[TEACHER_FILE_UPLOAD][DOC_UPLOAD]", {
-        currentAuthUid: auth.currentUser?.uid,
+      await uploadTeacherEventFileWithSignedUrl(uploadTarget, file);
+
+      console.log("[TEACHER_FILE_UPLOAD][FINALIZE_START]", {
         eventId,
-        targetEventId: uploadTarget.eventId,
-        docId: uploadTarget.docId,
+        kind: uploadTarget.kind,
+        fileId: uploadTarget.fileId,
+        docId,
         storagePath: uploadTarget.storagePath,
-        targetContentType: uploadTarget.contentType,
-        metadataContentType: uploadMetadata.contentType,
-        fileName: file.name,
-        fileType: file.type,
-        size: file.size,
-        role: profile?.role,
+        contentType: uploadType,
+        size: uploadTarget.size || file.size,
       });
 
-      await uploadEventDocumentWithResumable(
-        ref(storage, uploadTarget.storagePath),
-        file,
-        uploadMetadata,
-      );
-
-      await finalizeEventDocumentUpload({
+      const finalizedUpload = await finalizeEventDocumentUpload({
         eventId,
-        docId: uploadTarget.docId,
+        docId,
         size: uploadTarget.size || file.size,
         contentType: uploadType,
+      });
+      console.log("[TEACHER_FILE_UPLOAD][FINALIZE_SUCCESS]", {
+        eventId,
+        kind: uploadTarget.kind,
+        fileId: uploadTarget.fileId,
+        docId,
+        storagePath: finalizedUpload.storagePath,
+        contentType: finalizedUpload.contentType,
+        size: finalizedUpload.size,
+        status: finalizedUpload.status,
       });
     } catch (error) {
       if (uploadTarget) {
         await cleanupPendingEventDocumentUpload({
           eventId,
-          docId: uploadTarget.docId,
+          docId: uploadTarget.docId ?? uploadTarget.fileId,
         }).catch(() => undefined);
       }
 
@@ -1028,71 +1058,52 @@ export default function TeacherEventsPage() {
       type: uploadType,
       lastModified: Date.now(),
     });
-    let uploadTarget: Awaited<
-      ReturnType<typeof createEventImageUploadTarget>
-    > | null = null;
+    let uploadTarget: TeacherSignedUploadTarget | null = null;
 
     try {
-      uploadTarget = await createEventImageUploadTarget({
+      uploadTarget = await createTeacherEventFileUploadUrl({
         eventId,
+        kind: "image",
         fileName: uploadFile.name,
         contentType: uploadType,
         size: uploadFile.size,
       });
-      console.log("[TEACHER_FILE_UPLOAD][IMAGE_TARGET]", {
+      const imageId = uploadTarget.imageId ?? uploadTarget.fileId;
+      console.log("[TEACHER_FILE_UPLOAD][SIGNED_URL_TARGET]", {
+        currentAuthUid: auth.currentUser?.uid,
         eventId,
-        imageId: uploadTarget.imageId,
+        targetEventId: uploadTarget.eventId,
+        kind: uploadTarget.kind,
+        fileId: uploadTarget.fileId,
+        imageId,
         storagePath: uploadTarget.storagePath,
         fileName: uploadTarget.fileName,
         contentType: uploadTarget.contentType,
         size: uploadTarget.size,
-        uid: auth.currentUser?.uid,
-        targetUid: uploadTarget.uid,
-        uploadedByUid: uploadTarget.uploadedByUid,
-        createdByUid: uploadTarget.createdByUid,
-        ownerUid: uploadTarget.ownerUid,
-        uploadedByRole: uploadTarget.uploadedByRole,
         status: uploadTarget.status,
         role: profile?.role,
       });
 
-      const uploadMetadata: UploadMetadata = {
-        contentType: uploadTarget.contentType || uploadType,
-        customMetadata: {
-          uploadedByRole: "teacher",
-          eventId,
-          imageId: uploadTarget.imageId,
-        },
-      };
+      await uploadTeacherEventFileWithSignedUrl(uploadTarget, uploadFile);
 
-      console.log("[TEACHER_FILE_UPLOAD][IMAGE_UPLOAD]", {
-        currentAuthUid: auth.currentUser?.uid,
+      console.log("[TEACHER_FILE_UPLOAD][FINALIZE_START]", {
         eventId,
-        targetEventId: uploadTarget.eventId,
-        imageId: uploadTarget.imageId,
+        kind: uploadTarget.kind,
+        fileId: uploadTarget.fileId,
+        imageId,
         storagePath: uploadTarget.storagePath,
-        targetContentType: uploadTarget.contentType,
-        metadataContentType: uploadMetadata.contentType,
-        fileName: uploadFile.name,
-        originalType: file.type,
-        fileType: uploadFile.type,
-        size: uploadFile.size,
-        role: profile?.role,
+        contentType: uploadTarget.contentType || uploadType,
+        size: uploadTarget.size || uploadFile.size,
       });
-
-      await uploadEventDocumentWithResumable(
-        ref(storage, uploadTarget.storagePath),
-        uploadFile,
-        uploadMetadata,
-      );
-
       const finalizedUpload = await finalizeEventImageUpload({
         eventId,
-        imageId: uploadTarget.imageId,
+        imageId,
       });
-      console.log("[TEACHER_FILE_UPLOAD][IMAGE_FINALIZE]", {
+      console.log("[TEACHER_FILE_UPLOAD][FINALIZE_SUCCESS]", {
         eventId,
-        imageId: uploadTarget.imageId,
+        kind: uploadTarget.kind,
+        fileId: uploadTarget.fileId,
+        imageId,
         storagePath: finalizedUpload.storagePath,
         contentType: finalizedUpload.contentType,
         size: finalizedUpload.size,
@@ -1102,7 +1113,7 @@ export default function TeacherEventsPage() {
       if (uploadTarget) {
         await cleanupPendingEventImageUpload({
           eventId,
-          imageId: uploadTarget.imageId,
+          imageId: uploadTarget.imageId ?? uploadTarget.fileId,
         }).catch(() => undefined);
       }
 
