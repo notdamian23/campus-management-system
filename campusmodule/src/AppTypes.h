@@ -152,6 +152,7 @@ struct SyncItemResult {
   String recordId;
   String status;
   String message;
+  String reason;
 };
 
 enum class FingerprintOwnershipState : uint8_t {

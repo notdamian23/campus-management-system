@@ -113,6 +113,24 @@ bool AttendanceManager::canStartTimeIn(const EventInfo &event) const {
   return now.epoch >= eventStartEpoch;
 }
 
+bool AttendanceManager::hasEventEnded(const EventInfo &event) const {
+  if (!event.isValid() || event.date.isEmpty() || event.scheduledTimeEnd.isEmpty()) {
+    return false;
+  }
+
+  const TimeSnapshot now = clock_.now();
+  if (!now.valid) {
+    return false;
+  }
+
+  uint64_t eventEndEpoch = 0;
+  if (!parseEventDateTime(event.date, event.scheduledTimeEnd, eventEndEpoch)) {
+    return false;
+  }
+
+  return now.epoch >= eventEndEpoch;
+}
+
 bool AttendanceManager::canStudentTimeIn(const String &studentId,
                                          const String &eventId,
                                          String &message) const {
@@ -217,6 +235,11 @@ AttendanceOutcome AttendanceManager::saveAttendanceAction(
   AttendanceRecord existing;
   const bool foundExisting =
       storage_.findAttendanceRecord(event.eventId, student.studentUid, existing);
+  if (action == AttendanceAction::TimeIn &&
+      (!foundExisting || !existing.hasTimeIn()) && hasEventEnded(event)) {
+    message = "TIME IN closed";
+    return AttendanceOutcome::TimeInClosed;
+  }
   record = foundExisting ? existing : AttendanceRecord{};
 
   const TimeSnapshot timestamp = clock_.now();

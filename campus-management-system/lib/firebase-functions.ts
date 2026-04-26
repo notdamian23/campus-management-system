@@ -500,6 +500,7 @@ export type DeleteCampusEventPayload = {
 };
 
 export type DeleteCampusEventResult = {
+  success: true;
   eventId: string;
   deleted: boolean;
   linkedPaymentDeleted?: boolean;

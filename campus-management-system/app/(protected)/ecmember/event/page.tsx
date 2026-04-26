@@ -853,6 +853,10 @@ function canEditEventLifecycle(status: EventStatus | null | undefined) {
   return status === "upcoming" || status === "ongoing";
 }
 
+function canDeleteEventLifecycle(status: EventStatus | null | undefined) {
+  return status === "cancelled";
+}
+
 type TimeParts = { hour: number; minute: number; ampm: "AM" | "PM" };
 
 function to12hParts(time24: string): TimeParts {
@@ -4949,67 +4953,7 @@ export default function EventDashboard() {
     }
   }
 
-  async function deleteDocsInChunks(
-    docs: QueryDocumentSnapshot<DocumentData>[],
-  ) {
-    if (docs.length === 0) return;
-
-    const chunkSize = 400;
-    for (let i = 0; i < docs.length; i += chunkSize) {
-      const chunk = docs.slice(i, i + chunkSize);
-      const batch = writeBatch(db);
-      chunk.forEach((snap) => {
-        batch.delete(snap.ref);
-      });
-      await batch.commit();
-    }
-  }
-
-  async function deleteCompletedEventById(eventId: string) {
-    const [imagesSnap, docsSnap, attendanceSnap, registrationsSnap] =
-      await Promise.all([
-        getDocs(collection(db, "events", eventId, "images")),
-        getDocs(collection(db, "events", eventId, "docs")),
-        getDocs(collection(db, "events", eventId, "attendance")),
-        getDocs(collection(db, "events", eventId, "registrations")),
-      ]);
-
-    const storagePaths = [...imagesSnap.docs, ...docsSnap.docs]
-      .map((snap) => String(snap.data()?.path ?? "").trim())
-      .filter(Boolean);
-
-    const storageDeletionResults = await Promise.allSettled(
-      storagePaths.map(async (path) => {
-        try {
-          await deleteObject(ref(storage, path));
-        } catch (error: any) {
-          const code = String(error?.code ?? "");
-          if (code !== "storage/object-not-found") {
-            throw error;
-          }
-        }
-      }),
-    );
-
-    const storageDeleteFailed = storageDeletionResults.some(
-      (result) => result.status === "rejected",
-    );
-    if (storageDeleteFailed) {
-      ecEventsLogger.warn("Some event files could not be removed from storage.", {
-        eventId,
-      });
-    }
-
-    await deleteDocsInChunks([
-      ...imagesSnap.docs,
-      ...docsSnap.docs,
-      ...attendanceSnap.docs,
-      ...registrationsSnap.docs,
-    ]);
-    await deleteDoc(doc(db, "events", eventId));
-  }
-
-  function requestDeleteCompletedEvent(eventToDelete: EventDoc) {
+  function requestDeleteCancelledEvent(eventToDelete: EventDoc) {
     if (roleLoading) {
       addToast({
         title: "Please wait",
@@ -5020,22 +4964,22 @@ export default function EventDashboard() {
       return;
     }
 
-    if (!isECUser || !canEditEventRecord(eventToDelete)) {
+    if (!canEditEventRecord(eventToDelete)) {
       addToast({
         title: "Access denied",
         description: viewerIsBod ?
-          "B.O.D. members can only delete their own completed course activities." :
-          "Only editable events can be deleted.",
+          "B.O.D. members can only delete their own cancelled course activities." :
+          "You do not have permission to delete this event.",
         color: "danger",
         timeout: 5000,
       });
       return;
     }
 
-    if (computeStatus(eventToDelete) !== "completed") {
+    if (!canDeleteEventLifecycle(computeStatus(eventToDelete))) {
       addToast({
         title: "Delete unavailable",
-        description: "Only completed events can be deleted.",
+        description: "Only cancelled events can be deleted.",
         color: "warning",
         timeout: 5000,
       });
@@ -5048,7 +4992,7 @@ export default function EventDashboard() {
     });
   }
 
-  async function confirmDeleteCompletedEvent() {
+  async function confirmDeleteCancelledEvent() {
     if (!pendingDeleteEvent) return;
 
     setDeleteEventSubmitting(true);
@@ -5056,65 +5000,62 @@ export default function EventDashboard() {
     try {
       const eventToDelete = events.find(
         (ev) => ev.id === pendingDeleteEvent.id,
-      );
-      if (!eventToDelete) {
-        throw new Error("The event no longer exists.");
+      ) ?? null;
+
+      if (
+        eventToDelete &&
+        !canDeleteEventLifecycle(computeStatus(eventToDelete))
+      ) {
+        throw new Error("Only cancelled events can be deleted.");
       }
 
-      if (computeStatus(eventToDelete) !== "completed") {
-        throw new Error("Only completed events can be deleted.");
-      }
-
-      if (!canEditEventRecord(eventToDelete)) {
+      if (eventToDelete && !canEditEventRecord(eventToDelete)) {
         throw new Error(
           viewerIsBod ?
-            "B.O.D. members can only delete their own completed course activities." :
+            "B.O.D. members can only delete their own cancelled course activities." :
             "You do not have permission to delete this event.",
         );
       }
 
-      if (viewerIsBod) {
-        await deleteCampusEvent({ eventId: eventToDelete.id });
-      } else {
-        await deleteCompletedEventById(eventToDelete.id);
-      }
+      const deletedEventId = pendingDeleteEvent.id;
+      await deleteCampusEvent({ eventId: deletedEventId });
 
-      if (expandedEventId === eventToDelete.id) {
+      if (expandedEventId === deletedEventId) {
         setExpandedEventId(null);
       }
 
-      if (editingEventId === eventToDelete.id) {
+      if (editingEventId === deletedEventId) {
         setEditingEventId(null);
         setShowAddEventForm(false);
         resetEventComposer();
       }
 
-      if (viewAllFilesModal.eventId === eventToDelete.id) {
+      if (viewAllFilesModal.eventId === deletedEventId) {
         closeViewAllFilesModal();
       }
 
       setEventImages((prev) => {
-        if (!(eventToDelete.id in prev)) return prev;
+        if (!(deletedEventId in prev)) return prev;
         const next = { ...prev };
-        delete next[eventToDelete.id];
+        delete next[deletedEventId];
         return next;
       });
       setEventDocs((prev) => {
-        if (!(eventToDelete.id in prev)) return prev;
+        if (!(deletedEventId in prev)) return prev;
         const next = { ...prev };
-        delete next[eventToDelete.id];
+        delete next[deletedEventId];
         return next;
       });
       setEventRegistrations((prev) => {
-        if (!(eventToDelete.id in prev)) return prev;
+        if (!(deletedEventId in prev)) return prev;
         const next = { ...prev };
-        delete next[eventToDelete.id];
+        delete next[deletedEventId];
         return next;
       });
       setEventAttendance((prev) => {
-        if (!(eventToDelete.id in prev)) return prev;
+        if (!(deletedEventId in prev)) return prev;
         const next = { ...prev };
-        delete next[eventToDelete.id];
+        delete next[deletedEventId];
         return next;
       });
 
@@ -5122,7 +5063,7 @@ export default function EventDashboard() {
       await loadEvents();
       addToast({
         title: "Event deleted",
-        description: `${eventToDelete.title} was removed.`,
+        description: "Cancelled event deleted.",
         color: "success",
         timeout: 3500,
       });
@@ -5132,10 +5073,12 @@ export default function EventDashboard() {
         pendingDeleteEvent.id,
         error,
       );
-      const message = error?.message || "Failed to delete event.";
       addToast({
         title: "Delete failed",
-        description: message,
+        description: describeCallableError(
+          error,
+          "Failed to delete cancelled event.",
+        ),
         color: "danger",
         timeout: 5500,
       });
@@ -8759,7 +8702,7 @@ export default function EventDashboard() {
                             >
                               {isEventExpanded ? "Hide details" : "Open event"}
                             </Button>
-                            {liveStatus === "completed" ? (
+                            {liveStatus === "cancelled" && canEditThisEvent ? (
                               <Button
                                 size="sm"
                                 color="danger"
@@ -8767,9 +8710,8 @@ export default function EventDashboard() {
                                 className="flex-1 sm:flex-none min-w-[94px] px-4 text-xs font-semibold"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  requestDeleteCompletedEvent(ev);
+                                  requestDeleteCancelledEvent(ev);
                                 }}
-                                isDisabled={!canEditThisEvent}
                               >
                                 Delete
                               </Button>
@@ -9691,14 +9633,13 @@ export default function EventDashboard() {
                       >
                         Hide details
                       </Button>
-                      {selectedEventStatus === "completed" ? (
+                      {selectedEventStatus === "cancelled" && selectedEventEditable ? (
                         <Button
                           color="danger"
                           variant="flat"
-                          onPress={() => requestDeleteCompletedEvent(selectedEvent)}
-                          isDisabled={!selectedEventEditable}
+                          onPress={() => requestDeleteCancelledEvent(selectedEvent)}
                         >
-                          Delete
+                          Delete Event
                         </Button>
                       ) : selectedEventStatus &&
                         canEditEventLifecycle(selectedEventStatus) ? (
@@ -10318,10 +10259,10 @@ export default function EventDashboard() {
         <ModalContent>
           {(onClose) => (
             <>
-              <ModalHeader>Delete Event</ModalHeader>
+              <ModalHeader>Delete cancelled event?</ModalHeader>
               <ModalBody className="space-y-2">
                 <p className="text-base text-campus-text-primary">
-                  Are you sure you want to delete this event?
+                  This will permanently remove the cancelled event. This action cannot be undone.
                 </p>
                 {pendingDeleteEvent?.title && (
                   <p className="text-sm text-campus-text-secondary break-all">
@@ -10338,16 +10279,16 @@ export default function EventDashboard() {
                   }}
                   isDisabled={deleteEventSubmitting}
                 >
-                  Cancel
+                  Keep Event
                 </Button>
                 <Button
                   color="danger"
                   onPress={() => {
-                    void confirmDeleteCompletedEvent();
+                    void confirmDeleteCancelledEvent();
                   }}
                   isLoading={deleteEventSubmitting}
                 >
-                  Delete
+                  Delete Event
                 </Button>
               </ModalFooter>
             </>

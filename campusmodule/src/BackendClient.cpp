@@ -1706,6 +1706,7 @@ bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
       result.recordId = String(item["recordId"] | "");
       result.status = String(item["status"] | "");
       result.message = String(item["message"] | "");
+      result.reason = String(item["reason"] | "");
       if (!result.recordId.isEmpty()) {
         results.push_back(result);
       }

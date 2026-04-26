@@ -774,6 +774,10 @@ void showTimeInBlockedMessage(const EventInfo &event) {
                    startsAt);
 }
 
+void showTimeInClosedMessage() {
+  showTimedMessage("TIME IN closed", "Event already", kLongMessageMs, "ended");
+}
+
 void resetPairedEventState() {
   g_pairedEvent = EventInfo{};
   g_cachedPairedStudents.clear();
@@ -2261,8 +2265,9 @@ void tickSync() {
       bool batchHasFailure = false;
       String batchError;
       for (const auto &result : results) {
-        Serial.printf("[SYNC][ATTEND] result record=%s status=%s message=%s\n",
+        Serial.printf("[SYNC][ATTEND] result record=%s status=%s reason=%s message=%s\n",
                       result.recordId.c_str(), result.status.c_str(),
+                      result.reason.c_str(),
                       result.message.c_str());
         if (result.status == "uploaded") {
           ++g_sync.attendanceUploads;
@@ -3030,6 +3035,17 @@ void handleAttendanceLoop() {
   }
   g_lastAttendancePollAt = now;
 
+  if (!isTimeOutMode() && isPastEventEndTime(g_pairedEvent)) {
+    Serial.printf("[ATTEND] TIME IN closed during scan date=%s end=%s\n",
+                  g_pairedEvent.date.c_str(),
+                  g_pairedEvent.scheduledTimeEnd.c_str());
+    showTimeInClosedMessage();
+    g_feedback.warning();
+    g_attendanceCaptureMode = AttendanceCaptureMode::None;
+    setScreen(AppScreen::AttendanceMenu);
+    return;
+  }
+
   const FingerprintMatch match = g_fingerprint.scanOnce();
   if (match.status == FingerprintScanStatus::NoFinger) {
     setFingerprintState("idle");
@@ -3191,6 +3207,12 @@ void handleAttendanceLoop() {
         student.studentUid.c_str(), g_pairedEvent.date.c_str(),
         g_pairedEvent.scheduledTime.c_str());
     showTimeInBlockedMessage(g_pairedEvent);
+    g_feedback.warning();
+  } else if (outcome == AttendanceOutcome::TimeInClosed) {
+    Serial.printf("[ATTEND] TIME IN closed after event end student=%s date=%s end=%s\n",
+                  student.studentUid.c_str(), g_pairedEvent.date.c_str(),
+                  g_pairedEvent.scheduledTimeEnd.c_str());
+    showTimeInClosedMessage();
     g_feedback.warning();
   } else if (outcome == AttendanceOutcome::DuplicateTimeIn) {
     Serial.println("[ATTEND] TIME IN already recorded");
@@ -3696,6 +3718,15 @@ void handleAttendanceMenuAction(ButtonAction action) {
                     g_pairedEvent.date.c_str(),
                     g_pairedEvent.scheduledTime.c_str());
       showTimeInBlockedMessage(g_pairedEvent);
+      g_feedback.warning();
+      return;
+    }
+
+    if (isPastEventEndTime(g_pairedEvent)) {
+      Serial.printf("[ATTEND] TIME IN closed after event end date=%s end=%s\n",
+                    g_pairedEvent.date.c_str(),
+                    g_pairedEvent.scheduledTimeEnd.c_str());
+      showTimeInClosedMessage();
       g_feedback.warning();
       return;
     }

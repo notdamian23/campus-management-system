@@ -11644,29 +11644,22 @@ export const deleteCampusEvent = onCall({region: REGION}, async (request) => {
     const eventRef = db.doc(`events/${eventId}`);
     const eventSnapshot = await eventRef.get();
     if (!eventSnapshot.exists) {
-      throw new HttpsError("not-found", "Event not found.");
+      return {
+        success: true,
+        deleted: false,
+        eventId,
+        linkedPaymentDeleted: false,
+      };
     }
 
     const eventData = eventSnapshot.data() ?? {};
-    const ownerType = eventOwnerType(eventData);
-    const scopedCourse = eventCourseScope(eventData);
-    const createdByUid = eventCreatedByUid(eventData);
-    const createdByCourseScope =
-      normalizeCourseLabel(eventData.createdByCourseScope) || scopedCourse;
+    assertCanManageCampusEvent(actor, eventData, "delete");
 
-    if (actor.isBod) {
-      if (
-        ownerType !== "bod" ||
-        !actor.courseScope ||
-        createdByUid !== actor.uid ||
-        scopedCourse !== actor.courseScope ||
-        createdByCourseScope !== actor.courseScope
-      ) {
-        throw new HttpsError(
-          "permission-denied",
-          "B.O.D. members can only delete their own B.O.D.-created events.",
-        );
-      }
+    if (resolveCampusEventLifecycle(eventData) !== "cancelled") {
+      throw new HttpsError(
+        "failed-precondition",
+        "Only cancelled events can be deleted.",
+      );
     }
 
     const [imagesSnapshot, docsSnapshot, attendanceSnapshot, registrationsSnapshot] =
@@ -11688,12 +11681,13 @@ export const deleteCampusEvent = onCall({region: REGION}, async (request) => {
       normalizeText(eventData.linkedPaymentId) ||
       normalizeText(eventData.requiredPaymentId);
 
-    if (actor.isBod && actor.courseScope && linkedPaymentId) {
+    if (linkedPaymentId) {
       const paymentRef = db.doc(`payments/${linkedPaymentId}`);
       const paymentSnapshot = await paymentRef.get();
 
       if (paymentSnapshot.exists) {
         const paymentData = paymentSnapshot.data() ?? {};
+        const linkedEventId = paymentLinkedEventId(paymentData);
         const paymentOwner = paymentOwnerType(paymentData);
         const paymentScopedCourse = paymentCourseScope(paymentData);
         const paymentCourse = paymentCourseValue(paymentData);
@@ -11705,8 +11699,23 @@ export const deleteCampusEvent = onCall({region: REGION}, async (request) => {
           paymentScopedCourse === actor.courseScope &&
           paymentCreatedByScope === actor.courseScope &&
           paymentCourse === actor.courseScope;
+        const canDeleteLinkedPayment =
+          linkedEventId === eventId &&
+          (
+            actor.isAdmin ||
+            actor.isRegularEc ||
+            (
+              actor.isBod &&
+              Boolean(actor.courseScope) &&
+              paymentCreatedBy === actor.uid &&
+              paymentScopedCourse === actor.courseScope &&
+              paymentCreatedByScope === actor.courseScope &&
+              paymentCourse === actor.courseScope &&
+              (paymentOwner === "bod" || isLegacyBodPayment)
+            )
+          );
 
-        if (paymentOwner === "bod" || isLegacyBodPayment) {
+        if (canDeleteLinkedPayment) {
           const paymentStudentsSnapshot = await paymentRef.collection("students").get();
           await deleteSnapshotDocumentsInBatches(paymentStudentsSnapshot);
           await paymentRef.delete();
@@ -11723,6 +11732,7 @@ export const deleteCampusEvent = onCall({region: REGION}, async (request) => {
     await eventRef.delete();
 
     return {
+      success: true,
       deleted: true,
       eventId,
       linkedPaymentDeleted,
@@ -13978,7 +13988,7 @@ function resolveCampusEventLifecycle(
 function assertCanManageCampusEvent(
   actor: EcActorContext,
   eventData: FirebaseFirestore.DocumentData,
-  action: "update" | "cancel",
+  action: "update" | "cancel" | "delete",
 ): void {
   if (actor.isAdmin || actor.isRegularEc) {
     return;
@@ -13991,7 +14001,10 @@ function assertCanManageCampusEvent(
     );
   }
 
-  const actionVerb = action === "cancel" ? "cancel" : "update";
+  const actionVerb =
+    action === "cancel" ? "cancel" :
+      action === "delete" ? "delete" :
+        "update";
   const existingEventOwnerType =
     normalizeLower(eventData.ownerType) === "bod" ? "bod" : "ec";
   const existingEventCourseScope =

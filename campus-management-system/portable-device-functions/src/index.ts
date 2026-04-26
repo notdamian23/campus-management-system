@@ -216,6 +216,13 @@ type DeviceHandler = (
   device: DeviceContext
 ) => Promise<void>;
 
+type AttendanceSyncResult = {
+  recordId: string;
+  status: AttendanceResponseStatus;
+  message: string;
+  reason?: string;
+};
+
 class ApiError extends Error {
   status: number;
 
@@ -2147,6 +2154,108 @@ async function getEventSummary(eventId: string): Promise<PortableEventSummary> {
   return event;
 }
 
+async function getNonCancelledEventSummary(
+  eventId: string
+): Promise<PortableEventSummary> {
+  const ref = db.doc(`events/${eventId}`);
+  const snap = await ref.get();
+  if (!snap.exists) {
+    throw new ApiError(404, "Event not found.");
+  }
+
+  const data = snap.data() ?? {};
+  deviceLogger.info(
+    "Portable device raw Firestore event fields",
+    rawEventAudienceLogFields(snap.id, data)
+  );
+  const event = eventSummaryFromSnapshot(snap);
+  if (event.cancelled) {
+    throw new ApiError(400, "Event was cancelled.");
+  }
+
+  return event;
+}
+
+function isCompletedEventForAttendanceSync(event: PortableEventSummary): boolean {
+  const status = normalizeLower(event.status);
+  return status === "completed" || status === "archived" || hasEventEnded(event);
+}
+
+function attendanceSyncEventStatus(event?: PortableEventSummary | null): string {
+  if (!event) {
+    return "unknown";
+  }
+
+  const status = normalizeLower(event.status);
+  if (status) {
+    return status;
+  }
+  if (event.cancelled) {
+    return "cancelled";
+  }
+  return isCompletedEventForAttendanceSync(event) ? "completed" : "ongoing";
+}
+
+function attendanceSyncSuccessReason(
+  event: PortableEventSummary,
+  pairedEventId: string,
+  isDuplicate = false
+): string {
+  if (!pairedEventId || pairedEventId !== event.eventId) {
+    return "offline_record_sync_allowed";
+  }
+  if (isCompletedEventForAttendanceSync(event)) {
+    return "completed_event_offline_sync_allowed";
+  }
+  return isDuplicate ? "attendance_already_up_to_date" : "attendance_synced";
+}
+
+function logAttendanceSyncDecision(params: {
+  eventId: string;
+  recordId: string;
+  decision: AttendanceResponseStatus;
+  reason: string;
+  event?: PortableEventSummary | null;
+  studentId?: string;
+  schoolId?: string;
+  deviceId?: string;
+  pairedEventId?: string;
+  message?: string;
+}) {
+  const eventStatus = attendanceSyncEventStatus(params.event);
+  const cancelled = params.event?.cancelled === true;
+  const logLine =
+    `[DEVICE][ATTENDANCE_SYNC] eventId=${params.eventId || "-"} ` +
+    `recordId=${params.recordId || "-"} deviceId=${params.deviceId || "-"} ` +
+    `pairedEventId=${params.pairedEventId || "-"} status=${eventStatus} ` +
+    `cancelled=${cancelled ? "true" : "false"} ` +
+    `decision=${params.decision} reason=${params.reason || "unspecified"}`;
+  const logFields = {
+    eventId: params.eventId,
+    recordId: params.recordId,
+    eventStatus,
+    cancelled,
+    decision: params.decision,
+    reason: params.reason,
+    studentId: params.studentId ?? "",
+    schoolId: params.schoolId ?? "",
+    deviceId: params.deviceId ?? "",
+    pairedEventId: params.pairedEventId ?? "",
+    message: params.message ?? "",
+  };
+
+  if (params.decision === "failed") {
+    deviceLogger.error(logLine, logFields);
+    return;
+  }
+  if (params.decision === "rejected") {
+    deviceLogger.warn(logLine, logFields);
+    return;
+  }
+
+  deviceLogger.info(logLine, logFields);
+}
+
 async function loadDocsById(
   collectionName: string,
   ids: string[]
@@ -2465,7 +2574,7 @@ function mapStudentContext(
 }
 
 async function buildEventContext(eventId: string) {
-  const event = await getEventSummary(eventId);
+  const event = await getNonCancelledEventSummary(eventId);
   const authorizedStudents = await resolveAuthorizedStudentIds(eventId, event);
   const studentIds = Array.from(authorizedStudents.keys());
   const [profilesById, studentRecordsById, attendanceSnap] = await Promise.all([
@@ -3538,7 +3647,7 @@ async function findStudentRegistrationStatusForEvent(
 async function syncAttendanceRecord(
   device: DeviceContext,
   record: Record<string, unknown>
-): Promise<{recordId: string; status: AttendanceResponseStatus; message: string}> {
+): Promise<AttendanceSyncResult> {
   const eventId = normalizeText(record.eventId);
   const studentId =
     normalizeText(record.studentId) ||
@@ -3559,49 +3668,67 @@ async function syncAttendanceRecord(
     normalizeText(record.recordId) ||
     buildAttendanceRecordId(eventId, studentId, schoolId, attendanceType);
   const requestDeviceId = rawDeviceId || device.deviceId;
+  const pairedEventId = normalizeText(device.pairingData?.eventId);
+  const buildResult = (
+    status: AttendanceResponseStatus,
+    message: string,
+    reason = "",
+    eventSummary?: PortableEventSummary | null
+  ): AttendanceSyncResult => {
+    logAttendanceSyncDecision({
+      eventId,
+      recordId,
+      decision: status,
+      reason,
+      event: eventSummary,
+      studentId,
+      schoolId,
+      deviceId: device.deviceId,
+      pairedEventId,
+      message,
+    });
+    return {
+      recordId,
+      status,
+      message,
+      ...(reason ? {reason} : {}),
+    };
+  };
 
   if (!recordId) {
-    return {recordId: "", status: "failed", message: "recordId is required."};
+    return buildResult("failed", "recordId is required.", "missing_record_id");
   }
 
   if (!eventId) {
-    return {
-      recordId,
-      status: "failed",
-      message: "eventId is required.",
-    };
+    return buildResult("failed", "eventId is required.", "missing_event_id");
   }
 
   if (!studentId || !schoolId) {
-    return {
-      recordId,
-      status: "failed",
-      message: "studentId and schoolId are required.",
-    };
+    return buildResult(
+      "failed",
+      "studentId and schoolId are required.",
+      "missing_student_identity"
+    );
   }
 
   if (!attendanceType) {
-    return {
-      recordId,
-      status: "failed",
-      message: "attendanceType or attendance time data is required.",
-    };
+    return buildResult(
+      "failed",
+      "attendanceType or attendance time data is required.",
+      "missing_attendance_type"
+    );
   }
 
   if (!rawDeviceId) {
-    return {
-      recordId,
-      status: "failed",
-      message: "deviceId is required.",
-    };
+    return buildResult("failed", "deviceId is required.", "missing_device_id");
   }
 
   if (requestDeviceId !== device.deviceId) {
-    return {
-      recordId,
-      status: "failed",
-      message: "deviceId does not match the authenticated device.",
-    };
+    return buildResult(
+      "rejected",
+      "Attendance record was captured by another device.",
+      "device_mismatch"
+    );
   }
 
   const hasRecordedTimestamp =
@@ -3610,38 +3737,29 @@ async function syncAttendanceRecord(
     incomingTimeIn.hasValue ||
     incomingTimeOut.hasValue;
   if (!hasRecordedTimestamp) {
-    return {
-      recordId,
-      status: "failed",
-      message: "timestamp, timeIn, or timeOut is required.",
-    };
+    return buildResult(
+      "failed",
+      "timestamp, timeIn, or timeOut is required.",
+      "missing_attendance_timestamp"
+    );
   }
 
   if ((attendanceType === "time-in" || attendanceType === "present") &&
       !incomingTimeIn.hasValue) {
-    return {
-      recordId,
-      status: "failed",
-      message: "timeIn data is required for this attendanceType.",
-    };
+    return buildResult(
+      "failed",
+      "timeIn data is required for this attendanceType.",
+      "missing_time_in"
+    );
   }
 
   if ((attendanceType === "time-out" || attendanceType === "present") &&
       !incomingTimeOut.hasValue) {
-    return {
-      recordId,
-      status: "failed",
-      message: "timeOut data is required for this attendanceType.",
-    };
-  }
-
-  const pairedEventId = normalizeText(device.pairingData?.eventId);
-  if (!pairedEventId || pairedEventId !== eventId) {
-    return {
-      recordId,
-      status: "failed",
-      message: "Device can only sync attendance to its paired event.",
-    };
+    return buildResult(
+      "failed",
+      "timeOut data is required for this attendanceType.",
+      "missing_time_out"
+    );
   }
 
   const eventRef = db.doc(`events/${eventId}`);
@@ -3651,10 +3769,11 @@ async function syncAttendanceRecord(
   const profileRef = db.doc(`profiles/${studentId}`);
   let event: PortableEventSummary;
   try {
-    event = await getEventSummary(eventId);
+    event = await getNonCancelledEventSummary(eventId);
   } catch (error: unknown) {
     const message = errorMessage(error, "Failed to load event.");
     if (message === "Event was cancelled.") {
+      const reason = "event_cancelled";
       await syncLogRef.set(
         {
           recordId,
@@ -3663,6 +3782,7 @@ async function syncAttendanceRecord(
           schoolId,
           deviceId: device.deviceId,
           syncStatus: "rejected",
+          reason,
           message,
           attemptedAt: admin.firestore.FieldValue.serverTimestamp(),
           processedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -3670,11 +3790,7 @@ async function syncAttendanceRecord(
         },
         {merge: true}
       );
-      return {
-        recordId,
-        status: "rejected",
-        message,
-      };
+      return buildResult("rejected", message, reason);
     }
     throw error;
   }
@@ -3747,13 +3863,14 @@ async function syncAttendanceRecord(
     const rejectionMessage = eligibility.reason === "payment_required" ?
       "Student has not paid." :
       "Student is not allowed for this event";
+    const rejectionReason = eligibility.reason || "not_allowed_for_event";
     deviceLogger.warn(
       `[SYNC][ATTEND] rejected reason=not_allowed_for_event eventId=${eventId} schoolId=${resolvedSchoolId}`,
       {
       eventId,
       schoolId: resolvedSchoolId,
       studentId,
-      reason: eligibility.reason,
+      reason: rejectionReason,
       }
     );
     await syncLogRef.set(
@@ -3765,6 +3882,7 @@ async function syncAttendanceRecord(
         studentName: resolvedStudentName,
         deviceId: device.deviceId,
         syncStatus: "rejected",
+        reason: rejectionReason,
         message: rejectionMessage,
         attemptedAt: serverTimestamp(),
         processedAt: serverTimestamp(),
@@ -3772,11 +3890,7 @@ async function syncAttendanceRecord(
       },
       {merge: true}
     );
-    return {
-      recordId,
-      status: "rejected",
-      message: rejectionMessage,
-    };
+    return buildResult("rejected", rejectionMessage, rejectionReason, event);
   }
 
   const incomingTimeInSource =
@@ -3785,15 +3899,19 @@ async function syncAttendanceRecord(
 
   let resultStatus: AttendanceResponseStatus = "failed";
   let resultMessage = "Failed to sync attendance.";
+  let resultReason = "";
 
   await db.runTransaction(async (transaction) => {
     const eventSnap = await transaction.get(eventRef);
     if (!eventSnap.exists) {
       throw new ApiError(404, "Event not found.");
     }
-    if (isPortableEventCancelledData(eventSnap.data() ?? {})) {
+    const eventData = eventSnap.data() ?? {};
+    event = eventSummaryFromSnapshot(eventSnap);
+    if (isPortableEventCancelledData(eventData)) {
       resultStatus = "rejected";
       resultMessage = "Event was cancelled.";
+      resultReason = "event_cancelled";
 
       transaction.set(
         syncLogRef,
@@ -3805,6 +3923,7 @@ async function syncAttendanceRecord(
           studentName: resolvedStudentName,
           deviceId: device.deviceId,
           syncStatus: "rejected",
+          reason: resultReason,
           message: resultMessage,
           attemptedAt: admin.firestore.FieldValue.serverTimestamp(),
           processedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -3833,6 +3952,7 @@ async function syncAttendanceRecord(
     if (incomingTimeOut.hasValue && !mergedTimeIn.hasValue) {
       resultStatus = "failed";
       resultMessage = "No Time in record. Cannot Time out.";
+      resultReason = "missing_time_in";
 
       transaction.set(
         syncLogRef,
@@ -3842,6 +3962,7 @@ async function syncAttendanceRecord(
           studentId,
           deviceId: device.deviceId,
           syncStatus: "failed",
+          reason: resultReason,
           message: resultMessage,
           attemptedAt: serverTimestamp(),
           processedAt: serverTimestamp(),
@@ -3858,6 +3979,7 @@ async function syncAttendanceRecord(
       if (!addsNewTimeIn && !addsNewTimeOut) {
         resultStatus = "duplicate";
         resultMessage = "Attendance already up to date.";
+        resultReason = attendanceSyncSuccessReason(event, pairedEventId, true);
 
         transaction.set(
           syncLogRef,
@@ -3867,6 +3989,7 @@ async function syncAttendanceRecord(
             studentId,
             deviceId: device.deviceId,
             syncStatus: "duplicate",
+            reason: resultReason,
             message: resultMessage,
             attemptedAt: serverTimestamp(),
             processedAt: serverTimestamp(),
@@ -3879,6 +4002,7 @@ async function syncAttendanceRecord(
     } else if (!mergedTimeIn.hasValue) {
       resultStatus = "failed";
       resultMessage = "Time In data is required.";
+      resultReason = "missing_time_in";
 
       transaction.set(
         syncLogRef,
@@ -3888,6 +4012,7 @@ async function syncAttendanceRecord(
           studentId,
           deviceId: device.deviceId,
           syncStatus: "failed",
+          reason: resultReason,
           message: resultMessage,
           attemptedAt: serverTimestamp(),
           processedAt: serverTimestamp(),
@@ -3996,6 +4121,7 @@ async function syncAttendanceRecord(
         studentName: attendanceDoc.studentName,
         deviceId: device.deviceId,
         syncStatus: "uploaded",
+        reason: attendanceSyncSuccessReason(event, pairedEventId),
         message: mergedTimeOut.hasValue ? "Attendance updated." : "Attendance saved.",
         attemptedAt: serverTimestamp(),
         processedAt: serverTimestamp(),
@@ -4014,13 +4140,10 @@ async function syncAttendanceRecord(
 
     resultStatus = "uploaded";
     resultMessage = mergedTimeOut.hasValue ? "Attendance updated." : "Attendance saved.";
+    resultReason = attendanceSyncSuccessReason(event, pairedEventId);
   });
 
-  return {
-    recordId,
-    status: resultStatus,
-    message: resultMessage,
-  };
+  return buildResult(resultStatus, resultMessage, resultReason, event);
 }
 
 export const ecListFingerprintEnrollmentSessions = functions
@@ -4814,7 +4937,7 @@ export const campusDeviceResolveAttendanceOwner = deviceEndpoint(
     let eventAllowed = false;
     let reason = "event_not_provided";
     if (eventId) {
-      const event = await getEventSummary(eventId);
+      const event = await getNonCancelledEventSummary(eventId);
       const registrationStatus = await findStudentRegistrationStatusForEvent(
         eventId,
         resolvedOwner.entry.studentId
@@ -5378,7 +5501,7 @@ export const campusDeviceSyncAttendance = deviceEndpoint(
       throw new ApiError(400, `records must contain at most ${MAX_SYNC_BATCH_LIMIT} items.`);
     }
 
-    const results: Array<{recordId: string; status: AttendanceResponseStatus; message: string}> = [];
+    const results: AttendanceSyncResult[] = [];
     for (const rawRecord of rawRecords.slice(0, DEFAULT_SYNC_BATCH_LIMIT)) {
       try {
         const result = await syncAttendanceRecord(device, asRecord(rawRecord));
@@ -5391,6 +5514,18 @@ export const campusDeviceSyncAttendance = deviceEndpoint(
           normalizeText(record.studentId) ||
           normalizeText(record.studentUid) ||
           normalizeText(record.uid);
+        const message = errorMessage(error, "Failed to sync attendance.");
+        const reason = message === "Event not found." ? "event_not_found" : "sync_exception";
+
+        logAttendanceSyncDecision({
+          eventId,
+          recordId,
+          decision: "failed",
+          reason,
+          studentId,
+          deviceId: device.deviceId,
+          message,
+        });
 
         if (recordId) {
           await db.doc(`syncLogs/${recordId}`).set(
@@ -5400,7 +5535,8 @@ export const campusDeviceSyncAttendance = deviceEndpoint(
               studentId,
               deviceId: device.deviceId,
               syncStatus: "failed",
-              message: errorMessage(error, "Failed to sync attendance."),
+              reason,
+              message,
               attemptedAt: serverTimestamp(),
               processedAt: serverTimestamp(),
               source: "portable-device",
@@ -5412,7 +5548,8 @@ export const campusDeviceSyncAttendance = deviceEndpoint(
         results.push({
           recordId,
           status: "failed",
-          message: errorMessage(error, "Failed to sync attendance."),
+          message,
+          reason,
         });
       }
     }
@@ -5425,7 +5562,7 @@ export const campusDeviceSyncAttendance = deviceEndpoint(
     const ok = rejected.length === 0 && failed.length === 0;
     const error =
       rejected.length > 0 ?
-        "Student is not allowed for this event" :
+        rejected[0]?.message ?? "Student is not allowed for this event" :
         failed[0]?.message ?? "";
 
     sendJson(res, 200, {

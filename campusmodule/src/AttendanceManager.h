@@ -16,6 +16,7 @@ enum class AttendanceOutcome : uint8_t {
   TimeInRecorded,
   TimeOutRecorded,
   TimeInTooEarly,
+  TimeInClosed,
   DuplicateTimeIn,
   TimeOutAlreadyDone,
   DuplicateTimeOut,
@@ -42,6 +43,7 @@ class AttendanceManager {
   void updateAttendanceStatus(AttendanceRecord &record) const;
 
  private:
+  bool hasEventEnded(const EventInfo &event) const;
   AttendanceOutcome saveAttendanceAction(AttendanceAction action,
                                          const EventInfo &event,
                                          const StudentInfo &student,
