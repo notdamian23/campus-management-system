@@ -2160,6 +2160,8 @@ bool BackendClient::requestJson(const char *method, const String &path,
           : maxAttempts;
   const bool isSessionRequest = path == kCreateSessionPath;
   const bool isCleanupRequest = path.startsWith(kCleanupQueuePath);
+  const bool isEnrollmentSessionListRequest =
+      path.startsWith("/campusDeviceListEnrollmentSessions");
   if (!isSessionRequest && !isCleanupRequest && !ensureSession(error)) {
     return false;
   }
@@ -2402,6 +2404,7 @@ bool BackendClient::requestJson(const char *method, const String &path,
       logMemoryStage("before response parse", path, attempt, loopAttempts);
       DeserializationError jsonError = DeserializationError::Ok;
       String sessionResponseBody;
+      String rawResponseBody;
       if (isSessionRequest) {
         if (!readResponseBody(https, sessionResponseBody,
                               kSessionResponseMaxBytes + 1U)) {
@@ -2431,6 +2434,21 @@ bool BackendClient::requestJson(const char *method, const String &path,
         }
         lastResponsePayloadSize_ = sessionResponseBody.length();
         jsonError = deserializeJson(response, sessionResponseBody);
+      } else if (isEnrollmentSessionListRequest) {
+        const size_t rawResponseLimit =
+            responseBytes > 0 ? static_cast<size_t>(responseBytes) + 1U : 8192U;
+        if (!readResponseBody(https, rawResponseBody, rawResponseLimit)) {
+          lastFailureStage_ = "response_read";
+          error = "Response stream unavailable";
+          cleanupRequest(&https, "after response cleanup");
+          return false;
+        }
+        lastResponseBody_ = rawResponseBody;
+        lastResponsePayloadSize_ = rawResponseBody.length();
+        Serial.printf("[ENROLL][LIST_RAW] bytes=%u body=%s\n",
+                      static_cast<unsigned>(rawResponseBody.length()),
+                      rawResponseBody.c_str());
+        jsonError = deserializeJson(response, rawResponseBody);
       } else {
         jsonError = deserializeJson(response, *stream);
       }

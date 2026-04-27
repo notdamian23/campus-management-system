@@ -20,6 +20,8 @@ const DEFAULT_ENROLLMENT_LIMIT = 20;
 const MAX_ENROLLMENT_LIMIT = 50;
 const DEFAULT_ENROLLMENT_SESSION_LIMIT = 15;
 const MAX_ENROLLMENT_SESSION_LIMIT = 25;
+const MAX_ENROLLMENT_SESSION_QUERY_LIMIT = 100;
+const ENROLLMENT_SESSION_QUERY_MULTIPLIER = 5;
 const DEFAULT_SYNC_BATCH_LIMIT = 25;
 const MAX_SYNC_BATCH_LIMIT = 50;
 const DEFAULT_PAIRED_EVENT_CONTEXT_LIMIT = 20;
@@ -27,6 +29,8 @@ const MAX_PAIRED_EVENT_CONTEXT_LIMIT = 25;
 const DEFAULT_CLEANUP_LIMIT = 10;
 const MAX_CLEANUP_LIMIT = 50;
 const TOKEN_VERSION = 1;
+const ENROLLMENT_SESSIONS_COLLECTION = "enrollmentSessions";
+const ENROLLMENT_SESSION_STUDENTS_SUBCOLLECTION = "students";
 
 type AuthMode = "secret" | "session" | "session-or-secret";
 
@@ -145,6 +149,14 @@ type EnrollmentStudentStatus =
   | "synced"
   | "failed";
 
+const ACTIVE_DEVICE_ENROLLMENT_SESSION_STATUSES = new Set<EnrollmentSessionStatus>([
+  "pending",
+  "paired",
+  "downloading",
+  "enrolling",
+  "partially-completed",
+]);
+
 type EnrollmentSessionSummary = {
   sessionId: string;
   createdBy: string;
@@ -152,6 +164,7 @@ type EnrollmentSessionSummary = {
   createdBySchoolId: string;
   status: EnrollmentSessionStatus;
   pairedDeviceId: string;
+  targetDeviceId: string;
   totalStudents: number;
   pendingCount: number;
   downloadedCount: number;
@@ -2638,6 +2651,7 @@ function enrollmentSessionSummaryFromSnapshot(
     createdBySchoolId: normalizeText(data.createdBySchoolId),
     status: normalizeEnrollmentSessionStatus(data.status),
     pairedDeviceId: normalizeText(data.pairedDeviceId),
+    targetDeviceId: normalizeText(data.targetDeviceId),
     totalStudents: toPositiveInt(data.totalStudents, 0),
     pendingCount: toPositiveInt(data.pendingCount, 0),
     downloadedCount: toPositiveInt(data.downloadedCount, 0),
@@ -2676,24 +2690,85 @@ function enrollmentSessionStudentFromSnapshot(
   };
 }
 
+function deviceIdsMatch(left: string, right: string) {
+  return normalizeLower(left) === normalizeLower(right);
+}
+
+function enrollmentSessionBaseSkipReasonForDevice(
+  session: EnrollmentSessionSummary,
+  device: DeviceContext
+): string {
+  if (!ACTIVE_DEVICE_ENROLLMENT_SESSION_STATUSES.has(session.status)) {
+    return `status:${session.status}`;
+  }
+
+  if (session.pairedDeviceId && !deviceIdsMatch(session.pairedDeviceId, device.deviceId)) {
+    return `pairedDeviceId:${session.pairedDeviceId}`;
+  }
+
+  if (session.targetDeviceId && !deviceIdsMatch(session.targetDeviceId, device.deviceId)) {
+    return `targetDeviceId:${session.targetDeviceId}`;
+  }
+
+  return "";
+}
+
 async function listEnrollmentSessionsForDevice(
   device: DeviceContext,
   limit: number
 ): Promise<EnrollmentSessionSummary[]> {
-  const snapshot = await db
-    .collection("enrollmentSessions")
-    .limit(MAX_ENROLLMENT_SESSION_LIMIT)
+  const collectionRef = db.collection(ENROLLMENT_SESSIONS_COLLECTION);
+  const queryLimit = Math.min(
+    Math.max(limit * ENROLLMENT_SESSION_QUERY_MULTIPLIER, limit),
+    MAX_ENROLLMENT_SESSION_QUERY_LIMIT
+  );
+  const snapshot = await collectionRef
+    .orderBy("createdAt", "desc")
+    .limit(queryLimit)
     .get();
 
-  return snapshot.docs
-    .map((doc) => enrollmentSessionSummaryFromSnapshot(doc))
-    .filter((session) => {
-      if (session.status === "completed" || session.status === "closed") {
-        return false;
+  deviceLogger.info("Listing CAMPUS enrollment sessions for device", {
+    collectionPath: collectionRef.path,
+    deviceId: device.deviceId,
+    limit,
+    docsFoundBeforeFiltering: snapshot.size,
+    queryLimit,
+  });
+
+  const evaluatedSessions = await Promise.all(
+    snapshot.docs.map(async (doc) => {
+      const session = enrollmentSessionSummaryFromSnapshot(doc);
+      let skipReason = enrollmentSessionBaseSkipReasonForDevice(session, device);
+      let studentDocCount: number | null = null;
+
+      if (!skipReason && session.selectedStudentIds.length === 0) {
+        studentDocCount = (await readEnrollmentSessionStudents(session.sessionId)).length;
+        if (studentDocCount === 0) {
+          skipReason = "empty-student-queue";
+        }
       }
 
-      return !session.pairedDeviceId || session.pairedDeviceId === device.deviceId;
+      if (skipReason) {
+        deviceLogger.info("Skipping CAMPUS enrollment session for device", {
+          collectionPath: collectionRef.path,
+          deviceId: device.deviceId,
+          sessionId: session.sessionId,
+          reason: skipReason,
+          status: session.status,
+          pairedDeviceId: session.pairedDeviceId,
+          targetDeviceId: session.targetDeviceId,
+          selectedStudentIdsCount: session.selectedStudentIds.length,
+          studentDocCount,
+        });
+      }
+
+      return {session, skipReason};
     })
+  );
+
+  const sessions = evaluatedSessions
+    .filter(({skipReason}) => !skipReason)
+    .map(({session}) => session)
     .sort((left, right) => {
       if (left.createdAtMs !== right.createdAtMs) {
         return right.createdAtMs - left.createdAtMs;
@@ -2701,10 +2776,20 @@ async function listEnrollmentSessionsForDevice(
       return left.sessionId.localeCompare(right.sessionId);
     })
     .slice(0, limit);
+
+  deviceLogger.info("Filtered CAMPUS enrollment sessions for device", {
+    collectionPath: collectionRef.path,
+    deviceId: device.deviceId,
+    limit,
+    docsFoundBeforeFiltering: snapshot.size,
+    docsReturnedAfterFiltering: sessions.length,
+  });
+
+  return sessions;
 }
 
 async function readEnrollmentSessionSummary(sessionId: string): Promise<EnrollmentSessionSummary> {
-  const snap = await db.doc(`enrollmentSessions/${sessionId}`).get();
+  const snap = await db.doc(`${ENROLLMENT_SESSIONS_COLLECTION}/${sessionId}`).get();
   if (!snap.exists) {
     throw new ApiError(404, "Enrollment session not found.");
   }
@@ -2714,7 +2799,9 @@ async function readEnrollmentSessionSummary(sessionId: string): Promise<Enrollme
 
 async function readEnrollmentSessionStudents(sessionId: string) {
   const snapshot = await db
-    .collection(`enrollmentSessions/${sessionId}/students`)
+    .collection(
+      `${ENROLLMENT_SESSIONS_COLLECTION}/${sessionId}/${ENROLLMENT_SESSION_STUDENTS_SUBCOLLECTION}`
+    )
     .orderBy("fullName", "asc")
     .get();
 
@@ -2725,7 +2812,7 @@ async function readEnrollmentSessionStudents(sessionId: string) {
 }
 
 async function refreshEnrollmentSessionSummary(sessionId: string): Promise<EnrollmentSessionSummary> {
-  const sessionRef = db.doc(`enrollmentSessions/${sessionId}`);
+  const sessionRef = db.doc(`${ENROLLMENT_SESSIONS_COLLECTION}/${sessionId}`);
   const sessionSnap = await sessionRef.get();
   if (!sessionSnap.exists) {
     throw new ApiError(404, "Enrollment session not found.");
@@ -2806,15 +2893,18 @@ async function pairDeviceToEnrollmentSession(
   device: DeviceContext,
   sessionId: string
 ): Promise<EnrollmentSessionSummary> {
-  const sessionRef = db.doc(`enrollmentSessions/${sessionId}`);
+  const sessionRef = db.doc(`${ENROLLMENT_SESSIONS_COLLECTION}/${sessionId}`);
   const sessionSnap = await sessionRef.get();
   if (!sessionSnap.exists) {
     throw new ApiError(404, "Enrollment session not found.");
   }
 
   const session = enrollmentSessionSummaryFromSnapshot(sessionSnap);
-  if (session.pairedDeviceId && session.pairedDeviceId !== device.deviceId) {
+  if (session.pairedDeviceId && !deviceIdsMatch(session.pairedDeviceId, device.deviceId)) {
     throw new ApiError(409, "Enrollment session is already paired to another device.");
+  }
+  if (session.targetDeviceId && !deviceIdsMatch(session.targetDeviceId, device.deviceId)) {
+    throw new ApiError(403, "Enrollment session is reserved for another device.");
   }
   if (session.status === "completed" || session.status === "closed") {
     throw new ApiError(400, "Enrollment session is no longer available.");
@@ -2852,8 +2942,11 @@ async function resolveDeviceEnrollmentSession(
   }
 
   const session = await readEnrollmentSessionSummary(sessionId);
-  if (session.pairedDeviceId && session.pairedDeviceId !== device.deviceId) {
+  if (session.pairedDeviceId && !deviceIdsMatch(session.pairedDeviceId, device.deviceId)) {
     throw new ApiError(403, "Device can only access its assigned enrollment session.");
+  }
+  if (session.targetDeviceId && !deviceIdsMatch(session.targetDeviceId, device.deviceId)) {
+    throw new ApiError(403, "Device can only access enrollment sessions assigned to it.");
   }
 
   return session;
@@ -2888,7 +2981,7 @@ async function markEnrollmentSessionDownloaded(
   });
 
   batch.set(
-    db.doc(`enrollmentSessions/${sessionId}`),
+    db.doc(`${ENROLLMENT_SESSIONS_COLLECTION}/${sessionId}`),
     {
       status: "downloading",
       pairedDeviceId: device.deviceId,
@@ -2907,7 +3000,8 @@ async function listEnrollmentSessions(
   limit: number
 ): Promise<EnrollmentSessionSummary[]> {
   const snapshot = await db
-    .collection("enrollmentSessions")
+    .collection(ENROLLMENT_SESSIONS_COLLECTION)
+    .orderBy("createdAt", "desc")
     .limit(Math.min(limit, MAX_ENROLLMENT_SESSION_LIMIT))
     .get();
 
@@ -2931,7 +3025,7 @@ async function assertStudentsNotInActiveEnrollmentSessions(
   }
 
   const snapshot = await db
-    .collection("enrollmentSessions")
+    .collection(ENROLLMENT_SESSIONS_COLLECTION)
     .where("selectedStudentIds", "array-contains-any", probeIds)
     .get();
 
@@ -3011,6 +3105,7 @@ function enrollmentSessionPayload(session: EnrollmentSessionSummary) {
     createdBySchoolId: session.createdBySchoolId,
     status: session.status,
     pairedDeviceId: session.pairedDeviceId,
+    targetDeviceId: session.targetDeviceId,
     totalStudents: session.totalStudents,
     pendingCount: session.pendingCount,
     downloadedCount: session.downloadedCount,
@@ -4220,7 +4315,7 @@ export const ecCreateFingerprintEnrollmentSession = functions
       normalizeText(callerProfile.studentName) ||
       createdBySchoolId;
 
-    const sessionRef = db.collection("enrollmentSessions").doc();
+    const sessionRef = db.collection(ENROLLMENT_SESSIONS_COLLECTION).doc();
     const batch = db.batch();
 
     batch.set(sessionRef, {
@@ -4244,7 +4339,9 @@ export const ecCreateFingerprintEnrollmentSession = functions
 
     studentRows.forEach((student) => {
       batch.set(
-        db.doc(`enrollmentSessions/${sessionRef.id}/students/${student.studentId}`),
+        db.doc(
+          `${ENROLLMENT_SESSIONS_COLLECTION}/${sessionRef.id}/${ENROLLMENT_SESSION_STUDENTS_SUBCOLLECTION}/${student.studentId}`
+        ),
         {
           enrollmentSessionId: sessionRef.id,
           studentId: student.studentId,
@@ -4287,7 +4384,7 @@ export const ecCloseFingerprintEnrollmentSession = functions
       );
     }
 
-    await db.doc(`enrollmentSessions/${sessionId}`).set(
+    await db.doc(`${ENROLLMENT_SESSIONS_COLLECTION}/${sessionId}`).set(
       {
         status: "closed",
         closedAt: serverTimestamp(),
@@ -5007,25 +5104,22 @@ export const campusDeviceListEnrollmentSessions = deviceEndpoint(
       1,
       MAX_ENROLLMENT_SESSION_LIMIT
     );
+    deviceLogger.info("Device requested CAMPUS enrollment session list", {
+      collectionPath: ENROLLMENT_SESSIONS_COLLECTION,
+      deviceId: device.deviceId,
+      limit,
+    });
     const sessions = await listEnrollmentSessionsForDevice(device, limit);
 
+    deviceLogger.info("Device CAMPUS enrollment session list ready", {
+      collectionPath: ENROLLMENT_SESSIONS_COLLECTION,
+      deviceId: device.deviceId,
+      limit,
+      docsReturnedAfterFiltering: sessions.length,
+    });
+
     sendJson(res, 200, {
-      sessions: sessions.map((session) => ({
-        sessionId: session.sessionId,
-        createdBy: session.createdBy,
-        createdByName: session.createdByName,
-        createdBySchoolId: session.createdBySchoolId,
-        status: session.status,
-        pairedDeviceId: session.pairedDeviceId,
-        totalStudents: session.totalStudents,
-        pendingCount: session.pendingCount,
-        downloadedCount: session.downloadedCount,
-        enrolledCount: session.enrolledCount,
-        syncedCount: session.syncedCount,
-        failedCount: session.failedCount,
-        createdAtMs: session.createdAtMs,
-        updatedAtMs: session.updatedAtMs,
-      })),
+      sessions: sessions.map((session) => enrollmentSessionPayload(session)),
     });
   }
 );
@@ -5043,20 +5137,7 @@ export const campusDevicePairEnrollmentSession = deviceEndpoint(
     const session = await pairDeviceToEnrollmentSession(device, sessionId);
     sendJson(res, 200, {
       status: "paired",
-      session: {
-        sessionId: session.sessionId,
-        createdBy: session.createdBy,
-        createdByName: session.createdByName,
-        createdBySchoolId: session.createdBySchoolId,
-        status: session.status,
-        pairedDeviceId: session.pairedDeviceId,
-        totalStudents: session.totalStudents,
-        pendingCount: session.pendingCount,
-        downloadedCount: session.downloadedCount,
-        enrolledCount: session.enrolledCount,
-        syncedCount: session.syncedCount,
-        failedCount: session.failedCount,
-      },
+      session: enrollmentSessionPayload(session),
     });
   }
 );
@@ -5073,20 +5154,7 @@ export const campusDeviceDownloadEnrollmentSession = deviceEndpoint(
     );
 
     sendJson(res, 200, {
-      session: {
-        sessionId: session.sessionId,
-        createdBy: session.createdBy,
-        createdByName: session.createdByName,
-        createdBySchoolId: session.createdBySchoolId,
-        status: session.status,
-        pairedDeviceId: session.pairedDeviceId,
-        totalStudents: session.totalStudents,
-        pendingCount: session.pendingCount,
-        downloadedCount: session.downloadedCount,
-        enrolledCount: session.enrolledCount,
-        syncedCount: session.syncedCount,
-        failedCount: session.failedCount,
-      },
+      session: enrollmentSessionPayload(session),
       students: students.map(({student}) => ({
         sessionId: session.sessionId,
         studentId: student.studentId,
