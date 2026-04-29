@@ -1469,8 +1469,6 @@ export function StudentPortalProvider({
           status = "Attended";
         } else if (registration?.status === "CANCELLED") {
           status = "Cancelled";
-        } else if (paymentOutstanding) {
-          status = "Payment Due";
         } else if (lifecycle === "completed") {
           if (registration?.status === "WAITLISTED") {
             status = "Waitlisted";
@@ -1487,6 +1485,8 @@ export function StudentPortalProvider({
           status = "Waitlisted";
         } else if (raw.isPreReg) {
           status = "Pre-registration";
+        } else if (paymentOutstanding) {
+          status = "Payment Due";
         } else {
           status = "Upcoming";
         }

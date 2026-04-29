@@ -110,7 +110,7 @@ export type AttendanceParticipantRow = {
 type RegistrationStatus = "PRE_REGISTERED" | "WAITLISTED" | "CANCELLED";
 type AttendanceExportStatus = "upcoming" | "ongoing" | "completed";
 
-type EventParticipantRow = AttendanceExportRow & {
+export type EventParticipantRow = AttendanceExportRow & {
   uid: string;
   paymentStatus: "Paid" | "Not Paid" | "Not Required";
   sortMs: number;
@@ -731,13 +731,14 @@ function participantStatusSortRank(status: string) {
   if (isPresentAttendanceStatus(status)) return 0;
   if (normalized === "absent" || normalized === "missed") return 1;
   if (normalized === "not paid") return 2;
-  if (normalized === "pre-registered") return 3;
-  if (normalized === "waitlisted") return 4;
-  if (normalized === "cancelled") return 5;
+  if (normalized === "eligible") return 3;
+  if (normalized === "pre-registered") return 4;
+  if (normalized === "waitlisted") return 5;
+  if (normalized === "cancelled") return 6;
   return 6;
 }
 
-function buildEventParticipantRows(
+export function buildEventParticipantRows(
   event: AttendanceExportEvent,
   registrations: AttendanceExportRegistrationDoc[],
   attendanceRows: AttendanceExportAttendanceDoc[],
@@ -748,43 +749,50 @@ function buildEventParticipantRows(
   const rowsByUid = new Map<string, EventParticipantRow>();
   const preRegisteredByUid = new Set<string>();
   const preRegisteredBySchoolId = new Set<string>();
+  const isPreRegEvent = event.isPreReg === true;
   const {
     byUid: paymentAssignmentsByUid,
     bySchoolId: paymentAssignmentsBySchoolId,
   } = buildPaymentAssignmentIndexes(paymentAssignments);
   const audienceTargets = resolveEventAudienceTargets(event);
 
-  audienceStudents.forEach((student) => {
-    const uid = String(student.uid ?? "").trim();
-    if (!uid) return;
+  if (!isPreRegEvent) {
+    audienceStudents.forEach((student) => {
+      const uid = String(student.uid ?? "").trim();
+      if (!uid) return;
 
-    const schoolId = String(student.schoolId ?? "").trim() || uid;
-    const paymentStatus = getPaymentStatusByStudent(
-      event,
-      paymentAssignmentsByUid,
-      paymentAssignmentsBySchoolId,
-      uid,
-      schoolId,
-      respectPaymentStatus,
-    );
+      const schoolId = String(student.schoolId ?? "").trim() || uid;
+      const paymentStatus = getPaymentStatusByStudent(
+        event,
+        paymentAssignmentsByUid,
+        paymentAssignmentsBySchoolId,
+        uid,
+        schoolId,
+        respectPaymentStatus,
+      );
 
-    rowsByUid.set(uid, {
-      uid,
-      schoolId,
-      studentName: student.studentName || schoolId,
-      course: String(student.course ?? "").trim() || "-",
-      year: String(student.year ?? "").trim() || "-",
-      attendanceStatus: paymentStatus === "Not Paid" ? "Not Paid" : "Eligible",
-      attendanceTimeIn: "-",
-      attendanceTimeOut: "-",
-      paymentStatus,
-      sortMs: 0,
+      rowsByUid.set(uid, {
+        uid,
+        schoolId,
+        studentName: student.studentName || schoolId,
+        course: String(student.course ?? "").trim() || "-",
+        year: String(student.year ?? "").trim() || "-",
+        attendanceStatus: paymentStatus === "Not Paid" ? "Not Paid" : "Eligible",
+        attendanceTimeIn: "-",
+        attendanceTimeOut: "-",
+        paymentStatus,
+        sortMs: 0,
+      });
     });
-  });
+  }
 
   registrations.forEach((registration) => {
     const uid = String(registration.uid ?? registration.id).trim();
     if (!uid) return;
+    const registrationStatus = parseRegistrationStatus(registration.status);
+    if (isPreRegEvent && registrationStatus !== "PRE_REGISTERED") {
+      return;
+    }
 
     const schoolId = String(registration.schoolId ?? "").trim();
     const studentName = formatStudentFullName(
@@ -798,6 +806,7 @@ function buildEventParticipantRows(
     const year = String(registration.year ?? "").trim() || "-";
 
     if (
+      !isPreRegEvent &&
       !matchesResolvedEventAudience(
         event,
         audienceTargets,
@@ -811,7 +820,7 @@ function buildEventParticipantRows(
       return;
     }
 
-    if (parseRegistrationStatus(registration.status) === "PRE_REGISTERED") {
+    if (registrationStatus === "PRE_REGISTERED") {
       preRegisteredByUid.add(uid);
       if (schoolId) {
         preRegisteredBySchoolId.add(schoolId);
@@ -836,7 +845,9 @@ function buildEventParticipantRows(
       attendanceStatus:
         paymentStatus === "Not Paid"
           ? "Not Paid"
-          : formatRegistrationStatus(parseRegistrationStatus(registration.status)),
+          : registrationStatus === "PRE_REGISTERED"
+            ? "Eligible"
+            : formatRegistrationStatus(registrationStatus),
       attendanceTimeIn: "-",
       attendanceTimeOut: "-",
       paymentStatus,
@@ -865,6 +876,7 @@ function buildEventParticipantRows(
       "-";
 
     if (
+      !isPreRegEvent &&
       !matchesResolvedEventAudience(
         event,
         audienceTargets,
@@ -879,7 +891,7 @@ function buildEventParticipantRows(
     }
 
     if (
-      event.isPreReg &&
+      isPreRegEvent &&
       !preRegisteredByUid.has(uid) &&
       !preRegisteredBySchoolId.has(schoolId)
     ) {
@@ -1548,6 +1560,19 @@ function toFallbackNotPaidAttendanceExportRow(
   };
 }
 
+function eventParticipantRowToExportStudent(
+  row: EventParticipantRow,
+): AttendanceExportStudent {
+  return {
+    uid: row.uid,
+    schoolId: row.schoolId,
+    studentName: row.studentName,
+    course: row.course,
+    year: row.year,
+    status: "Active",
+  };
+}
+
 export function buildAttendanceExportRows({
   event,
   attendanceRows,
@@ -1592,6 +1617,7 @@ export function buildAttendanceExportRows({
   const presentRowCollection = createAttendanceExportCandidateCollection();
   const absentRowCollection = createAttendanceExportCandidateCollection();
   const notPaidRowCollection = createAttendanceExportCandidateCollection();
+  const isPreRegEvent = event.isPreReg === true;
 
   directPresentCandidates.forEach((candidate) => {
     const participantRow = resolveParticipantRowByIdentity(
@@ -1600,7 +1626,7 @@ export function buildAttendanceExportRows({
       candidate.uid,
       candidate.schoolId,
     );
-    if (audience.resolved && !participantRow) {
+    if ((audience.resolved || isPreRegEvent) && !participantRow) {
       return;
     }
 
@@ -1658,8 +1684,12 @@ export function buildAttendanceExportRows({
     });
   });
 
-  if (audience.resolved) {
-    audience.students.forEach((student) => {
+  if (audience.resolved || isPreRegEvent) {
+    const exportBaseStudents = isPreRegEvent
+      ? participantRows.map(eventParticipantRowToExportStudent)
+      : audience.students;
+
+    exportBaseStudents.forEach((student) => {
       const participantRow = resolveParticipantRowByIdentity(
         participantRowsByUid,
         participantRowsBySchoolId,
@@ -1706,6 +1736,10 @@ export function buildAttendanceExportRows({
           sortMs: participantRow.sortMs,
           row: toPresentAttendanceExportRow(student, participantRow),
         });
+        return;
+      }
+
+      if (isPreRegEvent && participantRow?.attendanceStatus !== "Absent") {
         return;
       }
 

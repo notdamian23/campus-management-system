@@ -133,7 +133,9 @@ import {
   logPermissionDeniedAttemptForCurrentUser,
 } from "@/lib/firebase-functions";
 import {
+  buildEventParticipantRows as buildSharedEventParticipantRows,
   downloadAttendanceWorkbook as downloadSharedAttendanceWorkbook,
+  type EventParticipantRow as SharedEventParticipantRow,
 } from "@/lib/attendance-export";
 import {
   computeEventLifecycle,
@@ -729,18 +731,7 @@ type EventAttendanceDoc = {
   updatedAt?: any;
 };
 
-type EventParticipantRow = {
-  uid: string;
-  schoolId: string;
-  studentName: string;
-  course: string;
-  year: string;
-  attendanceStatus: string;
-  attendanceTimeIn: string;
-  attendanceTimeOut: string;
-  paymentStatus: "Paid" | "Not Paid" | "Not Required";
-  sortMs: number;
-};
+type EventParticipantRow = SharedEventParticipantRow;
 
 type AttendanceExportRow = {
   schoolId: string;
@@ -1359,48 +1350,6 @@ function matchesEventCourseYearAudience(
   );
 }
 
-function matchesResolvedEventAudience(
-  event: Pick<
-    EventDoc,
-    "targetStudent" | "selectedStudentIds" | "selectedSchoolIds"
-  >,
-  targets: EventAudienceTargets,
-  uid: string,
-  schoolId: string,
-  course: string,
-  year: string,
-  studentName: string,
-) {
-  if (targets.hasSelectedAudience) {
-    if (matchesSelectedEventAudience(event, uid, schoolId)) {
-      return true;
-    }
-
-    if (!targets.shouldResolveCourseYearAudience) {
-      return false;
-    }
-
-    return matchesEventCourseYearAudience(targets, course, year);
-  }
-
-  if (targets.shouldResolveCourseYearAudience) {
-    return (
-      matchesEventCourseYearAudience(targets, course, year) &&
-      matchesSpecificEventStudentTarget(event.targetStudent, schoolId, studentName)
-    );
-  }
-
-  if (targets.hasSpecificTarget) {
-    return matchesSpecificEventStudentTarget(
-      event.targetStudent,
-      schoolId,
-      studentName,
-    );
-  }
-
-  return true;
-}
-
 function sortStudentLookups(rows: StudentLookup[]) {
   return [...rows].sort(
     (left, right) =>
@@ -1831,17 +1780,6 @@ function getPaymentStatusByStudent(
   return status === "Paid" ? "Paid" : "Not Paid";
 }
 
-function participantStatusSortRank(status: string) {
-  const normalized = normalizeLowerLookupText(status);
-  if (normalized === "present" || normalized === "timed in") return 0;
-  if (normalized === "absent" || normalized === "missed") return 1;
-  if (normalized === "not paid") return 2;
-  if (normalized === "pre-registered") return 3;
-  if (normalized === "waitlisted") return 4;
-  if (normalized === "cancelled") return 5;
-  return 6;
-}
-
 function getEventScheduleDisplay(
   event: Pick<EventDoc, "date" | "scheduledTime" | "timeStart" | "timeEnd">,
 ) {
@@ -1913,237 +1851,14 @@ function buildEventParticipantRows(
 ) {
   if (!event) return [] as EventParticipantRow[];
 
-  const rowsByUid = new Map<string, EventParticipantRow>();
-  const preRegisteredByUid = new Set<string>();
-  const preRegisteredBySchoolId = new Set<string>();
-  const {
-    byUid: paymentAssignmentsByUid,
-    bySchoolId: paymentAssignmentsBySchoolId,
-  } = buildPaymentAssignmentIndexes(paymentAssignments);
-  const audienceTargets = resolveEventAudienceTargets(event);
-
-  audienceStudents.forEach((student) => {
-    const uid = String(student.uid ?? "").trim();
-    if (!uid) return;
-
-    const schoolId = String(student.schoolId ?? "").trim() || uid;
-    const paymentStatus = getPaymentStatusByStudent(
-      event,
-      paymentAssignmentsByUid,
-      paymentAssignmentsBySchoolId,
-      uid,
-      schoolId,
-    );
-
-    rowsByUid.set(uid, {
-      uid,
-      schoolId,
-      studentName: student.studentName || schoolId,
-      course: String(student.course ?? "").trim() || "-",
-      year: String(student.year ?? "").trim() || "-",
-      attendanceStatus: paymentStatus === "Not Paid" ? "Not Paid" : "Eligible",
-      attendanceTimeIn: "-",
-      attendanceTimeOut: "-",
-      paymentStatus,
-      sortMs: 0,
-    });
-  });
-
-  registrations.forEach((registration) => {
-    const uid = String(registration.uid ?? registration.id).trim();
-    if (!uid) return;
-    const schoolId = String(registration.schoolId ?? "").trim();
-    const studentName = formatStudentFullName(
-      {
-        studentName: registration.studentName,
-        schoolId: registration.schoolId,
-      },
-      schoolId || uid,
-    );
-    const course = String(registration.course ?? "").trim() || "-";
-    const year = String(registration.year ?? "").trim() || "-";
-    if (
-      !matchesResolvedEventAudience(
-        event,
-        audienceTargets,
-        uid,
-        schoolId,
-        course,
-        year,
-        studentName,
-      )
-    ) {
-      return;
-    }
-
-    if (parseRegistrationStatus(registration.status) === "PRE_REGISTERED") {
-      preRegisteredByUid.add(uid);
-      if (schoolId) {
-        preRegisteredBySchoolId.add(schoolId);
-      }
-    }
-
-    const paymentStatus = getPaymentStatusByStudent(
-      event,
-      paymentAssignmentsByUid,
-      paymentAssignmentsBySchoolId,
-      uid,
-      schoolId || uid,
-    );
-
-    rowsByUid.set(uid, {
-      uid,
-      schoolId: schoolId || uid,
-      studentName,
-      course,
-      year,
-      attendanceStatus:
-        paymentStatus === "Not Paid" ?
-          "Not Paid" :
-          formatRegistrationStatus(parseRegistrationStatus(registration.status)),
-      attendanceTimeIn: "-",
-      attendanceTimeOut: "-",
-      paymentStatus,
-      sortMs: registrationSortMillis(registration),
-    });
-  });
-
-  attendanceRows.forEach((rowDoc) => {
-    const uid = String(rowDoc.uid ?? rowDoc.studentUid ?? rowDoc.id).trim();
-    if (!uid) return;
-
-    const existing = rowsByUid.get(uid);
-    const schoolId =
-      String(rowDoc.schoolId ?? existing?.schoolId ?? "").trim() || uid;
-    const studentName = formatStudentFullName(
-      {
-        studentName: rowDoc.studentName ?? existing?.studentName,
-        name: rowDoc.name,
-        schoolId: rowDoc.schoolId ?? existing?.schoolId,
-      },
-      schoolId,
-    );
-    const course = String(rowDoc.course ?? existing?.course ?? "").trim() || "-";
-    const year =
-      String(rowDoc.yearLevel ?? rowDoc.year ?? existing?.year ?? "").trim() ||
-      "-";
-    if (
-      !matchesResolvedEventAudience(
-        event,
-        audienceTargets,
-        uid,
-        schoolId,
-        course,
-        year,
-        studentName,
-      )
-    ) {
-      return;
-    }
-
-    if (
-      event.isPreReg &&
-      !preRegisteredByUid.has(uid) &&
-      !preRegisteredBySchoolId.has(schoolId)
-    ) {
-      return;
-    }
-
-    const fallbackStatus =
-      typeof rowDoc.present === "boolean"
-        ? rowDoc.present
-          ? "Present"
-          : "Absent"
-        : "";
-    const timeInValue = formatDateTime(
-      rowDoc.timeInIso ||
-        rowDoc.timeIn ||
-        rowDoc.timestamp ||
-        rowDoc.updatedAt ||
-        rowDoc.createdAt,
-    );
-    const timeOutValue = formatDateTime(rowDoc.timeOutIso || rowDoc.timeOut);
-    const derivedStatus =
-      timeInValue !== "-" && timeOutValue !== "-"
-        ? "Present"
-        : timeInValue !== "-"
-          ? "Timed In"
-          : "";
-    const status =
-      String(
-        rowDoc.attendanceStatus ?? rowDoc.status ?? fallbackStatus ?? "",
-      ).trim() ||
-      derivedStatus ||
-      existing?.attendanceStatus ||
-      "Recorded";
-
-    const paymentStatus = getPaymentStatusByStudent(
-      event,
-      paymentAssignmentsByUid,
-      paymentAssignmentsBySchoolId,
-      uid,
-      schoolId,
-    );
-
-    rowsByUid.set(uid, {
-      uid,
-      schoolId,
-      studentName,
-      course,
-      year,
-      attendanceStatus: paymentStatus === "Not Paid" ? "Not Paid" : status,
-      attendanceTimeIn:
-        timeInValue !== "-" ? timeInValue : (existing?.attendanceTimeIn ?? "-"),
-      attendanceTimeOut:
-        timeOutValue !== "-" ? timeOutValue : (existing?.attendanceTimeOut ?? "-"),
-      paymentStatus,
-      sortMs: Math.max(
-        toMillis(rowDoc.updatedAt || rowDoc.createdAt || rowDoc.timestamp),
-        existing?.sortMs ?? 0,
-      ),
-    });
-  });
-
-  const eventCompleted = computeStatus(event) === "completed";
-  rowsByUid.forEach((row) => {
-    const paymentStatus = getPaymentStatusByStudent(
-      event,
-      paymentAssignmentsByUid,
-      paymentAssignmentsBySchoolId,
-      row.uid,
-      row.schoolId,
-    );
-    row.paymentStatus = paymentStatus;
-
-    if (paymentStatus === "Not Paid") {
-      row.attendanceStatus = "Not Paid";
-      return;
-    }
-
-    if (row.attendanceStatus === "Missed") {
-      row.attendanceStatus = "Absent";
-    }
-
-    if (
-      eventCompleted &&
-      !isPresentAttendanceStatus(row.attendanceStatus) &&
-      row.attendanceStatus !== "Waitlisted" &&
-      row.attendanceStatus !== "Cancelled" &&
-      row.attendanceStatus !== "Not Paid"
-    ) {
-      row.attendanceStatus = "Absent";
-    }
-  });
-
-  return Array.from(rowsByUid.values()).sort((left, right) => {
-    const byStatus =
-      participantStatusSortRank(left.attendanceStatus) -
-      participantStatusSortRank(right.attendanceStatus);
-    if (byStatus !== 0) return byStatus;
-    const byName = left.studentName.localeCompare(right.studentName);
-    if (byName !== 0) return byName;
-    return left.schoolId.localeCompare(right.schoolId);
-  });
+  return buildSharedEventParticipantRows(
+    event,
+    registrations,
+    attendanceRows,
+    paymentAssignments,
+    audienceStudents,
+    true,
+  );
 }
 
 function sortAttendanceExportRows(rows: AttendanceExportRow[]) {
@@ -2521,6 +2236,19 @@ function toFallbackNotPaidAttendanceExportRow(
     attendanceStatus: "Not Paid",
     attendanceTimeIn: "",
     attendanceTimeOut: "",
+  };
+}
+
+function eventParticipantRowToStudentLookup(row: EventParticipantRow): StudentLookup {
+  return {
+    uid: row.uid,
+    schoolId: row.schoolId,
+    studentName: row.studentName,
+    course: row.course,
+    year: row.year,
+    searchText: "",
+    status: "Active",
+    role: "student",
   };
 }
 
@@ -4331,7 +4059,8 @@ export default function EventDashboard() {
   const totalParticipants = useMemo(
     () =>
       Object.values(eventRegistrations).reduce(
-        (sum, rows) => sum + rows.length,
+        (sum, rows) =>
+          sum + rows.filter((row) => row.status === "PRE_REGISTERED").length,
         0,
       ),
     [eventRegistrations],
@@ -6931,6 +6660,7 @@ export default function EventDashboard() {
       let presentRows: AttendanceExportRow[] = [];
       let absentRows: AttendanceExportRow[] = [];
       let notPaidRows: AttendanceExportRow[] = [];
+      const isPreRegEvent = ev.isPreReg === true;
 
       directPresentCandidates.forEach((candidate) => {
         const participantRow = resolveParticipantRowByIdentity(
@@ -6939,7 +6669,7 @@ export default function EventDashboard() {
           candidate.uid,
           candidate.schoolId,
         );
-        if (audience.resolved && !participantRow) {
+        if ((audience.resolved || isPreRegEvent) && !participantRow) {
           return;
         }
 
@@ -7002,8 +6732,12 @@ export default function EventDashboard() {
         });
       });
 
-      if (audience.resolved) {
-        audience.students.forEach((student) => {
+      if (audience.resolved || isPreRegEvent) {
+        const exportBaseStudents = isPreRegEvent
+          ? participantRows.map(eventParticipantRowToStudentLookup)
+          : audience.students;
+
+        exportBaseStudents.forEach((student) => {
           const participantRow = resolveParticipantRowByIdentity(
             participantRowsByUid,
             participantRowsBySchoolId,
@@ -7050,6 +6784,10 @@ export default function EventDashboard() {
               sortMs: participantRow.sortMs,
               row: toPresentAttendanceExportRow(student, participantRow),
             });
+            return;
+          }
+
+          if (isPreRegEvent && participantRow?.attendanceStatus !== "Absent") {
             return;
           }
 
@@ -7160,11 +6898,12 @@ export default function EventDashboard() {
 
       await downloadAttendanceWorkbook(ev, presentRows, absentRows, notPaidRows);
 
-      const description = audience.resolved
+      const exportScopeResolved = audience.resolved || ev.isPreReg === true;
+      const description = exportScopeResolved
         ? `Downloaded ${presentRows.length} present, ${absentRows.length} absent, and ${notPaidRows.length} not-paid row(s).`
         : "Downloaded the attendance workbook. Audience rules were unavailable, so only captured Present, Absents, and Not Paid rows were exported.";
       setExportMsg(
-        audience.resolved
+        exportScopeResolved
           ? `Exported ${presentRows.length} present, ${absentRows.length} absent, and ${notPaidRows.length} not-paid row(s) for "${ev.title}".`
           : `Exported attendance rows for "${ev.title}" using the available attendance and payment records.`,
       );
@@ -8927,14 +8666,12 @@ export default function EventDashboard() {
                       setEventFilesTab("images");
                     };
                     const used = hasSlots
-                      ? registrations.length > 0
+                      ? preRegisteredRows.length
+                      : ev.isPreReg
                         ? preRegisteredRows.length
                         : typeof ev.preRegCount === "number"
                           ? ev.preRegCount
-                          : 0
-                      : typeof ev.preRegCount === "number"
-                        ? ev.preRegCount
-                        : 0;
+                          : 0;
                     const total =
                       typeof ev.preRegSlots === "number" ? ev.preRegSlots : 0;
                     const left = hasSlots ? Math.max(0, total - used) : null;
@@ -9071,9 +8808,7 @@ export default function EventDashboard() {
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <p className="text-sm text-campus-text-primary">
                                 <b>Pre-Registrations:</b>{" "}
-                                {preRegisteredRows.length > 0
-                                  ? preRegisteredRows.length
-                                  : used}
+                                {ev.isPreReg ? preRegisteredRows.length : used}
                               </p>
                               <Button
                                 size="sm"
@@ -9124,12 +8859,8 @@ export default function EventDashboard() {
                             {ev.isPreReg && (
                               <p className="text-sm text-campus-text-primary">
                                 <b>Waitlist:</b> {ev.waitlistEnabled ? "Enabled" : "Disabled"} |{" "}
-                                <b>Pre-registered:</b> {preRegisteredRows.length > 0
-                                  ? preRegisteredRows.length
-                                  : Math.max(0, Number(ev.preRegCount ?? 0))} |{" "}
-                                <b>Waitlisted:</b> {waitlistedRows.length > 0
-                                  ? waitlistedRows.length
-                                  : Math.max(0, Number(ev.waitlistCount ?? 0))}
+                                <b>Pre-registered:</b> {preRegisteredRows.length} |{" "}
+                                <b>Waitlisted:</b> {waitlistedRows.length}
                               </p>
                             )}
 
@@ -9961,7 +9692,7 @@ export default function EventDashboard() {
                       value={
                         selectedEventRegistrations.filter(
                           (row) => row.status === "PRE_REGISTERED",
-                        ).length || Math.max(0, Number(selectedEvent.preRegCount ?? 0))
+                        ).length
                       }
                       tone="blue"
                     />

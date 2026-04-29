@@ -17325,37 +17325,6 @@ export const studentManagePreRegistration = onCall({region: REGION}, async (requ
         );
       }
 
-      const requiredPaymentId =
-        normalizeText(eventData.linkedPaymentId) ||
-        normalizeText(eventData.requiredPaymentId);
-      if (eventData.withPayment === true || eventData.paymentRequired === true) {
-        if (!requiredPaymentId) {
-          throw new HttpsError(
-            "failed-precondition",
-            "This event requires a linked payment before registration."
-          );
-        }
-
-        const paymentAssignmentSnap = await transaction.get(
-          db.doc(`payments/${requiredPaymentId}/students/${uid}`)
-        );
-
-        if (!paymentAssignmentSnap.exists) {
-          throw new HttpsError(
-            "failed-precondition",
-            "Complete the required payment first."
-          );
-        }
-
-        const paymentStatus = normalizeLower(paymentAssignmentSnap.data()?.status);
-        if (paymentStatus !== "paid") {
-          throw new HttpsError(
-            "failed-precondition",
-            "Complete the required payment first."
-          );
-        }
-      }
-
       const registrationsSnap = await transaction.get(
         db.collection(`events/${eventId}/registrations`)
       );

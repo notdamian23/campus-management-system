@@ -687,7 +687,9 @@ function StudentEventDetails({
       ? Math.max(0, event.preRegSlots - event.preRegCount)
       : 0);
   const requirementText = event.withPayment
-    ? "Payment is required for this event. You will not be treated as an eligible attendee until the EC marks the linked payment as paid on your account."
+    ? event.isPreReg
+      ? "You may pre-register now. Payment must be marked paid before your attendance can be accepted."
+      : "Payment is required for this event. Payment must be marked paid before your attendance can be accepted."
     : "Follow the EC instructions shared for this event before arrival.";
 
   return (
@@ -976,7 +978,7 @@ function StudentEventDetails({
                 {event.status === "Payment Due" ? (
                   <Card shadow="none" className="border border-amber-100 bg-amber-50/80">
                     <CardBody className="p-4 text-sm text-amber-700">
-                      Payment Required: complete the linked EC payment first. The backend will reject registration and attendance validation until that payment is marked paid on your account.
+                      Payment Required: payment must be marked paid before your attendance can be accepted.
                     </CardBody>
                   </Card>
                 ) : null}
