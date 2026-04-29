@@ -6323,7 +6323,7 @@ export default function EventDashboard() {
       let linkedPaymentId = withPayment ? requiredPaymentId.trim() : "";
       const previousLinkedPaymentId = getEventLinkedPaymentId(eventBeingEdited);
 
-      if (withPayment && isUpdateMode && !viewerIsBod) {
+      if (withPayment && isUpdateMode && !viewerIsBod && !isPreReg) {
         let allStudents = studentOptions;
         if (allStudents.length === 0) {
           allStudents = await loadStudentsForNotifications();
@@ -6375,7 +6375,12 @@ export default function EventDashboard() {
           color: "success",
           timeout: 4500,
         });
-      } else if (isUpdateMode && !viewerIsBod && previousLinkedPaymentId) {
+      } else if (
+        !withPayment &&
+        isUpdateMode &&
+        !viewerIsBod &&
+        previousLinkedPaymentId
+      ) {
         await setDoc(
           doc(db, "payments", previousLinkedPaymentId),
           {

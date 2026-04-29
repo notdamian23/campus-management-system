@@ -7878,17 +7878,192 @@ async function loadCampusPaymentAssignments(
   return assignments;
 }
 
+function sortCampusPaymentTargets(
+  targets: CampusPaymentTarget[],
+): CampusPaymentTarget[] {
+  return [...targets].sort((left, right) => {
+    const bySchoolId = left.schoolId.localeCompare(right.schoolId);
+    if (bySchoolId !== 0) {
+      return bySchoolId;
+    }
+
+    return left.studentName.localeCompare(right.studentName);
+  });
+}
+
+async function resolvePreRegisteredCampusPaymentTargets(
+  eventId: string,
+): Promise<CampusPaymentTarget[]> {
+  const normalizedEventId = normalizeText(eventId);
+  if (!normalizedEventId) {
+    return [];
+  }
+
+  const registrationsSnapshot = await db
+    .collection(`events/${normalizedEventId}/registrations`)
+    .get();
+  const targetsByUid = new Map<string, CampusPaymentTarget>();
+
+  registrationsSnapshot.docs.forEach((registrationDoc) => {
+    const registrationData = registrationDoc.data() ?? {};
+    const registrationStatus = parseRegistrationStatus(registrationData.status);
+    if (registrationStatus !== "PRE_REGISTERED") {
+      return;
+    }
+
+    const uid =
+      normalizeText(registrationData.uid) ||
+      normalizeText(registrationData.studentUid) ||
+      registrationDoc.id;
+    if (!uid) {
+      return;
+    }
+
+    const schoolId =
+      normalizeText(registrationData.schoolId) ||
+      normalizeText(registrationData.studentId) ||
+      uid;
+    const studentName =
+      normalizeText(
+        registrationData.studentName ||
+        registrationData.name ||
+        registrationData.fullName,
+      ) ||
+      schoolId;
+    const course =
+      normalizeCourseLabel(registrationData.course) ||
+      normalizeText(registrationData.course) ||
+      "Unassigned";
+    const yearLevel =
+      normalizeYear(registrationData.yearLevel || registrationData.year) ||
+      "Unassigned";
+
+    targetsByUid.set(uid, {
+      uid,
+      schoolId,
+      studentName,
+      course,
+      yearLevel,
+    });
+  });
+
+  return sortCampusPaymentTargets(Array.from(targetsByUid.values()));
+}
+
+async function getLinkedPreRegEventIdForPayment(
+  paymentData: FirebaseFirestore.DocumentData,
+): Promise<string> {
+  const linkedEventId = paymentLinkedEventId(paymentData);
+  if (!linkedEventId) {
+    return "";
+  }
+
+  const eventSnapshot = await db.doc(`events/${linkedEventId}`).get();
+  if (!eventSnapshot.exists) {
+    return "";
+  }
+
+  const eventData = eventSnapshot.data() ?? {};
+  return eventData.isPreReg === true ? linkedEventId : "";
+}
+
+async function resolvePreRegLinkedPaymentCounts(
+  paymentId: string,
+  paymentData: FirebaseFirestore.DocumentData,
+): Promise<{total: number; paidCount: number; unpaidCount: number} | null> {
+  const linkedPreRegEventId =
+    await getLinkedPreRegEventIdForPayment(paymentData);
+  if (!linkedPreRegEventId) {
+    return null;
+  }
+
+  const targets =
+    await resolvePreRegisteredCampusPaymentTargets(linkedPreRegEventId);
+  const assignments = await loadCampusPaymentAssignments(
+    db.doc(`payments/${paymentId}`),
+  );
+  const paidCount = targets.filter(
+    (target) => assignments.get(target.uid)?.status === "Paid",
+  ).length;
+
+  return {
+    total: targets.length,
+    paidCount,
+    unpaidCount: Math.max(0, targets.length - paidCount),
+  };
+}
+
+async function syncPreRegLinkedPaymentAssignmentsForEvent(
+  eventId: string,
+): Promise<CampusPaymentAssignmentSyncSummary | null> {
+  const normalizedEventId = normalizeText(eventId);
+  if (!normalizedEventId) {
+    return null;
+  }
+
+  const eventSnapshot = await db.doc(`events/${normalizedEventId}`).get();
+  if (!eventSnapshot.exists) {
+    return null;
+  }
+
+  const eventData = eventSnapshot.data() ?? {};
+  if (eventData.isPreReg !== true) {
+    return null;
+  }
+
+  const linkedPaymentId =
+    normalizeText(eventData.linkedPaymentId) ||
+    normalizeText(eventData.requiredPaymentId);
+  if (
+    !linkedPaymentId ||
+    (eventData.withPayment !== true && eventData.paymentRequired !== true)
+  ) {
+    return null;
+  }
+
+  const paymentRef = db.doc(`payments/${linkedPaymentId}`);
+  const paymentSnapshot = await paymentRef.get();
+  if (!paymentSnapshot.exists) {
+    return null;
+  }
+
+  const targets =
+    await resolvePreRegisteredCampusPaymentTargets(normalizedEventId);
+  const existingAssignments = await loadCampusPaymentAssignments(paymentRef);
+  const assignmentSummary = await syncCampusPaymentAssignments(
+    linkedPaymentId,
+    targets,
+    existingAssignments,
+    {countRetainedPaidMissingAssignments: false},
+  );
+
+  await paymentRef.set(
+    {
+      totalStudents: assignmentSummary.totalStudents,
+      paidCount: assignmentSummary.paidCount,
+      unpaidCount: assignmentSummary.unpaidCount,
+      updatedAt: serverTimestamp(),
+    },
+    {merge: true},
+  );
+
+  return assignmentSummary;
+}
+
 async function syncCampusPaymentAssignments(
   paymentId: string,
   targets: CampusPaymentTarget[],
   existingAssignments: Map<string, CampusPaymentAssignmentRecord>,
   options?: {
     removeMissingAssignments?: boolean;
+    countRetainedPaidMissingAssignments?: boolean;
   },
 ): Promise<CampusPaymentAssignmentSyncSummary> {
   const writesPerBatch = 450;
   const nextTargetIds = new Set(targets.map((target) => target.uid));
   const removeMissingAssignments = options?.removeMissingAssignments !== false;
+  const countRetainedPaidMissingAssignments =
+    options?.countRetainedPaidMissingAssignments !== false;
   let paidCount = 0;
   let batchCount = 0;
   let createdAssignmentCount = 0;
@@ -7957,12 +8132,21 @@ async function syncCampusPaymentAssignments(
       assignment.status === "Paid",
     );
   retainedExistingAssignments.forEach(([, assignment]) => {
-    if (!nextTargetIds.has(assignment.uid) && assignment.status === "Paid") {
+    if (
+      countRetainedPaidMissingAssignments &&
+      !nextTargetIds.has(assignment.uid) &&
+      assignment.status === "Paid"
+    ) {
       paidCount += 1;
     }
   });
   const totalStudents = removeMissingAssignments ?
-    nextTargetIds.size + retainedPaidMissingAssignments.length :
+    nextTargetIds.size +
+      (
+        countRetainedPaidMissingAssignments ?
+          retainedPaidMissingAssignments.length :
+          0
+      ) :
     new Set([
       ...Array.from(existingAssignments.keys()),
       ...Array.from(nextTargetIds),
@@ -8862,6 +9046,16 @@ async function resolveCampusPaymentTargetsFromStoredPayment(
         eventId: linkedEventId,
       };
     }
+  }
+
+  if (linkedEventId && linkedEventData?.isPreReg === true) {
+    const targets = await resolvePreRegisteredCampusPaymentTargets(linkedEventId);
+    functionsLogger.info("resolveCampusPaymentTargetsFromStoredPayment prereg audience", {
+      linkedEventId,
+      paymentId: normalizeText(paymentData.id || paymentData.paymentId),
+      targetCount: targets.length,
+    });
+    return targets;
   }
 
   const ownerType = paymentOwnerType(paymentData);
@@ -13342,13 +13536,73 @@ export const updateCampusPayment = onCall({region: REGION}, async (request) => {
       const linkedEventId = paymentLinkedEventId(paymentData);
       const requestedSelectedStudentIds = toUniqueIdentifierList(body.selectedStudentIds);
       const requestedSelectedSchoolIds = toUniqueIdentifierList(body.selectedSchoolIds);
+      const linkedPreRegEventId = linkedEventId ?
+        await getLinkedPreRegEventIdForPayment({
+          ...paymentData,
+          linkedEventId,
+        }) :
+        "";
       const preserveExistingAudience =
         Boolean(linkedEventId) &&
         requestedSelectedStudentIds.length === 0 &&
         requestedSelectedSchoolIds.length === 0;
 
       let audience: CampusPaymentAudienceResolution;
-      if (preserveExistingAudience) {
+      if (linkedPreRegEventId) {
+        const targets = await resolvePreRegisteredCampusPaymentTargets(
+          linkedPreRegEventId,
+        );
+
+        audience = {
+          targets,
+          targetStudent: normalizeText(paymentData.targetStudent),
+          course: actor.isBod ?
+            actor.courseScope :
+            paymentCourseValue(paymentData) ||
+              normalizeText(paymentData.course) ||
+              "All Courses",
+          yearLevel: normalizeText(paymentData.yearLevel) || "All Years",
+          targetCourses: actor.isBod ?
+            [actor.courseScope] :
+            paymentTargetCourses(paymentData).length > 0 ?
+              paymentTargetCourses(paymentData) :
+              Array.from(new Set(
+                targets
+                  .map((target) => normalizeCourseLabel(target.course))
+                  .filter(Boolean),
+              )),
+          targetYearLevels:
+            paymentTargetYearLevels(paymentData).length > 0 ?
+              paymentTargetYearLevels(paymentData) :
+              Array.from(new Set(
+                targets
+                  .map((target) => normalizeYear(target.yearLevel))
+                  .filter(
+                    (value) =>
+                      Boolean(value) &&
+                      value !== "Unassigned" &&
+                      normalizeLower(value) !== "all years",
+                  ),
+              )),
+          courseScope: actor.isBod ?
+            actor.courseScope :
+            paymentCourseScope(paymentData) || null,
+          selectedCourse: actor.isBod ?
+            actor.courseScope :
+            paymentCourseValue(paymentData) ||
+              normalizeText(paymentData.course) ||
+              "All Courses",
+          selectedYear: normalizeText(paymentData.yearLevel) || "All Years",
+          selectedStudentIds: toUniqueIdentifierList(paymentData.selectedStudentIds),
+          selectedSchoolIds: toUniqueIdentifierList(paymentData.selectedSchoolIds),
+          hasExplicitTargets: false,
+          courseTargetsForLog: paymentTargetCourses(paymentData),
+          yearTargetsForLog: paymentTargetYearLevels(paymentData),
+          courseYearMatchedCount: targets.length,
+          selectedMatchedCount: 0,
+          finalAudienceCount: targets.length,
+        };
+      } else if (preserveExistingAudience) {
         const targets = Array.from(existingAssignments.values())
           .map((assignment) => ({
             uid: assignment.uid,
@@ -13461,6 +13715,7 @@ export const updateCampusPayment = onCall({region: REGION}, async (request) => {
         paymentId,
         audience.targets,
         existingAssignments,
+        {countRetainedPaidMissingAssignments: !linkedPreRegEventId},
       );
       logBatchCount = assignmentSummary.batchCount;
       logRemovedAssignmentCount = assignmentSummary.removedAssignmentCount;
@@ -13643,11 +13898,16 @@ export const repairCampusPaymentAssignments = onCall({region: REGION}, async (re
       }
 
       const existingAssignments = await loadCampusPaymentAssignments(paymentRef);
+      const linkedPreRegEventId = await getLinkedPreRegEventIdForPayment({
+        ...paymentData,
+        linkedEventId: linkedEventId || paymentLinkedEventId(paymentData),
+      });
       const targets = await resolveCampusPaymentTargetsFromStoredPayment({
         ...paymentData,
         id: paymentId,
+        linkedEventId: linkedEventId || paymentLinkedEventId(paymentData),
       });
-      if (targets.length === 0) {
+      if (targets.length === 0 && !linkedPreRegEventId) {
         throw new HttpsError(
           "failed-precondition",
           "No active student profiles matched this payment audience.",
@@ -13658,6 +13918,7 @@ export const repairCampusPaymentAssignments = onCall({region: REGION}, async (re
         paymentId,
         targets,
         existingAssignments,
+        {countRetainedPaidMissingAssignments: !linkedPreRegEventId},
       );
 
       await paymentRef.set(
@@ -13885,18 +14146,23 @@ export const listCampusPayments = onCall({region: REGION}, async (request) => {
           .collection("payments")
           .orderBy("createdAt", "desc")
           .get();
+        const payments = await Promise.all(
+          paymentSnapshot.docs.map(async (paymentDoc) => {
+            const paymentData = paymentDoc.data() ?? {};
+            if (normalizeLower(paymentData.status) === "archived") {
+              return null;
+            }
+
+            const preregCounts = await resolvePreRegLinkedPaymentCounts(
+              paymentDoc.id,
+              paymentData,
+            );
+            return toPaymentPayload(paymentDoc.id, paymentData, preregCounts);
+          }),
+        );
 
         return {
-          payments: paymentSnapshot.docs
-            .map((paymentDoc) => {
-              const paymentData = paymentDoc.data() ?? {};
-              if (normalizeLower(paymentData.status) === "archived") {
-                return null;
-              }
-
-              return toPaymentPayload(paymentDoc.id, paymentData, null);
-            })
-            .filter(Boolean),
+          payments: payments.filter(Boolean),
         };
       }
 
@@ -14013,7 +14279,11 @@ export const listCampusPayments = onCall({region: REGION}, async (request) => {
           paymentCourse === actorCourseScope;
 
         if (isOwnBodPayment) {
-          payments.push(toPaymentPayload(paymentId, paymentData, null));
+          const preregCounts = await resolvePreRegLinkedPaymentCounts(
+            paymentId,
+            paymentData,
+          );
+          payments.push(toPaymentPayload(paymentId, paymentData, preregCounts));
           continue;
         }
 
@@ -14056,7 +14326,11 @@ export const listCampusPayments = onCall({region: REGION}, async (request) => {
         }
 
         if (matchesActorScope) {
-          payments.push(toPaymentPayload(paymentId, paymentData, null));
+          const preregCounts = await resolvePreRegLinkedPaymentCounts(
+            paymentId,
+            paymentData,
+          );
+          payments.push(toPaymentPayload(paymentId, paymentData, preregCounts));
         }
       }
 
@@ -14162,6 +14436,78 @@ export const listCampusPaymentStudents = onCall({region: REGION}, async (request
           matchedBy: access.matchedBy,
         });
         throw new HttpsError("permission-denied", access.reason);
+      }
+
+      const linkedPreRegEventId = await getLinkedPreRegEventIdForPayment(paymentData);
+      if (linkedPreRegEventId) {
+        await syncPreRegLinkedPaymentAssignmentsForEvent(linkedPreRegEventId);
+
+        const [targets, assignmentSnapshot] = await Promise.all([
+          resolvePreRegisteredCampusPaymentTargets(linkedPreRegEventId),
+          paymentRef.collection("students").get(),
+        ]);
+        const assignmentsByUid = new Map(
+          assignmentSnapshot.docs.map((studentDoc) => [studentDoc.id, studentDoc]),
+        );
+
+        rawStudentRowCount = targets.length;
+        const students = targets
+          .map((target) => {
+            const assignmentDoc = assignmentsByUid.get(target.uid);
+            const assignmentData = assignmentDoc?.data() ?? {};
+            return normalizeCampusPaymentStudentRow(target.uid, {
+              ...assignmentData,
+              uid: target.uid,
+              studentUid: target.uid,
+              schoolId:
+                normalizeText(assignmentData.schoolId) ||
+                target.schoolId,
+              studentId:
+                normalizeText(assignmentData.studentId) ||
+                target.schoolId,
+              name:
+                normalizeText(assignmentData.name) ||
+                target.studentName,
+              studentName:
+                normalizeText(assignmentData.studentName) ||
+                target.studentName,
+              course:
+                normalizeText(assignmentData.course) ||
+                target.course,
+              year:
+                normalizeText(assignmentData.year) ||
+                target.yearLevel,
+              yearLevel:
+                normalizeText(assignmentData.yearLevel) ||
+                target.yearLevel,
+              status:
+                normalizeText(assignmentData.status) ||
+                "Unpaid",
+            });
+          })
+          .filter((row) =>
+            actor.isBod && actor.courseScope ?
+              campusPaymentStudentMatchesCourseScope(row, actor.courseScope) :
+              true,
+          )
+          .sort(sortCampusPaymentStudentRows);
+
+        returnedStudentRowCount = students.length;
+        functionsLogger.info("listCampusPaymentStudents prereg success", {
+          callerUid,
+          callerRole,
+          callerCourseScope,
+          paymentId,
+          linkedEventId: linkedPreRegEventId,
+          paymentOwnerType: paymentOwner,
+          paymentCourse,
+          paymentCourseScope: paymentScope,
+          paymentTargetCourses,
+          rawStudentRowCount,
+          returnedStudentRowCount,
+        });
+
+        return {students};
       }
 
       const studentSnapshot = await paymentRef.collection("students").get();
@@ -14317,6 +14663,18 @@ export const updateCampusPaymentStudentStatus = onCall({region: REGION}, async (
         throw new HttpsError("permission-denied", access.reason);
       }
 
+      const linkedPreRegEventId = await getLinkedPreRegEventIdForPayment(paymentData);
+      const preRegTargets = linkedPreRegEventId ?
+        await resolvePreRegisteredCampusPaymentTargets(linkedPreRegEventId) :
+        [];
+      const preRegTargetIds = new Set(preRegTargets.map((target) => target.uid));
+      if (linkedPreRegEventId) {
+        if (!preRegTargetIds.has(studentUid)) {
+          throw new HttpsError("not-found", "Payment student not found.");
+        }
+        await syncPreRegLinkedPaymentAssignmentsForEvent(linkedPreRegEventId);
+      }
+
       const nowMs = Date.now();
       const nowTimestamp = admin.firestore.Timestamp.fromMillis(nowMs);
       const result = await db.runTransaction(async (transaction) => {
@@ -14365,6 +14723,9 @@ export const updateCampusPaymentStudentStatus = onCall({region: REGION}, async (
 
         let paidCount = 0;
         assignmentsSnapshot.docs.forEach((assignmentDoc) => {
+          if (linkedPreRegEventId && !preRegTargetIds.has(assignmentDoc.id)) {
+            return;
+          }
           const status =
             assignmentDoc.id === studentUid ?
               requestedStatus :
@@ -14373,7 +14734,9 @@ export const updateCampusPaymentStudentStatus = onCall({region: REGION}, async (
             paidCount += 1;
           }
         });
-        const totalStudents = assignmentsSnapshot.size;
+        const totalStudents = linkedPreRegEventId ?
+          preRegTargetIds.size :
+          assignmentsSnapshot.size;
         const unpaidCount = Math.max(0, totalStudents - paidCount);
 
         if (currentStatus !== requestedStatus) {
@@ -15825,27 +16188,32 @@ export const createCampusEvent = onCall({region: REGION}, async (request) => {
           selectedStudentIds,
           selectedSchoolIds,
         };
-        const paymentAudienceCandidates = await listCampusStudentRecipientCandidates(
-          actorCourseScope,
-          actorIsBod,
-        );
-        const paymentAudience = resolveCampusAudienceUnion(
-          paymentAudienceSource,
-          paymentAudienceCandidates,
-        );
-        const paymentTargets = paymentAudience.finalAudience.map((student) => ({
-          uid: student.uid,
-          schoolId: student.schoolId,
-          studentName: student.studentName,
-          course: student.course,
-          yearLevel: student.yearLevel,
-        }));
+        let paymentAudience: CampusAudienceResolution | null = null;
+        let paymentTargets: CampusPaymentTarget[] = [];
 
-        if (paymentTargets.length === 0) {
-          throw new HttpsError(
-            "invalid-argument",
-            "No active students match the selected audience for this paid event.",
+        if (!isPreReg) {
+          const paymentAudienceCandidates = await listCampusStudentRecipientCandidates(
+            actorCourseScope,
+            actorIsBod,
           );
+          paymentAudience = resolveCampusAudienceUnion(
+            paymentAudienceSource,
+            paymentAudienceCandidates,
+          );
+          paymentTargets = paymentAudience.finalAudience.map((student) => ({
+            uid: student.uid,
+            schoolId: student.schoolId,
+            studentName: student.studentName,
+            course: student.course,
+            yearLevel: student.yearLevel,
+          }));
+
+          if (paymentTargets.length === 0) {
+            throw new HttpsError(
+              "invalid-argument",
+              "No active students match the selected audience for this paid event.",
+            );
+          }
         }
 
         const paymentDocRef = db.collection("payments").doc();
@@ -15854,6 +16222,7 @@ export const createCampusEvent = onCall({region: REGION}, async (request) => {
           paymentDocRef.id,
           paymentTargets,
           new Map(),
+          {countRetainedPaidMissingAssignments: !isPreReg},
         );
 
         await paymentDocRef.set({
@@ -15886,19 +16255,29 @@ export const createCampusEvent = onCall({region: REGION}, async (request) => {
           updatedAt: serverTimestamp(),
         }, {merge: true});
 
-        logCampusAudienceResolution(
-          "createCampusEvent linked payment audience",
-          {
-            ...paymentAudienceSource,
+        if (paymentAudience) {
+          logCampusAudienceResolution(
+            "createCampusEvent linked payment audience",
+            {
+              ...paymentAudienceSource,
+              paymentId: paymentDocRef.id,
+            },
+            paymentAudience,
+            {
+              paymentAssignmentCreatedCount: assignmentSummary.createdAssignmentCount,
+              paidCount: assignmentSummary.paidCount,
+              unpaidCount: assignmentSummary.unpaidCount,
+            },
+          );
+        } else {
+          functionsLogger.info("createCampusEvent linked payment prereg audience", {
+            eventId,
             paymentId: paymentDocRef.id,
-          },
-          paymentAudience,
-          {
-            paymentAssignmentCreatedCount: assignmentSummary.createdAssignmentCount,
+            targetCount: paymentTargets.length,
             paidCount: assignmentSummary.paidCount,
             unpaidCount: assignmentSummary.unpaidCount,
-          },
-        );
+          });
+        }
       }
 
       const preRegCount = 0;
@@ -16427,27 +16806,34 @@ export const updateCampusEvent = onCall({region: REGION}, async (request) => {
           selectedStudentIds,
           selectedSchoolIds,
         };
-        const paymentAudienceCandidates = await listCampusStudentRecipientCandidates(
-          actorCourseScope,
-          actorIsBod,
-        );
-        const paymentAudience = resolveCampusAudienceUnion(
-          paymentAudienceSource,
-          paymentAudienceCandidates,
-        );
-        const paymentTargets = paymentAudience.finalAudience.map((student) => ({
-          uid: student.uid,
-          schoolId: student.schoolId,
-          studentName: student.studentName,
-          course: student.course,
-          yearLevel: student.yearLevel,
-        }));
+        let paymentAudience: CampusAudienceResolution | null = null;
+        let paymentTargets: CampusPaymentTarget[] = [];
 
-        if (paymentTargets.length === 0) {
-          throw new HttpsError(
-            "invalid-argument",
-            "No active students match the selected audience for this paid event.",
+        if (isPreReg) {
+          paymentTargets = await resolvePreRegisteredCampusPaymentTargets(eventId);
+        } else {
+          const paymentAudienceCandidates = await listCampusStudentRecipientCandidates(
+            actorCourseScope,
+            actorIsBod,
           );
+          paymentAudience = resolveCampusAudienceUnion(
+            paymentAudienceSource,
+            paymentAudienceCandidates,
+          );
+          paymentTargets = paymentAudience.finalAudience.map((student) => ({
+            uid: student.uid,
+            schoolId: student.schoolId,
+            studentName: student.studentName,
+            course: student.course,
+            yearLevel: student.yearLevel,
+          }));
+
+          if (paymentTargets.length === 0) {
+            throw new HttpsError(
+              "invalid-argument",
+              "No active students match the selected audience for this paid event.",
+            );
+          }
         }
 
         const existingAssignments = await loadCampusPaymentAssignments(paymentRef);
@@ -16455,6 +16841,7 @@ export const updateCampusEvent = onCall({region: REGION}, async (request) => {
           linkedPaymentId,
           paymentTargets,
           existingAssignments,
+          {countRetainedPaidMissingAssignments: !isPreReg},
         );
 
         await paymentRef.set(
@@ -16469,17 +16856,29 @@ export const updateCampusEvent = onCall({region: REGION}, async (request) => {
           {merge: true},
         );
 
-        logCampusAudienceResolution(
-          "updateCampusEvent linked payment audience",
-          paymentAudienceSource,
-          paymentAudience,
-          {
+        if (paymentAudience) {
+          logCampusAudienceResolution(
+            "updateCampusEvent linked payment audience",
+            paymentAudienceSource,
+            paymentAudience,
+            {
+              paymentAssignmentCreatedCount: assignmentSummary.createdAssignmentCount,
+              removedAssignmentCount: assignmentSummary.removedAssignmentCount,
+              paidCount: assignmentSummary.paidCount,
+              unpaidCount: assignmentSummary.unpaidCount,
+            },
+          );
+        } else {
+          functionsLogger.info("updateCampusEvent linked payment prereg audience", {
+            eventId,
+            paymentId: linkedPaymentId,
+            targetCount: paymentTargets.length,
             paymentAssignmentCreatedCount: assignmentSummary.createdAssignmentCount,
             removedAssignmentCount: assignmentSummary.removedAssignmentCount,
             paidCount: assignmentSummary.paidCount,
             unpaidCount: assignmentSummary.unpaidCount,
-          },
-        );
+          });
+        }
       } else if (previousLinkedPaymentId) {
         await db.doc(`payments/${previousLinkedPaymentId}`).set(
           {
@@ -17574,6 +17973,23 @@ export const studentManagePreRegistration = onCall({region: REGION}, async (requ
         promotedStudentUid,
       };
     });
+
+    await syncPreRegLinkedPaymentAssignmentsForEvent(eventId).catch(
+      (error: unknown) => {
+        functionsLogger.error(
+          "studentManagePreRegistration linked payment sync failed",
+          {
+            eventId,
+            uid,
+            action,
+            status: result.status,
+            errorMessage:
+              error instanceof Error ? error.message : String(error ?? ""),
+            errorStack: error instanceof Error ? error.stack : null,
+          },
+        );
+      },
+    );
 
     return result;
   });
