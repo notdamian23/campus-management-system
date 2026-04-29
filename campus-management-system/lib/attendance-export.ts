@@ -169,6 +169,17 @@ type AttendanceWorkbookDownloadOptions = {
   };
 };
 
+type EventAudienceTargets = {
+  courseTargets: string[];
+  yearTargets: string[];
+  hasSpecificTarget: boolean;
+  hasSelectedAudience: boolean;
+  hasCourseYearFilters: boolean;
+  hasAnyCourseYearTargets: boolean;
+  shouldResolveCourseYearAudience: boolean;
+  hasExplicitAudience: boolean;
+};
+
 function parseTime12ToMinutes(value: unknown) {
   const text = String(value ?? "").trim();
   if (!text) return null;
@@ -326,6 +337,47 @@ function hasExplicitSelectedEventAudience(event: AttendanceExportEvent) {
   );
 }
 
+function hasRestrictiveEventTargetList(targets: string[], allLabel: string) {
+  const normalizedAllLabel = normalizeLowerLookupText(allLabel);
+  return targets.some(
+    (item) => normalizeLowerLookupText(item) !== normalizedAllLabel,
+  );
+}
+
+function resolveEventAudienceTargets(
+  event: AttendanceExportEvent,
+): EventAudienceTargets {
+  const courseTargets =
+    Array.isArray(event.courses) && event.courses.length > 0
+      ? event.courses.map((item) => normalizeLookupText(item)).filter(Boolean)
+      : toEventTargetList(event.course);
+  const yearTargets =
+    Array.isArray(event.yearLevels) && event.yearLevels.length > 0
+      ? event.yearLevels.map((item) => normalizeLookupText(item)).filter(Boolean)
+      : toEventTargetList(event.yearLevel);
+  const hasSpecificTarget = Boolean(normalizeLookupText(event.targetStudent));
+  const hasSelectedAudience = hasExplicitSelectedEventAudience(event);
+  const hasCourseYearFilters =
+    hasRestrictiveEventTargetList(courseTargets, "All Courses") ||
+    hasRestrictiveEventTargetList(yearTargets, "All Years");
+  const hasAnyCourseYearTargets =
+    courseTargets.length > 0 || yearTargets.length > 0;
+  const shouldResolveCourseYearAudience =
+    hasCourseYearFilters || (!hasSelectedAudience && hasAnyCourseYearTargets);
+
+  return {
+    courseTargets,
+    yearTargets,
+    hasSpecificTarget,
+    hasSelectedAudience,
+    hasCourseYearFilters,
+    hasAnyCourseYearTargets,
+    shouldResolveCourseYearAudience,
+    hasExplicitAudience:
+      hasAnyCourseYearTargets || hasSpecificTarget || hasSelectedAudience,
+  };
+}
+
 function matchesSelectedEventAudience(
   event: AttendanceExportEvent,
   uid: string,
@@ -429,6 +481,56 @@ function matchesSpecificEventStudentTarget(
   return false;
 }
 
+function matchesEventCourseYearAudience(
+  targets: Pick<EventAudienceTargets, "courseTargets" | "yearTargets">,
+  course: string,
+  year: string,
+) {
+  return (
+    matchesEventTargetList(targets.courseTargets, course, "All Courses") &&
+    matchesEventTargetList(targets.yearTargets, year, "All Years")
+  );
+}
+
+function matchesResolvedEventAudience(
+  event: AttendanceExportEvent,
+  targets: EventAudienceTargets,
+  uid: string,
+  schoolId: string,
+  course: string,
+  year: string,
+  studentName: string,
+) {
+  if (targets.hasSelectedAudience) {
+    if (matchesSelectedEventAudience(event, uid, schoolId)) {
+      return true;
+    }
+
+    if (!targets.shouldResolveCourseYearAudience) {
+      return false;
+    }
+
+    return matchesEventCourseYearAudience(targets, course, year);
+  }
+
+  if (targets.shouldResolveCourseYearAudience) {
+    return (
+      matchesEventCourseYearAudience(targets, course, year) &&
+      matchesSpecificEventStudentTarget(event.targetStudent, schoolId, studentName)
+    );
+  }
+
+  if (targets.hasSpecificTarget) {
+    return matchesSpecificEventStudentTarget(
+      event.targetStudent,
+      schoolId,
+      studentName,
+    );
+  }
+
+  return true;
+}
+
 function sortStudentLookups(rows: AttendanceExportStudent[]) {
   return [...rows].sort(
     (left, right) =>
@@ -442,27 +544,65 @@ function isActiveStudentStatus(status: string) {
   return normalized === "" || normalized === "active";
 }
 
+function addAudienceStudent(
+  rows: AttendanceExportStudent[],
+  keysByUid: Set<string>,
+  keysBySchoolId: Set<string>,
+  student: AttendanceExportStudent,
+) {
+  const uid = normalizeLowerLookupText(student.uid);
+  const schoolId = normalizeLowerLookupText(student.schoolId);
+
+  if (uid && keysByUid.has(uid)) {
+    return;
+  }
+  if (schoolId && keysBySchoolId.has(schoolId)) {
+    return;
+  }
+
+  rows.push(student);
+
+  if (uid) {
+    keysByUid.add(uid);
+  }
+  if (schoolId) {
+    keysBySchoolId.add(schoolId);
+  }
+}
+
+function logEventAudienceResolution(
+  event: AttendanceExportEvent,
+  targets: EventAudienceTargets,
+  courseYearMatchedCount: number,
+  selectedMatchedCount: number,
+  finalAudienceCount: number,
+) {
+  globalThis.console?.debug?.("[attendance-export] resolved event audience", {
+    eventId: event.id,
+    course: event.course ?? null,
+    courses: event.courses ?? null,
+    yearLevel: event.yearLevel ?? null,
+    yearLevels: event.yearLevels ?? null,
+    selectedStudentIdsCount: normalizeEventIdentifierList(
+      event.selectedStudentIds,
+    ).length,
+    selectedSchoolIdsCount: normalizeEventIdentifierList(
+      event.selectedSchoolIds,
+    ).length,
+    courseYearMatchedCount,
+    selectedMatchedCount,
+    finalAudienceCount,
+    hasCourseYearFilters: targets.hasCourseYearFilters,
+  });
+}
+
 function resolveRequiredEventAudience(
   event: AttendanceExportEvent,
   students: AttendanceExportStudent[],
 ) {
-  const courseTargets =
-    Array.isArray(event.courses) && event.courses.length > 0
-      ? event.courses.map((item) => normalizeLookupText(item)).filter(Boolean)
-      : toEventTargetList(event.course);
-  const yearTargets =
-    Array.isArray(event.yearLevels) && event.yearLevels.length > 0
-      ? event.yearLevels.map((item) => normalizeLookupText(item)).filter(Boolean)
-      : toEventTargetList(event.yearLevel);
-  const hasSpecificTarget = Boolean(normalizeLookupText(event.targetStudent));
-  const hasSelectedAudience = hasExplicitSelectedEventAudience(event);
-  const hasExplicitAudience =
-    courseTargets.length > 0 ||
-    yearTargets.length > 0 ||
-    hasSpecificTarget ||
-    hasSelectedAudience;
+  const targets = resolveEventAudienceTargets(event);
 
-  if (!hasExplicitAudience) {
+  if (!targets.hasExplicitAudience) {
     return {
       resolved: false,
       students: [] as AttendanceExportStudent[],
@@ -473,37 +613,57 @@ function resolveRequiredEventAudience(
     isActiveStudentStatus(student.status),
   );
 
-  const matchedStudents = activeStudents.filter((student) => {
-    const selectedMatch = matchesSelectedEventAudience(
-      event,
-      student.uid,
-      student.schoolId,
-    );
-    if (!selectedMatch) {
-      return false;
-    }
+  const courseYearMatchedStudents = targets.shouldResolveCourseYearAudience
+    ? activeStudents.filter((student) => {
+        if (!matchesEventCourseYearAudience(targets, student.course, student.year)) {
+          return false;
+        }
 
-    if (hasSelectedAudience) {
-      return true;
-    }
+        return targets.hasSelectedAudience
+          ? true
+          : matchesSpecificEventStudentTarget(
+              event.targetStudent,
+              student.schoolId,
+              student.studentName,
+            );
+      })
+    : [];
+  const selectedMatchedStudents = targets.hasSelectedAudience
+    ? activeStudents.filter((student) =>
+        matchesSelectedEventAudience(event, student.uid, student.schoolId),
+      )
+    : [];
+  const specificMatchedStudents =
+    !targets.hasSelectedAudience &&
+    !targets.shouldResolveCourseYearAudience &&
+    targets.hasSpecificTarget
+      ? activeStudents.filter((student) =>
+          matchesSpecificEventStudentTarget(
+            event.targetStudent,
+            student.schoolId,
+            student.studentName,
+          ),
+        )
+      : [];
+  const matchedStudents: AttendanceExportStudent[] = [];
+  const keysByUid = new Set<string>();
+  const keysBySchoolId = new Set<string>();
 
-    const courseMatch = matchesEventTargetList(
-      courseTargets,
-      student.course,
-      "All Courses",
-    );
-    const yearMatch = matchesEventTargetList(
-      yearTargets,
-      student.year,
-      "All Years",
-    );
-    const studentMatch = matchesSpecificEventStudentTarget(
-      event.targetStudent,
-      student.schoolId,
-      student.studentName,
-    );
-    return courseMatch && yearMatch && studentMatch;
-  });
+  [
+    ...courseYearMatchedStudents,
+    ...selectedMatchedStudents,
+    ...specificMatchedStudents,
+  ].forEach((student) =>
+    addAudienceStudent(matchedStudents, keysByUid, keysBySchoolId, student),
+  );
+
+  logEventAudienceResolution(
+    event,
+    targets,
+    courseYearMatchedStudents.length,
+    selectedMatchedStudents.length,
+    matchedStudents.length,
+  );
 
   return {
     resolved: true,
@@ -592,6 +752,7 @@ function buildEventParticipantRows(
     byUid: paymentAssignmentsByUid,
     bySchoolId: paymentAssignmentsBySchoolId,
   } = buildPaymentAssignmentIndexes(paymentAssignments);
+  const audienceTargets = resolveEventAudienceTargets(event);
 
   audienceStudents.forEach((student) => {
     const uid = String(student.uid ?? "").trim();
@@ -637,27 +798,15 @@ function buildEventParticipantRows(
     const year = String(registration.year ?? "").trim() || "-";
 
     if (
-      !matchesSelectedEventAudience(event, uid, schoolId) ||
-      (!hasExplicitSelectedEventAudience(event) &&
-        (!matchesEventTargetList(
-          Array.isArray(event.courses) && event.courses.length > 0
-            ? event.courses
-            : event.course,
-          course,
-          "All Courses",
-        ) ||
-          !matchesEventTargetList(
-            Array.isArray(event.yearLevels) && event.yearLevels.length > 0
-              ? event.yearLevels
-              : event.yearLevel,
-            year,
-            "All Years",
-          ) ||
-          !matchesSpecificEventStudentTarget(
-            event.targetStudent,
-            schoolId,
-            studentName,
-          )))
+      !matchesResolvedEventAudience(
+        event,
+        audienceTargets,
+        uid,
+        schoolId,
+        course,
+        year,
+        studentName,
+      )
     ) {
       return;
     }
@@ -716,27 +865,15 @@ function buildEventParticipantRows(
       "-";
 
     if (
-      !matchesSelectedEventAudience(event, uid, schoolId) ||
-      (!hasExplicitSelectedEventAudience(event) &&
-        (!matchesEventTargetList(
-          Array.isArray(event.courses) && event.courses.length > 0
-            ? event.courses
-            : event.course,
-          course,
-          "All Courses",
-        ) ||
-          !matchesEventTargetList(
-            Array.isArray(event.yearLevels) && event.yearLevels.length > 0
-              ? event.yearLevels
-              : event.yearLevel,
-            year,
-            "All Years",
-          ) ||
-          !matchesSpecificEventStudentTarget(
-            event.targetStudent,
-            schoolId,
-            studentName,
-          )))
+      !matchesResolvedEventAudience(
+        event,
+        audienceTargets,
+        uid,
+        schoolId,
+        course,
+        year,
+        studentName,
+      )
     ) {
       return;
     }
@@ -1463,6 +1600,10 @@ export function buildAttendanceExportRows({
       candidate.uid,
       candidate.schoolId,
     );
+    if (audience.resolved && !participantRow) {
+      return;
+    }
+
     const matchedStudent = resolveStudentLookupByIdentity(
       studentLookupIndexes,
       candidate.uid,

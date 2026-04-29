@@ -111,6 +111,23 @@ void test_specific_students_mode_accepts_targeted_school_id() {
                            decision.finalReason.c_str());
 }
 
+void test_filtered_event_with_selected_students_accepts_union_roster_student() {
+  EventInfo event = makeBroadEvent("ME", "1st Year");
+  event.targetedStudentIds.push_back("student-cpe-001");
+  const StudentInfo mechanicalStudent =
+      makeStudent("student-me-001", "Mechanical Engineering", "1st Year");
+
+  const auto baseDecision = CampusEligibility::evaluateStudentForEvent(
+      event, {mechanicalStudent}, mechanicalStudent);
+  const auto decision = CampusEligibility::reconcileWithPairedRoster(
+      event, mechanicalStudent, baseDecision, true, true);
+
+  TEST_ASSERT_TRUE(decision.allowed);
+  TEST_ASSERT_TRUE(decision.matchedPairedRoster);
+  TEST_ASSERT_EQUAL_STRING("matched_paired_event_roster",
+                           decision.finalReason.c_str());
+}
+
 void test_restricted_event_with_missing_audience_context_is_rejected() {
   EventInfo event;
   event.eventId = "evt-broad-empty";
@@ -292,6 +309,7 @@ void setup() {
   RUN_TEST(test_broad_audience_non_matching_course_is_rejected);
   RUN_TEST(test_specific_students_mode_only_selected_students_are_allowed);
   RUN_TEST(test_specific_students_mode_accepts_targeted_school_id);
+  RUN_TEST(test_filtered_event_with_selected_students_accepts_union_roster_student);
   RUN_TEST(test_empty_targeted_students_does_not_reject_broad_audience_event);
   RUN_TEST(test_course_and_year_variants_match_after_normalization);
   RUN_TEST(test_specific_target_student_string_is_honored);

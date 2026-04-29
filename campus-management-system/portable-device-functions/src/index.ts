@@ -1568,6 +1568,28 @@ function matchesSelectedAudience(
     event.selectedSchoolIds.some((value) => normalizeLower(value) === normalizedSchoolId);
 }
 
+function matchesExplicitSelectedAudience(
+  event: Pick<PortableEventSummary, "selectedStudentIds" | "selectedSchoolIds">,
+  studentId: string,
+  schoolId: string
+): boolean {
+  return hasExplicitSelectedAudience(event) &&
+    matchesSelectedAudience(event, studentId, schoolId);
+}
+
+function matchesPortableCourseYearAudience(
+  event: Pick<PortableEventSummary, "courses" | "yearLevels" | "sectionFilters">,
+  candidate: {
+    course: string;
+    yearLevel: string;
+    section?: unknown;
+  }
+): boolean {
+  return matchesTargetList(event.courses, normalizeCourse(candidate.course)) &&
+    matchesTargetList(event.yearLevels, normalizeYearLevel(candidate.yearLevel)) &&
+    matchesTargetList(event.sectionFilters, normalizeSection(candidate.section));
+}
+
 function evaluateEventEligibility(
   event: PortableEventSummary,
   candidate: {
@@ -1583,12 +1605,21 @@ function evaluateEventEligibility(
     paymentStatus?: unknown;
   }
 ): {allowed: boolean; reason: string} {
-  if (!matchesSelectedAudience(event, candidate.studentId, candidate.schoolId)) {
-    return {allowed: false, reason: "not_selected_student"};
-  }
+  const hasSelectedAudience = hasExplicitSelectedAudience(event);
+  const selectedMatch = matchesExplicitSelectedAudience(
+    event,
+    candidate.studentId,
+    candidate.schoolId
+  );
+  const hasBroadAudienceFilters = portableEventHasBroadAudienceFilters(event);
+  const selectedAudienceAllowsCandidate = hasSelectedAudience && selectedMatch;
 
-  if (!hasExplicitSelectedAudience(event)) {
-    if (!matchesSpecificStudentTarget(event.targetStudent, {
+  if (!selectedAudienceAllowsCandidate) {
+    if (hasSelectedAudience && !hasBroadAudienceFilters) {
+      return {allowed: false, reason: "not_selected_student"};
+    }
+
+    if (!hasSelectedAudience && !matchesSpecificStudentTarget(event.targetStudent, {
       uid: candidate.studentId,
       schoolId: candidate.schoolId,
       studentName: candidate.studentName,
@@ -2302,6 +2333,42 @@ async function resolveAuthorizedStudentIds(
     .filter((registration) => registration.studentId.length > 0);
   const registrationsByStudentId = new Map<string, EventRegistrationLookup>();
   const authorized = new Map<string, {registrationId: string}>();
+  const selectedMatchedStudentIds = new Set<string>();
+  const courseYearMatchedStudentIds = new Set<string>();
+  const rememberAudienceMatch = (
+    studentId: string,
+    candidate: {
+      schoolId: string;
+      course: string;
+      yearLevel: string;
+      section?: unknown;
+    }
+  ) => {
+    if (matchesExplicitSelectedAudience(event, studentId, candidate.schoolId)) {
+      selectedMatchedStudentIds.add(studentId);
+    }
+    if (
+      portableEventHasBroadAudienceFilters(event) &&
+      matchesPortableCourseYearAudience(event, candidate)
+    ) {
+      courseYearMatchedStudentIds.add(studentId);
+    }
+  };
+  const logAndReturn = () => {
+    deviceLogger.info("Portable event audience resolved", {
+      eventId,
+      course: event.courses.length === 1 ? event.courses[0] : null,
+      courses: event.courses,
+      yearLevel: event.yearLevels.length === 1 ? event.yearLevels[0] : null,
+      yearLevels: event.yearLevels,
+      selectedStudentIdsCount: event.selectedStudentIds.length,
+      selectedSchoolIdsCount: event.selectedSchoolIds.length,
+      courseYearMatchedCount: courseYearMatchedStudentIds.size,
+      selectedMatchedCount: selectedMatchedStudentIds.size,
+      finalAudienceCount: authorized.size,
+    });
+    return authorized;
+  };
 
   registrations.forEach((registration) => {
     const existing = registrationsByStudentId.get(registration.studentId);
@@ -2329,9 +2396,15 @@ async function resolveAuthorizedStudentIds(
         authorized.set(registration.studentId, {
           registrationId: registration.registrationId,
         });
+        rememberAudienceMatch(registration.studentId, {
+          schoolId: registration.schoolId,
+          course: registration.course,
+          yearLevel: registration.yearLevel,
+          section: registration.section,
+        });
       }
     });
-    return authorized;
+    return logAndReturn();
   }
 
   if (event.selectedStudentIds.length > 0) {
@@ -2396,6 +2469,12 @@ async function resolveAuthorizedStudentIds(
       authorized.set(studentId, {
         registrationId: registration?.registrationId ?? "",
       });
+      rememberAudienceMatch(studentId, {
+        schoolId,
+        course,
+        yearLevel,
+        section,
+      });
     });
   }
 
@@ -2438,11 +2517,20 @@ async function resolveAuthorizedStudentIds(
       authorized.set(doc.id, {
         registrationId: registration?.registrationId ?? "",
       });
+      rememberAudienceMatch(doc.id, {
+        schoolId: normalizeText(data.schoolId),
+        course: normalizeCourse(data.course),
+        yearLevel: normalizeYearLevel(data.year ?? data.yearLevel),
+        section: normalizeSection(data.section),
+      });
     });
   }
 
-  if (hasExplicitSelectedAudience(event)) {
-    return authorized;
+  if (
+    hasExplicitSelectedAudience(event) &&
+    !portableEventHasBroadAudienceFilters(event)
+  ) {
+    return logAndReturn();
   }
 
   const profilesSnap = await db.collection("profiles").where("role", "==", "student").get();
@@ -2481,9 +2569,15 @@ async function resolveAuthorizedStudentIds(
     authorized.set(doc.id, {
       registrationId: registration?.registrationId ?? "",
     });
+    rememberAudienceMatch(doc.id, {
+      schoolId: normalizeText(data.schoolId),
+      course: normalizeCourse(data.course),
+      yearLevel: normalizeYearLevel(data.year ?? data.yearLevel),
+      section: normalizeSection(data.section),
+    });
   });
 
-  return authorized;
+  return logAndReturn();
 }
 
 function portableEventMinimalPayload(event: PortableEventSummary) {
