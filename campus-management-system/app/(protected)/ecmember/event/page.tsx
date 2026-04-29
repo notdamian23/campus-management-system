@@ -5930,6 +5930,8 @@ export default function EventDashboard() {
     targetStudentSummary,
     targetYearLevels,
     targetCourses,
+    selectedStudentIds,
+    selectedSchoolIds,
   }: {
     eventId: string;
     eventTitle: string;
@@ -5940,6 +5942,8 @@ export default function EventDashboard() {
     targetStudentSummary: string;
     targetYearLevels: string[];
     targetCourses: string[];
+    selectedStudentIds: string[];
+    selectedSchoolIds: string[];
   }) => {
     if (!currentUser?.uid) {
       throw new Error("You must be signed in to save an event payment.");
@@ -6005,6 +6009,8 @@ export default function EventDashboard() {
         targetStudent: targetStudentSummary,
         targetYearLevels,
         targetCourses,
+        selectedStudentIds,
+        selectedSchoolIds,
         details: paymentDescription.trim(),
         linkedEventId: eventId,
         eventId,
@@ -6066,9 +6072,16 @@ export default function EventDashboard() {
       await batch.commit();
     }
 
-    const removedAssignmentIds = Array.from(existingAssignments.keys()).filter(
-      (uid) => !nextTargetIds.has(uid),
+    const missingAssignments = Array.from(existingAssignments.entries()).filter(
+      ([uid]) => !nextTargetIds.has(uid),
     );
+    const removedAssignmentIds = missingAssignments
+      .filter(([, assignment]) => assignment.status !== "Paid")
+      .map(([uid]) => uid);
+    const retainedPaidMissingCount = missingAssignments.filter(
+      ([, assignment]) => assignment.status === "Paid",
+    ).length;
+    paidCount += retainedPaidMissingCount;
     for (let index = 0; index < removedAssignmentIds.length; index += writesPerBatch) {
       const batch = writeBatch(db);
       removedAssignmentIds
@@ -6082,9 +6095,12 @@ export default function EventDashboard() {
     await setDoc(
       paymentDocRef,
       {
-        totalStudents: activeTargets.length,
+        totalStudents: activeTargets.length + retainedPaidMissingCount,
         paidCount,
-        unpaidCount: Math.max(0, activeTargets.length - paidCount),
+        unpaidCount: Math.max(
+          0,
+          activeTargets.length + retainedPaidMissingCount - paidCount,
+        ),
         updatedAt: serverTimestamp(),
       },
       {merge: true},
@@ -6102,6 +6118,7 @@ export default function EventDashboard() {
     paymentTitle,
     viewerCourseScope,
     viewerCourseScopeValue,
+    viewerProfileWithUid?.role,
   ]);
 
   const handleStartEditUpcomingEvent = async (eventToEdit: EventDoc) => {
@@ -6615,6 +6632,8 @@ export default function EventDashboard() {
           targetStudentSummary: detailedStudentTarget,
           targetYearLevels: selectedEventYearLevels,
           targetCourses,
+          selectedStudentIds,
+          selectedSchoolIds,
         });
         linkedPaymentId = paymentSync.paymentId;
         setRequiredPaymentId(paymentSync.paymentId);

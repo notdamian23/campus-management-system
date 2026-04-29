@@ -191,6 +191,8 @@ type RawEventDoc = {
   yearLevels: string[];
   courses: string[];
   targetStudent: string;
+  selectedStudentIds: string[];
+  selectedSchoolIds: string[];
   details: string;
   isPreReg: boolean;
   withPayment: boolean;
@@ -594,6 +596,48 @@ function matchesSpecificStudentTarget(
   return false;
 }
 
+function matchesEventAudience(event: RawEventDoc, profile: StudentProfile) {
+  const selectedStudentIds = event.selectedStudentIds.map(normalizeText);
+  const selectedSchoolIds = event.selectedSchoolIds.map(normalizeText);
+  const hasSelectedAudience =
+    selectedStudentIds.length > 0 || selectedSchoolIds.length > 0;
+  const selectedMatch =
+    selectedStudentIds.includes(normalizeText(profile.uid)) ||
+    selectedSchoolIds.includes(normalizeText(profile.schoolId));
+  const courseValue = event.courses.length > 0 ? event.courses : event.course;
+  const yearValue = event.yearLevels.length > 0 ? event.yearLevels : event.yearLevel;
+  const hasCourseYearAudience =
+    event.courses.length > 0 ||
+    event.yearLevels.length > 0 ||
+    toTargetList(event.course).some(
+      (value) => normalizeText(value) !== "all courses",
+    ) ||
+    toTargetList(event.yearLevel).some((value) => {
+      const normalized = normalizeText(normalizeYear(value));
+      return normalized && normalized !== "all years" && normalized !== "unassigned";
+    });
+
+  if (selectedMatch) {
+    return true;
+  }
+
+  if (hasSelectedAudience && !hasCourseYearAudience) {
+    return false;
+  }
+
+  const courseMatch = matchesTarget(courseValue, profile.course, "All Courses");
+  const yearMatch = matchesTarget(yearValue, profile.year, "All Years");
+  const studentMatch = hasSelectedAudience
+    ? true
+    : matchesSpecificStudentTarget(
+        event.targetStudent,
+        profile.schoolId,
+        profile.studentName,
+      );
+
+  return courseMatch && yearMatch && studentMatch;
+}
+
 export function StudentPortalProvider({
   children,
 }: {
@@ -849,6 +893,8 @@ export function StudentPortalProvider({
         data: () => Partial<RawEventDoc> & {
           yearLevels?: unknown;
           courses?: unknown;
+          selectedStudentIds?: unknown;
+          selectedSchoolIds?: unknown;
           paymentRequired?: unknown;
           linkedPaymentId?: unknown;
         };
@@ -897,6 +943,8 @@ export function StudentPortalProvider({
             yearLevels,
             courses,
             targetStudent: String(data.targetStudent ?? ""),
+            selectedStudentIds: toTargetList(data.selectedStudentIds),
+            selectedSchoolIds: toTargetList(data.selectedSchoolIds),
             details: String(data.details ?? ""),
             isPreReg: data.isPreReg === true,
             withPayment: paymentRequired,
@@ -926,24 +974,7 @@ export function StudentPortalProvider({
                 : null,
           };
         })
-        .filter((event) => {
-          const courseMatch = matchesTarget(
-            event.courses.length > 0 ? event.courses : event.course,
-            profile.course,
-            "All Courses",
-          );
-          const yearMatch = matchesTarget(
-            event.yearLevels.length > 0 ? event.yearLevels : event.yearLevel,
-            profile.year,
-            "All Years",
-          );
-          const studentMatch = matchesSpecificStudentTarget(
-            event.targetStudent,
-            profile.schoolId,
-            profile.studentName,
-          );
-          return courseMatch && yearMatch && studentMatch;
-        });
+        .filter((event) => matchesEventAudience(event, profile));
 
     const handleEventLoadError = (
       error: unknown,

@@ -68,6 +68,7 @@ import {
   deleteCampusPayment,
   listCampusPaymentStudents,
   listCampusPayments,
+  repairCampusPaymentAssignments,
   updateCampusPayment,
   updateCampusPaymentStudentStatus,
   type CampusPaymentListItem,
@@ -701,6 +702,7 @@ export default function PaymentDashboard() {
   const [paymentPendingDelete, setPaymentPendingDelete] = useState<Payment | null>(
     null,
   );
+  const [repairingPaymentId, setRepairingPaymentId] = useState<string | null>(null);
 
   const viewerProfileWithUid = useMemo(
     () =>
@@ -1324,23 +1326,15 @@ export default function PaymentDashboard() {
             : null,
       targetCourses: Array.from(
         new Set(
-          targets
-            .map((student) => normalizeCourse(student.course))
-            .filter(
-              (courseName): courseName is string =>
-                Boolean(courseName) && courseName !== "Unassigned",
-            ),
+          viewerIsBod && viewerCourseScopeValue
+            ? [viewerCourseScopeValue]
+            : hasCourseFilter
+              ? [selectedPaymentCourse]
+              : [],
         ),
       ),
       targetYearLevels: Array.from(
-        new Set(
-          targets
-            .map((student) => normalizeYear(student.year))
-            .filter(
-              (yearName): yearName is string =>
-                Boolean(yearName) && yearName !== "Unassigned",
-            ),
-        ),
+        new Set(hasYearFilter ? [yearLevel] : []),
       ),
     };
   }
@@ -1418,9 +1412,16 @@ export default function PaymentDashboard() {
       await batch.commit();
     }
 
-    const removedAssignmentIds = Array.from(existingAssignments.keys()).filter(
-      (uid) => !nextTargetIds.has(uid),
+    const missingAssignments = Array.from(existingAssignments.entries()).filter(
+      ([uid]) => !nextTargetIds.has(uid),
     );
+    const removedAssignmentIds = missingAssignments
+      .filter(([, assignment]) => assignment.status !== "Paid")
+      .map(([uid]) => uid);
+    const retainedPaidMissingCount = missingAssignments.filter(
+      ([, assignment]) => assignment.status === "Paid",
+    ).length;
+    paidCount += retainedPaidMissingCount;
 
     for (
       let index = 0;
@@ -1436,10 +1437,12 @@ export default function PaymentDashboard() {
       await batch.commit();
     }
 
+    const totalStudents = targets.length + retainedPaidMissingCount;
+
     return {
-      totalStudents: targets.length,
+      totalStudents,
       paidCount,
-      unpaidCount: Math.max(0, targets.length - paidCount),
+      unpaidCount: Math.max(0, totalStudents - paidCount),
     };
   }
 
@@ -1717,7 +1720,10 @@ export default function PaymentDashboard() {
           selectedSchoolIds,
           targetStudent,
           targetCourses:
-            viewerCourseScopeValue ? [viewerCourseScopeValue] : [],
+            viewerCourseScopeValue &&
+            (selectedStudentIds.length === 0 || yearLevel !== "All Years")
+              ? [viewerCourseScopeValue]
+              : [],
           targetYearLevels:
             yearLevel !== "All Years" ? [yearLevel] : [],
           courseScope: viewerCourseScopeValue || null,
@@ -1810,6 +1816,10 @@ export default function PaymentDashboard() {
         targetStudent,
         targetCourses,
         targetYearLevels,
+        selectedStudentIds: selectedPaymentStudents.map((student) => student.uid),
+        selectedSchoolIds: selectedPaymentStudents
+          .map((student) => student.schoolId)
+          .filter(Boolean),
         details: cleanDetails,
         ownerType: viewerIsBod ? "bod" : "ec",
         createdByUid:
@@ -2179,6 +2189,57 @@ export default function PaymentDashboard() {
       });
     } finally {
       setUpdatingStatusKey(null);
+    }
+  }
+
+  async function handleRepairPaymentAssignments(payment: Payment) {
+    if (!canEditPaymentRecord(payment)) {
+      campusToast.warning({
+        title: "You do not have permission to repair this payment.",
+        preventDuplicate: false,
+      });
+      return;
+    }
+
+    setRepairingPaymentId(payment.id);
+    try {
+      const result = await repairCampusPaymentAssignments({
+        paymentId: payment.id,
+        linkedEventId: payment.linkedEventId || undefined,
+      });
+      setPaymentStudents((prev) => {
+        const next = { ...prev };
+        delete next[payment.id];
+        return next;
+      });
+      await loadPayments();
+      if (expandedPayment === payment.id) {
+        const rows = await fetchPaymentStudentsFromCallable(payment.id);
+        setPaymentStudents((prev) => ({
+          ...prev,
+          [payment.id]: rows,
+        }));
+      }
+      campusToast.success({
+        title: "Payment assignments repaired",
+        description: `${result.totalStudents} target student(s), ${result.createdAssignmentCount} added.`,
+        preventDuplicate: false,
+      });
+    } catch (error: unknown) {
+      const message = toScopedPaymentErrorMessage(
+        error,
+        "Failed to repair payment assignments.",
+        viewerCourseScope,
+        viewerIsBod,
+      );
+      setNotice({ type: "err", msg: message });
+      campusToast.error({
+        title: "Repair failed",
+        description: message,
+        preventDuplicate: false,
+      });
+    } finally {
+      setRepairingPaymentId(null);
     }
   }
 
@@ -2851,7 +2912,19 @@ export default function PaymentDashboard() {
 
                     {expandedPayment === p.id && (
                       <div className="mt-4 border-t pt-3">
-                        <div className="flex justify-start sm:justify-end mb-3">
+                        <div className="flex flex-wrap justify-start gap-2 sm:justify-end mb-3">
+                          {(p.source === "event" || p.linkedEventId) && (
+                            <Button
+                              variant="bordered"
+                              color="primary"
+                              isDisabled={!canEditThisPayment}
+                              isLoading={repairingPaymentId === p.id}
+                              onPress={() => void handleRepairPaymentAssignments(p)}
+                              className="px-4 font-semibold"
+                            >
+                              Repair Assignments
+                            </Button>
+                          )}
                           <Button
                             variant="flat"
                             color="primary"

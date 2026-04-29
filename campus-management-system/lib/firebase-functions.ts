@@ -647,7 +647,8 @@ export type UpdateCampusPaymentResult = {
 };
 
 export type RepairCampusPaymentAssignmentsPayload = {
-  paymentId: string;
+  paymentId?: string;
+  linkedEventId?: string;
 };
 
 export type RepairCampusPaymentAssignmentsResult = {
@@ -1442,6 +1443,7 @@ export async function repairCampusPaymentAssignments(
 ): Promise<RepairCampusPaymentAssignmentsResult> {
   logAuthEvent("info", "Repairing CAMPUS payment assignments via callable", {
     paymentId: payload.paymentId,
+    linkedEventId: payload.linkedEventId,
   });
 
   const callable = httpsCallable<

@@ -2834,35 +2834,308 @@ function normalizeIdentifierList(value: unknown): string[] {
   return value.map((item) => normalizeText(item)).filter(Boolean);
 }
 
-function hasExplicitSelectedAudience(
-  event: {
-    selectedStudentIds?: unknown;
-    selectedSchoolIds?: unknown;
-  }
-): boolean {
-  return normalizeIdentifierList(event.selectedStudentIds).length > 0 ||
-    normalizeIdentifierList(event.selectedSchoolIds).length > 0;
+type CampusAudienceSource = {
+  id?: unknown;
+  eventId?: unknown;
+  paymentId?: unknown;
+  course?: unknown;
+  courses?: unknown;
+  targetCourses?: unknown;
+  courseScope?: unknown;
+  yearLevel?: unknown;
+  yearLevels?: unknown;
+  targetYearLevels?: unknown;
+  targetStudent?: unknown;
+  selectedStudentIds?: unknown;
+  selectedSchoolIds?: unknown;
+};
+
+type CampusAudienceFilter = {
+  courseValue: unknown;
+  yearValue: unknown;
+  courseTargetsForLog: string[];
+  yearTargetsForLog: string[];
+  selectedStudentIds: string[];
+  selectedSchoolIds: string[];
+  hasSelectedAudience: boolean;
+  shouldIncludeCourseYearAudience: boolean;
+};
+
+type CampusAudienceResolution = CampusAudienceFilter & {
+  courseYearMatched: CampusNotificationRecipient[];
+  selectedMatched: CampusNotificationRecipient[];
+  finalAudience: CampusNotificationRecipient[];
+  courseYearMatchedCount: number;
+  selectedMatchedCount: number;
+  finalAudienceCount: number;
+};
+
+function hasConcreteCourseTarget(value: string): boolean {
+  const normalized = normalizeLower(value);
+  return Boolean(value) && normalized !== "all courses";
 }
 
-function matchesSelectedAudience(
-  event: {
-    selectedStudentIds?: unknown;
-    selectedSchoolIds?: unknown;
-  },
-  studentId: string,
-  schoolId: string
+function hasConcreteYearTarget(value: string): boolean {
+  const normalized = normalizeLower(normalizeYear(value));
+  return Boolean(value) &&
+    normalized !== "all years" &&
+    normalized !== "unassigned";
+}
+
+function resolveCampusAudienceFilter(
+  source: CampusAudienceSource,
+): CampusAudienceFilter {
+  const courseTargets = toTargetList(source.courses ?? source.targetCourses);
+  const yearTargets = toTargetList(source.yearLevels ?? source.targetYearLevels);
+  const courseScalar = normalizeText(source.course);
+  const sourceCourseScope = normalizeCourseLabel(source.courseScope);
+  const rawYearScalar = normalizeText(source.yearLevel);
+  const yearScalar =
+    rawYearScalar && normalizeLower(rawYearScalar) !== "unassigned" ?
+      rawYearScalar :
+      "";
+  const courseTargetsForLog =
+    courseTargets.length > 0 ? courseTargets : (courseScalar ? [courseScalar] : []);
+  const yearTargetsForLog =
+    yearTargets.length > 0 ? yearTargets : (yearScalar ? [yearScalar] : []);
+  const selectedStudentIds = toUniqueIdentifierList(source.selectedStudentIds);
+  const selectedSchoolIds = toUniqueIdentifierList(source.selectedSchoolIds);
+  const hasSelectedAudience =
+    selectedStudentIds.length > 0 || selectedSchoolIds.length > 0;
+  const hasConcreteYearSelection =
+    yearTargets.length > 0 || yearTargetsForLog.some(hasConcreteYearTarget);
+  const courseTargetsAreScopeOnly =
+    hasSelectedAudience &&
+    Boolean(sourceCourseScope) &&
+    !hasConcreteYearSelection &&
+    courseTargets.length === 1 &&
+    normalizeCourseLabel(courseTargets[0]) === sourceCourseScope;
+  const courseScalarIsScopeOnly =
+    hasSelectedAudience &&
+    Boolean(sourceCourseScope) &&
+    !hasConcreteYearSelection &&
+    courseTargets.length === 0 &&
+    normalizeCourseLabel(courseScalar) === sourceCourseScope;
+  const hasCourseYearAudienceSelection =
+    (courseTargets.length > 0 && !courseTargetsAreScopeOnly) ||
+    yearTargets.length > 0 ||
+    (
+      courseTargetsForLog.some(hasConcreteCourseTarget) &&
+      !courseScalarIsScopeOnly
+    ) ||
+    hasConcreteYearSelection;
+
+  return {
+    courseValue: courseTargets.length > 0 ? courseTargets : courseScalar,
+    yearValue: yearTargets.length > 0 ? yearTargets : yearScalar,
+    courseTargetsForLog,
+    yearTargetsForLog,
+    selectedStudentIds,
+    selectedSchoolIds,
+    hasSelectedAudience,
+    shouldIncludeCourseYearAudience:
+      !hasSelectedAudience || hasCourseYearAudienceSelection,
+  };
+}
+
+function campusAudienceSelectedMatch(
+  filter: CampusAudienceFilter,
+  uid: string,
+  schoolId: string,
 ): boolean {
-  if (!hasExplicitSelectedAudience(event)) {
-    return true;
+  if (!filter.hasSelectedAudience) {
+    return false;
   }
 
-  const selectedStudentIds = normalizeIdentifierList(event.selectedStudentIds);
-  const selectedSchoolIds = normalizeIdentifierList(event.selectedSchoolIds);
-  const normalizedStudentId = normalizeLower(studentId);
+  const normalizedUid = normalizeLower(uid);
   const normalizedSchoolId = normalizeLower(schoolId);
 
-  return selectedStudentIds.some((value) => normalizeLower(value) === normalizedStudentId) ||
-    selectedSchoolIds.some((value) => normalizeLower(value) === normalizedSchoolId);
+  return filter.selectedStudentIds.some((value) => normalizeLower(value) === normalizedUid) ||
+    filter.selectedSchoolIds.some((value) => normalizeLower(value) === normalizedSchoolId);
+}
+
+function campusAudienceCourseYearMatch(
+  source: CampusAudienceSource,
+  filter: CampusAudienceFilter,
+  recipient: Pick<CampusNotificationRecipient, "course" | "yearLevel" | "schoolId" | "studentName">,
+): boolean {
+  if (!filter.shouldIncludeCourseYearAudience) {
+    return false;
+  }
+
+  if (!matchesTargetList(filter.courseValue, recipient.course, "All Courses")) {
+    return false;
+  }
+
+  if (!matchesTargetList(filter.yearValue, recipient.yearLevel, "All Years")) {
+    return false;
+  }
+
+  if (
+    !filter.hasSelectedAudience &&
+    !matchesSpecificStudentTarget(
+      source.targetStudent,
+      recipient.schoolId,
+      recipient.studentName,
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function dedupeCampusAudienceRecipients(
+  recipients: CampusNotificationRecipient[],
+): CampusNotificationRecipient[] {
+  const uidKeys = new Set<string>();
+  const schoolIdKeys = new Set<string>();
+  const deduped: CampusNotificationRecipient[] = [];
+
+  recipients.forEach((recipient) => {
+    const uidKey = normalizeLower(recipient.uid);
+    const schoolIdKey = normalizeLower(recipient.schoolId);
+
+    if (uidKey && uidKeys.has(uidKey)) {
+      return;
+    }
+
+    if (schoolIdKey && schoolIdKeys.has(schoolIdKey)) {
+      return;
+    }
+
+    if (uidKey) {
+      uidKeys.add(uidKey);
+    }
+    if (schoolIdKey) {
+      schoolIdKeys.add(schoolIdKey);
+    }
+
+    deduped.push(recipient);
+  });
+
+  return deduped;
+}
+
+function sortCampusAudienceRecipients(
+  recipients: CampusNotificationRecipient[],
+): CampusNotificationRecipient[] {
+  return [...recipients].sort((left, right) => {
+    const bySchoolId = left.schoolId.localeCompare(right.schoolId);
+    if (bySchoolId !== 0) {
+      return bySchoolId;
+    }
+    return left.studentName.localeCompare(right.studentName);
+  });
+}
+
+function resolveCampusAudienceUnion(
+  source: CampusAudienceSource,
+  candidates: CampusNotificationRecipient[],
+): CampusAudienceResolution {
+  const filter = resolveCampusAudienceFilter(source);
+  const activeCandidates = candidates.filter((candidate) =>
+    isActiveCampusStudentStatus(candidate.status),
+  );
+
+  const courseYearMatched = filter.shouldIncludeCourseYearAudience ?
+    dedupeCampusAudienceRecipients(
+      activeCandidates.filter((candidate) =>
+        campusAudienceCourseYearMatch(source, filter, candidate),
+      ),
+    ) :
+    [];
+
+  const selectedMatched = filter.hasSelectedAudience ?
+    dedupeCampusAudienceRecipients(
+      activeCandidates.filter((candidate) =>
+        campusAudienceSelectedMatch(filter, candidate.uid, candidate.schoolId),
+      ),
+    ) :
+    [];
+
+  const finalAudience = sortCampusAudienceRecipients(
+    dedupeCampusAudienceRecipients([
+      ...courseYearMatched,
+      ...selectedMatched,
+    ]),
+  );
+
+  return {
+    ...filter,
+    courseYearMatched,
+    selectedMatched,
+    finalAudience,
+    courseYearMatchedCount: courseYearMatched.length,
+    selectedMatchedCount: selectedMatched.length,
+    finalAudienceCount: finalAudience.length,
+  };
+}
+
+function matchesCampusResolvedAudience(
+  source: CampusAudienceSource,
+  student: {
+    uid?: unknown;
+    schoolId?: unknown;
+    studentId?: unknown;
+    name?: unknown;
+    studentName?: unknown;
+    course?: unknown;
+    year?: unknown;
+    yearLevel?: unknown;
+  },
+): boolean {
+  const filter = resolveCampusAudienceFilter(source);
+  const uid = normalizeText(student.uid);
+  const schoolId =
+    normalizeText(student.schoolId) ||
+    normalizeText(student.studentId) ||
+    uid;
+  const recipient = {
+    course: normalizeCourseLabel(student.course) ||
+      normalizeText(student.course) ||
+      "Unassigned",
+    yearLevel: normalizeYear(student.yearLevel || student.year),
+    schoolId,
+    studentName:
+      normalizeText(student.studentName) ||
+      normalizeText(student.name) ||
+      schoolId,
+  };
+
+  return campusAudienceSelectedMatch(filter, uid, schoolId) ||
+    campusAudienceCourseYearMatch(source, filter, recipient);
+}
+
+function logCampusAudienceResolution(
+  label: string,
+  source: CampusAudienceSource,
+  resolution: Pick<
+    CampusAudienceResolution,
+    | "courseTargetsForLog"
+    | "yearTargetsForLog"
+    | "selectedStudentIds"
+    | "selectedSchoolIds"
+    | "courseYearMatchedCount"
+    | "selectedMatchedCount"
+    | "finalAudienceCount"
+  >,
+  extra: Record<string, unknown> = {},
+): void {
+  functionsLogger.info(label, {
+    eventId: normalizeText(source.eventId) || normalizeText(source.id) || null,
+    paymentId: normalizeText(source.paymentId) || null,
+    course: normalizeText(source.course),
+    courses: resolution.courseTargetsForLog,
+    yearLevel: normalizeText(source.yearLevel),
+    yearLevels: resolution.yearTargetsForLog,
+    selectedStudentIdsCount: resolution.selectedStudentIds.length,
+    selectedSchoolIdsCount: resolution.selectedSchoolIds.length,
+    courseYearMatchedCount: resolution.courseYearMatchedCount,
+    selectedMatchedCount: resolution.selectedMatchedCount,
+    finalAudienceCount: resolution.finalAudienceCount,
+    ...extra,
+  });
 }
 
 function parseRegistrationStatus(raw: unknown): "PRE_REGISTERED" | "WAITLISTED" | "CANCELLED" {
@@ -7025,6 +7298,7 @@ type StoredCampusPaymentAudienceMatch = {
   courseMatch: boolean;
   yearMatch: boolean;
   specificStudentMatch: boolean;
+  selectedStudentMatch: boolean;
   matchesAudience: boolean;
 };
 
@@ -7148,6 +7422,7 @@ function normalizedStoredPaymentYearLevel(
 function evaluateStoredCampusPaymentAudienceMatch(
   paymentData: FirebaseFirestore.DocumentData,
   student: {
+    uid?: string;
     schoolId: string;
     studentId: string;
     name: string;
@@ -7163,6 +7438,11 @@ function evaluateStoredCampusPaymentAudienceMatch(
   const callerCourse =
     normalizeCourseLabel(student.course) || normalizeText(student.course);
   const callerYear = normalizeYear(student.yearLevel || student.year);
+  const callerUid = normalizeText(student.uid);
+  const callerSchoolId =
+    normalizeText(student.schoolId) ||
+    normalizeText(student.studentId) ||
+    callerUid;
   const targetCourses = paymentTargetCourses(paymentData);
   const targetYearLevels = paymentTargetYearLevels(paymentData);
   const paymentCourse = normalizedStoredPaymentCourse(paymentData) || "All Courses";
@@ -7175,38 +7455,47 @@ function evaluateStoredCampusPaymentAudienceMatch(
     paymentData.yearLevel || paymentData.year,
   );
   const paymentCourseScopeValue = paymentCourseScope(paymentData);
-  const treatsAllCourses =
-    normalizeLower(rawPaymentCourse) === "all courses" ||
-    (
-      targetCourses.length === 0 &&
-      !rawPaymentCourse &&
-      !paymentCourseScopeValue
-    );
+  const audienceSource: CampusAudienceSource = {
+    course: paymentCourse || rawPaymentCourse || paymentCourseScopeValue,
+    courses: targetCourses,
+    courseScope: paymentCourseScopeValue,
+    yearLevel: paymentYearLevel || rawPaymentYearLevel,
+    yearLevels: targetYearLevels,
+    targetStudent: specificStudentTarget,
+    selectedStudentIds: paymentData.selectedStudentIds,
+    selectedSchoolIds: paymentData.selectedSchoolIds,
+  };
+  const audienceFilter = resolveCampusAudienceFilter(audienceSource);
 
   const courseMatch =
-    targetCourses.includes(callerCourse) ||
-    paymentCourse === callerCourse ||
-    paymentCourseScopeValue === callerCourse ||
-    treatsAllCourses;
+    matchesTargetList(audienceFilter.courseValue, callerCourse, "All Courses");
   const yearMatch =
-    targetYearLevels.includes(callerYear) ||
-    paymentYearLevel === callerYear ||
-    normalizeLower(rawPaymentYearLevel) === "all years" ||
-    (
-      targetYearLevels.length === 0 &&
-      (
-        !rawPaymentYearLevel ||
-        normalizeLower(rawPaymentYearLevel) === "all years"
-      )
-    );
+    matchesTargetList(audienceFilter.yearValue, callerYear, "All Years");
+  const selectedStudentMatch = campusAudienceSelectedMatch(
+    audienceFilter,
+    callerUid,
+    callerSchoolId,
+  );
   const specificStudentMatch =
     !specificStudentTarget ||
     matchesSpecificStudentTarget(
       specificStudentTarget,
-      student.schoolId || student.studentId,
+      callerSchoolId,
       student.studentName || student.name,
     ) ||
-    assignmentExists;
+    assignmentExists ||
+    selectedStudentMatch;
+  const matchesAudience =
+    selectedStudentMatch ||
+    (
+      audienceFilter.shouldIncludeCourseYearAudience &&
+      courseMatch &&
+      yearMatch &&
+      (
+        audienceFilter.hasSelectedAudience ||
+        specificStudentMatch
+      )
+    );
 
   return {
     paymentCourse,
@@ -7217,7 +7506,8 @@ function evaluateStoredCampusPaymentAudienceMatch(
     courseMatch,
     yearMatch,
     specificStudentMatch,
-    matchesAudience: courseMatch && yearMatch && specificStudentMatch,
+    selectedStudentMatch,
+    matchesAudience,
   };
 }
 
@@ -7233,6 +7523,7 @@ type CampusPaymentAssignmentSyncSummary = {
   totalStudents: number;
   paidCount: number;
   unpaidCount: number;
+  createdAssignmentCount: number;
   removedAssignmentCount: number;
   batchCount: number;
 };
@@ -7317,6 +7608,11 @@ type CampusPaymentAudienceResolution = {
   selectedStudentIds: string[];
   selectedSchoolIds: string[];
   hasExplicitTargets: boolean;
+  courseTargetsForLog: string[];
+  yearTargetsForLog: string[];
+  courseYearMatchedCount: number;
+  selectedMatchedCount: number;
+  finalAudienceCount: number;
 };
 
 function buildCampusPaymentExplicitTargetLabel(
@@ -7338,14 +7634,38 @@ async function resolveCampusPaymentAudience(
   const requestedTargetStudent = normalizeText(body.targetStudent);
   const requestedYear = normalizeYear(body.yearLevel);
   const requestedCourse = normalizeCourseLabel(body.course);
+  const requestedTargetCourses = Array.from(new Set(
+    toTargetList(body.targetCourses)
+      .map((value) => normalizeCourseLabel(value) || normalizeText(value))
+      .filter(Boolean),
+  ));
+  const requestedTargetYearLevels = Array.from(new Set(
+    toTargetList(body.targetYearLevels)
+      .map((value) => normalizeYear(value))
+      .filter(Boolean),
+  ));
   const requestedCourseScope = normalizeCourseLabel(body.courseScope);
+  const concreteRequestedCourses = requestedTargetCourses.filter(hasConcreteCourseTarget);
+  const concreteRequestedYears = requestedTargetYearLevels.filter(hasConcreteYearTarget);
+  const requestedCourseIsScopeOnly =
+    actor.isBod &&
+    hasExplicitTargets &&
+    requestedTargetCourses.length === 0 &&
+    requestedCourse === actor.courseScope;
   const hasYearFilter =
-    Boolean(requestedYear) &&
-    requestedYear !== "Unassigned" &&
-    normalizeLower(requestedYear) !== "all years";
+    concreteRequestedYears.length > 0 ||
+    (
+      Boolean(requestedYear) &&
+      requestedYear !== "Unassigned" &&
+      normalizeLower(requestedYear) !== "all years"
+    );
   const hasCourseFilter =
-    Boolean(requestedCourse) &&
-    normalizeLower(requestedCourse) !== "all courses";
+    concreteRequestedCourses.length > 0 ||
+    (
+      !requestedCourseIsScopeOnly &&
+      Boolean(requestedCourse) &&
+      normalizeLower(requestedCourse) !== "all courses"
+    );
 
   if (
     actor.isBod &&
@@ -7370,24 +7690,44 @@ async function resolveCampusPaymentAudience(
     );
   }
 
+  if (
+    actor.isBod &&
+    requestedTargetCourses.some((course) =>
+      hasConcreteCourseTarget(course) && course !== actor.courseScope,
+    )
+  ) {
+    throw new HttpsError(
+      "permission-denied",
+      `B.O.D accounts can only target ${actor.courseScope} students.`,
+    );
+  }
+
   const candidates = await listCampusPaymentRecipientCandidates(actor);
-  const explicitRecipients = hasExplicitTargets ?
-    candidates.filter((recipient) =>
-      selectedStudentIds.includes(recipient.uid) ||
-      selectedSchoolIds.includes(recipient.schoolId),
-    ) :
-    [];
+  const audienceSource: CampusAudienceSource = {
+    course: hasCourseFilter ? requestedCourse : "",
+    courses: requestedTargetCourses,
+    courseScope: requestedCourseScope || (actor.isBod ? actor.courseScope : ""),
+    yearLevel: hasYearFilter ? requestedYear : "",
+    yearLevels: requestedTargetYearLevels,
+    targetStudent: requestedTargetStudent,
+    selectedStudentIds,
+    selectedSchoolIds,
+  };
+  const audience = resolveCampusAudienceUnion(audienceSource, candidates);
+  const explicitRecipients = audience.selectedMatched;
 
   if (hasExplicitTargets) {
     const explicitUidSet = new Set(
-      explicitRecipients.map((recipient) => recipient.uid),
+      explicitRecipients.map((recipient) => normalizeLower(recipient.uid)),
     );
     const explicitSchoolIdSet = new Set(
-      explicitRecipients.map((recipient) => recipient.schoolId),
+      explicitRecipients.map((recipient) => normalizeLower(recipient.schoolId)),
     );
     const hasMissingExplicitTargets =
-      selectedStudentIds.some((uid) => !explicitUidSet.has(uid)) ||
-      selectedSchoolIds.some((schoolId) => !explicitSchoolIdSet.has(schoolId));
+      selectedStudentIds.some((uid) => !explicitUidSet.has(normalizeLower(uid))) ||
+      selectedSchoolIds.some((schoolId) =>
+        !explicitSchoolIdSet.has(normalizeLower(schoolId)),
+      );
 
     if (hasMissingExplicitTargets) {
       throw new HttpsError(
@@ -7399,38 +7739,7 @@ async function resolveCampusPaymentAudience(
     }
   }
 
-  const filteredRecipients = candidates.filter((recipient) => {
-    const matchesYear =
-      !hasYearFilter ||
-      normalizeLower(normalizeYear(recipient.yearLevel)) ===
-        normalizeLower(requestedYear);
-    const matchesCourse =
-      !hasCourseFilter ||
-      normalizeCourseLabel(recipient.course) === requestedCourse;
-
-    return matchesYear && matchesCourse;
-  });
-
-  const eligibleExplicitRecipients = hasExplicitTargets ?
-    explicitRecipients.filter((recipient) =>
-      filteredRecipients.some((filteredRecipient) => filteredRecipient.uid === recipient.uid),
-    ) :
-    [];
-
-  if (
-    hasExplicitTargets &&
-    (hasYearFilter || hasCourseFilter) &&
-    eligibleExplicitRecipients.length !== explicitRecipients.length
-  ) {
-    throw new HttpsError(
-      "permission-denied",
-      actor.isBod ?
-        `Selected recipients must match the chosen ${actor.courseScope} payment audience.` :
-        "Selected recipients must match the chosen payment audience.",
-    );
-  }
-
-  const targets = (hasExplicitTargets ? eligibleExplicitRecipients : filteredRecipients)
+  const targets = audience.finalAudience
     .map((recipient) => ({
       uid: recipient.uid,
       schoolId: recipient.schoolId,
@@ -7439,11 +7748,11 @@ async function resolveCampusPaymentAudience(
       yearLevel: recipient.yearLevel,
     }))
     .sort((left, right) => {
-    const bySchoolId = left.schoolId.localeCompare(right.schoolId);
-    if (bySchoolId !== 0) {
-      return bySchoolId;
-    }
-    return left.studentName.localeCompare(right.studentName);
+      const bySchoolId = left.schoolId.localeCompare(right.schoolId);
+      if (bySchoolId !== 0) {
+        return bySchoolId;
+      }
+      return left.studentName.localeCompare(right.studentName);
     });
 
   if (targets.length === 0) {
@@ -7455,23 +7764,23 @@ async function resolveCampusPaymentAudience(
     );
   }
 
-  const targetCourses = actor.isBod ?
+  const metadataTargetCourses = actor.isBod ?
     [actor.courseScope] :
-    Array.from(new Set(
-      targets
-        .map((target) => normalizeCourseLabel(target.course))
-        .filter(Boolean),
-    ));
-  const targetYearLevels = Array.from(new Set(
-    targets
-      .map((target) => normalizeYear(target.yearLevel))
-      .filter(
-        (value) =>
-          Boolean(value) &&
-          value !== "Unassigned" &&
-          normalizeLower(value) !== "all years",
-      ),
-  ));
+    (
+      concreteRequestedCourses.length > 0 ?
+        concreteRequestedCourses :
+        hasCourseFilter && requestedCourse ?
+          [requestedCourse] :
+          []
+    );
+  const metadataTargetYearLevels =
+    concreteRequestedYears.length > 0 ?
+      concreteRequestedYears :
+      hasYearFilter && requestedYear ?
+        [requestedYear] :
+        [];
+  const targetCourses = actor.isBod ? [actor.courseScope] : metadataTargetCourses;
+  const targetYearLevels = metadataTargetYearLevels;
   const targetStudent = requestedTargetStudent ||
     (hasExplicitTargets ? buildCampusPaymentExplicitTargetLabel(explicitRecipients.map((recipient) => ({
       uid: recipient.uid,
@@ -7483,19 +7792,23 @@ async function resolveCampusPaymentAudience(
   const course = actor.isBod ?
     actor.courseScope :
     hasCourseFilter ?
-      requestedCourse :
+      metadataTargetCourses.join(", ") || requestedCourse :
+      hasYearFilter ?
+        "All Courses" :
       hasExplicitTargets ?
         "" :
         "All Courses";
   const yearLevel = hasYearFilter ?
-    requestedYear :
+    metadataTargetYearLevels.join(", ") || requestedYear :
+    hasCourseFilter ?
+      "All Years" :
     hasExplicitTargets ?
       "" :
       "All Years";
   const courseScope = actor.isBod ?
     actor.courseScope :
-    hasCourseFilter ?
-      requestedCourse :
+    metadataTargetCourses.length === 1 ?
+      metadataTargetCourses[0] :
       null;
 
   return {
@@ -7511,6 +7824,11 @@ async function resolveCampusPaymentAudience(
     selectedStudentIds,
     selectedSchoolIds,
     hasExplicitTargets,
+    courseTargetsForLog: audience.courseTargetsForLog,
+    yearTargetsForLog: audience.yearTargetsForLog,
+    courseYearMatchedCount: audience.courseYearMatchedCount,
+    selectedMatchedCount: audience.selectedMatchedCount,
+    finalAudienceCount: audience.finalAudienceCount,
   };
 }
 
@@ -7573,11 +7891,15 @@ async function syncCampusPaymentAssignments(
   const removeMissingAssignments = options?.removeMissingAssignments !== false;
   let paidCount = 0;
   let batchCount = 0;
+  let createdAssignmentCount = 0;
 
   const upsertRows = targets.map((target) => {
     const existingStatus = existingAssignments.get(target.uid)?.status ?? "Unpaid";
     if (existingStatus === "Paid") {
       paidCount += 1;
+    }
+    if (!existingAssignments.has(target.uid)) {
+      createdAssignmentCount += 1;
     }
 
     return {
@@ -7605,10 +7927,16 @@ async function syncCampusPaymentAssignments(
     batchCount += 1;
   }
 
+  const missingExistingAssignments = Array.from(existingAssignments.entries()).filter(
+    ([uid]) => !nextTargetIds.has(uid),
+  );
   const removedAssignmentIds = removeMissingAssignments ?
-    Array.from(existingAssignments.keys()).filter(
-      (uid) => !nextTargetIds.has(uid),
-    ) :
+    missingExistingAssignments
+      .filter(([, assignment]) => assignment.status !== "Paid")
+      .map(([uid]) => uid) :
+    [];
+  const retainedPaidMissingAssignments = removeMissingAssignments ?
+    missingExistingAssignments.filter(([, assignment]) => assignment.status === "Paid") :
     [];
 
   for (let index = 0; index < removedAssignmentIds.length; index += writesPerBatch) {
@@ -7623,14 +7951,18 @@ async function syncCampusPaymentAssignments(
   }
 
   const retainedExistingAssignments = Array.from(existingAssignments.entries())
-    .filter(([uid]) => !removeMissingAssignments || nextTargetIds.has(uid));
+    .filter(([uid, assignment]) =>
+      !removeMissingAssignments ||
+      nextTargetIds.has(uid) ||
+      assignment.status === "Paid",
+    );
   retainedExistingAssignments.forEach(([, assignment]) => {
     if (!nextTargetIds.has(assignment.uid) && assignment.status === "Paid") {
       paidCount += 1;
     }
   });
   const totalStudents = removeMissingAssignments ?
-    nextTargetIds.size :
+    nextTargetIds.size + retainedPaidMissingAssignments.length :
     new Set([
       ...Array.from(existingAssignments.keys()),
       ...Array.from(nextTargetIds),
@@ -7640,6 +7972,7 @@ async function syncCampusPaymentAssignments(
     totalStudents,
     paidCount,
     unpaidCount: Math.max(0, totalStudents - paidCount),
+    createdAssignmentCount,
     removedAssignmentCount: removedAssignmentIds.length,
     batchCount,
   };
@@ -8518,45 +8851,74 @@ async function listCampusPaymentRecipientCandidates(
 async function resolveCampusPaymentTargetsFromStoredPayment(
   paymentData: FirebaseFirestore.DocumentData,
 ): Promise<CampusPaymentTarget[]> {
+  const linkedEventId = paymentLinkedEventId(paymentData);
+  let linkedEventData: FirebaseFirestore.DocumentData | null = null;
+
+  if (linkedEventId) {
+    const eventSnapshot = await db.doc(`events/${linkedEventId}`).get();
+    if (eventSnapshot.exists) {
+      linkedEventData = {
+        ...(eventSnapshot.data() ?? {}),
+        eventId: linkedEventId,
+      };
+    }
+  }
+
   const ownerType = paymentOwnerType(paymentData);
   const paymentScope = paymentCourseScope(paymentData);
   const paymentCourse = paymentCourseValue(paymentData);
+  const linkedEventScope = linkedEventData ? eventCourseScope(linkedEventData) : "";
   const candidateCourseScope =
-    ownerType === "bod" ?
+    linkedEventData && eventOwnerType(linkedEventData) === "bod" ?
+      linkedEventScope :
+      ownerType === "bod" ?
       paymentScope || paymentCourse :
       "";
   const candidates = await listCampusStudentRecipientCandidates(
     candidateCourseScope,
     Boolean(candidateCourseScope),
   );
+  const audienceSource: CampusAudienceSource = linkedEventData ? {
+    eventId: linkedEventId,
+    paymentId: paymentData.id || paymentData.paymentId,
+    course: linkedEventData.course,
+    courses: linkedEventData.courses,
+    courseScope: linkedEventData.courseScope,
+    yearLevel: linkedEventData.yearLevel,
+    yearLevels: linkedEventData.yearLevels,
+    targetStudent: linkedEventData.targetStudent,
+    selectedStudentIds: linkedEventData.selectedStudentIds,
+    selectedSchoolIds: linkedEventData.selectedSchoolIds,
+  } : {
+    paymentId: paymentData.id || paymentData.paymentId,
+    course: normalizedStoredPaymentCourse(paymentData) || paymentCourse || "All Courses",
+    courses: paymentTargetCourses(paymentData),
+    courseScope: paymentCourseScope(paymentData),
+    yearLevel:
+      normalizedStoredPaymentYearLevel(paymentData) ||
+      normalizeText(paymentData.yearLevel) ||
+      "All Years",
+    yearLevels: paymentTargetYearLevels(paymentData),
+    targetStudent: paymentData.targetStudent,
+    selectedStudentIds: paymentData.selectedStudentIds,
+    selectedSchoolIds: paymentData.selectedSchoolIds,
+  };
+  const audience = resolveCampusAudienceUnion(audienceSource, candidates);
 
-  return candidates
-    .map((candidate) => {
-      const audienceMatch = evaluateStoredCampusPaymentAudienceMatch(
-        paymentData,
-        {
-          schoolId: candidate.schoolId,
-          studentId: candidate.schoolId,
-          name: candidate.studentName,
-          studentName: candidate.studentName,
-          course: candidate.course,
-          year: candidate.yearLevel,
-          yearLevel: candidate.yearLevel,
-        },
-      );
-      if (!audienceMatch.matchesAudience) {
-        return null;
-      }
+  logCampusAudienceResolution(
+    "resolveCampusPaymentTargetsFromStoredPayment audience",
+    audienceSource,
+    audience,
+  );
 
-      return {
-        uid: candidate.uid,
-        schoolId: candidate.schoolId,
-        studentName: candidate.studentName,
-        course: normalizeCourseLabel(candidate.course) || candidate.course,
-        yearLevel: normalizeYear(candidate.yearLevel),
-      } satisfies CampusPaymentTarget;
-    })
-    .filter((candidate): candidate is CampusPaymentTarget => Boolean(candidate))
+  return audience.finalAudience
+    .map((candidate) => ({
+      uid: candidate.uid,
+      schoolId: candidate.schoolId,
+      studentName: candidate.studentName,
+      course: normalizeCourseLabel(candidate.course) || candidate.course,
+      yearLevel: normalizeYear(candidate.yearLevel),
+    } satisfies CampusPaymentTarget))
     .sort((left, right) => {
       const bySchoolId = left.schoolId.localeCompare(right.schoolId);
       if (bySchoolId !== 0) {
@@ -9867,34 +10229,34 @@ async function resolveCampusNotificationAudience(
       .map((value) => normalizeCourseLabel(value))
       .filter(Boolean),
   );
-  const eligibleAudience = candidates.filter((recipient) => {
-    const yearMatches =
-      selectedYearSet.size === 0 ||
-      selectedYearSet.has(normalizeLower(normalizeYear(recipient.yearLevel)));
-    const courseMatches =
-      selectedCourseSet.size === 0 ||
-      selectedCourseSet.has(normalizeCourseLabel(recipient.course));
-
-    return yearMatches && courseMatches;
-  });
-
-  const explicitRecipients = hasExplicitTargets ?
-    candidates.filter((recipient) =>
-      targetStudentIds.includes(recipient.uid) ||
-        targetSchoolIds.includes(recipient.schoolId),
-    ) :
-    [];
+  const audienceSource: CampusAudienceSource = {
+    course: sendToFilteredAudience ?
+      (selectedCourses.length > 0 ? selectedCourses.join(", ") : "All Courses") :
+      "",
+    courses: sendToFilteredAudience ? selectedCourses : [],
+    courseScope: actor.isBod ? actor.courseScope : requestedCourseScope,
+    yearLevel: sendToFilteredAudience ? yearLevelLabel : "",
+    yearLevels: sendToFilteredAudience ? selectedYearLevels : [],
+    selectedStudentIds: targetStudentIds,
+    selectedSchoolIds: targetSchoolIds,
+  };
+  const audience = resolveCampusAudienceUnion(audienceSource, candidates);
+  const explicitRecipients = audience.selectedMatched;
 
   if (hasExplicitTargets) {
     const explicitUidSet = new Set(
-      explicitRecipients.map((recipient) => recipient.uid),
+      explicitRecipients.map((recipient) => normalizeLower(recipient.uid)),
     );
     const explicitSchoolIdSet = new Set(
-      explicitRecipients.map((recipient) => recipient.schoolId),
+      explicitRecipients.map((recipient) => normalizeLower(recipient.schoolId)),
     );
     const hasMissingExplicitTargets =
-      targetStudentIds.some((targetUid) => !explicitUidSet.has(targetUid)) ||
-      targetSchoolIds.some((schoolId) => !explicitSchoolIdSet.has(schoolId));
+      targetStudentIds.some((targetUid) =>
+        !explicitUidSet.has(normalizeLower(targetUid)),
+      ) ||
+      targetSchoolIds.some((schoolId) =>
+        !explicitSchoolIdSet.has(normalizeLower(schoolId)),
+      );
 
     if (hasMissingExplicitTargets) {
       throw new HttpsError(
@@ -9906,23 +10268,7 @@ async function resolveCampusNotificationAudience(
     }
   }
 
-  const eligibleRecipientUidSet = new Set(
-    eligibleAudience.map((recipient) => recipient.uid),
-  );
-  const recipients = hasExplicitTargets ?
-    explicitRecipients.filter((recipient) =>
-      eligibleRecipientUidSet.has(recipient.uid),
-    ) :
-    eligibleAudience;
-
-  if (hasExplicitTargets && recipients.length !== explicitRecipients.length) {
-    throw new HttpsError(
-      "permission-denied",
-      actor.isBod ?
-        `Selected recipients must be active ${actor.courseScope} students that match the chosen year filter.` :
-        "Selected recipients must match the chosen notification audience.",
-    );
-  }
+  const recipients = audience.finalAudience;
 
   if (recipients.length === 0) {
     throw new HttpsError(
@@ -9934,7 +10280,7 @@ async function resolveCampusNotificationAudience(
   }
 
   const recipientType: CampusNotificationRecipientType =
-    hasExplicitTargets ?
+    hasExplicitTargets && !sendToFilteredAudience ?
       "student" :
       selectedCourseSet.size > 0 ?
         "course" :
@@ -9955,18 +10301,25 @@ async function resolveCampusNotificationAudience(
     courseScopeSlugFromValue(courseScope) :
     null;
   const storedSelectedCourses = actor.isBod ? [actor.courseScope] : selectedCourses;
-  const storedTargetStudentIds = hasExplicitTargets ?
-    recipients.map((recipient) => recipient.uid) :
-    [];
-  const storedTargetSchoolIds = hasExplicitTargets ?
-    recipients.map((recipient) => recipient.schoolId).filter(Boolean) :
-    [];
+  const storedTargetStudentIds = hasExplicitTargets ? targetStudentIds : [];
+  const storedTargetSchoolIds = hasExplicitTargets ? targetSchoolIds : [];
   const selectedYear = yearLevelLabel;
   const targetStudent = buildCampusNotificationTargetLabel(
-    recipients,
+    hasExplicitTargets ? explicitRecipients : recipients,
     hasExplicitTargets,
     courseValue,
     yearLevelLabel,
+  );
+
+  logCampusAudienceResolution(
+    "resolveCampusNotificationAudience audience",
+    audienceSource,
+    audience,
+    {
+      notificationRecipientCount: recipients.length,
+      audienceMode,
+      sendToFilteredAudience,
+    },
   );
 
   return {
@@ -12813,6 +13166,8 @@ export const createCampusPayment = onCall({region: REGION}, async (request) => {
             targetStudent: audience.targetStudent,
             targetCourses,
             targetYearLevels: audience.targetYearLevels,
+            selectedStudentIds: audience.selectedStudentIds,
+            selectedSchoolIds: audience.selectedSchoolIds,
             details,
             linkedEventId: null,
             linkedEventTitle: "",
@@ -12863,6 +13218,22 @@ export const createCampusPayment = onCall({region: REGION}, async (request) => {
         batchCount: assignmentSummary.batchCount,
         removedAssignmentCount: assignmentSummary.removedAssignmentCount,
       });
+      logCampusAudienceResolution(
+        "createCampusPayment audience",
+        {
+          paymentId,
+          course: audience.course,
+          courses: targetCourses,
+          yearLevel: audience.yearLevel,
+          yearLevels: audience.targetYearLevels,
+          selectedStudentIds: audience.selectedStudentIds,
+          selectedSchoolIds: audience.selectedSchoolIds,
+        },
+        audience,
+        {
+          paymentAssignmentCreatedCount: assignmentSummary.createdAssignmentCount,
+        },
+      );
 
       return {
         paymentId,
@@ -13044,6 +13415,11 @@ export const updateCampusPayment = onCall({region: REGION}, async (request) => {
           selectedStudentIds: [],
           selectedSchoolIds: [],
           hasExplicitTargets: false,
+          courseTargetsForLog: paymentTargetCourses(paymentData),
+          yearTargetsForLog: paymentTargetYearLevels(paymentData),
+          courseYearMatchedCount: targets.length,
+          selectedMatchedCount: 0,
+          finalAudienceCount: targets.length,
         };
       } else {
         audience = await resolveCampusPaymentAudience(actor, body);
@@ -13110,6 +13486,12 @@ export const updateCampusPayment = onCall({region: REGION}, async (request) => {
             audience.targetStudent,
           targetCourses: nextTargetCourses,
           targetYearLevels: audience.targetYearLevels,
+          selectedStudentIds: preserveExistingAudience ?
+            toUniqueIdentifierList(paymentData.selectedStudentIds) :
+            audience.selectedStudentIds,
+          selectedSchoolIds: preserveExistingAudience ?
+            toUniqueIdentifierList(paymentData.selectedSchoolIds) :
+            audience.selectedSchoolIds,
           details,
           linkedEventId: paymentLinkedEventId(paymentData) || null,
           eventId: normalizeText(paymentData.eventId) || null,
@@ -13147,6 +13529,24 @@ export const updateCampusPayment = onCall({region: REGION}, async (request) => {
         removedAssignmentCount: assignmentSummary.removedAssignmentCount,
         preserveExistingAudience,
       });
+      logCampusAudienceResolution(
+        "updateCampusPayment audience",
+        {
+          paymentId,
+          course: nextCourse,
+          courses: nextTargetCourses,
+          yearLevel: audience.yearLevel,
+          yearLevels: audience.targetYearLevels,
+          selectedStudentIds: audience.selectedStudentIds,
+          selectedSchoolIds: audience.selectedSchoolIds,
+        },
+        audience,
+        {
+          paymentAssignmentCreatedCount: assignmentSummary.createdAssignmentCount,
+          removedAssignmentCount: assignmentSummary.removedAssignmentCount,
+          preserveExistingAudience,
+        },
+      );
 
       return {
         paymentId,
@@ -13179,20 +13579,53 @@ export const repairCampusPaymentAssignments = onCall({region: REGION}, async (re
     let callerRole = "";
     let callerCourseScope = "";
     let paymentId = "";
+    let linkedEventId = "";
     let paymentTitle = "";
 
     try {
       const actor = await resolveEcActorContext(request);
       const body = asRecord(request.data);
       paymentId = normalizeText(body.paymentId);
+      linkedEventId = normalizeText(body.linkedEventId);
       callerUid = actor.uid;
       callerRole =
         normalizeCampusRoleValue(actor.profile.role) ||
         (actor.isBod ? "bod" : "ecmember");
       callerCourseScope = actor.courseScope || "";
 
+      if (!paymentId && linkedEventId) {
+        const eventSnapshot = await db.doc(`events/${linkedEventId}`).get();
+        if (eventSnapshot.exists) {
+          const eventData = eventSnapshot.data() ?? {};
+          assertCanManageCampusEvent(actor, eventData, "update");
+          paymentId =
+            normalizeText(eventData.linkedPaymentId) ||
+            normalizeText(eventData.requiredPaymentId);
+        }
+
+        if (!paymentId) {
+          const paymentQuerySnapshot = await db
+            .collection("payments")
+            .where("linkedEventId", "==", linkedEventId)
+            .limit(1)
+            .get();
+          paymentId = paymentQuerySnapshot.docs[0]?.id ?? "";
+        }
+        if (!paymentId) {
+          const paymentQuerySnapshot = await db
+            .collection("payments")
+            .where("eventId", "==", linkedEventId)
+            .limit(1)
+            .get();
+          paymentId = paymentQuerySnapshot.docs[0]?.id ?? "";
+        }
+      }
+
       if (!paymentId) {
-        throw new HttpsError("invalid-argument", "paymentId is required.");
+        throw new HttpsError(
+          "invalid-argument",
+          "paymentId or linkedEventId is required.",
+        );
       }
 
       const paymentRef = db.doc(`payments/${paymentId}`);
@@ -13202,6 +13635,7 @@ export const repairCampusPaymentAssignments = onCall({region: REGION}, async (re
       }
 
       const paymentData = paymentSnapshot.data() ?? {};
+      linkedEventId = linkedEventId || paymentLinkedEventId(paymentData);
       paymentTitle = normalizeText(paymentData.title) || "Untitled Payment";
       const access = evaluateCampusPaymentStudentManageAccess(actor, paymentData);
       if (!access.allowed) {
@@ -13209,7 +13643,10 @@ export const repairCampusPaymentAssignments = onCall({region: REGION}, async (re
       }
 
       const existingAssignments = await loadCampusPaymentAssignments(paymentRef);
-      const targets = await resolveCampusPaymentTargetsFromStoredPayment(paymentData);
+      const targets = await resolveCampusPaymentTargetsFromStoredPayment({
+        ...paymentData,
+        id: paymentId,
+      });
       if (targets.length === 0) {
         throw new HttpsError(
           "failed-precondition",
@@ -13217,9 +13654,6 @@ export const repairCampusPaymentAssignments = onCall({region: REGION}, async (re
         );
       }
 
-      const createdAssignmentCount = targets.filter(
-        (target) => !existingAssignments.has(target.uid),
-      ).length;
       const assignmentSummary = await syncCampusPaymentAssignments(
         paymentId,
         targets,
@@ -13258,9 +13692,10 @@ export const repairCampusPaymentAssignments = onCall({region: REGION}, async (re
         callerCourseScope,
         paymentId,
         paymentTitle,
+        linkedEventId,
         targetCount: targets.length,
         existingAssignmentCount: existingAssignments.size,
-        createdAssignmentCount,
+        createdAssignmentCount: assignmentSummary.createdAssignmentCount,
         removedAssignmentCount: assignmentSummary.removedAssignmentCount,
         paidCount: assignmentSummary.paidCount,
         unpaidCount: assignmentSummary.unpaidCount,
@@ -13268,10 +13703,11 @@ export const repairCampusPaymentAssignments = onCall({region: REGION}, async (re
 
       return {
         paymentId,
+        linkedEventId,
         repaired: true,
         targetCount: targets.length,
         totalStudents: assignmentSummary.totalStudents,
-        createdAssignmentCount,
+        createdAssignmentCount: assignmentSummary.createdAssignmentCount,
         removedAssignmentCount: assignmentSummary.removedAssignmentCount,
         paidCount: assignmentSummary.paidCount,
         unpaidCount: assignmentSummary.unpaidCount,
@@ -13282,6 +13718,7 @@ export const repairCampusPaymentAssignments = onCall({region: REGION}, async (re
         callerRole,
         callerCourseScope,
         paymentId,
+        linkedEventId,
         paymentTitle,
         errorMessage: error instanceof Error ? error.message : String(error ?? ""),
         errorCode:
@@ -15030,45 +15467,30 @@ async function resolveCampusEventNotificationRecipients(
     actor.courseScope,
     actor.isBod,
   );
-  const explicitAudience = hasExplicitSelectedAudience(eventData);
-  const courseTargets = toTargetList(eventData.courses);
-  const yearTargets = toTargetList(eventData.yearLevels);
-  const courseValue =
-    courseTargets.length > 0 ? courseTargets : normalizeText(eventData.course);
-  const yearValue =
-    yearTargets.length > 0 ? yearTargets : normalizeText(eventData.yearLevel);
+  const audienceSource: CampusAudienceSource = {
+    id: eventData.id,
+    eventId: eventData.eventId,
+    course: eventData.course,
+    courses: eventData.courses,
+    courseScope: eventData.courseScope,
+    yearLevel: eventData.yearLevel,
+    yearLevels: eventData.yearLevels,
+    targetStudent: eventData.targetStudent,
+    selectedStudentIds: eventData.selectedStudentIds,
+    selectedSchoolIds: eventData.selectedSchoolIds,
+  };
+  const audience = resolveCampusAudienceUnion(audienceSource, candidates);
 
-  return candidates
-    .filter((recipient) => {
-      if (!matchesSelectedAudience(eventData, recipient.uid, recipient.schoolId)) {
-        return false;
-      }
+  logCampusAudienceResolution(
+    "resolveCampusEventNotificationRecipients audience",
+    audienceSource,
+    audience,
+    {
+      notificationRecipientCount: audience.finalAudienceCount,
+    },
+  );
 
-      if (explicitAudience) {
-        return true;
-      }
-
-      if (!matchesTargetList(courseValue, recipient.course, "All Courses")) {
-        return false;
-      }
-
-      if (!matchesTargetList(yearValue, recipient.yearLevel, "All Years")) {
-        return false;
-      }
-
-      return matchesSpecificStudentTarget(
-        eventData.targetStudent,
-        recipient.schoolId,
-        recipient.studentName,
-      );
-    })
-    .sort((left, right) => {
-      const bySchoolId = left.schoolId.localeCompare(right.schoolId);
-      if (bySchoolId !== 0) {
-        return bySchoolId;
-      }
-      return left.studentName.localeCompare(right.studentName);
-    });
+  return audience.finalAudience;
 }
 
 export const createCampusEvent = onCall({region: REGION}, async (request) => {
@@ -15392,126 +15814,32 @@ export const createCampusEvent = onCall({region: REGION}, async (request) => {
           );
         }
 
-        const explicitSelectedStudentIds = new Set(
-          selectedStudentIds.map((uid) => normalizeLower(uid)),
+        const paymentAudienceSource: CampusAudienceSource = {
+          eventId,
+          course: eventCourse,
+          courses: eventCourses,
+          courseScope: eventCourseScope,
+          yearLevel: eventYearLevel,
+          yearLevels: eventYearLevels,
+          targetStudent: eventTargetStudent,
+          selectedStudentIds,
+          selectedSchoolIds,
+        };
+        const paymentAudienceCandidates = await listCampusStudentRecipientCandidates(
+          actorCourseScope,
+          actorIsBod,
         );
-        const explicitSelectedSchoolIds = new Set(
-          selectedSchoolIds.map((schoolId) => normalizeLower(schoolId)),
+        const paymentAudience = resolveCampusAudienceUnion(
+          paymentAudienceSource,
+          paymentAudienceCandidates,
         );
-        const hasExplicitSelectedAudience =
-          explicitSelectedStudentIds.size > 0 || explicitSelectedSchoolIds.size > 0;
-
-        const targetCourseSet = new Set(
-          eventCourses
-            .map((course) => normalizeLower(normalizeCourseLabel(course)))
-            .filter(Boolean),
-        );
-        const targetYearLevelSet = new Set(
-          eventYearLevels
-            .map((yearLevel) => normalizeLower(normalizeYear(yearLevel)))
-            .filter(
-              (yearLevel) =>
-                Boolean(yearLevel) &&
-                yearLevel !== "all years" &&
-                yearLevel !== "unassigned",
-            ),
-        );
-
-        const audienceCandidates = new Map<string, FirebaseFirestore.DocumentData>();
-
-        if (selectedStudentIds.length > 0) {
-          const selectedRefs = selectedStudentIds.map((uid) => db.doc(`profiles/${uid}`));
-          const selectedSnaps = await db.getAll(...selectedRefs);
-          selectedSnaps.forEach((profileSnap) => {
-            if (!profileSnap.exists) {
-              return;
-            }
-            audienceCandidates.set(profileSnap.id, profileSnap.data() ?? {});
-          });
-        }
-
-        if (selectedSchoolIds.length > 0) {
-          for (const schoolId of selectedSchoolIds) {
-            const matchedProfiles = await findStudentAudienceProfilesByIdentifier(
-              schoolId,
-              25,
-            );
-            matchedProfiles.forEach((profileDoc) => {
-              audienceCandidates.set(profileDoc.id, profileDoc.data() ?? {});
-            });
-          }
-        }
-
-        if (audienceCandidates.size === 0) {
-          const profileSnapshot = await db
-            .collection("profiles")
-            .where("role", "in", [...STUDENT_AUDIENCE_LOOKUP_PROFILE_ROLES])
-            .limit(5000)
-            .get();
-
-          profileSnapshot.docs.forEach((profileDoc) => {
-            audienceCandidates.set(profileDoc.id, profileDoc.data() ?? {});
-          });
-        }
-
-        const paymentTargets = Array.from(audienceCandidates.entries())
-          .map(([uid, profileData]) => {
-            const schoolId =
-              normalizeText(profileData.schoolId) ||
-              normalizeText(profileData.studentId) ||
-              uid;
-            const course =
-              normalizeCourseLabel(profileData.course) ||
-              normalizeText(profileData.course) ||
-              "Unassigned";
-            const year = normalizeYear(profileData.yearLevel ?? profileData.year);
-            const studentName = resolveStudentAudienceIdentityName(
-              profileData,
-              {},
-            );
-            const status = normalizeLower(profileData.status);
-
-            return {
-              uid,
-              schoolId,
-              studentName,
-              course,
-              year,
-              status,
-              role: normalizeText(profileData.role),
-            };
-          })
-          .filter((student) => isStudentAudienceProfile(student))
-          .filter((student) => student.status !== "inactive")
-          .filter((student) => {
-            if (
-              actorIsBod &&
-              actorCourseScope &&
-              normalizeCourseLabel(student.course) !== actorCourseScope
-            ) {
-              return false;
-            }
-
-            if (hasExplicitSelectedAudience) {
-              return explicitSelectedStudentIds.has(normalizeLower(student.uid)) ||
-                explicitSelectedSchoolIds.has(normalizeLower(student.schoolId));
-            }
-
-            const matchesCourse =
-              targetCourseSet.size === 0 ||
-              targetCourseSet.has(normalizeLower(normalizeCourseLabel(student.course)));
-            const matchesYear =
-              targetYearLevelSet.size === 0 ||
-              targetYearLevelSet.has(normalizeLower(normalizeYear(student.year)));
-            return matchesCourse && matchesYear;
-          })
-          .sort((left, right) => {
-            const bySchoolId = left.schoolId.localeCompare(right.schoolId);
-            if (bySchoolId !== 0) {
-              return bySchoolId;
-            }
-            return left.studentName.localeCompare(right.studentName);
-          });
+        const paymentTargets = paymentAudience.finalAudience.map((student) => ({
+          uid: student.uid,
+          schoolId: student.schoolId,
+          studentName: student.studentName,
+          course: student.course,
+          yearLevel: student.yearLevel,
+        }));
 
         if (paymentTargets.length === 0) {
           throw new HttpsError(
@@ -15522,6 +15850,11 @@ export const createCampusEvent = onCall({region: REGION}, async (request) => {
 
         const paymentDocRef = db.collection("payments").doc();
         linkedPaymentId = paymentDocRef.id;
+        const assignmentSummary = await syncCampusPaymentAssignments(
+          paymentDocRef.id,
+          paymentTargets,
+          new Map(),
+        );
 
         await paymentDocRef.set({
           title: normalizeText(body.paymentTitle) || title,
@@ -15533,6 +15866,8 @@ export const createCampusEvent = onCall({region: REGION}, async (request) => {
           targetStudent: eventTargetStudent,
           targetYearLevels: eventYearLevels,
           targetCourses: eventCourses,
+          selectedStudentIds,
+          selectedSchoolIds,
           details: normalizeText(body.paymentDescription),
           linkedEventId: eventId,
           eventId,
@@ -15544,39 +15879,26 @@ export const createCampusEvent = onCall({region: REGION}, async (request) => {
           courseScope: eventCourses.length === 1 ? eventCourses[0] : null,
           source: "event",
           status: "active",
-          totalStudents: paymentTargets.length,
-          paidCount: 0,
-          unpaidCount: paymentTargets.length,
+          totalStudents: assignmentSummary.totalStudents,
+          paidCount: assignmentSummary.paidCount,
+          unpaidCount: assignmentSummary.unpaidCount,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         }, {merge: true});
 
-        const writesPerBatch = 350;
-        for (let index = 0; index < paymentTargets.length; index += writesPerBatch) {
-          const batch = db.batch();
-          const chunk = paymentTargets.slice(index, index + writesPerBatch);
-
-          chunk.forEach((student) => {
-            batch.set(
-              db.doc(`payments/${paymentDocRef.id}/students/${student.uid}`),
-              {
-                uid: student.uid,
-                schoolId: student.schoolId,
-                name: student.studentName,
-                studentName: student.studentName,
-                year: student.year || "-",
-                section: "-",
-                course: student.course || "-",
-                status: "Unpaid",
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              },
-              {merge: true},
-            );
-          });
-
-          await batch.commit();
-        }
+        logCampusAudienceResolution(
+          "createCampusEvent linked payment audience",
+          {
+            ...paymentAudienceSource,
+            paymentId: paymentDocRef.id,
+          },
+          paymentAudience,
+          {
+            paymentAssignmentCreatedCount: assignmentSummary.createdAssignmentCount,
+            paidCount: assignmentSummary.paidCount,
+            unpaidCount: assignmentSummary.unpaidCount,
+          },
+        );
       }
 
       const preRegCount = 0;
@@ -16074,6 +16396,8 @@ export const updateCampusEvent = onCall({region: REGION}, async (request) => {
             targetStudent: eventTargetStudent,
             targetYearLevels: eventYearLevels,
             targetCourses: eventCourses,
+            selectedStudentIds,
+            selectedSchoolIds,
             details: paymentDescription,
             linkedEventId: eventId,
             eventId,
@@ -16091,194 +16415,71 @@ export const updateCampusEvent = onCall({region: REGION}, async (request) => {
           {merge: true},
         );
 
-        if (actorIsBod) {
-          const assignmentSnapshot = await paymentRef.collection("students").get();
-          const existingAssignments = new Map<
-            string,
-            {
-              status: "Paid" | "Unpaid";
-            }
-          >();
+        const paymentAudienceSource: CampusAudienceSource = {
+          eventId,
+          paymentId: linkedPaymentId,
+          course: eventCourse,
+          courses: eventCourses,
+          courseScope: eventCourseScope,
+          yearLevel: eventYearLevel,
+          yearLevels: eventYearLevels,
+          targetStudent: eventTargetStudent,
+          selectedStudentIds,
+          selectedSchoolIds,
+        };
+        const paymentAudienceCandidates = await listCampusStudentRecipientCandidates(
+          actorCourseScope,
+          actorIsBod,
+        );
+        const paymentAudience = resolveCampusAudienceUnion(
+          paymentAudienceSource,
+          paymentAudienceCandidates,
+        );
+        const paymentTargets = paymentAudience.finalAudience.map((student) => ({
+          uid: student.uid,
+          schoolId: student.schoolId,
+          studentName: student.studentName,
+          course: student.course,
+          yearLevel: student.yearLevel,
+        }));
 
-          assignmentSnapshot.docs.forEach((assignmentDoc) => {
-            const assignmentData = assignmentDoc.data() ?? {};
-            const status = normalizeLower(assignmentData.status) === "paid" ? "Paid" : "Unpaid";
-            existingAssignments.set(assignmentDoc.id, {status});
-          });
-
-          const explicitStudentIds = new Set(
-            selectedStudentIds.map((uid) => normalizeLower(uid)),
-          );
-          const explicitSchoolIds = new Set(
-            selectedSchoolIds.map((schoolId) => normalizeLower(schoolId)),
-          );
-          const hasExplicitAudience =
-            explicitStudentIds.size > 0 || explicitSchoolIds.size > 0;
-
-          const targetYearSet = new Set(
-            eventYearLevels
-              .map((value) => normalizeLower(normalizeYear(value)))
-              .filter(
-                (value) =>
-                  Boolean(value) &&
-                  value !== "all years" &&
-                  value !== "unassigned",
-              ),
-          );
-
-          const audienceCandidates = new Map<string, FirebaseFirestore.DocumentData>();
-          if (selectedStudentIds.length > 0) {
-            selectedStudentIds.forEach((uid) => {
-              const selectedProfile = selectedProfilesByUid.get(uid);
-              if (selectedProfile) {
-                audienceCandidates.set(uid, selectedProfile);
-              }
-            });
-          }
-
-          if (selectedSchoolIds.length > 0) {
-            for (const selectedSchoolId of selectedSchoolIds) {
-              const matchedProfiles = await findStudentAudienceProfilesByIdentifier(
-                selectedSchoolId,
-                25,
-              );
-
-              matchedProfiles.forEach((schoolDoc) => {
-                audienceCandidates.set(schoolDoc.id, schoolDoc.data() ?? {});
-              });
-            }
-          }
-
-          if (audienceCandidates.size === 0) {
-            const profileSnapshot = await db
-              .collection("profiles")
-              .where("role", "in", [...STUDENT_AUDIENCE_LOOKUP_PROFILE_ROLES])
-              .limit(5000)
-              .get();
-
-            profileSnapshot.docs.forEach((profileDoc) => {
-              audienceCandidates.set(profileDoc.id, profileDoc.data() ?? {});
-            });
-          }
-
-          const paymentTargets = Array.from(audienceCandidates.entries())
-            .map(([uid, profileData]) => {
-              const schoolId =
-                normalizeText(profileData.schoolId) ||
-                normalizeText(profileData.studentId) ||
-                uid;
-              const course =
-                normalizeCourseLabel(profileData.course) ||
-                normalizeText(profileData.course) ||
-                "Unassigned";
-              const year = normalizeYear(profileData.yearLevel ?? profileData.year);
-              const studentName = resolveStudentAudienceIdentityName(
-                profileData,
-                {},
-              );
-              const status = normalizeLower(profileData.status);
-
-              return {
-                uid,
-                schoolId,
-                studentName,
-                course,
-                year,
-                status,
-                role: normalizeText(profileData.role),
-              };
-            })
-            .filter((student) => isStudentAudienceProfile(student))
-            .filter((student) => student.status !== "inactive")
-            .filter((student) => normalizeCourseLabel(student.course) === actorCourseScope)
-            .filter((student) => {
-              if (hasExplicitAudience) {
-                return explicitStudentIds.has(normalizeLower(student.uid)) ||
-                  explicitSchoolIds.has(normalizeLower(student.schoolId));
-              }
-
-              return targetYearSet.size === 0 ||
-                targetYearSet.has(normalizeLower(normalizeYear(student.year)));
-            })
-            .sort((left, right) => {
-              const bySchoolId = left.schoolId.localeCompare(right.schoolId);
-              if (bySchoolId !== 0) {
-                return bySchoolId;
-              }
-              return left.studentName.localeCompare(right.studentName);
-            });
-
-          if (paymentTargets.length === 0) {
-            throw new HttpsError(
-              "invalid-argument",
-              "No active students match the selected audience for this paid event.",
-            );
-          }
-
-          const nextTargetIds = new Set(paymentTargets.map((student) => student.uid));
-          let paidCount = 0;
-          const upsertRows = paymentTargets.map((student) => {
-            const existingStatus = existingAssignments.get(student.uid)?.status ?? "Unpaid";
-            if (existingStatus === "Paid") {
-              paidCount += 1;
-            }
-
-            return {
-              student,
-              status: existingStatus,
-            };
-          });
-
-          const writesPerBatch = 350;
-          for (let index = 0; index < upsertRows.length; index += writesPerBatch) {
-            const batch = db.batch();
-            const chunk = upsertRows.slice(index, index + writesPerBatch);
-
-            chunk.forEach(({student, status}) => {
-              batch.set(
-                db.doc(`payments/${linkedPaymentId}/students/${student.uid}`),
-                {
-                  uid: student.uid,
-                  schoolId: student.schoolId,
-                  name: student.studentName,
-                  studentName: student.studentName,
-                  year: student.year || "-",
-                  section: "-",
-                  course: student.course || "-",
-                  status,
-                  updatedAt: serverTimestamp(),
-                  ...(existingAssignments.has(student.uid) ? {} : {createdAt: serverTimestamp()}),
-                },
-                {merge: true},
-              );
-            });
-
-            await batch.commit();
-          }
-
-          const removedAssignmentIds = Array.from(existingAssignments.keys()).filter(
-            (uid) => !nextTargetIds.has(uid),
-          );
-          for (let index = 0; index < removedAssignmentIds.length; index += writesPerBatch) {
-            const batch = db.batch();
-            removedAssignmentIds
-              .slice(index, index + writesPerBatch)
-              .forEach((uid) => {
-                batch.delete(db.doc(`payments/${linkedPaymentId}/students/${uid}`));
-              });
-            await batch.commit();
-          }
-
-          await paymentRef.set(
-            {
-              totalStudents: paymentTargets.length,
-              paidCount,
-              unpaidCount: Math.max(0, paymentTargets.length - paidCount),
-              updatedAt: serverTimestamp(),
-            },
-            {merge: true},
+        if (paymentTargets.length === 0) {
+          throw new HttpsError(
+            "invalid-argument",
+            "No active students match the selected audience for this paid event.",
           );
         }
+
+        const existingAssignments = await loadCampusPaymentAssignments(paymentRef);
+        const assignmentSummary = await syncCampusPaymentAssignments(
+          linkedPaymentId,
+          paymentTargets,
+          existingAssignments,
+        );
+
+        await paymentRef.set(
+          {
+            selectedStudentIds,
+            selectedSchoolIds,
+            totalStudents: assignmentSummary.totalStudents,
+            paidCount: assignmentSummary.paidCount,
+            unpaidCount: assignmentSummary.unpaidCount,
+            updatedAt: serverTimestamp(),
+          },
+          {merge: true},
+        );
+
+        logCampusAudienceResolution(
+          "updateCampusEvent linked payment audience",
+          paymentAudienceSource,
+          paymentAudience,
+          {
+            paymentAssignmentCreatedCount: assignmentSummary.createdAssignmentCount,
+            removedAssignmentCount: assignmentSummary.removedAssignmentCount,
+            paidCount: assignmentSummary.paidCount,
+            unpaidCount: assignmentSummary.unpaidCount,
+          },
+        );
       } else if (previousLinkedPaymentId) {
         await db.doc(`payments/${previousLinkedPaymentId}`).set(
           {
@@ -16494,7 +16695,10 @@ export const cancelCampusEvent = onCall({region: REGION}, async (request) => {
       const eventData = cancellationState.eventData ?? {};
       const recipients = await resolveCampusEventNotificationRecipients(
         actor,
-        eventData,
+        {
+          ...eventData,
+          eventId,
+        },
       );
       const title = normalizeText(eventData.title) || "Event";
       const date = normalizeText(eventData.date);
@@ -17090,47 +17294,35 @@ export const studentManagePreRegistration = onCall({region: REGION}, async (requ
         normalizeText(profileData.studentName) ||
         normalizeText(profileData.name) ||
         schoolId;
-      if (!matchesSelectedAudience(eventData, uid, schoolId)) {
+      const course = normalizeText(profileData.course) || "Unassigned";
+      const year = normalizeYear(profileData.yearLevel ?? profileData.year);
+      const allowedAudience = matchesCampusResolvedAudience(
+        {
+          eventId,
+          course: eventData.course,
+          courses: eventData.courses,
+          courseScope: eventData.courseScope,
+          yearLevel: eventData.yearLevel,
+          yearLevels: eventData.yearLevels,
+          targetStudent: eventData.targetStudent,
+          selectedStudentIds: eventData.selectedStudentIds,
+          selectedSchoolIds: eventData.selectedSchoolIds,
+        },
+        {
+          uid,
+          schoolId,
+          studentName,
+          course,
+          year,
+          yearLevel: year,
+        },
+      );
+
+      if (!allowedAudience) {
         throw new HttpsError(
           "permission-denied",
           "You are not part of the allowed audience for this event."
         );
-      }
-      const course = normalizeText(profileData.course) || "Unassigned";
-      const year = normalizeYear(profileData.year);
-
-      const courseTargets = toTargetList(eventData.courses);
-      const yearTargets = toTargetList(eventData.yearLevels);
-      const courseValue =
-        courseTargets.length > 0 ?
-          courseTargets :
-          normalizeText(eventData.course);
-      const yearValue =
-        yearTargets.length > 0 ?
-          yearTargets :
-          normalizeText(eventData.yearLevel);
-
-      if (!hasExplicitSelectedAudience(eventData)) {
-        if (!matchesTargetList(courseValue, course, "All Courses")) {
-          throw new HttpsError(
-            "permission-denied",
-            "Your course is not allowed for this event."
-          );
-        }
-
-        if (!matchesTargetList(yearValue, year, "All Years")) {
-          throw new HttpsError(
-            "permission-denied",
-            "Your year level is not allowed for this event."
-          );
-        }
-
-        if (!matchesSpecificStudentTarget(eventData.targetStudent, schoolId, studentName)) {
-          throw new HttpsError(
-            "permission-denied",
-            "You are not part of the allowed audience for this event."
-          );
-        }
       }
 
       const requiredPaymentId =
