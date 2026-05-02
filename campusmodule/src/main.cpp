@@ -156,6 +156,7 @@ enum class SyncPhase : uint8_t {
   UploadAttendance,
   CleanupMappings,
   RefreshContext,
+  RestoreAttendanceState,
   DownloadFingerprintRoster,
   Complete,
 };
@@ -183,11 +184,16 @@ struct SyncController {
   size_t rejections = 0;
   size_t cleanupProcessed = 0;
   size_t rosterRows = 0;
+  size_t attendanceRestoreCreated = 0;
+  size_t attendanceRestoreMerged = 0;
+  size_t attendanceRestoreSkipped = 0;
   bool rosterDownloaded = false;
   bool cleanupQueueLoaded = false;
+  bool attendanceRestoreWarning = false;
   std::vector<CleanupQueueItem> cleanupQueue;
   String lastError;
   String lastFailureStage;
+  String attendanceRestoreMessage;
 };
 
 struct PendingSyncSnapshot {
@@ -1085,7 +1091,7 @@ SyncPhase nextSyncPhaseAfterCleanup(SyncMode mode, bool contextRefreshNeeded,
              : SyncPhase::Complete;
 }
 
-SyncPhase nextSyncPhaseAfterRefresh(SyncMode mode) {
+SyncPhase nextSyncPhaseAfterAttendanceRestore(SyncMode mode) {
   return syncModeIncludesFingerprintRoster(mode)
              ? SyncPhase::DownloadFingerprintRoster
              : SyncPhase::Complete;
@@ -1144,11 +1150,13 @@ const char *syncPhaseName(SyncPhase phase) {
     case SyncPhase::CleanupMappings:
       return "Cleanup";
     case SyncPhase::RefreshContext:
-      return "Refresh evt";
+      return "Sync roster";
+    case SyncPhase::RestoreAttendanceState:
+      return "Restore att";
     case SyncPhase::DownloadFingerprintRoster:
       return "FP roster";
     case SyncPhase::Complete:
-      return "Complete";
+      return "Done";
     case SyncPhase::Idle:
     default:
       return "Idle";
@@ -1648,6 +1656,18 @@ bool refreshPairedEventContext(String &error) {
   return true;
 }
 
+bool restorePairedEventAttendanceState(AttendanceRestoreStats &stats,
+                                       String &error) {
+  if (!g_pairedEvent.isValid()) {
+    error = "No paired event";
+    return false;
+  }
+
+  EventInfo event = g_pairedEvent;
+  return g_backend.downloadPairedEventAttendanceStateToStorage(event, g_storage,
+                                                               stats, error);
+}
+
 void renderMenu() {
   g_display.showMenu("CAMPUS Menu", kMenuItems, g_menuIndex,
                      static_cast<int>(kMenuItemCount));
@@ -1789,6 +1809,15 @@ void renderSyncProgress() {
   String line3 = syncPhaseName(g_sync.phase);
   String line4 = "E:" + String(g_sync.enrollmentUploads) + " A:" +
                  String(g_sync.attendanceUploads);
+  if (g_sync.phase == SyncPhase::RestoreAttendanceState ||
+      g_sync.mode == SyncMode::PairedEventData) {
+    line4 = "New:" + String(g_sync.attendanceRestoreCreated) + " M:" +
+            String(g_sync.attendanceRestoreMerged) + " S:" +
+            String(g_sync.attendanceRestoreSkipped);
+    if (g_sync.attendanceRestoreWarning && !g_sync.attendanceRestoreMessage.isEmpty()) {
+      line4 = trim16(g_sync.attendanceRestoreMessage);
+    }
+  }
   if (g_sync.cleanupProcessed > 0) {
     line4 += " C:";
     line4 += String(g_sync.cleanupProcessed);
@@ -1919,6 +1948,8 @@ String syncFailureStageLabel() {
       return "cleanup";
     case SyncPhase::RefreshContext:
       return "refresh_context";
+    case SyncPhase::RestoreAttendanceState:
+      return "attendance_restore";
     case SyncPhase::DownloadFingerprintRoster:
       return "fingerprint_roster";
     case SyncPhase::Complete:
@@ -1937,7 +1968,14 @@ String syncSummaryLine() {
                  ? "Rows:" + String(g_sync.rosterRows)
                  : String("Roster refresh done");
     case SyncMode::PairedEventData:
-      return "Event context updated";
+      if (g_sync.attendanceRestoreCreated == 0 &&
+          g_sync.attendanceRestoreMerged == 0 &&
+          g_sync.attendanceRestoreSkipped == 0) {
+        return "Event context updated";
+      }
+      return "New:" + String(g_sync.attendanceRestoreCreated) + " M:" +
+             String(g_sync.attendanceRestoreMerged) + " S:" +
+             String(g_sync.attendanceRestoreSkipped);
     case SyncMode::CleanupQueue:
       return "Cleanup applied:" + String(g_sync.cleanupProcessed);
     case SyncMode::AttendanceOnly:
@@ -1960,8 +1998,20 @@ String syncSummaryLine() {
   }
 }
 
+bool isAttendanceLocalSaveFailure(const String &error) {
+  return error.startsWith("Attendance sync state save failed");
+}
+
+bool isNoWifiSyncFailure(const String &error) {
+  return error == "Wi-Fi not connected" || g_sync.lastFailureStage == "wifi";
+}
+
 String syncFailureTitle(const String &error) {
-  if (!g_wifi.isConnected() || error == "Wi-Fi not connected") {
+  if (isAttendanceLocalSaveFailure(error)) {
+    return "SYNC SAVE ERR";
+  }
+
+  if (isNoWifiSyncFailure(error)) {
     return "NO WIFI";
   }
 
@@ -1982,7 +2032,11 @@ String syncFailureTitle(const String &error) {
 }
 
 String syncFailureDetail(const String &error) {
-  if (!g_wifi.isConnected() || error == "Wi-Fi not connected") {
+  if (isAttendanceLocalSaveFailure(error)) {
+    return "Attendance uploaded";
+  }
+
+  if (isNoWifiSyncFailure(error)) {
     return "Check Wi-Fi setup";
   }
 
@@ -2002,6 +2056,13 @@ String syncFailureDetail(const String &error) {
   }
   if (httpCode >= 500 && httpCode <= 599) {
     return "Retry later";
+  }
+  return trim16(error);
+}
+
+String syncFailureFooter(const String &error) {
+  if (isAttendanceLocalSaveFailure(error)) {
+    return "Local state failed";
   }
   return trim16(error);
 }
@@ -2037,9 +2098,19 @@ void finishSyncSuccess() {
     g_autoSyncBackoffMs = CampusConfig::kAutoSyncIntervalMs;
   } else {
     setScreen(AppScreen::SyncRecordsMenu);
-    showTimedMessage("SYNC OK", syncModeMenuLabel(g_sync.mode), kLongMessageMs,
-                     syncSummaryLine());
-    g_feedback.success();
+    if (g_sync.attendanceRestoreWarning) {
+      const bool pairedEventDataMode = g_sync.mode == SyncMode::PairedEventData;
+      showTimedMessage(pairedEventDataMode ? "ROSTER SYNC OK" : "SYNC WARN",
+                       pairedEventDataMode ? "ATT RESTORE WARN"
+                                           : syncModeMenuLabel(g_sync.mode),
+                       kLongMessageMs, syncSummaryLine(),
+                       trim16(g_sync.attendanceRestoreMessage));
+      g_feedback.warning();
+    } else {
+      showTimedMessage("SYNC OK", syncModeMenuLabel(g_sync.mode), kLongMessageMs,
+                       syncSummaryLine());
+      g_feedback.success();
+    }
   }
 
   if (g_pairedEventRecoveredFromAttendance &&
@@ -2091,7 +2162,7 @@ void failSync(const String &error) {
     setScreen(AppScreen::SyncRecordsMenu);
     showTimedMessage(syncFailureTitle(message), syncModeMenuLabel(g_sync.mode),
                      kLongMessageMs, syncFailureDetail(message),
-                     trim16(message));
+                     syncFailureFooter(message));
     g_feedback.warning();
   }
 
@@ -2253,15 +2324,24 @@ void tickSync() {
       g_sync.attendanceAttempts += batch.size();
       std::vector<SyncItemResult> results;
       String error;
+      String applyError;
       if (!g_backend.syncAttendance(batch, results, error)) {
-        if (!results.empty()) {
-          g_storage.applySyncResults(results);
+        if (!results.empty() &&
+            !g_storage.applySyncResults(results, applyError) &&
+            error.isEmpty()) {
+          error = applyError;
+        }
+        if (error.isEmpty()) {
+          error = applyError;
         }
         failSync(error);
         return;
       }
 
-      g_storage.applySyncResults(results);
+      if (!g_storage.applySyncResults(results, applyError)) {
+        failSync(applyError);
+        return;
+      }
       bool batchHasFailure = false;
       String batchError;
       for (const auto &result : results) {
@@ -2269,12 +2349,19 @@ void tickSync() {
                       result.recordId.c_str(), result.status.c_str(),
                       result.reason.c_str(),
                       result.message.c_str());
-        if (result.status == "uploaded") {
+        if (isAttendanceSyncSuccessStatus(result.status)) {
           ++g_sync.attendanceUploads;
           g_sync.contextRefreshNeeded = true;
         } else if (result.status == "duplicate") {
-          ++g_sync.duplicates;
-          g_sync.contextRefreshNeeded = true;
+          if (shouldAcknowledgeAttendanceSyncResult(result)) {
+            ++g_sync.duplicates;
+            g_sync.contextRefreshNeeded = true;
+          } else if (!batchHasFailure) {
+            batchHasFailure = true;
+            batchError = !result.message.isEmpty()
+                             ? result.message
+                             : "Attendance duplicate needs manual review.";
+          }
         } else if (result.status == "rejected") {
           ++g_sync.rejections;
         } else if (!batchHasFailure) {
@@ -2423,8 +2510,37 @@ void tickSync() {
           failSync(error);
           return;
         }
+        g_sync.phase = nextSyncPhaseAfterAttendanceRestore(g_sync.mode);
+        markDisplayDirty();
+        return;
       }
-      g_sync.phase = nextSyncPhaseAfterRefresh(g_sync.mode);
+      g_sync.phase = SyncPhase::RestoreAttendanceState;
+      markDisplayDirty();
+      return;
+    }
+
+    case SyncPhase::RestoreAttendanceState: {
+      AttendanceRestoreStats restoreStats;
+      String error;
+      const bool restored =
+          restorePairedEventAttendanceState(restoreStats, error);
+      g_sync.attendanceRestoreCreated += restoreStats.created;
+      g_sync.attendanceRestoreMerged += restoreStats.merged;
+      g_sync.attendanceRestoreSkipped += restoreStats.skipped;
+      if (!restored) {
+        g_sync.attendanceRestoreWarning = true;
+        g_sync.attendanceRestoreMessage =
+            error.isEmpty() ? "Attendance restore warning" : error;
+        Serial.printf(
+            "[SYNC][WARN] attendance restore warning pages=%u created=%u "
+            "merged=%u skipped=%u errors=%u message=%s\n",
+            static_cast<unsigned>(restoreStats.pages),
+            static_cast<unsigned>(restoreStats.created),
+            static_cast<unsigned>(restoreStats.merged),
+            static_cast<unsigned>(restoreStats.skipped),
+            static_cast<unsigned>(restoreStats.errors), error.c_str());
+      }
+      g_sync.phase = nextSyncPhaseAfterAttendanceRestore(g_sync.mode);
       markDisplayDirty();
       return;
     }

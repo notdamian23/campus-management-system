@@ -148,12 +148,47 @@ struct AttendanceRecord {
   }
 };
 
+enum class AttendanceRestoreAction : uint8_t {
+  Created,
+  Merged,
+  Skipped,
+};
+
+struct AttendanceRestoreStats {
+  size_t pages = 0;
+  size_t created = 0;
+  size_t merged = 0;
+  size_t skipped = 0;
+  size_t errors = 0;
+  bool partialFailure = false;
+};
+
 struct SyncItemResult {
   String recordId;
   String status;
   String message;
   String reason;
+  String eventId;
+  String studentUid;
 };
+
+inline bool isAttendanceSyncSuccessStatus(const String &status) {
+  return status == "uploaded" || status == "success";
+}
+
+inline bool isAttendanceSyncSafeDuplicateReason(const String &reason) {
+  return reason == "attendance_already_up_to_date" ||
+         reason == "already_synced" || reason == "already_exists_same_data";
+}
+
+inline bool shouldAcknowledgeAttendanceSyncResult(
+    const SyncItemResult &result) {
+  if (isAttendanceSyncSuccessStatus(result.status)) {
+    return true;
+  }
+  return result.status == "duplicate" &&
+         isAttendanceSyncSafeDuplicateReason(result.reason);
+}
 
 enum class FingerprintOwnershipState : uint8_t {
   None,

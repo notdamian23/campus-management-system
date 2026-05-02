@@ -17,6 +17,8 @@
 namespace {
 constexpr char kCreateSessionPath[] = "/campusDeviceCreateSession";
 constexpr char kPairedEventContextPath[] = "/campusDevicePairedEventContext";
+constexpr char kPairedEventAttendanceStatePath[] =
+    "/campusDevicePairedEventAttendanceState";
 constexpr char kFingerprintRosterPath[] = "/campusDeviceDownloadFingerprintRoster";
 constexpr char kResolveAttendanceOwnerPath[] = "/campusDeviceResolveAttendanceOwner";
 constexpr char kAttendanceSyncPath[] = "/campusDeviceSyncAttendance";
@@ -40,10 +42,15 @@ constexpr size_t kPairedEventContextResponseJsonCapacity = 32768;
 constexpr size_t kPairedEventContextMaxResponseBytes = 32768;
 constexpr size_t kPairedEventContextPageSize = 20;
 constexpr size_t kPairedEventContextMaxPages = 128;
+constexpr size_t kPairedEventAttendanceStateResponseJsonCapacity = 24576;
+constexpr size_t kPairedEventAttendanceStateMaxResponseBytes = 24576;
+constexpr size_t kPairedEventAttendanceStatePageSize = 25;
+constexpr size_t kPairedEventAttendanceStateMaxPages = 128;
 constexpr uint32_t kTlsLargestFreeBlockWarningBytes = 24U * 1024U;
 constexpr uint32_t kSecureClientCooldownMs = 150;
 constexpr uint32_t kHttpRequestWarnMs = 2000;
 constexpr uint8_t kPairedEventTlsConnectAttempts = 2;
+constexpr uint32_t kAttendanceRestorePageDelayMs = 20;
 
 struct RequestTarget {
   String url;
@@ -543,11 +550,21 @@ StudentInfo studentFromJson(JsonObjectConst object) {
 }
 
 bool isPairedEventContextRequestPath(const String &path) {
-  return path.startsWith(kPairedEventContextPath);
+  return path.startsWith(kPairedEventContextPath) ||
+         path.startsWith(kPairedEventAttendanceStatePath);
 }
 
 String buildPairedEventContextPath(size_t offset, size_t limit) {
   String path = kPairedEventContextPath;
+  path += "?offset=";
+  path += String(static_cast<unsigned>(offset));
+  path += "&limit=";
+  path += String(static_cast<unsigned>(limit));
+  return path;
+}
+
+String buildPairedEventAttendanceStatePath(size_t offset, size_t limit) {
+  String path = kPairedEventAttendanceStatePath;
   path += "?offset=";
   path += String(static_cast<unsigned>(offset));
   path += "&limit=";
@@ -820,6 +837,79 @@ EventContextPageInfo eventContextPageInfoFromJson(JsonDocument &response) {
       parseBoolValue(pageObject["hasMoreSelectedSchoolIds"], false);
   info.nextOffset = pageObject["nextOffset"] | -1;
   return info;
+}
+
+struct AttendanceRestorePageInfo {
+  bool hasMore = false;
+  int nextOffset = -1;
+  int count = 0;
+};
+
+AttendanceRestorePageInfo attendanceRestorePageInfoFromJson(
+    JsonDocument &response) {
+  AttendanceRestorePageInfo info;
+  info.hasMore = parseBoolValue(response["hasMore"], false);
+  info.nextOffset = response["nextOffset"] | -1;
+  info.count = response["count"] | 0;
+  return info;
+}
+
+const char *attendanceRestoreActionName(AttendanceRestoreAction action) {
+  switch (action) {
+    case AttendanceRestoreAction::Created:
+      return "created";
+    case AttendanceRestoreAction::Merged:
+      return "merged";
+    case AttendanceRestoreAction::Skipped:
+    default:
+      return "skipped";
+  }
+}
+
+size_t attendanceRestoreAppliedCount(const AttendanceRestoreStats &stats) {
+  return stats.created + stats.merged;
+}
+
+AttendanceRecord attendanceRestoreRecordFromJson(JsonObjectConst object,
+                                                 const EventInfo &event) {
+  AttendanceRecord record;
+  record.eventId = event.eventId;
+  record.eventTitle = event.title;
+  record.eventDate = event.date;
+  record.scheduledTimeStart = event.scheduledTime;
+  record.scheduledTimeEnd = event.scheduledTimeEnd;
+  record.eventLocation = event.location;
+  record.studentUid = String(object["studentUid"] | object["studentId"] | "");
+  record.schoolId = String(object["schoolId"] | record.studentUid);
+  record.studentName = String(object["studentName"] | "");
+  record.course = String(object["course"] | "");
+  record.yearLevel = String(object["yearLevel"] | object["year"] | "");
+  record.templateId = object["templateId"] | -1;
+  record.timeInEpoch = object["timeInEpoch"].isNull()
+                           ? 0ULL
+                           : object["timeInEpoch"].as<uint64_t>();
+  record.timeInIso = String(object["timeInIso"] | "");
+  record.timeInSource = String(object["timeInSource"] | "");
+  record.timeOutEpoch = object["timeOutEpoch"].isNull()
+                            ? 0ULL
+                            : object["timeOutEpoch"].as<uint64_t>();
+  record.timeOutIso = String(object["timeOutIso"] | "");
+  record.timeOutSource = String(object["timeOutSource"] | "");
+  record.attendanceStatus = String(object["attendanceStatus"] | "");
+  record.source = String(object["source"] | "portable-device");
+  record.synced = true;
+  record.syncRejected = false;
+  record.remoteDuplicate = false;
+  record.syncError = "";
+  record.retryCount = 0;
+  record.capturedAtEpoch =
+      record.timeOutEpoch > 0 ? record.timeOutEpoch : record.timeInEpoch;
+  record.capturedAtIso =
+      !record.timeOutIso.isEmpty() ? record.timeOutIso : record.timeInIso;
+  record.timeSource = !record.timeOutSource.isEmpty()
+                          ? record.timeOutSource
+                          : record.timeInSource;
+  return record;
 }
 
 bool ensureDynamicJsonCapacity(const DynamicJsonDocument &doc,
@@ -1246,6 +1336,187 @@ bool BackendClient::downloadPairedEventContextToStorage(
   return false;
 }
 
+bool BackendClient::downloadPairedEventAttendanceStateToStorage(
+    EventInfo &event, StorageManager &storage, AttendanceRestoreStats &stats,
+    String &error) {
+  stats = AttendanceRestoreStats{};
+  if (!ensureSessionForRequest(kPairedEventAttendanceStatePath, error)) {
+    return false;
+  }
+  if (!event.isValid()) {
+    error = "No paired event";
+    return false;
+  }
+
+  Serial.printf("[ATT_RESTORE][START] eventId=%s\n", event.eventId.c_str());
+  size_t offset = 0;
+  for (size_t pageIndex = 0; pageIndex < kPairedEventAttendanceStateMaxPages;
+       ++pageIndex) {
+    const String path = buildPairedEventAttendanceStatePath(
+        offset, kPairedEventAttendanceStatePageSize);
+    Serial.printf("[ATT_RESTORE][PAGE_REQUEST] offset=%u limit=%u\n",
+                  static_cast<unsigned>(offset),
+                  static_cast<unsigned>(kPairedEventAttendanceStatePageSize));
+    logMemoryStage("before attendance restore page", path);
+
+    if (!hasSafeHeapForPairedContextPage(path, offset, error)) {
+      if (error == "Context too large") {
+        error = "Attendance restore response too large";
+      }
+      ++stats.errors;
+      stats.partialFailure = true;
+      Serial.printf("[ATT_RESTORE][ERROR] stage=heap_guard message=%s\n",
+                    error.c_str());
+      Serial.printf(
+          "[ATT_RESTORE][SUMMARY] pages=%u restored=%u merged=%u skipped=%u "
+          "errors=%u\n",
+          static_cast<unsigned>(stats.pages),
+          static_cast<unsigned>(attendanceRestoreAppliedCount(stats)),
+          static_cast<unsigned>(stats.merged),
+          static_cast<unsigned>(stats.skipped),
+          static_cast<unsigned>(stats.errors));
+      return false;
+    }
+
+    DynamicJsonDocument response(kPairedEventAttendanceStateResponseJsonCapacity);
+    if (!ensureDynamicJsonCapacity(
+            response, kPairedEventAttendanceStateResponseJsonCapacity, path,
+            "pairedEventAttendanceState response", error)) {
+      ++stats.errors;
+      stats.partialFailure = true;
+      Serial.printf("[ATT_RESTORE][ERROR] stage=response_alloc message=%s\n",
+                    error.c_str());
+      Serial.printf(
+          "[ATT_RESTORE][SUMMARY] pages=%u restored=%u merged=%u skipped=%u "
+          "errors=%u\n",
+          static_cast<unsigned>(stats.pages),
+          static_cast<unsigned>(attendanceRestoreAppliedCount(stats)),
+          static_cast<unsigned>(stats.merged),
+          static_cast<unsigned>(stats.skipped),
+          static_cast<unsigned>(stats.errors));
+      return false;
+    }
+
+    if (!requestJson("GET", path, emptyRequestBody(), response, error, true,
+                     CampusConfig::kHttpRetryAttempts, 0,
+                     kPairedEventAttendanceStateMaxResponseBytes,
+                     "Attendance state response too large")) {
+      ++stats.errors;
+      stats.partialFailure = true;
+      Serial.printf("[ATT_RESTORE][ERROR] stage=request message=%s\n",
+                    error.c_str());
+      Serial.printf(
+          "[ATT_RESTORE][SUMMARY] pages=%u restored=%u merged=%u skipped=%u "
+          "errors=%u\n",
+          static_cast<unsigned>(stats.pages),
+          static_cast<unsigned>(attendanceRestoreAppliedCount(stats)),
+          static_cast<unsigned>(stats.merged),
+          static_cast<unsigned>(stats.skipped),
+          static_cast<unsigned>(stats.errors));
+      return false;
+    }
+
+    JsonArrayConst attendanceArray = response["attendance"].as<JsonArrayConst>();
+    const AttendanceRestorePageInfo pageInfo =
+        attendanceRestorePageInfoFromJson(response);
+    Serial.printf("[ATT_RESTORE][PAGE_SUCCESS] count=%u hasMore=%s\n",
+                  static_cast<unsigned>(pageInfo.count),
+                  pageInfo.hasMore ? "yes" : "no");
+
+    for (JsonObjectConst item : attendanceArray) {
+      AttendanceRecord record = attendanceRestoreRecordFromJson(item, event);
+      if (record.eventId.isEmpty() || record.studentUid.isEmpty()) {
+        ++stats.errors;
+        stats.partialFailure = true;
+        Serial.println(
+            "[ATT_RESTORE][ERROR] stage=parse_record message=missing key");
+        continue;
+      }
+
+      AttendanceRestoreAction action = AttendanceRestoreAction::Skipped;
+      String upsertError;
+      if (!storage.upsertCloudAttendanceRecord(record, action, upsertError)) {
+        ++stats.errors;
+        stats.partialFailure = true;
+        Serial.printf("[ATT_RESTORE][ERROR] stage=upsert message=%s\n",
+                      upsertError.c_str());
+        continue;
+      }
+
+      if (action == AttendanceRestoreAction::Created) {
+        ++stats.created;
+      } else if (action == AttendanceRestoreAction::Merged) {
+        ++stats.merged;
+      } else {
+        ++stats.skipped;
+      }
+      Serial.printf("[ATT_RESTORE][UPSERT] studentUid=%s action=%s\n",
+                    record.studentUid.c_str(),
+                    attendanceRestoreActionName(action));
+      yield();
+    }
+
+    ++stats.pages;
+    logMemoryStage("after attendance restore page", path);
+    response.clear();
+    logMemoryStage("after attendance restore cleanup", path);
+
+    if (!pageInfo.hasMore) {
+      if (stats.partialFailure && error.isEmpty()) {
+        error = "Attendance restore completed with warnings";
+      }
+      Serial.printf(
+          "[ATT_RESTORE][SUMMARY] pages=%u restored=%u merged=%u skipped=%u "
+          "errors=%u\n",
+          static_cast<unsigned>(stats.pages),
+          static_cast<unsigned>(attendanceRestoreAppliedCount(stats)),
+          static_cast<unsigned>(stats.merged),
+          static_cast<unsigned>(stats.skipped),
+          static_cast<unsigned>(stats.errors));
+      return !stats.partialFailure;
+    }
+
+    const size_t nextOffset =
+        pageInfo.nextOffset > static_cast<int>(offset)
+            ? static_cast<size_t>(pageInfo.nextOffset)
+            : (offset + kPairedEventAttendanceStatePageSize);
+    if (nextOffset <= offset) {
+      ++stats.errors;
+      stats.partialFailure = true;
+      error = "Attendance restore pagination stalled";
+      Serial.printf("[ATT_RESTORE][ERROR] stage=pagination message=%s\n",
+                    error.c_str());
+      Serial.printf(
+          "[ATT_RESTORE][SUMMARY] pages=%u restored=%u merged=%u skipped=%u "
+          "errors=%u\n",
+          static_cast<unsigned>(stats.pages),
+          static_cast<unsigned>(attendanceRestoreAppliedCount(stats)),
+          static_cast<unsigned>(stats.merged),
+          static_cast<unsigned>(stats.skipped),
+          static_cast<unsigned>(stats.errors));
+      return false;
+    }
+
+    offset = nextOffset;
+    delay(kAttendanceRestorePageDelayMs);
+    yield();
+  }
+
+  ++stats.errors;
+  stats.partialFailure = true;
+  error = "Attendance restore exceeded page limit";
+  Serial.printf("[ATT_RESTORE][ERROR] stage=page_limit message=%s\n",
+                error.c_str());
+  Serial.printf(
+      "[ATT_RESTORE][SUMMARY] pages=%u restored=%u merged=%u skipped=%u "
+      "errors=%u\n",
+      static_cast<unsigned>(stats.pages),
+      static_cast<unsigned>(attendanceRestoreAppliedCount(stats)),
+      static_cast<unsigned>(stats.merged), static_cast<unsigned>(stats.skipped),
+      static_cast<unsigned>(stats.errors));
+  return false;
+}
+
 bool BackendClient::fetchPendingEnrollments(std::vector<StudentInfo> &students,
                                             String &error) {
   if (!ensureSessionForRequest("/campusDevicePendingEnrollments", error)) {
@@ -1619,6 +1890,17 @@ bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
 
   const RequestTarget target = buildRequestTarget(kAttendanceSyncPath);
   for (const auto &record : records) {
+    const auto appendFailure = [&results](const AttendanceRecord &failedRecord,
+                                          const String &message) {
+      SyncItemResult failure;
+      failure.recordId = failedRecord.recordId;
+      failure.status = "failed";
+      failure.message = message;
+      failure.eventId = failedRecord.eventId;
+      failure.studentUid = failedRecord.studentUid;
+      results.push_back(failure);
+    };
+
     logMemoryStage("before attendance payload", kAttendanceSyncPath);
 
     String body;
@@ -1627,11 +1909,7 @@ bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
       if (!ensureDynamicJsonCapacity(payload, kAttendancePayloadJsonCapacity,
                                      kAttendanceSyncPath,
                                      "attendance payload", error)) {
-        SyncItemResult failure;
-        failure.recordId = record.recordId;
-        failure.status = "failed";
-        failure.message = error;
-        results.push_back(failure);
+        appendFailure(record, error);
         return false;
       }
       JsonArray array = payload.createNestedArray("records");
@@ -1682,43 +1960,44 @@ bool BackendClient::syncAttendance(const std::vector<AttendanceRecord> &records,
     const size_t resultsBefore = results.size();
     if (!requestJson("POST", kAttendanceSyncPath, body, response, error, true,
                      CampusConfig::kHttpRetryAttempts, 1)) {
-      SyncItemResult failure;
-      failure.recordId = record.recordId;
-      failure.status = "failed";
-      failure.message = error;
-      results.push_back(failure);
+      appendFailure(record, error);
       return false;
     }
 
     JsonArray resultArray = response["results"].as<JsonArray>();
     if (resultArray.isNull()) {
       error = "Attendance sync results missing.";
-      SyncItemResult failure;
-      failure.recordId = record.recordId;
-      failure.status = "failed";
-      failure.message = error;
-      results.push_back(failure);
+      appendFailure(record, error);
       return false;
     }
 
     for (JsonObjectConst item : resultArray) {
       SyncItemResult result;
       result.recordId = String(item["recordId"] | "");
+      if (result.recordId.isEmpty()) {
+        result.recordId = record.recordId;
+      }
       result.status = String(item["status"] | "");
       result.message = String(item["message"] | "");
       result.reason = String(item["reason"] | "");
-      if (!result.recordId.isEmpty()) {
+      result.eventId = String(item["eventId"] | "");
+      if (result.eventId.isEmpty()) {
+        result.eventId = record.eventId;
+      }
+      result.studentUid = String(item["studentUid"] | item["studentId"] |
+                                 item["uid"] | "");
+      if (result.studentUid.isEmpty()) {
+        result.studentUid = record.studentUid;
+      }
+      if (!result.recordId.isEmpty() ||
+          (!result.eventId.isEmpty() && !result.studentUid.isEmpty())) {
         results.push_back(result);
       }
     }
 
     if (!(response["ok"] | false) && results.size() == resultsBefore) {
       error = String(response["error"] | "Attendance sync rejected.");
-      SyncItemResult failure;
-      failure.recordId = record.recordId;
-      failure.status = "failed";
-      failure.message = error;
-      results.push_back(failure);
+      appendFailure(record, error);
       return false;
     }
 
@@ -2203,7 +2482,7 @@ bool BackendClient::requestJson(const char *method, const String &path,
     const bool caCertConfigured = false;
     logMemoryStage("before secure client", path, attempt, loopAttempts);
     if (isPairedEventContextRequest) {
-      Serial.println("[HTTP] endpoint=campusDevicePairedEventContext");
+      Serial.printf("[HTTP] pagedEndpoint=%s\n", path.c_str());
       Serial.printf("[HTTP] host=%s\n", requestHost);
       Serial.printf("[HTTP] attempt=%u\n", static_cast<unsigned>(attempt));
       Serial.printf("[HTTP] tlsMode=%s\n", insecureTls ? "insecure" : "caCert");

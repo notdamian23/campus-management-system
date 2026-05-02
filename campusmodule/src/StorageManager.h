@@ -81,12 +81,15 @@ class StorageManager {
   std::vector<AttendanceRecord> loadUnsyncedAttendanceBatch(size_t limit) const;
   bool appendAttendanceRecord(const AttendanceRecord &record);
   bool upsertAttendanceRecord(const AttendanceRecord &record);
+  bool upsertCloudAttendanceRecord(const AttendanceRecord &record,
+                                   AttendanceRestoreAction &action,
+                                   String &error);
   bool findAttendanceRecord(const String &eventId, const String &studentUid,
                             AttendanceRecord &outRecord) const;
   bool isDuplicateAttendance(const String &eventId, const String &studentUid) const;
   bool hasUnsyncedAttendanceForEvent(const String &eventId) const;
   size_t unsyncedAttendanceCount() const;
-  bool applySyncResults(const std::vector<SyncItemResult> &results);
+  bool applySyncResults(const std::vector<SyncItemResult> &results, String &error);
   bool exportAttendanceCsv(const EventInfo &event, const TimeSnapshot &generatedAt,
                            String &path) const;
   bool saveFingerprintRosterToSd(Stream &stream, size_t expectedBytes,
@@ -105,12 +108,10 @@ class StorageManager {
   bool ensurePendingStudentsLoaded() const;
   bool ensureFingerprintMappingsLoaded() const;
   bool ensureEnrollmentSyncQueueLoaded() const;
-  bool ensureAttendanceLoaded() const;
-  void refreshUnsyncedAttendanceCount() const;
+  bool rebuildAttendanceStatsCache() const;
   bool writePendingStudents(const std::vector<StudentInfo> &students) const;
   bool writeFingerprintMappings(const std::vector<StudentInfo> &students) const;
   bool writeStudentList(const char *path, const std::vector<StudentInfo> &students) const;
-  bool writeAttendanceRecords(const std::vector<AttendanceRecord> &records) const;
   bool writeCurrentEnrollmentSession(const EnrollmentSessionInfo &session) const;
   bool writePairedEventContext(const EventInfo &event,
                                const std::vector<StudentInfo> &students,
@@ -139,6 +140,14 @@ class StorageManager {
                                           const String &studentUid);
   bool clearEnrollmentFingerprintsOnSd(String &error);
   bool clearFingerprintRosterArtifacts(String &error);
+  bool migrateLegacyAttendanceStorage();
+  bool loadAttendanceRecordFile(const String &path,
+                                AttendanceRecord &record) const;
+  bool saveAttendanceRecordFile(const AttendanceRecord &record,
+                                bool updateSdBackup);
+  bool saveAttendanceRecordFileAtPath(const String &path,
+                                      const AttendanceRecord &record,
+                                      String *error = nullptr) const;
 
   mutable Preferences prefs_;
   bool prefsReady_ = false;
@@ -162,7 +171,6 @@ class StorageManager {
   mutable bool enrollmentSyncQueueLoaded_ = false;
   mutable std::vector<StudentInfo> enrollmentSyncQueueCache_;
 
-  mutable bool attendanceLoaded_ = false;
-  mutable std::vector<AttendanceRecord> attendanceRecordsCache_;
+  mutable bool attendanceStatsLoaded_ = false;
   mutable size_t unsyncedAttendanceCountCache_ = 0;
 };

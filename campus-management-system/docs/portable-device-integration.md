@@ -66,7 +66,14 @@ Existing event docs remain the source of truth. The device API reads:
 - `yearLevels`
 - `courses`
 - `targetStudent`
+- `selectedStudentIds`
+- `selectedSchoolIds`
 - `isPreReg`
+
+Audience resolution supports filtered audiences, specific students, and mixed
+audiences. When an event has course/year/section filters plus manually selected
+students, the paired roster is the union of the filtered students and selected
+students.
 
 ### `events/{eventId}/attendance/{studentId}`
 
@@ -196,6 +203,30 @@ Implemented in `portable-device-functions/src/index.ts`.
 - method: `GET`
 - auth: bearer token or legacy headers
 - returns: paired event snapshot + authorized students + already recorded IDs
+- mixed filtered + manually selected audiences are preserved as one authorized roster
+
+### `campusDevicePairedEventAttendanceState`
+
+- method: `GET`
+- auth: bearer token or legacy headers
+- query: `offset`, `limit`
+- returns: paginated existing attendance docs for the device's currently paired event only
+- reads only `devicePairings/{deviceId}.eventId`; callers cannot request arbitrary events
+- does not create or modify `events/{eventId}/attendance/*`
+- empty attendance returns HTTP 200 with `attendance: []`
+
+```json
+{
+  "ok": true,
+  "eventId": "event123",
+  "offset": 0,
+  "limit": 25,
+  "count": 0,
+  "hasMore": false,
+  "nextOffset": null,
+  "attendance": []
+}
+```
 
 ### `campusDevicePendingEnrollments`
 

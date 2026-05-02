@@ -663,6 +663,7 @@ type NotificationAudienceMode = "filtered" | "course" | "explicit";
 type NotificationListStatus = "scheduled" | "sent";
 type EventFilesTab = "images" | "docs";
 type EventSortMode = "latest_to_oldest" | "oldest_to_latest" | "alphabetical";
+type ParticipantSortMode = (typeof PARTICIPANT_SORT_OPTIONS)[number]["key"];
 type PendingDeleteFile = {
   eventId: string;
   kind: "images" | "docs";
@@ -808,7 +809,14 @@ const BOD_SELECTED_STUDENT_LIMIT_ERROR =
 const BOD_COURSE_SCOPE_ERROR =
   "B.O.D. members can only create events for their assigned course.";
 const ITEMS_PER_PAGE = 5;
-const PARTICIPANT_ROWS_PER_PAGE_OPTIONS = ["10", "25", "50"] as const;
+const PARTICIPANT_ROWS_PER_PAGE = 10;
+const PARTICIPANT_SORT_OPTIONS = [
+  { key: "default", label: "Sort by Default" },
+  { key: "absent", label: "Sort by Absent" },
+  { key: "present", label: "Sort by Present" },
+  { key: "not_paid", label: "Sort by Not Paid" },
+  { key: "timed_in", label: "Sort by Timed In" },
+] as const;
 
 function pad2(n: number) {
   return String(n).padStart(2, "0");
@@ -1721,6 +1729,19 @@ function isPresentAttendanceStatus(status: string) {
   return normalized === "present" || normalized === "timed in";
 }
 
+function matchesParticipantSortMode(
+  row: Pick<EventParticipantRow, "attendanceStatus">,
+  sortMode: ParticipantSortMode,
+) {
+  const normalized = normalizeLowerLookupText(row.attendanceStatus);
+
+  if (sortMode === "default") return false;
+  if (sortMode === "present") return normalized === "present";
+  if (sortMode === "not_paid") return normalized === "not paid";
+  if (sortMode === "timed_in") return normalized === "timed in";
+  return normalized === "absent";
+}
+
 function getEventLinkedPaymentId(
   event: Pick<EventDoc, "linkedPaymentId" | "requiredPaymentId"> | null | undefined,
 ) {
@@ -2505,9 +2526,8 @@ export default function EventDashboard() {
     useState<EventDetailsTab>("overview");
   const [participantSearch, setParticipantSearch] = useState("");
   const [participantPage, setParticipantPage] = useState(1);
-  const [participantRowsPerPage, setParticipantRowsPerPage] = useState<string>(
-    PARTICIPANT_ROWS_PER_PAGE_OPTIONS[0],
-  );
+  const [participantSortMode, setParticipantSortMode] =
+    useState<ParticipantSortMode>("default");
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
@@ -3867,32 +3887,49 @@ export default function EventDashboard() {
       return haystack.includes(search);
     });
   }, [participantSearch, selectedEventParticipantRows]);
-  const participantRowsPerPageValue = useMemo(() => {
-    const value = Number(participantRowsPerPage);
-    return Number.isFinite(value) && value > 0 ?
-        value :
-        Number(PARTICIPANT_ROWS_PER_PAGE_OPTIONS[0]);
-  }, [participantRowsPerPage]);
+  const sortedFilteredSelectedParticipantRows = useMemo(
+    () => {
+      if (participantSortMode === "default") {
+        return filteredSelectedParticipantRows;
+      }
+
+      return filteredSelectedParticipantRows
+        .map((row, index) => ({
+          row,
+          index,
+          matchesSelectedSort: matchesParticipantSortMode(row, participantSortMode),
+        }))
+        .sort((left, right) => {
+          if (left.matchesSelectedSort !== right.matchesSelectedSort) {
+            return left.matchesSelectedSort ? -1 : 1;
+          }
+
+          return left.index - right.index;
+        })
+        .map(({ row }) => row);
+    },
+    [filteredSelectedParticipantRows, participantSortMode],
+  );
   const selectedEventParticipantTotalPages = useMemo(
     () =>
       Math.max(
         1,
         Math.ceil(
-          filteredSelectedParticipantRows.length / participantRowsPerPageValue,
+          sortedFilteredSelectedParticipantRows.length /
+            PARTICIPANT_ROWS_PER_PAGE,
         ),
       ),
-    [filteredSelectedParticipantRows.length, participantRowsPerPageValue],
+    [sortedFilteredSelectedParticipantRows.length],
   );
   const paginatedSelectedParticipantRows = useMemo(() => {
-    const start = (participantPage - 1) * participantRowsPerPageValue;
-    return filteredSelectedParticipantRows.slice(
+    const start = (participantPage - 1) * PARTICIPANT_ROWS_PER_PAGE;
+    return sortedFilteredSelectedParticipantRows.slice(
       start,
-      start + participantRowsPerPageValue,
+      start + PARTICIPANT_ROWS_PER_PAGE,
     );
   }, [
-    filteredSelectedParticipantRows,
+    sortedFilteredSelectedParticipantRows,
     participantPage,
-    participantRowsPerPageValue,
   ]);
   const selectedEventPreviewImages = useMemo(
     () => selectedEventImages.slice(0, 3),
@@ -3983,13 +4020,13 @@ export default function EventDashboard() {
     setSelectedEventTab("overview");
     setParticipantSearch("");
     setParticipantPage(1);
-    setParticipantRowsPerPage(PARTICIPANT_ROWS_PER_PAGE_OPTIONS[0]);
+    setParticipantSortMode("default");
     setEventFilesTab("images");
   }, [expandedEventId]);
 
   useEffect(() => {
     setParticipantPage(1);
-  }, [participantRowsPerPage, participantSearch]);
+  }, [participantSearch, participantSortMode]);
 
   useEffect(() => {
     setParticipantPage((prev) =>
@@ -9818,7 +9855,7 @@ export default function EventDashboard() {
 
                     <Tab key="participants" title="Participants">
                       <div className="space-y-4 pt-3">
-                        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_160px_auto]">
+                        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_220px_auto]">
                           <Input
                             aria-label="Search participants"
                             value={participantSearch}
@@ -9828,19 +9865,19 @@ export default function EventDashboard() {
                           />
 
                           <Select
-                            aria-label="Participant rows per page"
+                            aria-label="Sort participants by status"
                             disallowEmptySelection
-                            selectedKeys={new Set([participantRowsPerPage])}
+                            selectedKeys={new Set([participantSortMode])}
                             onSelectionChange={(keys) => {
                               if (keys === "all") return;
                               const selected = Array.from(keys)[0];
                               if (typeof selected === "string") {
-                                setParticipantRowsPerPage(selected);
+                                setParticipantSortMode(selected as ParticipantSortMode);
                               }
                             }}
                           >
-                            {PARTICIPANT_ROWS_PER_PAGE_OPTIONS.map((value) => (
-                              <SelectItem key={value}>{value} / page</SelectItem>
+                            {PARTICIPANT_SORT_OPTIONS.map((option) => (
+                              <SelectItem key={option.key}>{option.label}</SelectItem>
                             ))}
                           </Select>
 
@@ -9860,8 +9897,8 @@ export default function EventDashboard() {
 
                         <div className="flex flex-wrap items-center gap-2">
                           <Chip size="sm" className="bg-slate-100 text-slate-700">
-                            {filteredSelectedParticipantRows.length} participant
-                            {filteredSelectedParticipantRows.length === 1 ? "" : "s"}
+                            {sortedFilteredSelectedParticipantRows.length} participant
+                            {sortedFilteredSelectedParticipantRows.length === 1 ? "" : "s"}
                           </Chip>
                           <Chip size="sm" className="bg-emerald-100 text-emerald-700">
                             Present: {selectedEventPresentCount}
@@ -9874,7 +9911,7 @@ export default function EventDashboard() {
                           </Chip>
                         </div>
 
-                        {filteredSelectedParticipantRows.length === 0 ? (
+                        {sortedFilteredSelectedParticipantRows.length === 0 ? (
                           <ECEmptyState
                             title="No participants found"
                             description={
@@ -9930,8 +9967,8 @@ export default function EventDashboard() {
                               </Card>
                             ))}
 
-                            {filteredSelectedParticipantRows.length >
-                            participantRowsPerPageValue ? (
+                            {sortedFilteredSelectedParticipantRows.length >
+                            PARTICIPANT_ROWS_PER_PAGE ? (
                               <div className="flex justify-center sm:justify-end">
                                 <Pagination
                                   showControls

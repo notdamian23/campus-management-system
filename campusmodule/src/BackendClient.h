@@ -29,6 +29,9 @@ class BackendClient {
   bool confirmPairing(const EventInfo &event, String &error);
   bool downloadPairedEventContextToStorage(EventInfo &event, StorageManager &storage,
                                            String &error);
+  bool downloadPairedEventAttendanceStateToStorage(
+      EventInfo &event, StorageManager &storage, AttendanceRestoreStats &stats,
+      String &error);
   bool fetchPendingEnrollments(std::vector<StudentInfo> &students, String &error);
   bool submitEnrollment(const StudentInfo &student, String &error);
   bool downloadFingerprintRoster(StorageManager &storage,

@@ -1,6 +1,7 @@
 #include "StorageManager.h"
 
 #include <algorithm>
+#include <ctype.h>
 
 #include <ArduinoJson.h>
 #include <FS.h>
@@ -18,7 +19,10 @@ constexpr char kDeviceConfigPath[] = "/config/device.json";
 constexpr char kEnrollmentSessionPath[] = "/sessions/current_enrollment_session.json";
 constexpr char kPendingStudentsPath[] = "/students/enrollment_queue.json";
 constexpr char kFingerprintMapPath[] = "/fingerprint_map.json";
-constexpr char kAttendancePath[] = "/attendance_records.json";
+constexpr char kLegacyAttendancePath[] = "/attendance_records.json";
+constexpr char kAttendanceDir[] = "/attendance";
+constexpr char kAttendanceTempPath[] = "/attendance/write.tmp";
+constexpr char kAttendanceBackupPath[] = "/attendance/write.bak";
 constexpr char kEnrollmentLogsPath[] = "/logs/enrollment_logs.json";
 constexpr char kEnrollmentSyncQueuePath[] = "/logs/sync_queue.json";
 constexpr char kPairedEventContextPath[] = "/paired_event_context.json";
@@ -38,7 +42,8 @@ constexpr uint16_t kPairedEventContextSchemaVersion = 2;
 
 constexpr size_t kPendingDocSize = 16384;
 constexpr size_t kFingerprintDocSize = 16384;
-constexpr size_t kAttendanceDocSize = 65536;
+constexpr size_t kAttendanceRecordDocSize = 4096;
+constexpr size_t kLegacyAttendanceRecordDocSize = 4096;
 constexpr size_t kPairedEventContextDocSize = 65536;
 constexpr size_t kEnrollmentSessionDocSize = 4096;
 constexpr size_t kFingerprintRosterFieldCountLegacy = 8;
@@ -51,6 +56,11 @@ constexpr size_t kEnrollmentResultFieldCount = 12;
 constexpr size_t kPairedEventStudentFieldCount = 8;
 constexpr size_t kPairedEventRecordedFieldCount = 1;
 constexpr uint32_t kSdReadWarnMs = 250;
+#ifdef CONFIG_LITTLEFS_OBJ_NAME_LEN
+constexpr size_t kLittleFsObjectNameMax = CONFIG_LITTLEFS_OBJ_NAME_LEN;
+#else
+constexpr size_t kLittleFsObjectNameMax = 64;
+#endif
 
 void logJsonLoadIssue(const char *stage, const char *path,
                       const DeserializationError &error, size_t fileSize,
@@ -596,6 +606,283 @@ String safePathComponent(const String &value) {
   output.replace("<", "_");
   output.replace(">", "_");
   return output;
+}
+
+bool isAttendanceRecordUnsynced(const AttendanceRecord &record) {
+  return !record.synced && !record.syncRejected;
+}
+
+void updateAttendanceStatus(AttendanceRecord &record) {
+  if (record.hasTimeIn() && record.hasTimeOut()) {
+    record.attendanceStatus = "Present";
+    return;
+  }
+
+  if (record.hasTimeIn()) {
+    record.attendanceStatus = "Timed In";
+    return;
+  }
+
+  record.attendanceStatus = "";
+}
+
+String localAttendanceRecordId(const String &deviceId, const String &eventId,
+                               const String &studentUid) {
+  return safePathComponent(deviceId) + "-" + safePathComponent(eventId) + "-" +
+         safePathComponent(studentUid);
+}
+
+String encodeAttendancePathKey(const String &value) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  String output;
+  output.reserve((value.length() * 3U) + 1U);
+  for (size_t index = 0; index < value.length(); ++index) {
+    const unsigned char current = static_cast<unsigned char>(value[index]);
+    if (isalnum(current) || current == '-' || current == '_') {
+      output += static_cast<char>(current);
+      continue;
+    }
+
+    output += '_';
+    output += kHex[(current >> 4) & 0x0F];
+    output += kHex[current & 0x0F];
+  }
+
+  if (output.isEmpty()) {
+    output = "blank";
+  }
+  return output;
+}
+
+String attendanceRecordPathForKey(const String &eventId, const String &studentUid) {
+  return String(kAttendanceDir) + "/" + encodeAttendancePathKey(eventId) + "__" +
+         encodeAttendancePathKey(studentUid) + ".json";
+}
+
+String normalizeAttendanceRecordPath(const String &path) {
+  String normalized = path;
+  normalized.trim();
+  if (normalized.isEmpty()) {
+    return normalized;
+  }
+  if (normalized.startsWith("/")) {
+    return normalized;
+  }
+  return String(kAttendanceDir) + "/" + normalized;
+}
+
+String attendancePathFromOpenFile(const File &file) {
+  String path = file.path();
+  if (path.isEmpty()) {
+    path = file.name();
+  }
+  return normalizeAttendanceRecordPath(path);
+}
+
+bool isAttendanceStoragePath(const String &path) {
+  const String prefix = String(kAttendanceDir) + "/";
+  return path.startsWith(prefix);
+}
+
+size_t fileNameLength(const String &path) {
+  const int slashIndex = path.lastIndexOf('/');
+  return slashIndex >= 0 ? path.length() - static_cast<size_t>(slashIndex) - 1U
+                         : path.length();
+}
+
+void setStorageError(String *error, const String &reason) {
+  if (error != nullptr) {
+    *error = reason;
+  }
+}
+
+String saveFailureReason(const String &reason, const String &path,
+                         const String &tempPath = "") {
+  String detail = reason;
+  detail += " pathLen=";
+  detail += String(static_cast<unsigned>(path.length()));
+  detail += " nameLen=";
+  detail += String(static_cast<unsigned>(fileNameLength(path)));
+  if (!tempPath.isEmpty()) {
+    detail += " tempLen=";
+    detail += String(static_cast<unsigned>(tempPath.length()));
+    detail += " tempNameLen=";
+    detail += String(static_cast<unsigned>(fileNameLength(tempPath)));
+  }
+  return detail;
+}
+
+bool attendanceMomentsMatch(uint64_t leftEpoch, const String &leftIso,
+                            uint64_t rightEpoch, const String &rightIso) {
+  const bool leftHasValue = leftEpoch > 0 || !leftIso.isEmpty();
+  const bool rightHasValue = rightEpoch > 0 || !rightIso.isEmpty();
+  if (!leftHasValue && !rightHasValue) {
+    return true;
+  }
+  if (leftHasValue != rightHasValue) {
+    return false;
+  }
+  if (leftEpoch > 0 && rightEpoch > 0) {
+    return leftEpoch == rightEpoch;
+  }
+  return leftIso == rightIso;
+}
+
+bool attendanceRecordsEqual(const AttendanceRecord &left,
+                            const AttendanceRecord &right) {
+  return left.recordId == right.recordId && left.eventId == right.eventId &&
+         left.eventTitle == right.eventTitle &&
+         left.eventDate == right.eventDate &&
+         left.scheduledTimeStart == right.scheduledTimeStart &&
+         left.scheduledTimeEnd == right.scheduledTimeEnd &&
+         left.eventLocation == right.eventLocation &&
+         left.studentUid == right.studentUid &&
+         left.schoolId == right.schoolId &&
+         left.studentName == right.studentName &&
+         left.course == right.course &&
+         left.yearLevel == right.yearLevel &&
+         left.templateId == right.templateId &&
+         left.deviceId == right.deviceId &&
+         left.capturedAtEpoch == right.capturedAtEpoch &&
+         left.capturedAtIso == right.capturedAtIso &&
+         left.timeSource == right.timeSource &&
+         left.timeInEpoch == right.timeInEpoch &&
+         left.timeInIso == right.timeInIso &&
+         left.timeInSource == right.timeInSource &&
+         left.timeOutEpoch == right.timeOutEpoch &&
+         left.timeOutIso == right.timeOutIso &&
+         left.timeOutSource == right.timeOutSource &&
+         left.attendanceStatus == right.attendanceStatus &&
+         left.source == right.source && left.synced == right.synced &&
+         left.syncRejected == right.syncRejected &&
+         left.remoteDuplicate == right.remoteDuplicate &&
+         left.syncError == right.syncError &&
+         left.retryCount == right.retryCount;
+}
+
+String attendanceSyncLocalErrorMessage(const SyncItemResult &result) {
+  if (!result.message.isEmpty()) {
+    return result.message;
+  }
+  return result.reason;
+}
+
+bool readNextLegacyAttendanceObject(File &file, String &json, bool &done,
+                                    String &error) {
+  json = "";
+  done = false;
+  error = "";
+
+  bool started = false;
+  bool inString = false;
+  bool escaped = false;
+  int depth = 0;
+
+  while (file.available()) {
+    const char current = static_cast<char>(file.read());
+    if (!started) {
+      if (current == '[' || current == ',' || isspace(static_cast<unsigned char>(current))) {
+        continue;
+      }
+      if (current == ']') {
+        done = true;
+        return true;
+      }
+      if (current != '{') {
+        error = "Legacy attendance JSON invalid";
+        return false;
+      }
+      started = true;
+      depth = 1;
+      json += current;
+      continue;
+    }
+
+    json += current;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (current == '\\' && inString) {
+      escaped = true;
+      continue;
+    }
+    if (current == '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (current == '{') {
+      ++depth;
+      continue;
+    }
+    if (current == '}') {
+      --depth;
+      if (depth == 0) {
+        return true;
+      }
+    }
+  }
+
+  if (started) {
+    error = "Legacy attendance JSON truncated";
+    return false;
+  }
+
+  done = true;
+  return true;
+}
+
+template <typename Callback>
+bool visitAttendanceRecords(fs::FS &fs, Callback callback) {
+  File dir = fs.open(kAttendanceDir, FILE_READ);
+  if (!dir) {
+    return false;
+  }
+  if (!dir.isDirectory()) {
+    dir.close();
+    return true;
+  }
+
+  size_t index = 0;
+  for (File file = dir.openNextFile(); file; file = dir.openNextFile()) {
+    const String path = attendancePathFromOpenFile(file);
+    if (file.isDirectory() || !path.endsWith(".json")) {
+      file.close();
+      continue;
+    }
+
+    DynamicJsonDocument doc(kAttendanceRecordDocSize);
+    const size_t fileSize = static_cast<size_t>(file.size());
+    const DeserializationError parseError = deserializeJson(doc, file);
+    file.close();
+    if (parseError) {
+      logJsonLoadIssue("attendance_record", path.c_str(), parseError, fileSize,
+                       doc.capacity());
+      continue;
+    }
+
+    JsonObjectConst object = doc.as<JsonObjectConst>();
+    if (object.isNull()) {
+      continue;
+    }
+
+    const AttendanceRecord record = attendanceFromJson(object);
+    if (record.eventId.isEmpty() || record.studentUid.isEmpty()) {
+      continue;
+    }
+
+    if (!callback(path, record)) {
+      dir.close();
+      return true;
+    }
+    serviceStorageLoop(index++);
+  }
+
+  dir.close();
+  return true;
 }
 
 String pairedEventStudentsPathForEvent(const String &eventId) {
@@ -1386,6 +1673,7 @@ bool StorageManager::begin() {
     LittleFS.mkdir("/sessions");
     LittleFS.mkdir("/students");
     LittleFS.mkdir("/logs");
+    LittleFS.mkdir(kAttendanceDir);
     saveDeviceConfigSnapshot();
   }
 
@@ -1393,7 +1681,241 @@ bool StorageManager::begin() {
     mountSdCard();
   }
 
-  return prefsReady_ && littleFsReady_;
+  const bool attendanceReady =
+      littleFsReady_ ? migrateLegacyAttendanceStorage() : false;
+  attendanceStatsLoaded_ = false;
+  unsyncedAttendanceCountCache_ = 0;
+  return prefsReady_ && littleFsReady_ && attendanceReady;
+}
+
+bool StorageManager::saveAttendanceRecordFileAtPath(
+    const String &path, const AttendanceRecord &record, String *error) const {
+  setStorageError(error, "");
+  if (!littleFsReady_) {
+    setStorageError(error, "LittleFS not mounted");
+    return false;
+  }
+
+  const String targetPath = normalizeAttendanceRecordPath(path);
+  if (targetPath.isEmpty()) {
+    setStorageError(error, "empty path");
+    return false;
+  }
+  if (!isAttendanceStoragePath(targetPath)) {
+    setStorageError(error, saveFailureReason("path outside attendance dir",
+                                             targetPath));
+    return false;
+  }
+  if (record.eventId.isEmpty() || record.studentUid.isEmpty()) {
+    setStorageError(error, "attendance key missing");
+    return false;
+  }
+
+  if (!LittleFS.exists(kAttendanceDir) && !LittleFS.mkdir(kAttendanceDir)) {
+    setStorageError(error, "attendance directory missing");
+    return false;
+  }
+  if (fileNameLength(targetPath) > kLittleFsObjectNameMax) {
+    setStorageError(error, saveFailureReason("filename too long", targetPath));
+    return false;
+  }
+
+  DynamicJsonDocument doc(kAttendanceRecordDocSize);
+  JsonObject object = doc.to<JsonObject>();
+  attendanceToJson(object, record);
+
+  const String tempPath = kAttendanceTempPath;
+  const String backupPath = kAttendanceBackupPath;
+  LittleFS.remove(tempPath);
+  LittleFS.remove(backupPath);
+
+  File file = LittleFS.open(tempPath, FILE_WRITE);
+  if (!file) {
+    setStorageError(error, saveFailureReason("temp open failed", targetPath,
+                                             tempPath));
+    return false;
+  }
+
+  if (serializeJson(doc, file) == 0) {
+    file.close();
+    LittleFS.remove(tempPath);
+    setStorageError(error, saveFailureReason("json serialize failed", targetPath,
+                                             tempPath));
+    return false;
+  }
+  file.close();
+
+  const bool hadExisting = LittleFS.exists(targetPath);
+  if (hadExisting && !LittleFS.rename(targetPath, backupPath)) {
+    LittleFS.remove(tempPath);
+    setStorageError(error, saveFailureReason("backup rename failed", targetPath,
+                                             backupPath));
+    return false;
+  }
+
+  if (!LittleFS.rename(tempPath, targetPath)) {
+    LittleFS.remove(tempPath);
+    if (hadExisting && LittleFS.exists(backupPath)) {
+      LittleFS.rename(backupPath, targetPath);
+    }
+    setStorageError(error, saveFailureReason("temp rename failed", targetPath,
+                                             tempPath));
+    return false;
+  }
+
+  if (hadExisting) {
+    LittleFS.remove(backupPath);
+  }
+  return true;
+}
+
+bool StorageManager::saveAttendanceRecordFile(const AttendanceRecord &record,
+                                              bool updateSdBackup) {
+  if (record.eventId.isEmpty() || record.studentUid.isEmpty()) {
+    return false;
+  }
+
+  const bool saved = saveAttendanceRecordFileAtPath(
+      attendanceRecordPathForKey(record.eventId, record.studentUid), record);
+  if (!saved) {
+    return false;
+  }
+
+  if (updateSdBackup) {
+    lastSdWriteSucceeded_ = backupAttendanceToSd(record);
+  }
+  return true;
+}
+
+bool StorageManager::loadAttendanceRecordFile(const String &path,
+                                              AttendanceRecord &record) const {
+  record = AttendanceRecord{};
+  const String targetPath = normalizeAttendanceRecordPath(path);
+  if (!littleFsReady_ || targetPath.isEmpty() || !LittleFS.exists(targetPath)) {
+    return false;
+  }
+
+  File file = LittleFS.open(targetPath, FILE_READ);
+  if (!file) {
+    logStorageOpenIssue("attendance_record", targetPath.c_str());
+    return false;
+  }
+
+  DynamicJsonDocument doc(kAttendanceRecordDocSize);
+  const size_t fileSize = static_cast<size_t>(file.size());
+  const DeserializationError parseError = deserializeJson(doc, file);
+  file.close();
+  if (parseError) {
+    logJsonLoadIssue("attendance_record", targetPath.c_str(), parseError, fileSize,
+                     doc.capacity());
+    return false;
+  }
+
+  JsonObjectConst object = doc.as<JsonObjectConst>();
+  if (object.isNull()) {
+    return false;
+  }
+
+  record = attendanceFromJson(object);
+  return !record.eventId.isEmpty() && !record.studentUid.isEmpty();
+}
+
+bool StorageManager::migrateLegacyAttendanceStorage() {
+  if (!littleFsReady_ || !LittleFS.exists(kLegacyAttendancePath)) {
+    return true;
+  }
+
+  File file = LittleFS.open(kLegacyAttendancePath, FILE_READ);
+  if (!file) {
+    logStorageOpenIssue("legacy_attendance", kLegacyAttendancePath);
+    return false;
+  }
+
+  Serial.println("[ATTEND][MIGRATE] legacy attendance migration started");
+  size_t migrated = 0;
+  size_t skipped = 0;
+  while (true) {
+    String rawRecord;
+    bool done = false;
+    String readError;
+    if (!readNextLegacyAttendanceObject(file, rawRecord, done, readError)) {
+      file.close();
+      Serial.printf("[ATTEND][MIGRATE][ERROR] %s\n", readError.c_str());
+      return false;
+    }
+    if (done) {
+      break;
+    }
+    if (rawRecord.isEmpty()) {
+      continue;
+    }
+
+    DynamicJsonDocument doc(kLegacyAttendanceRecordDocSize);
+    const DeserializationError parseError = deserializeJson(doc, rawRecord);
+    if (parseError) {
+      file.close();
+      logJsonLoadIssue("legacy_attendance_record", kLegacyAttendancePath,
+                       parseError, rawRecord.length(), doc.capacity());
+      return false;
+    }
+
+    AttendanceRecord record = attendanceFromJson(doc.as<JsonObjectConst>());
+    if (record.eventId.isEmpty() || record.studentUid.isEmpty()) {
+      ++skipped;
+      continue;
+    }
+    if (record.recordId.isEmpty()) {
+      record.recordId =
+          localAttendanceRecordId(deviceId(), record.eventId, record.studentUid);
+    }
+    if (record.deviceId.isEmpty()) {
+      record.deviceId = deviceId();
+    }
+    updateAttendanceStatus(record);
+    if (!saveAttendanceRecordFile(record, false)) {
+      file.close();
+      Serial.printf("[ATTEND][MIGRATE][ERROR] save failed eventId=%s studentUid=%s\n",
+                    record.eventId.c_str(), record.studentUid.c_str());
+      return false;
+    }
+    ++migrated;
+    serviceStorageLoop(migrated);
+  }
+
+  file.close();
+  LittleFS.remove(kLegacyAttendancePath);
+  attendanceStatsLoaded_ = false;
+  unsyncedAttendanceCountCache_ = 0;
+  Serial.printf("[ATTEND][MIGRATE] completed migrated=%u skipped=%u\n",
+                static_cast<unsigned>(migrated),
+                static_cast<unsigned>(skipped));
+  return true;
+}
+
+bool StorageManager::rebuildAttendanceStatsCache() const {
+  if (!littleFsReady_) {
+    attendanceStatsLoaded_ = false;
+    unsyncedAttendanceCountCache_ = 0;
+    return false;
+  }
+
+  size_t unsyncedCount = 0;
+  if (!visitAttendanceRecords(LittleFS,
+                              [&unsyncedCount](const String &,
+                                               const AttendanceRecord &record) {
+                                if (isAttendanceRecordUnsynced(record)) {
+                                  ++unsyncedCount;
+                                }
+                                return true;
+                              })) {
+    attendanceStatsLoaded_ = false;
+    unsyncedAttendanceCountCache_ = 0;
+    return false;
+  }
+
+  unsyncedAttendanceCountCache_ = unsyncedCount;
+  attendanceStatsLoaded_ = true;
+  return true;
 }
 
 bool StorageManager::mountSdCard() {
@@ -4030,69 +4552,36 @@ bool StorageManager::markEnrollmentSynced(const String &studentUid) {
   return mappingSaved && pendingSaved && queueSaved && clearedSession;
 }
 
-bool StorageManager::ensureAttendanceLoaded() const {
-  if (attendanceLoaded_) {
-    return true;
-  }
-
-  attendanceRecordsCache_.clear();
-  attendanceLoaded_ = true;
-  unsyncedAttendanceCountCache_ = 0;
-  if (!littleFsReady_) {
-    return false;
-  }
-
-  DynamicJsonDocument doc(kAttendanceDocSize);
-  loadArrayDocument(LittleFS, kAttendancePath, doc);
-
-  JsonArrayConst array = doc.as<JsonArrayConst>();
-  attendanceRecordsCache_.reserve(array.size());
-  size_t index = 0;
-  for (JsonObjectConst item : array) {
-    serviceStorageLoop(index++);
-    const AttendanceRecord record = attendanceFromJson(item);
-    if (!record.recordId.isEmpty()) {
-      attendanceRecordsCache_.push_back(record);
-      if (!record.synced && !record.syncRejected) {
-        ++unsyncedAttendanceCountCache_;
-      }
-    }
-  }
-
-  return true;
-}
-
-void StorageManager::refreshUnsyncedAttendanceCount() const {
-  unsyncedAttendanceCountCache_ = 0;
-  for (const auto &record : attendanceRecordsCache_) {
-    if (!record.synced && !record.syncRejected) {
-      ++unsyncedAttendanceCountCache_;
-    }
-  }
-}
-
 std::vector<AttendanceRecord> StorageManager::loadAttendanceRecords() const {
-  ensureAttendanceLoaded();
-  return attendanceRecordsCache_;
+  std::vector<AttendanceRecord> records;
+  if (!littleFsReady_) {
+    return records;
+  }
+
+  visitAttendanceRecords(LittleFS,
+                         [&records](const String &, const AttendanceRecord &record) {
+                           records.push_back(record);
+                           return true;
+                         });
+  return records;
 }
 
 std::vector<AttendanceRecord> StorageManager::loadUnsyncedAttendanceBatch(
     size_t limit) const {
-  ensureAttendanceLoaded();
   std::vector<AttendanceRecord> batch;
-  if (limit == 0) {
+  if (!littleFsReady_ || limit == 0) {
     return batch;
   }
 
-  batch.reserve(std::min(limit, attendanceRecordsCache_.size()));
-  for (const auto &record : attendanceRecordsCache_) {
-    if (!record.synced && !record.syncRejected) {
-      batch.push_back(record);
-      if (batch.size() >= limit) {
-        break;
-      }
-    }
-  }
+  batch.reserve(limit);
+  visitAttendanceRecords(LittleFS,
+                         [&batch, limit](const String &,
+                                         const AttendanceRecord &record) {
+                           if (isAttendanceRecordUnsynced(record)) {
+                             batch.push_back(record);
+                           }
+                           return batch.size() < limit;
+                         });
   return batch;
 }
 
@@ -4101,48 +4590,217 @@ bool StorageManager::appendAttendanceRecord(const AttendanceRecord &record) {
 }
 
 bool StorageManager::upsertAttendanceRecord(const AttendanceRecord &record) {
-  if (!littleFsReady_) {
+  if (!littleFsReady_ || record.eventId.isEmpty() || record.studentUid.isEmpty()) {
     return false;
   }
 
-  ensureAttendanceLoaded();
-  bool updated = false;
-  for (auto &entry : attendanceRecordsCache_) {
-    if ((entry.eventId == record.eventId && entry.studentUid == record.studentUid) ||
-        (!record.recordId.isEmpty() && entry.recordId == record.recordId)) {
-      entry = record;
-      updated = true;
-      break;
+  AttendanceRecord normalized = record;
+  if (normalized.recordId.isEmpty()) {
+    normalized.recordId =
+        localAttendanceRecordId(deviceId(), normalized.eventId, normalized.studentUid);
+  }
+  if (normalized.deviceId.isEmpty()) {
+    normalized.deviceId = deviceId();
+  }
+  updateAttendanceStatus(normalized);
+
+  AttendanceRecord existing;
+  const bool hadExisting =
+      findAttendanceRecord(normalized.eventId, normalized.studentUid, existing);
+  const bool saved = saveAttendanceRecordFile(normalized, true);
+  if (!saved) {
+    attendanceStatsLoaded_ = false;
+    return false;
+  }
+
+  if (attendanceStatsLoaded_) {
+    if (hadExisting && isAttendanceRecordUnsynced(existing)) {
+      if (!isAttendanceRecordUnsynced(normalized)) {
+        --unsyncedAttendanceCountCache_;
+      }
+    } else if ((!hadExisting || !isAttendanceRecordUnsynced(existing)) &&
+               isAttendanceRecordUnsynced(normalized)) {
+      ++unsyncedAttendanceCountCache_;
     }
   }
+  return true;
+}
 
-  if (!updated) {
-    attendanceRecordsCache_.push_back(record);
+bool StorageManager::upsertCloudAttendanceRecord(const AttendanceRecord &record,
+                                                 AttendanceRestoreAction &action,
+                                                 String &error) {
+  action = AttendanceRestoreAction::Skipped;
+  error = "";
+  if (!littleFsReady_) {
+    error = "Attendance storage unavailable";
+    return false;
+  }
+  if (record.eventId.isEmpty() || record.studentUid.isEmpty()) {
+    error = "Attendance restore key missing";
+    return false;
   }
 
-  refreshUnsyncedAttendanceCount();
-  const bool saved = writeAttendanceRecords(attendanceRecordsCache_);
-  if (saved) {
-    lastSdWriteSucceeded_ = backupAttendanceToSd(record);
+  AttendanceRecord cloudRecord = record;
+  if (cloudRecord.recordId.isEmpty()) {
+    cloudRecord.recordId =
+        localAttendanceRecordId(deviceId(), cloudRecord.eventId,
+                                cloudRecord.studentUid);
+  }
+  if (cloudRecord.deviceId.isEmpty()) {
+    cloudRecord.deviceId = deviceId();
+  }
+  if (cloudRecord.capturedAtEpoch == 0) {
+    cloudRecord.capturedAtEpoch =
+        cloudRecord.timeOutEpoch > 0 ? cloudRecord.timeOutEpoch
+                                     : cloudRecord.timeInEpoch;
+  }
+  if (cloudRecord.capturedAtIso.isEmpty()) {
+    cloudRecord.capturedAtIso =
+        !cloudRecord.timeOutIso.isEmpty() ? cloudRecord.timeOutIso
+                                          : cloudRecord.timeInIso;
+  }
+  if (cloudRecord.timeSource == "unknown" || cloudRecord.timeSource.isEmpty()) {
+    if (!cloudRecord.timeOutSource.isEmpty()) {
+      cloudRecord.timeSource = cloudRecord.timeOutSource;
+    } else if (!cloudRecord.timeInSource.isEmpty()) {
+      cloudRecord.timeSource = cloudRecord.timeInSource;
+    }
+  }
+  cloudRecord.synced = true;
+  cloudRecord.syncRejected = false;
+  cloudRecord.remoteDuplicate = false;
+  cloudRecord.syncError = "";
+  cloudRecord.retryCount = 0;
+  updateAttendanceStatus(cloudRecord);
+
+  AttendanceRecord localRecord;
+  const bool hasLocal =
+      findAttendanceRecord(cloudRecord.eventId, cloudRecord.studentUid, localRecord);
+  if (!hasLocal) {
+    if (!saveAttendanceRecordFile(cloudRecord, false)) {
+      error = "Attendance restore save failed";
+      attendanceStatsLoaded_ = false;
+      return false;
+    }
+    markRemoteAttendanceRecorded(cloudRecord.eventId, cloudRecord.studentUid);
+    action = AttendanceRestoreAction::Created;
     return true;
   }
 
-  attendanceLoaded_ = false;
-  ensureAttendanceLoaded();
-  return false;
+  AttendanceRecord merged = localRecord;
+  const auto fillString = [](String &target, const String &value) {
+    if (target.isEmpty() && !value.isEmpty()) {
+      target = value;
+    }
+  };
+  const auto fillEpoch = [](uint64_t &target, uint64_t value) {
+    if (target == 0 && value > 0) {
+      target = value;
+    }
+  };
+
+  fillString(merged.eventTitle, cloudRecord.eventTitle);
+  fillString(merged.eventDate, cloudRecord.eventDate);
+  fillString(merged.scheduledTimeStart, cloudRecord.scheduledTimeStart);
+  fillString(merged.scheduledTimeEnd, cloudRecord.scheduledTimeEnd);
+  fillString(merged.eventLocation, cloudRecord.eventLocation);
+  fillString(merged.schoolId, cloudRecord.schoolId);
+  fillString(merged.studentName, cloudRecord.studentName);
+  fillString(merged.course, cloudRecord.course);
+  fillString(merged.yearLevel, cloudRecord.yearLevel);
+  fillString(merged.deviceId, cloudRecord.deviceId);
+  fillEpoch(merged.capturedAtEpoch, cloudRecord.capturedAtEpoch);
+  fillString(merged.capturedAtIso, cloudRecord.capturedAtIso);
+  fillString(merged.timeSource, cloudRecord.timeSource);
+  fillString(merged.source, cloudRecord.source);
+  if (merged.templateId <= 0 && cloudRecord.templateId > 0) {
+    merged.templateId = cloudRecord.templateId;
+  }
+  if (!merged.hasTimeIn() && cloudRecord.hasTimeIn()) {
+    merged.timeInEpoch = cloudRecord.timeInEpoch;
+    merged.timeInIso = cloudRecord.timeInIso;
+    merged.timeInSource = cloudRecord.timeInSource;
+  }
+  if (!merged.hasTimeOut() && cloudRecord.hasTimeOut()) {
+    merged.timeOutEpoch = cloudRecord.timeOutEpoch;
+    merged.timeOutIso = cloudRecord.timeOutIso;
+    merged.timeOutSource = cloudRecord.timeOutSource;
+  }
+  if (merged.recordId.isEmpty()) {
+    merged.recordId = cloudRecord.recordId;
+  }
+  if (merged.recordId.isEmpty()) {
+    merged.recordId =
+        localAttendanceRecordId(deviceId(), merged.eventId, merged.studentUid);
+  }
+  if (merged.deviceId.isEmpty()) {
+    merged.deviceId = deviceId();
+  }
+  if (merged.hasTimeIn() && merged.timeInSource.isEmpty()) {
+    merged.timeInSource =
+        !cloudRecord.timeInSource.isEmpty() ? cloudRecord.timeInSource : "unknown";
+  }
+  if (merged.hasTimeOut() && merged.timeOutSource.isEmpty()) {
+    merged.timeOutSource =
+        !cloudRecord.timeOutSource.isEmpty() ? cloudRecord.timeOutSource : "unknown";
+  }
+
+  bool pendingLocalChanges = false;
+  if (!localRecord.synced) {
+    if (localRecord.hasTimeIn() &&
+        !attendanceMomentsMatch(localRecord.timeInEpoch, localRecord.timeInIso,
+                                cloudRecord.timeInEpoch, cloudRecord.timeInIso)) {
+      pendingLocalChanges = true;
+    }
+    if (localRecord.hasTimeOut() &&
+        !attendanceMomentsMatch(localRecord.timeOutEpoch, localRecord.timeOutIso,
+                                cloudRecord.timeOutEpoch, cloudRecord.timeOutIso)) {
+      pendingLocalChanges = true;
+    }
+  }
+
+  if (pendingLocalChanges) {
+    merged.synced = false;
+    merged.syncRejected = localRecord.syncRejected;
+    merged.remoteDuplicate = localRecord.remoteDuplicate;
+    merged.syncError = localRecord.syncError;
+    merged.retryCount = localRecord.retryCount;
+  } else {
+    merged.synced = true;
+    merged.syncRejected = false;
+    merged.remoteDuplicate = false;
+    merged.syncError = "";
+    merged.retryCount = 0;
+  }
+  updateAttendanceStatus(merged);
+
+  if (attendanceRecordsEqual(localRecord, merged)) {
+    markRemoteAttendanceRecorded(merged.eventId, merged.studentUid);
+    action = AttendanceRestoreAction::Skipped;
+    return true;
+  }
+
+  if (!saveAttendanceRecordFile(merged, false)) {
+    error = "Attendance restore save failed";
+    attendanceStatsLoaded_ = false;
+    return false;
+  }
+
+  if (attendanceStatsLoaded_ && isAttendanceRecordUnsynced(localRecord) &&
+      !isAttendanceRecordUnsynced(merged)) {
+    --unsyncedAttendanceCountCache_;
+  }
+
+  markRemoteAttendanceRecorded(merged.eventId, merged.studentUid);
+  action = AttendanceRestoreAction::Merged;
+  return true;
 }
 
 bool StorageManager::findAttendanceRecord(const String &eventId,
                                           const String &studentUid,
                                           AttendanceRecord &outRecord) const {
-  ensureAttendanceLoaded();
-  for (const auto &record : attendanceRecordsCache_) {
-    if (record.eventId == eventId && record.studentUid == studentUid) {
-      outRecord = record;
-      return true;
-    }
-  }
-  return false;
+  return loadAttendanceRecordFile(attendanceRecordPathForKey(eventId, studentUid),
+                                  outRecord);
 }
 
 bool StorageManager::isDuplicateAttendance(const String &eventId,
@@ -4152,65 +4810,191 @@ bool StorageManager::isDuplicateAttendance(const String &eventId,
 }
 
 bool StorageManager::hasUnsyncedAttendanceForEvent(const String &eventId) const {
-  ensureAttendanceLoaded();
-  for (const auto &record : attendanceRecordsCache_) {
-    if (record.eventId == eventId && !record.synced && !record.syncRejected) {
-      return true;
-    }
-  }
-  return false;
+  bool found = false;
+  visitAttendanceRecords(LittleFS,
+                         [&eventId, &found](const String &,
+                                            const AttendanceRecord &record) {
+                           if (record.eventId == eventId &&
+                               isAttendanceRecordUnsynced(record)) {
+                             found = true;
+                             return false;
+                           }
+                           return true;
+                         });
+  return found;
 }
 
 size_t StorageManager::unsyncedAttendanceCount() const {
-  ensureAttendanceLoaded();
+  if (!attendanceStatsLoaded_) {
+    rebuildAttendanceStatsCache();
+  }
   return unsyncedAttendanceCountCache_;
 }
 
-bool StorageManager::applySyncResults(const std::vector<SyncItemResult> &results) {
+bool StorageManager::applySyncResults(const std::vector<SyncItemResult> &results,
+                                      String &error) {
+  error = "";
   if (results.empty()) {
     return true;
   }
+  if (!littleFsReady_) {
+    error = "Attendance storage unavailable";
+    return false;
+  }
 
-  ensureAttendanceLoaded();
-  bool changed = false;
+  struct PendingAttendanceUpdate {
+    String path;
+    String matchMethod;
+    AttendanceRecord record;
+    const SyncItemResult *result = nullptr;
+  };
 
-  for (auto &record : attendanceRecordsCache_) {
-    for (const auto &result : results) {
-      if (record.recordId != result.recordId) {
-        continue;
+  std::vector<PendingAttendanceUpdate> updates;
+  updates.reserve(results.size());
+  std::vector<bool> matched(results.size(), false);
+  for (const auto &result : results) {
+    Serial.printf(
+        "[SYNC][ATTEND][APPLY_START] recordId=%s eventId=%s studentUid=%s\n",
+        result.recordId.c_str(), result.eventId.c_str(),
+        result.studentUid.c_str());
+  }
+  if (!visitAttendanceRecords(
+          LittleFS, [&updates, &results, &matched](const String &path,
+                                                   const AttendanceRecord &record) {
+            for (size_t index = 0; index < results.size(); ++index) {
+              if (matched[index]) {
+                continue;
+              }
+              const auto &result = results[index];
+              if (result.recordId.isEmpty()) {
+                continue;
+              }
+              if (record.recordId != result.recordId) {
+                continue;
+              }
+              PendingAttendanceUpdate update;
+              update.path = normalizeAttendanceRecordPath(path);
+              update.matchMethod = "recordId";
+              update.record = record;
+              update.result = &result;
+              updates.push_back(update);
+              matched[index] = true;
+              break;
+            }
+            return true;
+          })) {
+    error = "Attendance sync state scan failed";
+    return false;
+  }
+
+  for (size_t index = 0; index < results.size(); ++index) {
+    if (matched[index]) {
+      continue;
+    }
+
+    const auto &result = results[index];
+    if (result.eventId.isEmpty() || result.studentUid.isEmpty()) {
+      continue;
+    }
+
+    PendingAttendanceUpdate update;
+    update.path =
+        normalizeAttendanceRecordPath(attendanceRecordPathForKey(result.eventId,
+                                                                 result.studentUid));
+    if (!loadAttendanceRecordFile(update.path, update.record)) {
+      continue;
+    }
+    update.matchMethod = "eventId_studentUid";
+    update.result = &result;
+    updates.push_back(update);
+    matched[index] = true;
+  }
+
+  for (size_t index = 0; index < results.size(); ++index) {
+    if (matched[index]) {
+      continue;
+    }
+    const auto &result = results[index];
+    Serial.printf("[SYNC][ATTEND][KEEP_PENDING] record=%s status=%s reason=%s\n",
+                  result.recordId.c_str(), result.status.c_str(),
+                  result.reason.c_str());
+    error = "Attendance sync result could not be matched to local record.";
+    return false;
+  }
+
+  for (auto &update : updates) {
+    const String savePath = normalizeAttendanceRecordPath(update.path);
+    Serial.printf(
+        "[SYNC][ATTEND][MATCH] method=%s recordId=%s eventId=%s studentUid=%s "
+        "path=%s\n",
+        update.matchMethod.c_str(), update.record.recordId.c_str(),
+        update.record.eventId.c_str(), update.record.studentUid.c_str(),
+        savePath.c_str());
+    AttendanceRecord next = update.record;
+    const bool acknowledged =
+        shouldAcknowledgeAttendanceSyncResult(*update.result);
+    if (acknowledged) {
+      next.synced = true;
+      next.syncRejected = false;
+      next.remoteDuplicate = update.result->status == "duplicate";
+      next.syncError = attendanceSyncLocalErrorMessage(*update.result);
+      next.retryCount = 0;
+      markRemoteAttendanceRecorded(next.eventId, next.studentUid);
+      if (update.result->status == "duplicate") {
+        Serial.printf(
+            "[SYNC][ATTEND][ACK_DUPLICATE] record=%s reason=%s action=mark_synced\n",
+            next.recordId.c_str(), update.result->reason.c_str());
       }
+    } else if (update.result->status == "rejected") {
+      next.synced = false;
+      next.syncRejected = true;
+      next.remoteDuplicate = false;
+      next.syncError = attendanceSyncLocalErrorMessage(*update.result);
+      next.retryCount += 1;
+    } else {
+      next.synced = false;
+      next.syncRejected = false;
+      next.remoteDuplicate = false;
+      next.syncError = attendanceSyncLocalErrorMessage(*update.result);
+      next.retryCount += 1;
+      Serial.printf("[SYNC][ATTEND][KEEP_PENDING] record=%s status=%s reason=%s\n",
+                    next.recordId.c_str(), update.result->status.c_str(),
+                    update.result->reason.c_str());
+    }
+    updateAttendanceStatus(next);
 
-      if (result.status == "uploaded" || result.status == "duplicate") {
-        record.synced = true;
-        record.syncRejected = false;
-        record.remoteDuplicate = result.status == "duplicate";
-        record.syncError = result.message;
-        record.retryCount = 0;
-        markRemoteAttendanceRecorded(record.eventId, record.studentUid);
-      } else if (result.status == "rejected") {
-        record.synced = false;
-        record.syncRejected = true;
-        record.remoteDuplicate = false;
-        record.syncError = result.message;
-        record.retryCount += 1;
-      } else {
-        record.synced = false;
-        record.syncRejected = false;
-        record.remoteDuplicate = false;
-        record.syncError = result.message;
-        record.retryCount += 1;
+    Serial.printf("[SYNC][ATTEND][SAVE_START] path=%s\n", savePath.c_str());
+    String saveError;
+    if (!saveAttendanceRecordFileAtPath(savePath, next, &saveError)) {
+      Serial.printf("[SYNC][ATTEND][SAVE_ERROR] path=%s reason=%s\n",
+                    savePath.c_str(),
+                    saveError.isEmpty() ? "unknown" : saveError.c_str());
+      error = "Attendance sync state save failed";
+      if (!saveError.isEmpty()) {
+        error += ": ";
+        error += saveError;
       }
-      changed = true;
-      break;
+      attendanceStatsLoaded_ = false;
+      Serial.printf("[SYNC][ATTEND] pendingAfter=%u\n",
+                    static_cast<unsigned>(unsyncedAttendanceCount()));
+      return false;
+    }
+    Serial.printf("[SYNC][ATTEND][SAVE_OK] path=%s\n", savePath.c_str());
+
+    if (attendanceStatsLoaded_) {
+      if (isAttendanceRecordUnsynced(update.record) &&
+          !isAttendanceRecordUnsynced(next)) {
+        --unsyncedAttendanceCountCache_;
+      } else if (!isAttendanceRecordUnsynced(update.record) &&
+                 isAttendanceRecordUnsynced(next)) {
+        ++unsyncedAttendanceCountCache_;
+      }
     }
   }
 
-  if (!changed) {
-    return true;
-  }
-
-  refreshUnsyncedAttendanceCount();
-  return writeAttendanceRecords(attendanceRecordsCache_);
+  Serial.printf("[SYNC][ATTEND] pendingAfter=%u\n",
+                static_cast<unsigned>(unsyncedAttendanceCount()));
+  return true;
 }
 
 String StorageManager::attendanceExportPath(const String &eventId) const {
@@ -4229,15 +5013,6 @@ bool StorageManager::exportAttendanceCsv(const EventInfo &event,
   path = "";
   if (!sdReady_ || !event.isValid()) {
     return false;
-  }
-
-  ensureAttendanceLoaded();
-  std::vector<AttendanceRecord> eventRecords;
-  eventRecords.reserve(attendanceRecordsCache_.size());
-  for (const auto &record : attendanceRecordsCache_) {
-    if (record.eventId == event.eventId) {
-      eventRecords.push_back(record);
-    }
   }
 
   path = attendanceExportPath(event.eventId);
@@ -4265,20 +5040,32 @@ bool StorageManager::exportAttendanceCsv(const EventInfo &event,
       "School ID,Student Name,Course,Year,Attendance Status,Attendance Time In,"
       "Attendance Time Out");
 
-  for (const auto &record : eventRecords) {
-    file.print(csvEscape(record.schoolId));
-    file.print(",");
-    file.print(csvEscape(record.studentName));
-    file.print(",");
-    file.print(csvEscape(record.course));
-    file.print(",");
-    file.print(csvEscape(record.yearLevel));
-    file.print(",");
-    file.print(csvEscape(record.attendanceStatus));
-    file.print(",");
-    file.print(csvEscape(record.timeInIso));
-    file.print(",");
-    file.println(csvEscape(record.timeOutIso));
+  const bool scanned = visitAttendanceRecords(
+      LittleFS, [&event, &file](const String &, const AttendanceRecord &record) {
+        if (record.eventId != event.eventId) {
+          return true;
+        }
+
+        file.print(csvEscape(record.schoolId));
+        file.print(",");
+        file.print(csvEscape(record.studentName));
+        file.print(",");
+        file.print(csvEscape(record.course));
+        file.print(",");
+        file.print(csvEscape(record.yearLevel));
+        file.print(",");
+        file.print(csvEscape(record.attendanceStatus));
+        file.print(",");
+        file.print(csvEscape(record.timeInIso));
+        file.print(",");
+        file.println(csvEscape(record.timeOutIso));
+        return true;
+      });
+  if (!scanned) {
+    file.close();
+    SD.remove(path);
+    path = "";
+    return false;
   }
 
   file.close();
@@ -4437,17 +5224,6 @@ bool StorageManager::writeCurrentEnrollmentSession(
   JsonObject object = doc.to<JsonObject>();
   enrollmentSessionToJson(object, session);
   return saveDocument(LittleFS, kEnrollmentSessionPath, kTempPath, doc);
-}
-
-bool StorageManager::writeAttendanceRecords(
-    const std::vector<AttendanceRecord> &records) const {
-  DynamicJsonDocument doc(kAttendanceDocSize);
-  JsonArray array = doc.to<JsonArray>();
-  for (const auto &record : records) {
-    JsonObject object = array.createNestedObject();
-    attendanceToJson(object, record);
-  }
-  return saveDocument(LittleFS, kAttendancePath, kTempPath, doc);
 }
 
 bool StorageManager::writePairedEventContext(

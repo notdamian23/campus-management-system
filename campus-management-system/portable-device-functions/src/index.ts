@@ -26,6 +26,8 @@ const DEFAULT_SYNC_BATCH_LIMIT = 25;
 const MAX_SYNC_BATCH_LIMIT = 50;
 const DEFAULT_PAIRED_EVENT_CONTEXT_LIMIT = 20;
 const MAX_PAIRED_EVENT_CONTEXT_LIMIT = 25;
+const DEFAULT_PAIRED_EVENT_ATTENDANCE_STATE_LIMIT = 25;
+const MAX_PAIRED_EVENT_ATTENDANCE_STATE_LIMIT = 25;
 const DEFAULT_CLEANUP_LIMIT = 10;
 const MAX_CLEANUP_LIMIT = 50;
 const TOKEN_VERSION = 1;
@@ -235,6 +237,20 @@ type AttendanceSyncResult = {
   message: string;
   reason?: string;
 };
+
+function errorLogFields(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      errorName: error.name,
+      errorMessage: error.message,
+      errorStack: error.stack,
+    };
+  }
+  return {
+    error,
+    errorMessage: errorMessage(error, "Unknown error"),
+  };
+}
 
 class ApiError extends Error {
   status: number;
@@ -1870,6 +1886,12 @@ async function loadDeviceContext(
   authMode: "secret" | "session",
   deviceData?: FirebaseFirestore.DocumentData
 ): Promise<DeviceContext> {
+  deviceLogger.info("Portable device context lookup started", {
+    deviceId,
+    authMode,
+    deviceDocPath: `devices/${deviceId}`,
+    pairingDocPath: `devicePairings/${deviceId}`,
+  });
   const ref = db.doc(`devices/${deviceId}`);
   const snap = deviceData ? null : await ref.get();
   const data = deviceData ?? snap?.data();
@@ -1884,6 +1906,14 @@ async function loadDeviceContext(
 
   const pairingRef = db.doc(`devicePairings/${deviceId}`);
   const pairingSnap = await pairingRef.get();
+  deviceLogger.info("Portable device pairing lookup completed", {
+    deviceId,
+    authMode,
+    pairingDocPath: pairingRef.path,
+    pairingExists: pairingSnap.exists,
+    pairedEventId: normalizeText(pairingSnap.data()?.eventId),
+    pairingStatus: normalizeText(pairingSnap.data()?.status),
+  });
 
   await ref.set(
     {
@@ -1911,6 +1941,12 @@ async function authenticateDeviceWithSecret(req: Request): Promise<DeviceContext
     "X-Campus-Device-Secret",
     "X-Device-Secret"
   );
+  deviceLogger.info("Portable device secret auth started", {
+    method: req.method,
+    path: req.path,
+    deviceId,
+    hasSecret: secret.length > 0,
+  });
 
   if (!deviceId || !secret) {
     throw new ApiError(401, "Unauthorized device");
@@ -1927,16 +1963,32 @@ async function authenticateDeviceWithSecret(req: Request): Promise<DeviceContext
     throw new ApiError(401, "Unauthorized device");
   }
 
+  deviceLogger.info("Portable device secret auth accepted", {
+    method: req.method,
+    path: req.path,
+    deviceId,
+  });
   return loadDeviceContext(deviceId, "secret", data);
 }
 
 async function authenticateDeviceWithSession(req: Request): Promise<DeviceContext> {
   const token = readBearerToken(req);
+  deviceLogger.info("Portable device session auth started", {
+    method: req.method,
+    path: req.path,
+    hasBearerToken: token.length > 0,
+  });
   if (!token) {
     throw new ApiError(401, "Missing device session token.");
   }
 
   const payload = verifySessionToken(token);
+  deviceLogger.info("Portable device session token resolved", {
+    method: req.method,
+    path: req.path,
+    deviceId: payload.deviceId,
+    sessionVersion: payload.sessionVersion,
+  });
   const context = await loadDeviceContext(payload.deviceId, "session");
   const sessionVersion = toPositiveInt(context.data.sessionVersion, 1);
 
@@ -1944,6 +1996,12 @@ async function authenticateDeviceWithSession(req: Request): Promise<DeviceContex
     throw new ApiError(401, "Device session token is no longer valid.");
   }
 
+  deviceLogger.info("Portable device session auth accepted", {
+    method: req.method,
+    path: req.path,
+    deviceId: payload.deviceId,
+    sessionVersion,
+  });
   return context;
 }
 
@@ -2006,6 +2064,12 @@ function deviceEndpoint(
 ) {
   return functions.region(REGION).https.onRequest(async (req, res) => {
     res.set("Cache-Control", "no-store");
+    deviceLogger.info("Portable device endpoint request", {
+      expectedMethod: method,
+      requestMethod: req.method,
+      path: req.path,
+      authMode,
+    });
 
     if (req.method === "OPTIONS") {
       res.set("Allow", `${method}, OPTIONS`);
@@ -2021,13 +2085,31 @@ function deviceEndpoint(
 
     try {
       const device = await authenticateDevice(req, authMode);
+      deviceLogger.info("Portable device endpoint auth validated", {
+        expectedMethod: method,
+        requestMethod: req.method,
+        path: req.path,
+        authMode,
+        deviceId: device.deviceId,
+        resolvedAuthMode: device.authMode,
+      });
       await handler(req, res, device);
     } catch (error: unknown) {
       const status = error instanceof ApiError ? error.status : 500;
-      const message = status >= 500 ?
-        "Server error" :
-        errorMessage(error, "Server error");
-      deviceLogger.error("Portable device endpoint failed", {error, status});
+      const message = error instanceof ApiError ?
+        errorMessage(error, "Server error") :
+        status >= 500 ?
+          "Server error" :
+          errorMessage(error, "Server error");
+      deviceLogger.error("Portable device endpoint failed", {
+        ...errorLogFields(error),
+        status,
+        responseMessage: message,
+        expectedMethod: method,
+        requestMethod: req.method,
+        path: req.path,
+        authMode,
+      });
       sendJson(res, status, {ok: false, error: message});
     }
   });
@@ -2730,6 +2812,63 @@ async function ensurePairedEventContext(device: DeviceContext) {
   return {
     ...context,
     pairing: device.pairingData ?? {},
+  };
+}
+
+function portableAttendanceStatePayload(
+  snap: FirebaseFirestore.QueryDocumentSnapshot
+) {
+  const data = snap.data() ?? {};
+  const studentUid =
+    normalizeText(data.studentUid) ||
+    normalizeText(data.studentId) ||
+    normalizeText(data.uid) ||
+    snap.id;
+  const schoolId = normalizeText(data.schoolId) || studentUid;
+  const timeIn = resolveAttendanceMoment(
+    data.timeInEpoch ?? data.deviceTimestampEpoch,
+    data.timeInIso ?? data.deviceTimestampIso,
+    data.timeIn ?? data.timestamp
+  );
+  const timeOut = resolveAttendanceMoment(
+    data.timeOutEpoch,
+    data.timeOutIso,
+    data.timeOut
+  );
+  const attendanceStatus =
+    normalizeText(data.attendanceStatus) ||
+    normalizeText(data.status) ||
+    deriveAttendanceStatus(timeIn.hasValue, timeOut.hasValue);
+
+  return {
+    studentUid,
+    studentId: normalizeText(data.studentId) || studentUid,
+    schoolId,
+    studentName:
+      normalizeText(data.studentName) ||
+      normalizeText(data.name) ||
+      schoolId ||
+      studentUid,
+    course: normalizeCourse(data.course) || "Unassigned",
+    yearLevel: normalizeYearLevel(data.yearLevel ?? data.year) || "Unassigned",
+    section: normalizeSection(data.section),
+    templateId: toPositiveInt(
+      data.templateId ?? data.fingerprintTemplateId,
+      -1
+    ),
+    timeInEpoch: timeIn.epochSeconds,
+    timeInIso: timeIn.iso,
+    timeInSource: timeIn.hasValue ?
+      normalizeText(data.timeInSource ?? data.timeSource) || "unknown" :
+      "",
+    timeOutEpoch: timeOut.epochSeconds,
+    timeOutIso: timeOut.iso,
+    timeOutSource: timeOut.hasValue ?
+      normalizeText(data.timeOutSource) || "unknown" :
+      "",
+    attendanceStatus,
+    source: normalizeText(data.source) || "portable-device",
+    syncStatus: "synced",
   };
 }
 
@@ -5048,6 +5187,162 @@ export const campusDevicePairedEventContext = deviceEndpoint(
       portableEventSummary: portableEventSummaryResponseLogFields(context.event),
     });
     sendJson(res, 200, payload);
+  }
+);
+
+export const campusDevicePairedEventAttendanceState = deviceEndpoint(
+  "GET",
+  "session-or-secret",
+  async (req, res, device) => {
+    const rawOffset = req.query.offset;
+    const rawLimit = req.query.limit;
+    const offset = parseQueryInt(rawOffset, 0, 0, Number.MAX_SAFE_INTEGER);
+    const limit = parseQueryInt(
+      rawLimit,
+      DEFAULT_PAIRED_EVENT_ATTENDANCE_STATE_LIMIT,
+      1,
+      MAX_PAIRED_EVENT_ATTENDANCE_STATE_LIMIT
+    );
+    deviceLogger.info("Portable device attendance state pagination parsed", {
+      method: req.method,
+      path: req.path,
+      deviceId: device.deviceId,
+      rawOffset: Array.isArray(rawOffset) ? rawOffset[0] : rawOffset,
+      rawLimit: Array.isArray(rawLimit) ? rawLimit[0] : rawLimit,
+      offset,
+      limit,
+      maxLimit: MAX_PAIRED_EVENT_ATTENDANCE_STATE_LIMIT,
+    });
+
+    deviceLogger.info("Portable device attendance state pairing resolution started", {
+      deviceId: device.deviceId,
+      pairingDocPath: device.pairingRef.path,
+      pairingExists: device.pairingData !== null,
+      pairingStatus: normalizeText(device.pairingData?.status),
+      pairingEventId: normalizeText(device.pairingData?.eventId),
+      deviceLastPairedEventId: normalizeText(device.data.lastPairedEventId),
+    });
+
+    const pairedEventId =
+      normalizeText(device.pairingData?.eventId) ||
+      normalizeText(device.data.lastPairedEventId);
+
+    if (!pairedEventId) {
+      deviceLogger.warn("Portable device attendance state missing paired event", {
+        deviceId: device.deviceId,
+        pairingDocPath: device.pairingRef.path,
+        pairingExists: device.pairingData !== null,
+      });
+      throw new ApiError(404, "Device is not paired to an event.");
+    }
+
+    deviceLogger.info("Portable device attendance state paired event resolved", {
+      deviceId: device.deviceId,
+      eventId: pairedEventId,
+      eventDocPath: `events/${pairedEventId}`,
+    });
+
+    try {
+      await getNonCancelledEventSummary(pairedEventId);
+    } catch (error: unknown) {
+      deviceLogger.error("Portable device attendance state event read failed", {
+        ...errorLogFields(error),
+        deviceId: device.deviceId,
+        eventId: pairedEventId,
+        eventDocPath: `events/${pairedEventId}`,
+      });
+      throw error;
+    }
+
+    const attendanceCollectionPath = `events/${pairedEventId}/attendance`;
+    deviceLogger.info("Portable device attendance state query started", {
+      deviceId: device.deviceId,
+      eventId: pairedEventId,
+      attendanceCollectionPath,
+      offset,
+      limit,
+      queryLimit: limit + 1,
+      orderBy: "__name__",
+    });
+
+    let attendanceSnap: FirebaseFirestore.QuerySnapshot;
+    try {
+      attendanceSnap = await db
+        .collection(attendanceCollectionPath)
+        .orderBy(admin.firestore.FieldPath.documentId())
+        .offset(offset)
+        .limit(limit + 1)
+        .get();
+    } catch (error: unknown) {
+      deviceLogger.error("Portable device attendance state Firestore query failed", {
+        ...errorLogFields(error),
+        deviceId: device.deviceId,
+        eventId: pairedEventId,
+        attendanceCollectionPath,
+        offset,
+        limit,
+        queryLimit: limit + 1,
+      });
+      throw new ApiError(500, "Attendance state read failed.");
+    }
+
+    const hasMore = attendanceSnap.docs.length > limit;
+    const attendanceDocs = hasMore ?
+      attendanceSnap.docs.slice(0, limit) :
+      attendanceSnap.docs;
+    let attendance: ReturnType<typeof portableAttendanceStatePayload>[];
+    try {
+      attendance = attendanceDocs.map(portableAttendanceStatePayload);
+    } catch (error: unknown) {
+      deviceLogger.error("Portable device attendance state mapping failed", {
+        ...errorLogFields(error),
+        deviceId: device.deviceId,
+        eventId: pairedEventId,
+        attendanceCollectionPath,
+        docsRead: attendanceSnap.docs.length,
+        docsReturned: attendanceDocs.length,
+      });
+      throw new ApiError(500, "Attendance state response mapping failed.");
+    }
+
+    const payload = {
+      ok: true,
+      eventId: pairedEventId,
+      offset,
+      limit,
+      count: attendance.length,
+      hasMore,
+      nextOffset: hasMore ? offset + limit : null,
+      attendance,
+    };
+
+    try {
+      const responseJson = JSON.stringify(payload);
+      deviceLogger.info("Portable device paired event attendance state response", {
+        deviceId: device.deviceId,
+        eventId: pairedEventId,
+        attendanceCollectionPath,
+        offset,
+        limit,
+        firestoreDocsRead: attendanceSnap.docs.length,
+        count: attendance.length,
+        hasMore,
+        nextOffset: payload.nextOffset,
+        responseBytes: Buffer.byteLength(responseJson, "utf8"),
+      });
+      sendJson(res, 200, payload);
+    } catch (error: unknown) {
+      deviceLogger.error("Portable device attendance state response serialization failed", {
+        ...errorLogFields(error),
+        deviceId: device.deviceId,
+        eventId: pairedEventId,
+        attendanceCollectionPath,
+        offset,
+        limit,
+        count: attendance.length,
+      });
+      throw new ApiError(500, "Attendance state response serialization failed.");
+    }
   }
 );
 
